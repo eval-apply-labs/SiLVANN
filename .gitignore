@@ -1,0 +1,8 @@
+# what a build, a download or a conversation leaves behind
+/lib/
+/engine/build/
+/models/*/
+/user_sessions/
+/venv/
+__pycache__/
+*.pyc

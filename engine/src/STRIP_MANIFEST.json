@@ -1,0 +1,12 @@
+{
+ "removed": {
+  "pybind.cuh": 14,
+  "engine/eval.cuh": 16,
+  "packages/sys/cpu/heap__impl.cuh": 6,
+  "packages/sys/cpu/list__impl.cuh": 13,
+  "packages/sys/cpu/opcodes/opcodes.cuh": 29,
+  "packages/sys/contracts/macros/language_contract__verbs.cuh": 10
+ },
+ "waived": [],
+ "total_lines": 88
+}
