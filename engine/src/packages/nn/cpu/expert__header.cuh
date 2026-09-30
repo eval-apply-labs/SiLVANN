@@ -137,6 +137,7 @@ static __device__ __noinline__ void nn__weights__zzpackage_release_internal(sys_
  * resident. */
 static __device__ inline bool nn__expert__recent(uint64_t layer, uint64_t type, uint64_t* expert);
 static __device__ inline bool nn__expert__oldest(uint64_t layer, uint64_t type, uint64_t* expert);
+static __device__ inline uint64_t nn__expert__layer_resident(uint64_t layer, uint64_t type);
 
 /* ══ ⭐⭐ THE ADMITTER — AND IT IS NOW A POP ═════════════════════════════════════════════════════════
  *
@@ -176,9 +177,18 @@ static __device__ inline int nn__expert__request(sys__silicon_family__id family,
                                                  const nn__expert__backing* backing, bool predicted,
                                                  const uint64_t* pinned, unsigned npinned, uint64_t* at);
 static __device__ inline bool nn__expert__settle(uint64_t layer, uint64_t type);
+/* `settle` for one expert: waits for its read alone, if one is on the way, and admits it — so a verb can compute an
+ * expert that has arrived while the reads it asked for after it are still arriving. */
+static __device__ inline bool nn__expert__settle_one(uint64_t layer, uint64_t type, uint64_t expert);
 static __device__ inline bool nn__expert__fetch(sys__silicon_family__id family, uint64_t layer, uint64_t type, uint64_t expert,
                                                 const nn__expert__backing* backing, uint64_t* at, bool* missed);
 static __device__ inline uint64_t nn__expert__count(unsigned which);
+static __device__ inline uint64_t nn__expert__zzpackage_owner(void);
+/* ⭐ WHERE THE SLOTS ARE A MAPPED FILE, "RESIDENT" SAYS ONLY THAT THE EXPERT HAS AN ADDRESS: its bytes are in memory
+ * when the system has kept the file's pages. `in_memory` answers whether every byte of the slot at `at` is there now —
+ * and when one is not, starts its reading without waiting, so a verb computes the experts that are here while the rest
+ * arrive. Always true where the slots are memory of their own. */
+static __device__ inline bool nn__expert__in_memory(sys__silicon_family__id family, uint64_t type, uint64_t at);
 /* A backing node array, read into the struct the loader takes. False unless it is 13 integers. */
 static __device__ inline bool nn__expert__backing_of(uint64_t array, nn__expert__backing* backing);
 /* The loader threads joined, at the package's teardown. */

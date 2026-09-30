@@ -1690,6 +1690,87 @@ static __device__ inline void nn__turboquant__zzabi_body_gemv_groups_sum_int8(ui
     }
 }
 
+/* ══ ⭐⭐ THE EXPERT-MAJOR GEMM IN INTEGERS — `expert_groups_int8`, `expert_rows_sum_int8` ═════════════════════════════
+ * The same shapes as the two exact doors above, in the int8 gemv's arithmetic with a wider block: each row of `x` cut
+ * into blocks of `NN__EXPERT__INT8_BLOCK`, a block quantised to int8 by its largest magnitude (127 to it, rounded half away
+ * from zero), the weights as the width's int8 levels, a block's products summed in integers and scaled once, the row's
+ * scale and 1/127 last. ⛳ WHY 256 AND NOT THE GEMV'S 32 — `MEASURED` on the R730's Xeons (the family's override, 28
+ * threads, 7 and 28 rows an expert): a block of 32 needs a float step every 32 products and ran 68-300 GMAC/s, a block of
+ * 256 ran 300-545, the exact fp32 GEMM 100-132. A block of 256 of a rotated row still spans its values' spread.
+ * Widths with an int8 table only (4, 5, 8 bits), `cols` whole blocks. */
+#define NN__EXPERT__INT8_BLOCK 256u
+
+/* Block `c0` of a row of `x` quantised into `q`; its scale answered. */
+static __device__ inline float nn__expert__zzprivate_quantise(const uint16_t* x, uint64_t c0, int8_t* q) {
+    float mx = 0.0f;
+    for (uint32_t i = 0u; i < NN__EXPERT__INT8_BLOCK; ++i) {
+        const float v = nn__silicon__half_to_float(x[c0 + i]);
+        const float a = v < 0.0f ? -v : v;
+        if (a > mx) mx = a;
+    }
+    const float inv = mx > 0.0f ? 127.0f / mx : 0.0f;
+    for (uint32_t i = 0u; i < NN__EXPERT__INT8_BLOCK; ++i) {
+        const float t = nn__silicon__half_to_float(x[c0 + i]) * inv;
+        q[i] = (int8_t)(t >= 0.0f ? (int32_t)(t + 0.5f) : -(int32_t)(-t + 0.5f));
+    }
+    return mx / 127.0f;
+}
+static __device__ inline void nn__expert__zzprivate_rows_int8(uint16_t* out, float* acc, const uint8_t* weights,
+                                                              uint64_t w_room, const uint8_t* luts, uint64_t l_room,
+                                                              const uint16_t* x, const uint32_t* rows, const uint16_t* w,
+                                                              uint64_t count, uint64_t d, uint64_t out_rows,
+                                                              uint64_t cols, unsigned int* over) {
+    const uint32_t D = (uint32_t)d, per = 16u / D, mask = (1u << D) - 1u;
+    const uint64_t row_bytes = nn__turboquant__row_bytes(d, cols), blocks = cols / NN__EXPERT__INT8_BLOCK;
+    const uint64_t rows_held = row_bytes == 0ull ? 0ull : w_room / row_bytes, held = rows_held < l_room / 2ull ? rows_held : l_room / 2ull;
+    const uint64_t lane = nn__silicon__lane(), lanes = nn__silicon__lanes(), table = nn__turboquant__zzprivate_gaussian_at(D);
+    for (uint64_t r = nn__silicon__block(); r < out_rows; r += nn__silicon__blocks()) {
+        const uint8_t* row = r < held ? weights + r * row_bytes : 0;
+        for (uint64_t j = 0ull; j < count; ++j) {
+            const uint16_t* xr = x + (uint64_t)rows[2ull * j] * cols;
+            float part = 0.0f;
+            for (uint64_t b = lane; row != 0 && b < blocks; b += lanes) {
+                int8_t q[NN__EXPERT__INT8_BLOCK];
+                const float s = nn__expert__zzprivate_quantise(xr, b * NN__EXPERT__INT8_BLOCK, q);
+                int32_t dot = 0;
+                for (uint32_t i = 0u; i < NN__EXPERT__INT8_BLOCK; ++i) {
+                    const uint64_t c = b * NN__EXPERT__INT8_BLOCK + i, u = c / per;
+                    const uint32_t unit = (uint32_t)row[2ull * u] | ((uint32_t)row[2ull * u + 1ull] << 8);
+                    dot += (int32_t)q[i] * (int32_t)nn__turboquant__zzprivate_gaussian_i8[table + ((unit >> (D * (uint32_t)(c % per))) & mask)];
+                }
+                part += (float)dot * s;
+            }
+            const float sum = nn__silicon__lanes_sum(part);
+            if (lane != 0ull || row == 0) continue;
+            const float v = sum * nn__silicon__half_to_float((uint16_t)((uint32_t)luts[r * 2ull] | ((uint32_t)luts[r * 2ull + 1ull] << 8)))
+                          / 127.0f;
+            const uint64_t at = (uint64_t)rows[2ull * j + 1ull] * out_rows + r;
+            if (out) {
+                bool hit = false;
+                out[at] = nn__primitives__zzpackage_float_to_half(v, &hit);
+                if (hit) *over = NN__KERNELS__OVERFLOWED;
+            } else {
+                acc[at] += v * nn__silicon__half_to_float(w[rows[2ull * j]]);
+            }
+        }
+    }
+}
+static __device__ inline void nn__expert__zzabi_body_groups_int8(uint16_t* out, nn__expert__groups g, const uint16_t* x,
+                                                                 const uint32_t* rows, uint64_t cols, unsigned int* over) {
+    for (uint64_t i = 0ull; i < g.count && i < NN__EXPERT__GROUPS_MAX; ++i) {
+        const uint64_t row_bytes = nn__turboquant__row_bytes(g.d[i], cols);
+        nn__expert__zzprivate_rows_int8(out + g.out_at[i], 0, (const uint8_t*)(uintptr_t)g.codes[i], g.out_rows[i] * row_bytes,
+                                        (const uint8_t*)(uintptr_t)g.luts[i], g.out_rows[i] * 2ull, x, rows + 2ull * g.pairs_at[i],
+                                        0, g.pairs[i], g.d[i], g.out_rows[i], cols, over);
+    }
+}
+static __device__ inline void nn__expert__zzabi_body_rows_sum_int8(float* acc, const uint8_t* weights, uint64_t w_room,
+                                                                   const uint8_t* luts, uint64_t l_room, const uint16_t* x,
+                                                                   const uint32_t* rows, const uint16_t* w, uint64_t count,
+                                                                   uint64_t d, uint64_t out_rows, uint64_t cols) {
+    nn__expert__zzprivate_rows_int8(0, acc, weights, w_room, luts, l_room, x, rows, w, count, d, out_rows, cols, 0);
+}
+
 
 /* Little-endian, a byte at a time. ⛳ NOT A `uint16_t` LOAD THROUGH A CAST: a row begins at a stride
  * the producer aligns to two, but this verb is not the one that gets to assume it — an unaligned load
@@ -2100,47 +2181,56 @@ static __device__ inline void nn__hyper__zzabi_body_logits(float* lg, const uint
 /* The weights from the logits `lg` (at `mix + (2 + mult)·mult`): `pre = σ(·scale₀ + base) + eps`, `post = 2σ(·scale₁ + base)`,
  * `comb` a row-softmax then `iters` Sinkhorn steps — written into `mix` by the first index alone — and the collapse
  * `out = Σ pre_i · stream_i`, wide: every index takes `pre` for itself, four sigmoids. */
+/* `pre`, a weight a stream, from the logits: every index of a collapse takes it for itself. */
+static __device__ inline void nn__hyper__zzprivate_pre(float* pre, const float* lg, const uint16_t* base, float s0,
+                                                       uint64_t mult, float eps) {
+    for (uint64_t i = 0ull; i < mult; ++i)
+        pre[i] = 1.0f / (1.0f + nn__silicon__expf(-(lg[i] * s0 + nn__silicon__half_to_float(base[i])))) + eps;
+}
+
+/* `pre`, `post` and `comb` into `mix`, by one index of a collapse. */
+static __device__ inline void nn__hyper__zzprivate_weights(float* mix, const float* lg, const float* pre, const uint16_t* base,
+                                                           float s1, float s2, uint64_t mult, uint64_t iters, float eps) {
+    float post[NN__HYPER__MULT_MAX], comb[NN__HYPER__MULT_MAX * NN__HYPER__MULT_MAX];
+    for (uint64_t i = 0ull; i < mult; ++i)
+        post[i] = 2.0f / (1.0f + nn__silicon__expf(-(lg[mult + i] * s1 + nn__silicon__half_to_float(base[mult + i]))));
+    for (uint64_t i = 0ull; i < mult; ++i) {                /* each row a softmax over its columns, plus eps */
+        float top = -NN__KERNELS__INFINITY, sum = 0.0f;
+        for (uint64_t j = 0ull; j < mult; ++j) {
+            const uint64_t k = 2ull * mult + i * mult + j;
+            comb[i * mult + j] = lg[k] * s2 + nn__silicon__half_to_float(base[k]);
+            if (comb[i * mult + j] > top) top = comb[i * mult + j];
+        }
+        for (uint64_t j = 0ull; j < mult; ++j) { comb[i * mult + j] = nn__silicon__expf(comb[i * mult + j] - top); sum += comb[i * mult + j]; }
+        for (uint64_t j = 0ull; j < mult; ++j) comb[i * mult + j] = comb[i * mult + j] / sum + eps;
+    }
+    for (uint64_t it = 0ull; it < iters; ++it) {            /* the columns, then — past the first — rows and columns */
+        if (it != 0ull)
+            for (uint64_t i = 0ull; i < mult; ++i) {
+                float sum = 0.0f;
+                for (uint64_t j = 0ull; j < mult; ++j) sum += comb[i * mult + j];
+                for (uint64_t j = 0ull; j < mult; ++j) comb[i * mult + j] /= sum + eps;
+            }
+        for (uint64_t j = 0ull; j < mult; ++j) {
+            float sum = 0.0f;
+            for (uint64_t i = 0ull; i < mult; ++i) sum += comb[i * mult + j];
+            for (uint64_t i = 0ull; i < mult; ++i) comb[i * mult + j] /= sum + eps;
+        }
+    }
+    for (uint64_t i = 0ull; i < mult; ++i) { mix[i] = pre[i]; mix[mult + i] = post[i]; }
+    for (uint64_t k = 0ull; k < mult * mult; ++k) mix[2ull * mult + k] = comb[k];
+}
+
 static __device__ inline void nn__hyper__zzabi_body_pre(uint16_t* out, float* mix, const uint16_t* streams,
                                                          const uint16_t* base, const uint16_t* scale, uint64_t hidden, uint64_t mult,
                                                          uint64_t iters, float eps, unsigned int* over) {
-    const uint64_t rows = NN__HYPER__MIX(mult);
-    const float* lg = mix + rows;
+    const float* lg = mix + NN__HYPER__MIX(mult);
     const float s0 = nn__silicon__half_to_float(scale[0]), s1 = nn__silicon__half_to_float(scale[1]);
     const float s2 = nn__silicon__half_to_float(scale[2]);
     float pre[NN__HYPER__MULT_MAX];
-    for (uint64_t i = 0ull; i < mult; ++i)
-        pre[i] = 1.0f / (1.0f + nn__silicon__expf(-(lg[i] * s0 + nn__silicon__half_to_float(base[i])))) + eps;
+    nn__hyper__zzprivate_pre(pre, lg, base, s0, mult, eps);
     const uint64_t first = nn__kernels__zzprivate_first();
-    if (first == 0ull) {
-        float post[NN__HYPER__MULT_MAX], comb[NN__HYPER__MULT_MAX * NN__HYPER__MULT_MAX];
-        for (uint64_t i = 0ull; i < mult; ++i)
-            post[i] = 2.0f / (1.0f + nn__silicon__expf(-(lg[mult + i] * s1 + nn__silicon__half_to_float(base[mult + i]))));
-        for (uint64_t i = 0ull; i < mult; ++i) {                /* each row a softmax over its columns, plus eps */
-            float top = -NN__KERNELS__INFINITY, sum = 0.0f;
-            for (uint64_t j = 0ull; j < mult; ++j) {
-                const uint64_t k = 2ull * mult + i * mult + j;
-                comb[i * mult + j] = lg[k] * s2 + nn__silicon__half_to_float(base[k]);
-                if (comb[i * mult + j] > top) top = comb[i * mult + j];
-            }
-            for (uint64_t j = 0ull; j < mult; ++j) { comb[i * mult + j] = nn__silicon__expf(comb[i * mult + j] - top); sum += comb[i * mult + j]; }
-            for (uint64_t j = 0ull; j < mult; ++j) comb[i * mult + j] = comb[i * mult + j] / sum + eps;
-        }
-        for (uint64_t it = 0ull; it < iters; ++it) {            /* the columns, then — past the first — rows and columns */
-            if (it != 0ull)
-                for (uint64_t i = 0ull; i < mult; ++i) {
-                    float sum = 0.0f;
-                    for (uint64_t j = 0ull; j < mult; ++j) sum += comb[i * mult + j];
-                    for (uint64_t j = 0ull; j < mult; ++j) comb[i * mult + j] /= sum + eps;
-                }
-            for (uint64_t j = 0ull; j < mult; ++j) {
-                float sum = 0.0f;
-                for (uint64_t i = 0ull; i < mult; ++i) sum += comb[i * mult + j];
-                for (uint64_t i = 0ull; i < mult; ++i) comb[i * mult + j] /= sum + eps;
-            }
-        }
-        for (uint64_t i = 0ull; i < mult; ++i) { mix[i] = pre[i]; mix[mult + i] = post[i]; }
-        for (uint64_t k = 0ull; k < mult * mult; ++k) mix[2ull * mult + k] = comb[k];
-    }
+    if (first == 0ull) nn__hyper__zzprivate_weights(mix, lg, pre, base, s1, s2, mult, iters, eps);
     for (uint64_t e = first; e < hidden; e += nn__kernels__zzprivate_stride()) {
         float sum = 0.0f;
         for (uint64_t i = 0ull; i < mult; ++i) sum += pre[i] * nn__silicon__half_to_float(streams[i * hidden + e]);
@@ -2163,6 +2253,70 @@ static __device__ inline void nn__hyper__zzabi_body_post(uint16_t* out, const ui
             for (uint64_t i = 0ull; i < mult; ++i) sum += mix[2ull * mult + i * mult + j] * s[i];
             bool hit = false;
             out[j * hidden + e] = nn__primitives__zzpackage_float_to_half(sum, &hit);
+            if (hit) *over = NN__KERNELS__OVERFLOWED;
+        }
+    }
+}
+
+/* ⭐ THE SAME THREE OVER `rows` ROWS — a row a position, its streams `mult · hidden` halves, its output `hidden`, and its
+ * weights a record of `mix_stride` floats: `pre · post · comb`, then the logits the map gives. */
+static __device__ inline void nn__hyper__zzabi_body_logits_rows(float* lg, const uint16_t* streams, const uint16_t* fn,
+                                                                 uint64_t hidden, uint64_t mult, float norm_eps, uint64_t rows,
+                                                                 uint64_t lg_stride) {
+    const uint64_t lane = nn__silicon__lane(), lanes = nn__silicon__lanes(), n = mult * hidden, mix = NN__HYPER__MIX(mult);
+    for (uint64_t tr = nn__silicon__block(); tr < rows * mix; tr += nn__silicon__blocks()) {
+        const uint64_t t = tr / mix, r = tr - t * mix;
+        const uint16_t* st = streams + t * n;
+        float sq = 0.0f, dot = 0.0f;
+        for (uint64_t c = lane; c < n; c += lanes) {
+            const float v = nn__silicon__half_to_float(st[c]);
+            sq += v * v;
+            dot += nn__silicon__half_to_float(fn[r * n + c]) * v;
+        }
+        const float inv = 1.0f / nn__silicon__sqrtf(nn__silicon__lanes_sum(sq) / (float)n + norm_eps);
+        const float got = nn__silicon__lanes_sum(dot) * inv;
+        if (lane == 0ull) lg[t * lg_stride + r] = got;
+    }
+}
+
+static __device__ inline void nn__hyper__zzabi_body_pre_rows(uint16_t* out, float* mix, const uint16_t* streams,
+                                                              const uint16_t* base, const uint16_t* scale, uint64_t hidden,
+                                                              uint64_t mult, uint64_t iters, float eps, uint64_t rows,
+                                                              uint64_t mix_stride, unsigned int* over) {
+    const float s0 = nn__silicon__half_to_float(scale[0]), s1 = nn__silicon__half_to_float(scale[1]);
+    const float s2 = nn__silicon__half_to_float(scale[2]);
+    for (uint64_t i = nn__kernels__zzprivate_first(); i < rows * hidden; i += nn__kernels__zzprivate_stride()) {
+        const uint64_t t = i / hidden, e = i - t * hidden;
+        float* mt = mix + t * mix_stride;
+        const float* lg = mt + NN__HYPER__MIX(mult);
+        float pre[NN__HYPER__MULT_MAX];
+        nn__hyper__zzprivate_pre(pre, lg, base, s0, mult, eps);
+        if (e == 0ull) nn__hyper__zzprivate_weights(mt, lg, pre, base, s1, s2, mult, iters, eps);
+        const uint16_t* st = streams + t * mult * hidden;
+        float sum = 0.0f;
+        for (uint64_t k = 0ull; k < mult; ++k) sum += pre[k] * nn__silicon__half_to_float(st[k * hidden + e]);
+        bool hit = false;
+        out[i] = nn__primitives__zzpackage_float_to_half(sum, &hit);
+        if (hit) *over = NN__KERNELS__OVERFLOWED;
+    }
+}
+
+static __device__ inline void nn__hyper__zzabi_body_post_rows(uint16_t* out, const uint16_t* streams, const uint16_t* y,
+                                                               const float* mix, uint64_t hidden, uint64_t mult, uint64_t rows,
+                                                               uint64_t mix_stride, unsigned int* over) {
+    for (uint64_t ie = nn__kernels__zzprivate_first(); ie < rows * hidden; ie += nn__kernels__zzprivate_stride()) {
+        const uint64_t t = ie / hidden, e = ie - t * hidden;
+        const float* mt = mix + t * mix_stride;
+        const uint16_t* st = streams + t * mult * hidden;
+        uint16_t* ot = out + t * mult * hidden;
+        float s[NN__HYPER__MULT_MAX];
+        for (uint64_t i = 0ull; i < mult; ++i) s[i] = nn__silicon__half_to_float(st[i * hidden + e]);
+        const float ye = nn__silicon__half_to_float(y[ie]);
+        for (uint64_t j = 0ull; j < mult; ++j) {
+            float sum = mt[mult + j] * ye;
+            for (uint64_t i = 0ull; i < mult; ++i) sum += mt[2ull * mult + i * mult + j] * s[i];
+            bool hit = false;
+            ot[j * hidden + e] = nn__primitives__zzpackage_float_to_half(sum, &hit);
             if (hit) *over = NN__KERNELS__OVERFLOWED;
         }
     }
@@ -2230,6 +2384,31 @@ static __device__ inline void nn__kda__zzabi_body_step(float* S, const uint16_t*
         nn__kda__zzprivate_step_head(S + h * d * d, conved + h * d, conved + heads * d + h * d, conved + 2ull * heads * d + h * d,
                                      f + h * d, dt + h * d, nn__silicon__expf(nn__silicon__half_to_float(a_log[h])), beta,
                                      gate + h * d, w, out + h * d, d, lower, eps, &hit);
+    }
+    if (hit) *over = NN__KERNELS__OVERFLOWED;
+}
+
+/* ⭐ THE STEP OVER `rows` POSITIONS IN ORDER, ONE LAUNCH: a block a head walks them, its state its own. `conved` is the
+ * rows' `q`, then their `k`, then their `v`; row `t` of each, of `f`, `gate` and `out` is `heads · head_dim` wide, of `b`
+ * `heads`. */
+static __device__ inline void nn__kda__zzabi_body_steps(float* S, const uint16_t* conved, const uint16_t* f, const uint16_t* b,
+                                                         const uint16_t* dt,
+                                                         const uint16_t* a_log, const uint16_t* gate, const uint16_t* w,
+                                                         uint16_t* out, uint64_t heads, uint64_t head_dim, float lower, float eps,
+                                                         uint64_t rows, unsigned int* over) {
+    const uint64_t d = head_dim, width = heads * d;
+    const uint16_t* q = conved;
+    const uint16_t* k = conved + rows * width;
+    const uint16_t* v = conved + 2ull * rows * width;
+    bool hit = false;
+    for (uint64_t h = nn__silicon__block(); h < heads; h += nn__silicon__blocks()) {
+        const float a = nn__silicon__expf(nn__silicon__half_to_float(a_log[h]));
+        for (uint64_t t = 0ull; t < rows; ++t) {
+            const uint64_t at = t * width + h * d;
+            const float beta = 1.0f / (1.0f + nn__silicon__expf(-nn__silicon__half_to_float(b[t * heads + h])));
+            nn__kda__zzprivate_step_head(S + h * d * d, q + at, k + at, v + at, f + at, dt + h * d, a, beta, gate + at, w,
+                                         out + at, d, lower, eps, &hit);
+        }
     }
     if (hit) *over = NN__KERNELS__OVERFLOWED;
 }

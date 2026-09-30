@@ -2,11 +2,13 @@
  "removed": {
   "pybind.cuh": 14,
   "engine/eval.cuh": 16,
+  "packages/nn/cpu/loader__impl.cuh": 7,
   "packages/sys/cpu/heap__impl.cuh": 6,
   "packages/sys/cpu/list__impl.cuh": 13,
   "packages/sys/cpu/opcodes/opcodes.cuh": 29,
-  "packages/sys/contracts/macros/language_contract__verbs.cuh": 10
+  "packages/sys/contracts/macros/language_contract__verbs.cuh": 10,
+  "silicon_families/x86_avx2/primitives/sys.cuh": 7
  },
  "waived": [],
- "total_lines": 88
+ "total_lines": 102
 }

@@ -33,7 +33,7 @@ def _half(a):
 
 class Qwen35:
     def __init__(self, folder, machine, max_context=4096, fused_moe=True, kv="tiered", tiers=None, experts_on="card",
-                 experts_from="auto", experts_dir=None, layers=None, chunk=256):
+                 experts_from="auto", experts_dir=None, layers=None, chunk=256, experts_ram_gb=None):
         if folder.architecture not in ARCHITECTURES:
             raise Refused("%s is a %r model, not one of %s" % (folder.path, folder.architecture, ARCHITECTURES))
         c, b = folder.config, folder.bundle
@@ -88,6 +88,8 @@ class Qwen35:
         if experts_on not in ("card", "cpu"):
             raise Refused("experts_on is 'card' or 'cpu', not %r" % (experts_on,))
         self.CPU_EXPERTS = experts_on == "cpu"
+        # a prompt's hand row with the experts on the CPU: the hand, then its picks as words — ▶ AI_QWEN_3__HAND__ROW
+        self.HAND_ROW = ((2 * (self.H + 16 + self.INTER) + 7) & ~7) + 8 * self.TOPK if self.MOE else 0
         if self.CPU_EXPERTS and not self.MOE:
             raise Refused("experts on the CPU: this model has no routed experts")
         if self.CPU_EXPERTS:
@@ -96,6 +98,16 @@ class Qwen35:
         if self.CPU_EXPERTS:
             self.EXPERTS_FROM = experts_file.choose(experts_from, self.cpu_arena)
             self.experts_dir = experts_dir or os.path.join(folder.path, "experts")
+        # ⭐ FROM THE DISK, THE EXPERTS ARE A CACHE IN THE CPU WORKER'S OWN MEMORY — read from the file into a slot when a
+        #   token picks one that is not there, straight from the drive, the layer's least recently used given up for it.
+        #   `"mapped"` maps the file instead. ▶ glm5.py's, and nn's loader.
+        self.SLOTS = None
+        if self.CPU_EXPERTS and self.EXPERTS_FROM == "disk":
+            total = self.EXPERTS * len(self.run_layers)
+            self.SLOTS = min(total, experts_file.cache_bytes(self.cpu_arena, experts_ram_gb) // self.EPLAN.slot_bytes)
+            if self.SLOTS < 4 * self.TOPK:
+                raise Refused("%d experts is too few for a cache of them" % self.SLOTS)
+            self.cpu_arena = self.SLOTS * self.EPLAN.slot_bytes
 
     # ── ① the collections: a type a dense tensor, the experts, the head, the embedding, the two states ──────────
     def _plan(self):
@@ -186,12 +198,16 @@ class Qwen35:
                    "".join(self.kinds[l] for l in range(self.LAYERS)), len(self.collections), types))
         if not self.CPU_EXPERTS:
             return card
-        # the CPU worker's section: its one collection, the experts, and small pools for the hand-off's buffers
+        # the CPU worker's section: its one collection, the experts, and small pools for the hand-off's buffers — and a
+        # prompt's: its hand rows, its routed rows and `experts_rows`' scratch (▶ ai_qwen_3's `experts_rows`)
         p = self.EPLAN
+        P, I = self.CHUNK * self.TOPK, self.INTER
+        self.RSCRATCH = 2 * self.CHUNK * self.H + 16 * P + 2 * P + 8 * P * I + 4 * self.CHUNK * self.H + 64
+        cbig = max(1 << 20, self.RSCRATCH, self.CHUNK * self.HAND_ROW)
         cpu = ("nn__buffer_resid__size_bytes:2097152\nnn__buffer_resid__qty:8\n"
                "nn__buffer_main__size_bytes:4194304\nnn__buffer_main__qty:1\n"
                "nn__buffer_attn_out__size_bytes:1048576\nnn__buffer_attn_out__qty:16\n"
-               "nn__buffer_logits__size_bytes:1048576\nnn__buffer_logits__qty:2\n"
+               "nn__buffer_logits__size_bytes:%d\nnn__buffer_logits__qty:5\n"
                "nn__buffer_partials__size_bytes:1048576\nnn__buffer_partials__qty:8\n"
                "nn__expert_cache_l1__size_mb:%d\n"
                "nn__cartridge_sink__tokens:1\nnn__cartridge_sink__bytes_per_token_layer:64\n"
@@ -202,8 +218,9 @@ class Qwen35:
                "nn__conversation__text_size_kb:4\nnn__deltanet_state__bytes_per_layer:64\n"
                "nn__model__layer_types:%s\nnn__expert__types:1\n"
                "nn__expert__type0__up_bytes:%d\nnn__expert__type0__down_bytes:%d\nnn__expert__type0__slots:%d\n"
-               % ((self.cpu_arena + (256 << 20)) >> 20, self.LAYERS - n_d, n_d,
-                  "".join(self.kinds[l] for l in range(self.LAYERS)), p.up_bytes, p.down_bytes, self.EXPERTS * len(self.run_layers)))
+               % (cbig, (self.cpu_arena + (256 << 20)) >> 20, self.LAYERS - n_d, n_d,
+                  "".join(self.kinds[l] for l in range(self.LAYERS)), p.up_bytes, p.down_bytes,
+                  self.SLOTS if self.SLOTS is not None else self.EXPERTS * len(self.run_layers)))
         return {CARD: card, CPU: cpu}
 
     def workers(self):
@@ -256,7 +273,11 @@ class Qwen35:
         layer's experts table and the picture the card hands it."""
         m, H, e = self.m, self.H, self.EPLAN
         layers = self.run_layers
+        backing = {}
         if self.EXPERTS_FROM == "disk":
+            backing = experts_file.cache_experts(m, self.b, [(CPU, 0, 1)], e, layers, self.EXPERTS, self.experts_dir,
+                                                 self._expert_pieces, list(range(self.LAYERS)), progress=progress)
+        elif self.EXPERTS_FROM == "mapped":
             experts_file.map_experts(m, self.b, [(CPU, 0, 1)], e, layers, self.EXPERTS, self.experts_dir,
                                      self._expert_pieces, list(range(self.LAYERS)), progress=progress)
         else:
@@ -276,9 +297,20 @@ class Qwen35:
         m.buffer(2 * (H + 16), "c_hand")
         m.buffer(H * 2, "c_routed")
         m.buffer(131072, "c_scratch")
+        m.buffer(self.CHUNK * self.HAND_ROW, "c_hands")
+        m.buffer(self.CHUNK * H * 2, "c_rrows")
+        m.buffer(self.RSCRATCH, "c_rscratch")
         for l in layers:
             m.table("exc%d" % l, ["c_signs", "c_scratch", "c_zero", l, 0, e.at_up_lut, e.at_down_data, e.at_down_lut,
-                                  H, self.INTER, self.EXPERTS, self.TOPK, int(self.b.record(l, GU).d), 0])
+                                  H, self.INTER, self.EXPERTS, self.TOPK, int(self.b.record(l, GU).d),
+                                  backing.get((CPU, l), 0)])
+            # a prompt's: the chunk's scratch in place of a position's, and a picture over the chunk
+            m.table("exrc%d" % l, ["c_signs", "c_rscratch", "c_zero", l, 0, e.at_up_lut, e.at_down_data, e.at_down_lut,
+                                   H, self.INTER, self.EXPERTS, self.TOPK, int(self.b.record(l, GU).d),
+                                   backing.get((CPU, l), 0)])
+            m.picture("xr%d" % l, "(begin (nn__buffer__copy hands %d c_hands %d) "
+                      "(ai_qwen_3__experts_rows c_hands exrc%d c_rrows (sys__node_array__get nrows 0)))"
+                      % (CARD, self.CHUNK * self.HAND_ROW, l))
             m.picture("xq%d" % l, "(begin (nn__buffer__copy hand %d c_hand %d) (ai_qwen_3__experts c_hand picks exc%d c_routed))"
                       % (CARD, 2 * (H + 16), l))
         m.act_as(CARD)
@@ -327,6 +359,11 @@ class Qwen35:
             # the router's hand, its picks and its scratch
             m.buffer(2 * (H + 16 + self.INTER), "hand")
             m.buffer(65536, "pre_scratch")
+        if self.CPU_EXPERTS:
+            # a prompt's hand rows and the routed rows the CPU hands back
+            m.buffer(self.CHUNK * self.HAND_ROW, "hands")
+            m.buffer(self.CHUNK * H * 2, "rrows")
+            m.node_array("nrows", 1)
             m.buffer(131072, "exp_scratch")
             m.node_array("picks", self.TOPK)
 
@@ -457,15 +494,23 @@ class Qwen35:
                     "(nn__turboquant__decode (nn__vector__range emb_codes codes %d) (nn__vector__range emb_scales scale 1) u 1 %d %d) "
                     "(nn__hadamard__rotate u ones512 hu %d) (nn__vector__pointwise_mul hu signs_row %s %d) (type xs)))"
                     % (H * 2, H * 2, row // 2, H, int(self.emb_rec["d"]), H, into, H))
-        for l in (self.run_layers if not self.CPU_EXPERTS else []):     # the CPU's experts: a position at a time
+        for l in self.run_layers:
             mixer = ("(ai_qwen_3__deltanet_rows xs dr%d h1s n)" % l if self.kinds[l] == "d"
                      else ("(ai_qwen_3__attention_tiered_rows xs atr%d first h1s n)" if self.TIERED
                            else "(ai_qwen_3__attention_rows xs ar%d first h1s n)") % l)
-            mlp = ("(ai_qwen_3__moe_rows h1s mr%d xs n)" if self.MOE else "(ai_qwen_3__mlp_rows h1s mlr%d xs n)") % l
+            if self.CPU_EXPERTS:
+                # ⭐ THE EXPERTS ON THE CPU, A CHUNK AT A TIME: the card routes every row into its hand row, the CPU runs each
+                #   expert once over the rows that picked it, the card closes every row. ⛳ Waited for without a bound, as
+                #   GLM's: a chunk's experts read from the disk can outlast `sys__result`'s wait
+                mlp = ("(ai_qwen_3__pre_expert_rows h1s pre%d hands n) (sys__compute %d names xr%d) "
+                       "(while '(sys__eq (sys__completed %d) (< 1 0)) '(< 0 1)) (sys__result %d) "
+                       "(nn__buffer__copy c_rrows %d rrows %d) (ai_qwen_3__post_expert_rows h1s hands rrows post%d xs n)"
+                       % (l, CPU, l, CPU, CPU, CPU, self.CHUNK * H * 2, l))
+            else:
+                mlp = ("(ai_qwen_3__moe_rows h1s mr%d xs n)" if self.MOE else "(ai_qwen_3__mlp_rows h1s mlr%d xs n)") % l
             m.defun("(defun (rows%d first n) (begin %s %s (type xs)))" % (l, mixer, mlp))
-        if not self.CPU_EXPERTS:
-            m.defun("(defun (rows first n) (begin %s (type xs)))"
-                    % " ".join("(rows%d first n)" % l for l in self.run_layers))
+        m.defun("(defun (rows first n) (begin %s (type xs)))"
+                % " ".join("(rows%d first n)" % l for l in self.run_layers))
         m.defun("(defun (head) (begin %s (nn__argmax__find logits_h res %d) (nn__buffer__read res)))" % (logits, self.VOCAB))
         m.defun("(defun (head_logits) (begin %s (type x)))" % logits)
         for l in self.run_layers:
@@ -526,24 +571,18 @@ class Qwen35:
         the last row (greedy), or its logits left for a sampler."""
         if first + len(tokens) > self.max_context:
             raise Refused("positions to %d are past the context of %d" % (first + len(tokens), self.max_context))
-        if self.CPU_EXPERTS:
-            # ⛳ a position at a time: the rows' MoE is the card's fused word, and here the experts are the CPU's
-            for i, t in enumerate(tokens[:-1]):
-                self._stage([t])
-                self._run("(begin (embed 0 0) (nn__rope__angles cs %d %d %d) (layers %d) (type x))"
-                          % (first + i, self.THETA, self.ROT, first + i), "position %d" % (first + i))
-            return self.step(tokens[-1], first + len(tokens) - 1, greedy)
         row = int(self.emb_rec["row_bytes"])
         step = min(self.CHUNK, self.HOT) if self.TIERED else self.CHUNK      # a chunk never outgrows the hot ring
         for at in range(0, len(tokens), step):
             chunk = tokens[at:at + step]
             self._stage(chunk)
             embeds = " ".join("(embed_row %d %d %d)" % (i * row // 2, i, i * self.H) for i in range(len(chunk)))
-            self.m.must("(begin %s (rows %d %d) (type xs))" % (embeds, first + at, len(chunk)), "the rows from %d" % (first + at))
+            count = "(sys__node_array__set nrows 0 %d) " % len(chunk) if self.CPU_EXPERTS else ""
+            self._run("(begin %s%s (rows %d %d) (type xs))" % (count, embeds, first + at, len(chunk)), "the rows from %d" % (first + at))
             last = len(chunk) - 1
         head = "(head)" if greedy else "(head_logits)"
-        return self.m.must("(begin (nn__vector__add (nn__vector__range xs %d %d) zero_h x %d) %s)"
-                           % (last * self.H, self.H, self.H, head), "the prompt's last row")
+        return self._run("(begin (nn__vector__add (nn__vector__range xs %d %d) zero_h x %d) %s)"
+                         % (last * self.H, self.H, self.H, head), "the prompt's last row")
 
     # ── a stage of a pipeline: this machine's run of layers, its input and output the residual rows ─────────────
     # ⚖ *"we need to test pipeline parallelism"*. A model split over machines (▶ `pipeline`) runs each machine's layers

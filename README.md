@@ -1,6 +1,6 @@
 # SiLVANN
 
-> **Developer preview, v0.1.1.** It runs the models below well on the hardware it was tested on, and it is shared
+> **Developer preview, v0.2.0.** It runs the models below well on the hardware it was tested on, and it is shared
 > for people who can find their way around a build and a stack trace. The NVIDIA and Apple paths, and tensor
 > cores, are not tested yet.
 
@@ -56,24 +56,50 @@ the prompt.
 |---|---|---|---|
 | Qwen 3.6 35B-A3B | one MI50 | 81 positions/s | 19 tokens/s (31 on a short prompt) |
 | Qwen 3.8 27B | one MI50 | 32 positions/s | 5.8 tokens/s (7.6 on a short prompt) |
-| Qwen 3.6 35B-A3B | one MI50 for the dense part, the experts on the CPU, all in RAM | 18 positions/s* | 16 tokens/s |
-| Qwen 3.6 35B-A3B | the same, the experts read from the disk, 8 GB of RAM | 4.9 positions/s*† | 8.1 tokens/s — 92% of expert reads from memory |
-| Qwen 3.6 35B-A3B | the same, 6 GB of RAM | 3.4 positions/s*† | 5.5 tokens/s — 81% from memory |
-| GLM 5.3 Flash | one MI50 for the dense part, the experts on the CPU, all in RAM | 6.7 positions/s | 4.9 tokens/s |
-| GLM 5.3 Flash | the same, the experts read from the disk, 128 GB of RAM | 5.8 positions/s† | 2.9 tokens/s — 93% from memory |
-| GLM 5.3 Flash | the same, 64 GB of RAM | 5.6 positions/s† | 1.4 tokens/s — 71% from memory |
-| GLM 5.3 Flash | the same, 32 GB of RAM | 5.6 positions/s† | 1.0 tokens/s — 58% from memory |
+| Qwen 3.6 35B-A3B | one MI50 for the dense part, the experts on the CPU, all in RAM | 51 positions/s | 16 tokens/s |
+| Qwen 3.6 35B-A3B | the same, the experts read from the disk, 8 GB of RAM | 32 positions/s† | 11.9 tokens/s — 90% of expert reads from memory |
+| Qwen 3.6 35B-A3B | the same, 6 GB of RAM | 31 positions/s† | 10.2 tokens/s — 83% from memory |
+| GLM 5.3 Flash | one MI50 for the dense part, the experts on the CPU, all in RAM | 18 positions/s | 4.3 tokens/s |
+| GLM 5.3 Flash | the same, the experts read from the disk, 128 GB of RAM | 10 positions/s† | 3.5 tokens/s — 96% from memory |
+| GLM 5.3 Flash | the same, 64 GB of RAM | 10 positions/s† | 1.6 tokens/s — 77% from memory |
+| GLM 5.3 Flash | the same, 32 GB of RAM | 11 positions/s† | 1.1 tokens/s — 61% from memory |
 
-\* With its experts on the CPU, the 35B still reads a prompt a position at a time, so its prompt is no faster than
-its answer. GLM reads a prompt 1,024 positions at a time through each layer, so each expert is read about once a
-chunk.
+With its experts on the CPU, a model reads a prompt a chunk of positions at a time through each layer — 256 for the
+35B, 1,024 for GLM — so each expert is read about once a chunk and runs once over every position that picked it.
 † Measured from a cold start, so reading the prompt is also when the experts are first read from the disk into
-memory; the answer that follows runs on what the prompt left in memory.
+memory; the answer that follows runs on what the prompt left in memory. The answer's rate is from its 10th token on.
 
-⚠ **Reading a prompt is not fully optimized yet.** It runs a chunk of positions through each layer at once, through
-a tiled matrix kernel (tiles staged in shared memory); the 35B's mixture-of-experts sites, where each expert gets
-few rows of a chunk, and GLM's card sites, still read a position at a time inside a layer, remain well below what
-the card allows.
+⚠ **Reading a prompt is not fully optimized yet.** It runs a chunk of positions through each layer at once — every
+matrix once a chunk, on the card through a tiled kernel and on the CPU in 8-bit integers, and GLM's latent attention
+over every row of the chunk at once — but that attention's kernel reads the cache once for each of its 64 heads where
+one read would serve them all, which makes it the second-largest part of a 1,024-position chunk after the experts.
+
+### What limits the experts on the disk: the drive
+
+With the experts on the CPU, each is kept in the engine's own memory once it has been used, and one that is not is read
+from its file straight into memory (`O_DIRECT`) while the others compute. A miss then costs what its bytes cost to read.
+One GLM 5.3 Flash MoE layer on one socket, one of its 8 picks not in memory, measured on the test machine:
+
+```
+scale: 20 characters = 1 ms          0 ms                1.0                 2.0       2.5
+                                     |-------------------|-------------------|---------|
+the 7 experts in memory              [============================]                        1.4 ms of compute
+the missing one, read (6.3 MB)       [===============================================]     2.4 ms — PCIe 3 x4 NVMe, 2.6 GB/s
+  then computed                                                                    [====]  0.2 ms
+                                                          ^ the layer waits ~1 ms for the disk
+
+the same read, a drive twice as fast [========================]                            ~1.2 ms — a PCIe 4 NVMe, or a
+  then computed                                               [====]                       RAID 0 of two: nothing waited for
+```
+
+**The test machine's limit is its PCIe 3 drive.** A PCIe 4 NVMe, or a RAID 0 of several NVMe drives, reads a missing
+expert inside the time the others take to compute, and pushes straight against that bottleneck. Where most of a token's
+experts come from the disk — GLM with 64 GB or 32 GB, ~1.2-1.7 GB of reads a token — the rate follows the drive's
+almost directly.
+
+How much memory a model needs for few misses depends on its router. The Qwen 35B uses a few of its experts for most
+tokens, so 8 GB holding about a third of them answers 90% of reads from memory; GLM 5.3 Flash spreads its tokens evenly
+over its experts, so holding 39% of them (64 GB) answers 77%.
 
 The 27B also runs split over machines (pipeline parallel): as three stages it answers the same tokens at 6.8
 tokens/s.

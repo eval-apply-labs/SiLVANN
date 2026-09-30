@@ -431,6 +431,9 @@ static __device__ inline uint64_t nn__expert__zzprivate_index(void) {
     return row.args[0];
 }
 
+/* Whose index this is — the worker's own, one a worker — for the loader, which several workers of one program share. */
+static __device__ inline uint64_t nn__expert__zzpackage_owner(void) { return nn__expert__zzprivate_index(); }
+
 static __device__ inline uint64_t nn__expert__zzprivate_lru(void) {
     const sys__heap_node row = sys__package__own_row(nn_pkg_id, (uint64_t)NN__HATCH__EXPERT_LRU);
     if (row.dtype != SYS__KIND__OBJECT_REFERENCE) return 0ull;
@@ -711,6 +714,7 @@ static __device__ inline bool nn__expert__zzprivate_unlink(uint64_t layer, uint6
 
     me.args[NN__EXPERT__SLOT_PREV] = NN__EXPERT__NONE;
     me.args[NN__EXPERT__SLOT_NEXT] = NN__EXPERT__NONE;
+    if (ends.args[NN__EXPERT__LRU_COUNT] != 0ull) --ends.args[NN__EXPERT__LRU_COUNT];
     return nn__expert__zzprivate_slot_set(layer, type, expert, &me)
         && nn__expert__zzprivate_lru_set(layer, type, &ends);
 }
@@ -737,8 +741,15 @@ static __device__ inline bool nn__expert__zzprivate_push_front(uint64_t layer, u
         ends.args[NN__EXPERT__LRU_OLDEST] = NN__EXPERT__LINK(expert);
     }
     ends.args[NN__EXPERT__LRU_RECENT] = NN__EXPERT__LINK(expert);
+    ++ends.args[NN__EXPERT__LRU_COUNT];
     return nn__expert__zzprivate_slot_set(layer, type, expert, &me)
         && nn__expert__zzprivate_lru_set(layer, type, &ends);
+}
+
+/* How many of a (layer, type) band's experts are resident: its chain's length. */
+static __device__ inline uint64_t nn__expert__layer_resident(uint64_t layer, uint64_t type) {
+    sys__heap_node row;
+    return nn__expert__zzprivate_lru_row(layer, type, &row) ? row.args[NN__EXPERT__LRU_COUNT] : 0ull;
 }
 
 /* ── ADMIT · TOUCH · EVICT ───────────────────────────────────────────────────────────────────────────
