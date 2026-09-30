@@ -64,7 +64,8 @@
     X(PKG, bool,     file_open,                       SYS__SILICON_FAMILY__OF_THIS(file_open),                       (const char* path, uint64_t* handle)) \
     X(PKG, void,     file_close,                      SYS__SILICON_FAMILY__OF_THIS(file_close),                      (uint64_t handle)) \
     X(PKG, bool,     file_read,                       SYS__SILICON_FAMILY__OF_THIS(file_read),                       (uint64_t handle, uint64_t offset, uint64_t bytes, void* to)) \
-    X(PKG, bool,     memory_map_file,                 SYS__SILICON_FAMILY__OF_THIS(memory_map_file),                 (void* at, size_t bytes, uint64_t handle, uint64_t offset))
+    X(PKG, bool,     memory_map_file,                 SYS__SILICON_FAMILY__OF_THIS(memory_map_file),                 (void* at, size_t bytes, uint64_t handle, uint64_t offset)) \
+    X(PKG, bool,     memory_prefetch,                 SYS__SILICON_FAMILY__OF_THIS(memory_prefetch),                 (const void* at, size_t bytes))
 
 /* What each door does, in the order of the list:
  *     memory_allocate / memory_free            memory on the card
@@ -105,7 +106,11 @@
  *                                              for as long as the system keeps a file's pages, so memory smaller
  *                                              than the file holds what is used and the disk the rest. Page-aligned
  *                                              `at` and `offset`. Only where the program's memory is the machine's
- *                                              own; a card answers false. */
+ *                                              own; a card answers false.
+ *     memory_prefetch                          whether every page of the range is in memory now — and when one is not,
+ *                                              its reading STARTED, not waited for, so a caller can compute with what
+ *                                              is here while the rest arrives. Memory that is never paged out (a
+ *                                              card's, an allocation) answers true. */
 
 #define SYS__DOORS__ZZPRIVATE_FIELD(PKG, RET, NAME, FN, PARAMS)  RET (*NAME) PARAMS;
 typedef struct sys__doors {

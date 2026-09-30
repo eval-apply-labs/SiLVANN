@@ -268,6 +268,11 @@ static inline bool khronos_opencl2__memory_map_file(void* at, size_t bytes, uint
     (void)at; (void)bytes; (void)handle; (void)offset;
     return false;
 }
+/* A range of this family's memory is always in it: nothing is paged in, so nothing is waited for. */
+static inline bool khronos_opencl2__memory_prefetch(const void* at, size_t bytes) {
+    (void)at; (void)bytes;
+    return true;
+}
 static inline bool khronos_opencl2__file_read(uint64_t handle, uint64_t offset, uint64_t bytes, void* to) {
     return sys__file__zzabi_read_through(handle, offset, bytes, to, khronos_opencl2__memory_write);
 }

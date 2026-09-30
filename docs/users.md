@@ -1,6 +1,6 @@
 # Running SiLVANN
 
-This is a **developer preview (v0.1.1)**. It is tested on Linux with AMD Instinct MI50 cards (gfx906, ROCm 6);
+This is a **developer preview (v0.2.0)**. It is tested on Linux with AMD Instinct MI50 cards (gfx906, ROCm 6);
 Windows and NVIDIA cards are untested, Apple silicon is not supported yet. If something does not build or does
 not run on your machine, you are expected to be able to read the error and the source.
 
@@ -70,13 +70,13 @@ The Qwen models' `options`:
 | `tiers` | `[sink, hot, warm]` | the tiers' sizes; `warm` may be `"rest"`. `[256, 4096, "rest"]` is the default; `[256, 4096, N]` puts what is older than `N` at 4 bits, for small cards |
 | `chunk` | positions, 1 to 256, default 256 | how many positions of a prompt go through a layer at once |
 | `experts_on` | `"card"` (default), `"cpu"` | the 35B's routed experts on the card, or on the CPU — the setup for a card too small to hold them |
-| `experts_from` | `"auto"`, `"ram"`, `"disk"` | with the experts on the CPU: copied into RAM, or read from a file on the disk as they are needed; `auto` chooses by the memory there is |
+| `experts_from` | `"auto"`, `"ram"`, `"disk"`, `"mapped"` | with the experts on the CPU: copied into RAM, or read from a file on the disk as they are needed — `disk` keeps the ones used in the engine's own memory, as much of it as there is (`experts_ram_gb` to set it), `mapped` leaves that to the system's page cache and is slower; `auto` chooses by the memory there is |
 
 GLM 5.3 Flash's `options`:
 
 | option | values | |
 |---|---|---|
-| `experts_from` | `"auto"`, `"ram"`, `"disk"` | its routed experts (142 GB) in RAM, or read from a file on the disk as they are needed; `auto` puts them in RAM when they leave a fifth of the available memory free — about 180 GB available |
+| `experts_from` | `"auto"`, `"ram"`, `"disk"`, `"mapped"` | its routed experts (142 GB) in RAM, or read from a file on the disk as they are needed — `disk` keeps the ones used in the engine's own memory (`experts_ram_gb` to set how much), `mapped` leaves that to the system's page cache; `auto` puts them in RAM when they leave a fifth of the available memory free — about 180 GB available |
 | `chunk` | positions, default 256 | how many positions of a prompt go through a layer at once; with the experts on the disk, 1024 reads a prompt faster |
 | `sockets` | `1`, `2` | the CPU sockets the experts are split over; by default, all of them |
 
@@ -86,8 +86,9 @@ With `experts_from: "disk"`, the first start writes the model's experts to `mode
 the CPU reads them in — about 150 GB for GLM 5.3 Flash, 16 GB for the 35B — and later starts map that file. The
 disk should be an NVMe drive: RAM keeps the experts that are used, and every other one is read from the disk
 when a token picks it, so the disk's speed is the answer's speed. On our test machine GLM 5.3 Flash answered at
-2.9 tokens a second with 128 GB of RAM, 1.4 with 64 GB and 1.0 with 32 GB, from an NVMe drive that reads 2.5 GB/s,
-and read a prompt at 5.6-5.8 positions a second with `chunk: 1024` in all three.
+3.5 tokens a second with 128 GB of RAM, 1.6 with 64 GB and 1.1 with 32 GB, from an NVMe drive that reads 2.6 GB/s,
+and read a prompt at 10-11 positions a second with `chunk: 1024` in all three. The engine keeps as many experts
+as the memory there is allows — the process's own limit when it has one — less a quarter of it for everything else.
 
 ## 6. A model over several machines
 

@@ -6,6 +6,7 @@
  * a launch has finished by the time it returns (`pool.cuh`). What differs is the device: there is one, and
  * it is only there when the processors have what this family's bodies were compiled for. */
 #include "../../../packages/sys/cpu/silicon/file.cuh"   /* opening and reading a file, written once for every family */
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -138,8 +139,87 @@ static inline bool x86_avx2__memory_map_file(void* at, size_t bytes, uint64_t ha
     if (at == 0 || bytes == 0u || handle == 0ull || (uintptr_t)at % X86_AVX2__ZZPRIVATE_PAGE != 0u
         || offset % X86_AVX2__ZZPRIVATE_PAGE != 0ull)
         return false;
-    void* got = mmap(at, bytes, PROT_READ, MAP_SHARED | MAP_FIXED, (int)(handle - 1ull), (off_t)offset);
+    void* got = mmap(at, bytes, PROT_READ, MAP_SHARED | MAP_FIXED, sys__file__zzabi_descriptor(handle), (off_t)offset);
     return got == at;
+}
+/* ⭐ THE PAGERS — a few threads that do nothing but bring a range's pages into memory, by touching them: a page not in
+ * memory is read from the disk by the thread that touches it, so several of them keep the disk reading several
+ * pieces at once (`MEASURED` on the Optane under node03's test: one thread faulting reads 1.6 GB/s, four 2.3 GB/s, the
+ * drive's own rate). A range is handed over and not waited for; a computing thread that reaches a page still on its
+ * way waits for that page alone. Started the first time a range is handed over (`SILVANN_PAGERS`, 4 by default). */
+#define X86_AVX2__ZZPRIVATE_PAGER_RING    1024u
+#define X86_AVX2__ZZPRIVATE_PAGERS_MAX    16u
+static uintptr_t       x86_avx2__zzprivate_pager_from[X86_AVX2__ZZPRIVATE_PAGER_RING];
+static uintptr_t       x86_avx2__zzprivate_pager_to[X86_AVX2__ZZPRIVATE_PAGER_RING];
+static unsigned        x86_avx2__zzprivate_pager_head = 0u;
+static unsigned        x86_avx2__zzprivate_pager_tail = 0u;
+static unsigned        x86_avx2__zzprivate_pagers = 0u;
+static pthread_mutex_t x86_avx2__zzprivate_pager_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t  x86_avx2__zzprivate_pager_work = PTHREAD_COND_INITIALIZER;
+static volatile uint64_t x86_avx2__zzprivate_pager_sink = 0u;
+
+static void* x86_avx2__zzprivate_pager(void* unused) {
+    (void)unused;
+    for (;;) {
+        pthread_mutex_lock(&x86_avx2__zzprivate_pager_lock);
+        while (x86_avx2__zzprivate_pager_head == x86_avx2__zzprivate_pager_tail)
+            pthread_cond_wait(&x86_avx2__zzprivate_pager_work, &x86_avx2__zzprivate_pager_lock);
+        const unsigned k = x86_avx2__zzprivate_pager_tail;
+        const uintptr_t from = x86_avx2__zzprivate_pager_from[k], to = x86_avx2__zzprivate_pager_to[k];
+        x86_avx2__zzprivate_pager_tail = (k + 1u) % X86_AVX2__ZZPRIVATE_PAGER_RING;
+        pthread_mutex_unlock(&x86_avx2__zzprivate_pager_lock);
+        uint64_t sum = 0u;
+        for (uintptr_t a = from; a < to; a += X86_AVX2__ZZPRIVATE_PAGE) sum += *(volatile const uint8_t*)a;
+        x86_avx2__zzprivate_pager_sink += sum;
+    }
+    return 0;
+}
+
+/* `[from, to)` handed to the pagers, a piece of `X86_AVX2__ZZPRIVATE_PAGE`s each so several share a long range; a full
+ * ring drops the rest, which the computing thread then reads itself. */
+static void x86_avx2__zzprivate_page_in(uintptr_t from, uintptr_t to) {
+    const uintptr_t piece = 64u * X86_AVX2__ZZPRIVATE_PAGE;
+    pthread_mutex_lock(&x86_avx2__zzprivate_pager_lock);
+    if (x86_avx2__zzprivate_pagers == 0u) {
+        unsigned want = 4u;
+        const char* said = getenv("SILVANN_PAGERS");
+        if (said != 0) { const long n = strtol(said, 0, 10); if (n > 0) want = (unsigned)n; }
+        if (want > X86_AVX2__ZZPRIVATE_PAGERS_MAX) want = X86_AVX2__ZZPRIVATE_PAGERS_MAX;
+        for (unsigned t = 0u; t < want; ++t) {
+            pthread_t id;
+            if (pthread_create(&id, 0, x86_avx2__zzprivate_pager, 0) != 0) break;
+            pthread_detach(id);
+            ++x86_avx2__zzprivate_pagers;
+        }
+    }
+    for (uintptr_t a = from; a < to; a += piece) {
+        const unsigned next = (x86_avx2__zzprivate_pager_head + 1u) % X86_AVX2__ZZPRIVATE_PAGER_RING;
+        if (next == x86_avx2__zzprivate_pager_tail) break;
+        x86_avx2__zzprivate_pager_from[x86_avx2__zzprivate_pager_head] = a;
+        x86_avx2__zzprivate_pager_to[x86_avx2__zzprivate_pager_head] = a + piece < to ? a + piece : to;
+        x86_avx2__zzprivate_pager_head = next;
+    }
+    pthread_cond_broadcast(&x86_avx2__zzprivate_pager_work);
+    pthread_mutex_unlock(&x86_avx2__zzprivate_pager_lock);
+}
+
+/* Whether every page of the range is in memory, from the system's own record (`mincore`), a page-aligned run at a time;
+ * when one is not, the range is handed to the pagers and not waited for. Memory the program allocated is always in it. */
+static inline bool x86_avx2__memory_prefetch(const void* at, size_t bytes) {
+    if (at == 0 || bytes == 0u) return true;
+    const uintptr_t first = (uintptr_t)at / X86_AVX2__ZZPRIVATE_PAGE * X86_AVX2__ZZPRIVATE_PAGE;
+    const uintptr_t end = (uintptr_t)at + bytes;
+    unsigned char in[1024];
+    bool all = true;
+    for (uintptr_t a = first; a < end && all; a += sizeof in * X86_AVX2__ZZPRIVATE_PAGE) {
+        const size_t pages = (end - a + X86_AVX2__ZZPRIVATE_PAGE - 1u) / X86_AVX2__ZZPRIVATE_PAGE;
+        const size_t n = pages < sizeof in ? pages : sizeof in;
+        if (mincore((void*)a, n * X86_AVX2__ZZPRIVATE_PAGE, in) != 0) return true;   /* not a mapping it can say of */
+        for (size_t k = 0; k < n && all; ++k) all = (in[k] & 1u) != 0u;
+    }
+    if (all) return true;
+    x86_avx2__zzprivate_page_in(first, end);
+    return false;
 }
 static inline bool x86_avx2__file_read(uint64_t handle, uint64_t offset, uint64_t bytes, void* to) {
     return sys__file__zzabi_read(handle, offset, bytes, to);

@@ -137,7 +137,13 @@ typedef struct nn__gemm__tile {
     X(PKG, void, index_scores,             nn__index__zzabi_launch_scores,             (float* scores, const uint16_t* q, const uint16_t* w, const uint16_t* pooled, uint64_t heads, uint64_t dim, uint64_t pools, float scale)) \
     X(PKG, void, index_select,             nn__index__zzabi_launch_select,             (uint32_t* index, uint32_t* count, const float* scores, uint64_t pools, uint64_t k, uint64_t kpool, uint64_t tail_first, uint64_t tail)) \
     X(PKG, void, index_gather,             nn__index__zzabi_launch_gather,             (uint16_t* out, const uint16_t* src, const uint32_t* index, uint64_t n, uint64_t row)) \
-    X(PKG, void, vector_copy,              nn__vector__zzabi_launch_copy,              (uint16_t* out, const uint16_t* in, uint64_t n))
+    X(PKG, void, vector_copy,              nn__vector__zzabi_launch_copy,              (uint16_t* out, const uint16_t* in, uint64_t n)) \
+    X(PKG, void, hyper_logits_rows,        nn__hyper__zzabi_launch_logits_rows,        (float* lg, const uint16_t* streams, const uint16_t* fn, uint64_t hidden, uint64_t mult, float norm_eps, uint64_t rows, uint64_t lg_stride)) \
+    X(PKG, void, hyper_pre_rows,           nn__hyper__zzabi_launch_pre_rows,           (uint16_t* out, float* mix, const uint16_t* streams, const uint16_t* base, const uint16_t* scale, uint64_t hidden, uint64_t mult, uint64_t iters, float eps, uint64_t rows, uint64_t mix_stride, unsigned int* over)) \
+    X(PKG, void, hyper_post_rows,          nn__hyper__zzabi_launch_post_rows,          (uint16_t* out, const uint16_t* streams, const uint16_t* y, const float* mix, uint64_t hidden, uint64_t mult, uint64_t rows, uint64_t mix_stride, unsigned int* over)) \
+    X(PKG, void, kda_steps,                nn__kda__zzabi_launch_steps,                (float* S, const uint16_t* conved, const uint16_t* f, const uint16_t* b, const uint16_t* dt, const uint16_t* a_log, const uint16_t* gate, const uint16_t* w, uint16_t* out, uint64_t heads, uint64_t head_dim, float lower, float eps, uint64_t rows, unsigned int* over)) \
+    X(PKG, void, expert_groups_int8,       nn__expert__zzabi_launch_groups_int8,       (uint16_t* out, nn__expert__groups g, const uint16_t* x, const uint32_t* rows, uint64_t cols, unsigned int* over)) \
+    X(PKG, void, expert_rows_sum_int8,     nn__expert__zzabi_launch_rows_sum_int8,     (float* acc, const uint8_t* weights, uint64_t w_room, const uint8_t* luts, uint64_t l_room, const uint16_t* x, const uint32_t* rows, const uint16_t* w, uint64_t count, uint64_t d, uint64_t out_rows, uint64_t cols))
 
 /* ⛳ THE TABLE AND THE LAUNCH ARE THE HOST'S SIDE OF A FAMILY, so a family whose kernels are compiled as
  * OpenCL C does not see them there: that language has no function pointers, and `kernel` is a keyword. */

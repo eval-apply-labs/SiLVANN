@@ -28,6 +28,7 @@
 typedef struct nn__loader__read {
     uint32_t state;
     bool     predicted;            /* queued by a prediction, not by a pick */
+    uint64_t owner;                /* the index of the worker that asked — several workers share these threads */
     sys__silicon_family__id family;
     uint64_t layer, type, expert, slot, room;
     nn__expert__backing backing;
@@ -99,32 +100,56 @@ static void nn__loader__zzpackage_stop(void) {
     pthread_mutex_unlock(&nn__loader__zzprivate_lock);
 }
 
-/* The read of `expert` in flight, or none. Called with the lock held. */
-static nn__loader__read* nn__loader__zzprivate_find(uint64_t layer, uint64_t type, uint64_t expert) {
+/* This worker's read of `expert` in flight, or none. Called with the lock held. ⛳ A READ IS ITS WORKER'S: two workers of
+ *   one program each keep their own index and slots, and the same expert of each is two reads into two slots. */
+static nn__loader__read* nn__loader__zzprivate_find(uint64_t owner, uint64_t layer, uint64_t type, uint64_t expert) {
     for (unsigned i = 0u; i < NN__EXPERT__FLIGHT_MAX; ++i) {
         nn__loader__read* r = &nn__loader__zzprivate_reads[i];
-        if (r->state != NN__LOADER__FREE && r->layer == layer && r->type == type && r->expert == expert) return r;
+        if (r->state != NN__LOADER__FREE && r->owner == owner && r->layer == layer && r->type == type && r->expert == expert) return r;
     }
     return 0;
 }
 
-/* A slot for a read: a free one of the collection, or the least recently used expert's — this layer's oldest
- * unless that is one of `pinned`, else the oldest of the first other layer that has one. */
-static bool nn__loader__zzprivate_room(uint64_t layer, uint64_t type, const uint64_t* pinned, unsigned npinned,
-                                       uint64_t* slot, uint64_t* room) {
-    if (nn__expert__type_take(type, slot, room)) return true;
-    const uint64_t layers = nn__expert__index_layers();
-    for (uint64_t k = 0ull; k < layers; ++k) {
-        const uint64_t l = (layer + k) % layers;
-        uint64_t victim = 0ull;
-        if (nn__expert__layer_experts(l, type) == 0ull || !nn__expert__oldest(l, type, &victim)) continue;
+/* A slot for a read. ⭐ EVERY LAYER KEEPS ITS FAIR SHARE — the collection's slots over the layers that have experts of the
+ * type: a layer holding its share gives up its own least recently used expert (one not `pinned`); one holding less takes
+ * a free slot, and with none free, the least recently used of the layer that holds the most.
+ * ⛳ WITHOUT THE SHARE, the first layers of a prompt read as rows took every free slot — a chunk wants most of a layer's
+ *   experts at once — and a token's misses, each evicting from its own layer, never gave them back: `MEASURED` on the
+ *   35B with 8 GB, 83% of reads from memory after a prompt of rows against 94% after one read a position at a time. */
+/* Layer `l`'s least recently used expert that is not one of `pinned` (they are the asking layer's), evicted for its slot.
+ * ⛳ A PINNED ONE CAN BE THE OLDEST: a batch's resident experts move to the front only as the batch's requests reach them,
+ *   so the walk goes on toward the newer ones — at most one step a pinned expert. */
+static bool nn__loader__zzprivate_evict_oldest(uint64_t l, uint64_t type, uint64_t layer, const uint64_t* pinned, unsigned npinned,
+                                               uint64_t* slot, uint64_t* room) {
+    uint64_t victim = 0ull;
+    if (nn__expert__layer_experts(l, type) == 0ull || !nn__expert__oldest(l, type, &victim)) return false;
+    for (unsigned step = 0u; step <= npinned; ++step) {
         bool held = false;
         for (unsigned p = 0u; l == layer && p < npinned; ++p) held = held || pinned[p] == victim;
-        if (held) continue;
-        if (!nn__expert__evict(l, type, victim)) return false;
-        return nn__expert__type_take(type, slot, room);
+        if (!held) return nn__expert__evict(l, type, victim) && nn__expert__type_take(type, slot, room);
+        sys__heap_node me;
+        if (!nn__expert__slot(l, type, victim, &me) || me.args[NN__EXPERT__SLOT_PREV] == NN__EXPERT__NONE) return false;
+        victim = NN__EXPERT__UNLINK(me.args[NN__EXPERT__SLOT_PREV]);
     }
     return false;
+}
+static bool nn__loader__zzprivate_room(uint64_t layer, uint64_t type, const uint64_t* pinned, unsigned npinned,
+                                       uint64_t* slot, uint64_t* room) {
+    const uint64_t layers = nn__expert__index_layers();
+    uint64_t banded = 0ull;
+    for (uint64_t l = 0ull; l < layers; ++l) banded += nn__expert__layer_experts(l, type) != 0ull ? 1ull : 0ull;
+    const uint64_t share = banded == 0ull ? 0ull : nn__expert__type_slots(type) / banded;
+    if (share != 0ull && nn__expert__layer_resident(layer, type) >= share
+     && nn__loader__zzprivate_evict_oldest(layer, type, layer, pinned, npinned, slot, room))
+        return true;
+    if (nn__expert__type_take(type, slot, room)) return true;
+    uint64_t most = layers, held = 0ull;
+    for (uint64_t l = 0ull; l < layers; ++l) {
+        const uint64_t n = nn__expert__layer_resident(l, type);
+        if (n > held) { held = n; most = l; }
+    }
+    if (most < layers && nn__loader__zzprivate_evict_oldest(most, type, layer, pinned, npinned, slot, room)) return true;
+    return nn__loader__zzprivate_evict_oldest(layer, type, layer, pinned, npinned, slot, room);
 }
 
 static __device__ inline int nn__expert__request(sys__silicon_family__id family, uint64_t layer, uint64_t type, uint64_t expert,
@@ -136,8 +161,9 @@ static __device__ inline int nn__expert__request(sys__silicon_family__id family,
         if (at != 0) *at = me.args[NN__EXPERT__SLOT_AT];
         return nn__expert__touch(layer, type, expert) ? NN__EXPERT__RESIDENT : NN__EXPERT__REFUSED;
     }
+    const uint64_t owner = nn__expert__zzpackage_owner();
     pthread_mutex_lock(&nn__loader__zzprivate_lock);
-    nn__loader__read* r = nn__loader__zzprivate_find(layer, type, expert);
+    nn__loader__read* r = nn__loader__zzprivate_find(owner, layer, type, expert);
     if (r != 0) {
         if (!predicted && r->predicted) { r->predicted = false; ++nn__loader__zzprivate_count[NN__EXPERT__COUNT_PREDICTED_USED]; }
         pthread_mutex_unlock(&nn__loader__zzprivate_lock);
@@ -159,6 +185,7 @@ static __device__ inline int nn__expert__request(sys__silicon_family__id family,
     }
     free_read->state = NN__LOADER__QUEUED;
     free_read->predicted = predicted;
+    free_read->owner = owner;
     free_read->family = family;
     free_read->layer = layer; free_read->type = type; free_read->expert = expert;
     free_read->slot = slot; free_read->room = room;
@@ -171,12 +198,13 @@ static __device__ inline int nn__expert__request(sys__silicon_family__id family,
 
 static __device__ inline bool nn__expert__settle(uint64_t layer, uint64_t type) {
     bool ok = true;
+    const uint64_t owner = nn__expert__zzpackage_owner();
     pthread_mutex_lock(&nn__loader__zzprivate_lock);
     for (;;) {
         bool waiting = false;
         for (unsigned i = 0u; i < NN__EXPERT__FLIGHT_MAX; ++i) {
             nn__loader__read* r = &nn__loader__zzprivate_reads[i];
-            if (r->state == NN__LOADER__FREE || r->layer != layer || r->type != type) continue;
+            if (r->state == NN__LOADER__FREE || r->owner != owner || r->layer != layer || r->type != type) continue;
             if (r->state == NN__LOADER__QUEUED || r->state == NN__LOADER__READING) { waiting = true; continue; }
             /* done or failed: the index learns of it here, on this thread */
             const bool read = r->state == NN__LOADER__DONE;
@@ -192,6 +220,34 @@ static __device__ inline bool nn__expert__settle(uint64_t layer, uint64_t type) 
     }
     pthread_mutex_unlock(&nn__loader__zzprivate_lock);
     return ok;
+}
+
+static __device__ inline bool nn__expert__settle_one(uint64_t layer, uint64_t type, uint64_t expert) {
+    bool ok = true;
+    const uint64_t owner = nn__expert__zzpackage_owner();
+    pthread_mutex_lock(&nn__loader__zzprivate_lock);
+    for (;;) {
+        nn__loader__read* r = nn__loader__zzprivate_find(owner, layer, type, expert);
+        if (r == 0) break;
+        if (r->state == NN__LOADER__QUEUED || r->state == NN__LOADER__READING) {
+            pthread_cond_wait(&nn__loader__zzprivate_done, &nn__loader__zzprivate_lock);
+            continue;
+        }
+        const bool read = r->state == NN__LOADER__DONE;
+        const uint64_t slot = r->slot, room = r->room;
+        r->state = NN__LOADER__FREE;
+        if (!read || !nn__expert__admit(layer, expert, room, type)) {
+            (void)nn__expert__type_give(type, slot);
+            ok = false;
+        }
+        break;
+    }
+    pthread_mutex_unlock(&nn__loader__zzprivate_lock);
+    return ok;
+}
+
+static __device__ inline bool nn__expert__in_memory(sys__silicon_family__id family, uint64_t type, uint64_t at) {
+    return sys__gpu__memory_prefetch(family, (const void*)(uintptr_t)at, (size_t)nn__expert__type_bytes(type));
 }
 
 static __device__ inline uint64_t nn__expert__count(unsigned which) {

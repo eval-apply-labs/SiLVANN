@@ -147,6 +147,12 @@
 #define nn__index__zzabi_launch_select__RUNS             NN__GPU__ZZPRIVATE_WIDE,     nn__index__zzabi_body_select,             1u, 256u, (index, count, scores, pools, k, kpool, tail_first, tail)
 #define nn__index__zzabi_launch_gather__RUNS             NN__GPU__ZZPRIVATE_WIDE,     nn__index__zzabi_body_gather,             NN__GPU__ZZPRIVATE_EACH(n * row), 256u, (out, src, index, n, row)
 #define nn__vector__zzabi_launch_copy__RUNS              NN__GPU__ZZPRIVATE_WIDE,     nn__vector__zzabi_body_copy,              NN__GPU__ZZPRIVATE_EACH(n), 256u, (out, in, n)
+#define nn__hyper__zzabi_launch_logits_rows__RUNS        NN__GPU__ZZPRIVATE_WIDE,     nn__hyper__zzabi_body_logits_rows,        NN__GPU__ZZPRIVATE_UP_TO(rows * NN__HYPER__MIX(mult), NN__KERNELS__BLOCKS_MAX), 256u, (lg, streams, fn, hidden, mult, norm_eps, rows, lg_stride)
+#define nn__hyper__zzabi_launch_pre_rows__RUNS           NN__GPU__ZZPRIVATE_WIDE,     nn__hyper__zzabi_body_pre_rows,           NN__GPU__ZZPRIVATE_EACH(rows * hidden), 256u, (out, mix, streams, base, scale, hidden, mult, iters, eps, rows, mix_stride, over)
+#define nn__hyper__zzabi_launch_post_rows__RUNS          NN__GPU__ZZPRIVATE_WIDE,     nn__hyper__zzabi_body_post_rows,          NN__GPU__ZZPRIVATE_EACH(rows * hidden), 256u, (out, streams, y, mix, hidden, mult, rows, mix_stride, over)
+#define nn__expert__zzabi_launch_groups_int8__RUNS       NN__GPU__ZZPRIVATE_WIDE,     nn__expert__zzabi_body_groups_int8,       NN__KERNELS__BLOCKS_MAX, 256u, (out, g, x, rows, cols, over)
+#define nn__expert__zzabi_launch_rows_sum_int8__RUNS     NN__GPU__ZZPRIVATE_WIDE,     nn__expert__zzabi_body_rows_sum_int8,     NN__GPU__ZZPRIVATE_UP_TO(out_rows, NN__KERNELS__BLOCKS_MAX), 256u, (acc, weights, w_room, luts, l_room, x, rows, w, count, d, out_rows, cols)
+#define nn__kda__zzabi_launch_steps__RUNS                NN__GPU__ZZPRIVATE_WIDE,     nn__kda__zzabi_body_steps,                NN__GPU__ZZPRIVATE_UP_TO(heads, NN__KERNELS__BLOCKS_MAX), 256u, (S, conved, f, b, dt, a_log, gate, w, out, heads, head_dim, lower, eps, rows, over)
 
 /* ── EVERY ROW BECOMES A KERNEL AND A DOOR ─────────────────────────────────────────────────────────────── */
 /* ⛳ A SERIAL BODY RUNS ON ONE LANE OF ONE BLOCK, so PLAIN sends every other lane home first; a WIDE body

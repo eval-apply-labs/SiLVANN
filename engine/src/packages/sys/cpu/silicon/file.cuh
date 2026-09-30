@@ -13,28 +13,40 @@
  * family on this machine. So it is written once, here, and published as `zzabi_` for the families to call,
  * the way nn publishes what an override may reuse: a family whose memory the program shares reads straight
  * into it; a card's reads through a bounce buffer and its own `memory_write`.
- * ⛳ A HANDLE IS THE DESCRIPTOR PLUS ONE, so zero is never a file. POSIX; another host answers these with its
- * own calls. */
+ * ⛳ A HANDLE IS TWO DESCRIPTORS OF THE ONE FILE, EACH PLUS ONE, so zero is never a file: the low half an ordinary
+ *   one, the high half one opened `O_DIRECT` — which a read takes whenever its offset, its length and its memory are
+ *   whole pages. `MEASURED` on node03's Optane (PCIe 3 x4), 6.3 MB pieces from one thread: 2.6 GB/s direct, the drive's own rate,
+ *   against 1.4 buffered — and a direct read leaves no copy in the page cache, so a program that keeps what it read
+ *   holds it once. A file system that refuses `O_DIRECT` leaves the high half zero and every read buffered. POSIX;
+ *   another host answers these with its own calls. */
+#define SYS__FILE__ZZPRIVATE_PAGE 4096ull
+static inline int sys__file__zzabi_descriptor(uint64_t handle) { return (int)(uint32_t)handle - 1; }
 
 static inline bool sys__file__zzabi_open(const char* path, uint64_t* handle) {
     if (path == 0 || handle == 0) return false;
     const int fd = open(path, O_RDONLY | O_CLOEXEC);
     if (fd < 0) return false;
-    *handle = (uint64_t)fd + 1ull;
+    const int direct = open(path, O_RDONLY | O_CLOEXEC | O_DIRECT);
+    *handle = ((uint64_t)(uint32_t)fd + 1ull) | (direct < 0 ? 0ull : ((uint64_t)(uint32_t)direct + 1ull) << 32);
     return true;
 }
 
 static inline void sys__file__zzabi_close(uint64_t handle) {
-    if (handle != 0ull) (void)close((int)(handle - 1ull));
+    if (handle == 0ull) return;
+    (void)close(sys__file__zzabi_descriptor(handle));
+    if ((handle >> 32) != 0ull) (void)close((int)(handle >> 32) - 1);
 }
 
-/* `bytes` at `offset` into memory the program can write directly. A short read is retried where it
- * stopped; the end of the file before `bytes` is a false. */
+/* `bytes` at `offset` into memory the program can write directly — straight from the drive when every one of the
+ * three is whole pages. A short read is retried where it stopped; the end of the file before `bytes` is a false. */
 static inline bool sys__file__zzabi_read(uint64_t handle, uint64_t offset, uint64_t bytes, void* to) {
     if (handle == 0ull || (to == 0 && bytes != 0ull)) return false;
+    const bool whole = (handle >> 32) != 0ull && offset % SYS__FILE__ZZPRIVATE_PAGE == 0ull && bytes % SYS__FILE__ZZPRIVATE_PAGE == 0ull
+                    && (uint64_t)(uintptr_t)to % SYS__FILE__ZZPRIVATE_PAGE == 0ull;
+    const int fd = whole ? (int)(handle >> 32) - 1 : sys__file__zzabi_descriptor(handle);
     uint64_t done = 0ull;
     while (done < bytes) {
-        const ssize_t got = pread((int)(handle - 1ull), (char*)to + done, (size_t)(bytes - done), (off_t)(offset + done));
+        const ssize_t got = pread(fd, (char*)to + done, (size_t)(bytes - done), (off_t)(offset + done));
         if (got <= 0) return false;
         done += (uint64_t)got;
     }

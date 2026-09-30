@@ -264,6 +264,7 @@ typedef struct nn__expert__backing {
  * package's allocation head from `nn` would make this file depend on a layout `sys` is free to change. */
 #define NN__EXPERT__LRU_RECENT  0u   /* the most recently touched expert of this layer, as a LINK */
 #define NN__EXPERT__LRU_OLDEST  1u   /* the eviction candidate, as a LINK                         */
+#define NN__EXPERT__LRU_COUNT   2u   /* how many are in the chain — this layer's residents         */
 
 /* ⛔⛔ 509 EXPERTS PER LAYER IS A REAL BOUND AND IT IS NOT FAR AWAY. An allocation must fit the room left
  * in ONE heap chunk, and a `node_array` of E elements costs E+1 nodes against `SYS__HEAP__CHUNK_NODES`

@@ -168,6 +168,16 @@
 #define AI_GLM_5_3__EXP__INT8       15u     /* 1: the products in integers (nn's int8 gemvs), 0: exact */
 #define AI_GLM_5_3__EXP__LIMIT      16u
 #define AI_GLM_5_3__EXP__TABLE      17u
+/* ⭐ optional: WHERE THE EXPERTS ARE ON DISK — nn's backing (`nn/contracts/objects/expert.cuh`), or 0. With one, the
+ * worker's slots are a cache in its own memory: an expert that is not in it is read from the file straight into a slot
+ * (nn's loader), the least recently used one of the layer's given up for it. Without, every expert has its slot. */
+#define AI_GLM_5_3__EXP__BACKING    17u
+/* A prompt's experts, where the slots are a cache: this many a batch, the next batch read while one computes — so a
+ * worker's cache needs room for two batches beside what it keeps. */
+#define AI_GLM_5_3__EXP__BATCH      16u
+/* A prompt's MLA rows attend this many at a time where they attend every position before them: the scores of a block are
+ * `rows · heads · (first + rows)` floats of the rows verbs' work buffer. */
+#define AI_GLM_5_3__MLA__ROWS_BLOCK 32u
 
 #define AI_GLM_5_3__TOP_K_MAX       12u     /* nn's grouped launch takes twelve matrices */
 

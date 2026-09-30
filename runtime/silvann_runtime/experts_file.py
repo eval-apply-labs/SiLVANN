@@ -31,11 +31,38 @@ def available():
     return 0
 
 
+def limit():
+    """What this process may hold: its cgroup's memory limit when it has one (a `systemd-run -p MemoryMax=…` scope, a
+    container), else what the system says is available."""
+    try:
+        with open("/proc/self/cgroup") as f:
+            path = next(l.strip().split(":", 2)[2] for l in f if l.startswith("0::"))
+        with open(os.path.join("/sys/fs/cgroup", path.lstrip("/"), "memory.max")) as f:
+            said = f.read().strip()
+        if said != "max":
+            return min(int(said), available())
+    except (OSError, StopIteration, ValueError):
+        pass
+    return available()
+
+
+def cache_bytes(total, ram_gb=None):
+    """How much of `total` bytes of experts a cache in memory holds: `ram_gb` when a config says so, else what the process
+    may hold less a quarter of it, at least 3 GB and at most 8, for everything else. `MEASURED` on node03, the 35B under
+    an 8 GB cap: with 2 GB kept the cgroup killed the process (5.7 GB of its own memory and 1.5 GB of mapped files at the
+    kill) — the card's pinned host memory cannot be given back, and the cap counts it."""
+    if ram_gb is not None:
+        return min(total, int(float(ram_gb) * (1 << 30)))
+    held = limit()
+    return max(0, min(total, held - min(8 << 30, max(3 << 30, held // 4))))
+
+
 def choose(experts_from, need):
-    """`"ram"` or `"disk"` for `experts_from` as a config says it: `"auto"` is the disk when the experts would leave less
-    than a fifth of what is available — `REASONED`: the rest is the system's and the page cache's."""
-    if experts_from not in ("auto", "ram", "disk"):
-        raise Refused("experts_from is 'auto', 'ram' or 'disk', not %r" % (experts_from,))
+    """`"ram"`, `"disk"` or `"mapped"` for `experts_from` as a config says it: `"auto"` is the disk when the experts would
+    leave less than a fifth of what is available — `REASONED`: the rest is the system's. `"disk"` is a cache of experts in
+    memory, read from the file as they are wanted; `"mapped"` maps the file and lets the system's page cache be the cache."""
+    if experts_from not in ("auto", "ram", "disk", "mapped"):
+        raise Refused("experts_from is 'auto', 'ram', 'disk' or 'mapped', not %r" % (experts_from,))
     if experts_from == "auto":
         return "disk" if need > 0.8 * available() else "ram"
     return experts_from
@@ -50,9 +77,7 @@ def map_experts(m, bundle, workers, plan, layers, experts, directory, pieces, al
     layers       the routed layers this run holds; `all_layers` the model's, which name the file when they are the same
     pieces       pieces(view, layer, expert, part) -> [(offset in the slot, a uint8 array)], `view` the layer's blob
     """
-    tag = "" if list(layers) == list(all_layers) else ".layers-" + hashlib.sha256(
-        json.dumps(list(layers)).encode()).hexdigest()[:10]
-    todo, mapped = [], []
+    paths = ensure(bundle, workers, plan, layers, experts, directory, pieces, all_layers, progress)
     for w, part, parts in workers:
         m.act_as(w)
         loader, at = m.loader(), {}
@@ -64,24 +89,58 @@ def map_experts(m, bundle, workers, plan, layers, experts, directory, pieces, al
         if loader.handed() != 0:
             raise Refused("%d expert slots were reserved and never published" % loader.handed())
         lo = min(at.values())
-        size = max(at.values()) - lo + plan.slot_bytes
-        layout = [[l, x, at[(l, x)] - lo] for l in layers for x in range(experts)]
+        if any(at[(l, x)] - lo != off for l, x, off in layout(layers, experts, plan.slot_bytes)):
+            raise Refused("the slots were not handed out one after another, as the file is laid out")
+        m.map_file(lo, plan.slot_bytes * experts * len(layers), paths[part], 0)
+
+
+def layout(layers, experts, slot_bytes):
+    """Where each expert is in a file: layer by layer, expert by expert, a slot each — [(layer, expert, offset)]."""
+    return [(l, x, (i * experts + x) * slot_bytes) for i, l in enumerate(layers) for x in range(experts)]
+
+
+def ensure(bundle, workers, plan, layers, experts, directory, pieces, all_layers, progress=None):
+    """Each worker's file, written if it is missing or was written for something else: {part: path}."""
+    tag = "" if list(layers) == list(all_layers) else ".layers-" + hashlib.sha256(
+        json.dumps(list(layers)).encode()).hexdigest()[:10]
+    size = plan.slot_bytes * experts * len(layers)
+    places = [[l, x, off] for l, x, off in layout(layers, experts, plan.slot_bytes)]
+    todo, paths = [], {}
+    for _, part, parts in workers:
         ident = hashlib.sha256(json.dumps(dict(pack=bundle.manifest, parts=parts, part=part, size=size,
                                                slot=[plan.up_data, plan.up_lut, plan.down_data, plan.down_lut],
-                                               layout=layout), sort_keys=True, default=str).encode()).hexdigest()
-        path = os.path.join(directory, "part%dof%d%s.bin" % (part + 1, parts, tag))
+                                               layout=places), sort_keys=True, default=str).encode()).hexdigest()
+        path = paths[part] = os.path.join(directory, "part%dof%d%s.bin" % (part + 1, parts, tag))
         try:
             fresh = json.load(open(path + ".json"))["ident"] == ident and os.path.getsize(path) == size
         except (OSError, ValueError, KeyError):
             fresh = False
         if not fresh:
-            todo.append((path, ident, size, part, parts, {(l, x): off for l, x, off in layout}))
-        mapped.append((w, lo, size, path))
+            todo.append((path, ident, size, part, parts, {(l, x): off for l, x, off in places}))
     if todo:
         _write(bundle, todo, plan, layers, experts, directory, pieces, progress)
-    for w, lo, size, path in mapped:
+    return paths
+
+
+def cache_experts(m, bundle, workers, plan, layers, experts, directory, pieces, all_layers, expert_type=0,
+                  progress=None):
+    """Every layer's experts on each CPU worker as a CACHE in its own memory, read from the worker's file as they are
+    wanted (nn's loader, straight from the drive) — the file written first if it is not there. Answers each worker's
+    backing tables, {(worker, layer): name}, for the experts tables to name. ▶ nn's `nn__expert__backing`."""
+    paths = ensure(bundle, workers, plan, layers, experts, directory, pieces, all_layers, progress)
+    names = {}
+    for w, part, parts in workers:
         m.act_as(w)
-        m.map_file(lo, size, path, 0)
+        loader = m.loader()
+        for l in layers:
+            loader.layer_width(l, expert_type, experts)
+        kind, handle = m.run("(sys__file__open '%s)" % paths[part])
+        if kind != m.K["sys__value_int"] or handle == 0:
+            raise Refused("the experts' file %s could not be opened" % paths[part])
+        for i, l in enumerate(layers):
+            names[(w, l)] = "bk%d_%d" % (l, w)
+            m.table(names[(w, l)], [handle, i * experts * plan.slot_bytes, plan.slot_bytes, 0] + [0] * 9)
+    return names
 
 
 def _write(bundle, todo, plan, layers, experts, directory, pieces, progress):

@@ -6,6 +6,7 @@
 #include "../../../nn/cpu/expert__header.cuh"   /* where a routed expert's slot is */
 #include "../../contracts/objects/moe.cuh"      /* the plane tables' places and these verbs' faults */
 #include "../table.cuh"                          /* reading a table, and landing the picks */
+#include <stdlib.h>                              /* a chunk's picks, inverted on the host: malloc, free */
 
 /* ══ ⭐⭐ THE SPARSE MoE BLOCK AS ONE VERB ═════════════════════════════════════════════════════════════════
  * `(ai_qwen_3__moe h1 planes out)` — `out = h1 + MoE(h1)`, the layer's second residual included (⚖ ruled).
@@ -242,15 +243,17 @@ static sys__heap_node ai_qwen_3__experts__zzabi_apply(const sys__heap_node* argv
         if (p.dtype != SYS__KIND__VALUE_INT || p.args[0] >= E) return sys__engine__abi__error(AI_QWEN_3__MOE__FAULT_EXPERT);
         ids[j] = p.args[0];
     }
-    /* ① every pick asked for: the resident ones answered, the others' reads on their way */
+    /* ① every pick asked for: the resident ones answered, the others' reads on their way — a read into a slot, or a
+     *   mapped expert's pages from its file */
     uint64_t ready_slot[AI_QWEN_3__HAND__WEIGHTS], ready_which[AI_QWEN_3__HAND__WEIGHTS], later[AI_QWEN_3__HAND__WEIGHTS];
     uint64_t n_ready = 0u, n_later = 0u;
     for (uint64_t j = 0u; j < K; ++j) {
         uint64_t slot = 0ull;
         const int got = nn__expert__request(ctx->family, layer, type, ids[j], &backing, false, ids, (unsigned)K, &slot);
         if (got == NN__EXPERT__REFUSED) return sys__engine__abi__error(AI_QWEN_3__MOE__FAULT_EXPERT);
-        if (got == NN__EXPERT__RESIDENT) { ready_slot[n_ready] = slot; ready_which[n_ready] = j; ++n_ready; }
-        else later[n_later++] = j;
+        if (got == NN__EXPERT__RESIDENT && nn__expert__in_memory(ctx->family, type, slot)) {
+            ready_slot[n_ready] = slot; ready_which[n_ready] = j; ++n_ready;
+        } else later[n_later++] = j;
     }
     /* ② the resident ones computed while the reads arrive */
     const uint64_t scratch = at[AI_QWEN_3__EXP__SCRATCH], signs = at[AI_QWEN_3__EXP__SIGNS], zero = at[AI_QWEN_3__EXP__ZERO];
@@ -461,11 +464,249 @@ static sys__heap_node ai_qwen_3__experts_down__zzabi_apply(const sys__heap_node*
     return nn__doors_answer(&argv[5]);
 }
 
+
+/* ══ ⭐⭐ A PROMPT AS ROWS WITH THE EXPERTS ON THE CPU — the three words over a chunk ═════════════════════════════
+ * The card routes every row into its hand row (`AI_QWEN_3__HAND__ROW`: the hand, then its picks as words) and runs its
+ * shared expert's gate and up; the CPU runs each expert the chunk used ONCE over every row that picked it, reading its
+ * weights once a chunk, in integers; the card closes every row. ▶ ai_glm_5_3's `experts_rows`, which this follows. */
+
+/* `(ai_qwen_3__pre_expert_rows h1s planes hands n)` -> `hands`: `pre_expert` for each of `n` rows, its picks into its
+ * hand row. */
+static sys__heap_node ai_qwen_3__pre_expert_rows__zzabi_apply(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx) {
+    if (argc != 4u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
+    uint64_t h1s = 0, h1_room = 0, hands = 0, hands_room = 0;
+    if (!sys__heap_node__carries_reference(argv[1].dtype) || !sys__node_array__is(argv[1].args[0])
+     || argv[3].dtype != SYS__KIND__VALUE_INT
+     || !nn__primitives__room(&argv[0], &h1s, &h1_room) || !nn__primitives__room(&argv[2], &hands, &hands_room))
+        return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
+    uint64_t at[AI_QWEN_3__PRE__TABLE], room[AI_QWEN_3__PRE__TABLE], v[AI_QWEN_3__PRE__TABLE];
+    if (!ai_qwen_3__table__zzpackage_read(argv[1].args[0], AI_QWEN_3__PRE__HIDDEN, AI_QWEN_3__PRE__TABLE, at, room, v))
+        return sys__engine__abi__error(AI_QWEN_3__MOE__FAULT_TABLE);
+    const uint64_t H = v[AI_QWEN_3__PRE__HIDDEN], I = v[AI_QWEN_3__PRE__INTER], E = v[AI_QWEN_3__PRE__EXPERTS];
+    const uint64_t K = v[AI_QWEN_3__PRE__TOP_K], sd = v[AI_QWEN_3__PRE__SHARED_D], n = argv[3].args[0];
+    const uint64_t row = AI_QWEN_3__HAND__ROW(H, I, K);
+    if (H == 0u || I == 0u || E == 0u || K == 0u || K > E || K >= AI_QWEN_3__HAND__WEIGHTS || K > NN__VECTOR__TOP_K_MAX
+     || H > (1ull << 24) || I > (1ull << 24) || E > (1ull << 24) || n == 0u || n > AI_QWEN_3__ROWS_MAX
+     || !nn__primitives__fits(n * H, h1_room) || !nn__primitives__fits(H, room[AI_QWEN_3__PRE__NORM]) || hands_room / row < n)
+        return sys__engine__abi__error(AI_QWEN_3__MOE__FAULT_TABLE);
+    const uint64_t need = H + E + 2u * I + 2u + I;
+    if (!nn__primitives__fits(need, room[AI_QWEN_3__PRE__SCRATCH])) return sys__engine__abi__error(AI_QWEN_3__MOE__FAULT_ROOM);
+    const uint64_t hm = at[AI_QWEN_3__PRE__SCRATCH], logits = hm + 2u * H, sgu = logits + 2u * E, sact = sgu + 2u * (2u * I + 2u);
+    const uint64_t signs = at[AI_QWEN_3__PRE__SIGNS];
+    const bool rotated = ai_qwen_3__table__zzpackage_flag(argv[1].args[0], AI_QWEN_3__PRE__RESIDUAL_ROTATED);
+    const nn__doors* doors = nn__doors_for(ctx);
+    if (doors == 0) return sys__engine__abi__error(NN__PRIMITIVES__FAULT_NO_DEVICE);
+    unsigned int* over = ctx->fault_word;
+    nn__turboquant__groups sh = {};
+    sh.codes[0] = at[AI_QWEN_3__PRE__SHARED_GATE];  sh.luts[0] = at[AI_QWEN_3__PRE__SHARED_GATE_LUT];  sh.rows[0] = I; sh.d[0] = sd; sh.out_at[0] = 0u;
+    sh.codes[1] = at[AI_QWEN_3__PRE__SHARED_UP];    sh.luts[1] = at[AI_QWEN_3__PRE__SHARED_UP_LUT];    sh.rows[1] = I; sh.d[1] = sd; sh.out_at[1] = I;
+    sh.codes[2] = at[AI_QWEN_3__PRE__SHARED_LOGIT]; sh.luts[2] = at[AI_QWEN_3__PRE__SHARED_LOGIT_LUT]; sh.rows[2] = 1u; sh.d[2] = sd; sh.out_at[2] = 2u * I;
+    sh.count = 3u;
+    for (uint64_t t = 0u; t < n; ++t) {
+        const uint64_t h1 = h1s + 2u * t * H, hand = hands + t * row;
+        const uint64_t hmrot = hand, w = hand + 2u * H, sactr = w + 2u * AI_QWEN_3__HAND__WEIGHTS;
+        const uint64_t normed = rotated ? hmrot : hm;
+        doors->rmsnorm((uint16_t*)(uintptr_t)normed, (const uint16_t*)(uintptr_t)h1, (const uint16_t*)(uintptr_t)at[AI_QWEN_3__PRE__NORM], H, over);
+        doors->turboquant_gemv((uint16_t*)(uintptr_t)logits, (const uint8_t*)(uintptr_t)at[AI_QWEN_3__PRE__ROUTER], room[AI_QWEN_3__PRE__ROUTER],
+                               (const uint8_t*)(uintptr_t)at[AI_QWEN_3__PRE__ROUTER_LUT], room[AI_QWEN_3__PRE__ROUTER_LUT],
+                               (const uint16_t*)(uintptr_t)normed, v[AI_QWEN_3__PRE__ROUTER_D], E, H, over);
+        doors->vector_top_k((uint64_t*)(uintptr_t)(hand + AI_QWEN_3__HAND__PICKS(H, I)), 1ull, (uint16_t*)(uintptr_t)w,
+                            (const uint16_t*)(uintptr_t)logits, E, K);
+        if (!rotated) doors->hadamard_rotate((uint16_t*)(uintptr_t)hmrot, (const uint16_t*)(uintptr_t)hm, (const uint16_t*)(uintptr_t)signs, H, over);
+        doors->turboquant_gemv_groups((uint16_t*)(uintptr_t)sgu, sh, (const uint16_t*)(uintptr_t)hmrot, H, over);
+        doors->swiglu_pairs((uint16_t*)(uintptr_t)sact, (const uint16_t*)(uintptr_t)sgu, 1u, I, over);
+        doors->hadamard_rotate((uint16_t*)(uintptr_t)sactr, (const uint16_t*)(uintptr_t)sact, (const uint16_t*)(uintptr_t)signs, I, over);
+        doors->sigmoid((uint16_t*)(uintptr_t)(w + 2u * K), (const uint16_t*)(uintptr_t)(sgu + 2u * 2u * I), 1u, over);
+    }
+    return nn__doors_answer(&argv[2]);
+}
+
+/* `(ai_qwen_3__post_expert_rows h1s hands routed planes outs n)` -> `outs`: `post_expert` for each of `n` rows. */
+static sys__heap_node ai_qwen_3__post_expert_rows__zzabi_apply(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx) {
+    if (argc != 6u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
+    uint64_t h1s = 0, h1_room = 0, hands = 0, hands_room = 0, routed = 0, routed_room = 0, outs = 0, out_room = 0;
+    if (!sys__heap_node__carries_reference(argv[3].dtype) || !sys__node_array__is(argv[3].args[0]) || argv[5].dtype != SYS__KIND__VALUE_INT
+     || !nn__primitives__room(&argv[0], &h1s, &h1_room) || !nn__primitives__room(&argv[1], &hands, &hands_room)
+     || !nn__primitives__room(&argv[2], &routed, &routed_room) || !nn__primitives__room(&argv[4], &outs, &out_room))
+        return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
+    uint64_t at[AI_QWEN_3__POST__TABLE], room[AI_QWEN_3__POST__TABLE], v[AI_QWEN_3__POST__TABLE];
+    if (!ai_qwen_3__table__zzpackage_read(argv[3].args[0], AI_QWEN_3__POST__HIDDEN, AI_QWEN_3__POST__TABLE, at, room, v))
+        return sys__engine__abi__error(AI_QWEN_3__MOE__FAULT_TABLE);
+    const uint64_t H = v[AI_QWEN_3__POST__HIDDEN], I = v[AI_QWEN_3__POST__INTER], K = v[AI_QWEN_3__POST__TOP_K], n = argv[5].args[0];
+    const uint64_t row = AI_QWEN_3__HAND__ROW(H, I, K);
+    if (H == 0u || I == 0u || K >= AI_QWEN_3__HAND__WEIGHTS || H > (1ull << 24) || I > (1ull << 24) || n == 0u || n > AI_QWEN_3__ROWS_MAX
+     || !nn__primitives__fits(n * H, h1_room) || !nn__primitives__fits(n * H, routed_room) || !nn__primitives__fits(n * H, out_room)
+     || hands_room / row < n)
+        return sys__engine__abi__error(AI_QWEN_3__MOE__FAULT_TABLE);
+    const nn__doors* doors = nn__doors_for(ctx);
+    if (doors == 0) return sys__engine__abi__error(NN__PRIMITIVES__FAULT_NO_DEVICE);
+    unsigned int* over = ctx->fault_word;
+    nn__turboquant__groups sh = {};
+    sh.codes[0] = at[AI_QWEN_3__POST__SHARED_DOWN]; sh.luts[0] = at[AI_QWEN_3__POST__SHARED_DOWN_LUT];
+    sh.rows[0] = H; sh.d[0] = v[AI_QWEN_3__POST__SHARED_D]; sh.count = 1u;
+    for (uint64_t t = 0u; t < n; ++t) {
+        const uint64_t out = outs + 2u * t * H, hand = hands + t * row, w = hand + 2u * H, sactr = w + 2u * AI_QWEN_3__HAND__WEIGHTS;
+        doors->vector_add((uint16_t*)(uintptr_t)out, (const uint16_t*)(uintptr_t)(h1s + 2u * t * H), (const uint16_t*)(uintptr_t)(routed + 2u * t * H),
+                          H, over);
+        doors->turboquant_gemv_groups_sum((uint16_t*)(uintptr_t)out, sh, (const uint16_t*)(uintptr_t)sactr, (const uint16_t*)(uintptr_t)(w + 2u * K),
+                                          (const uint16_t*)(uintptr_t)out, H, I, over);
+    }
+    return nn__doors_answer(&argv[4]);
+}
+
+/* `(ai_qwen_3__experts_rows hands planes routed n)` -> `routed`: for each of `n` hand rows, Σ_j w_j · down_j(swiglu(
+ * gate_up_j(x))) over its picks, a row of `routed` each — EXPERT-MAJOR, each expert the chunk used run once over the rows
+ * that picked it, in integers; where the slots are a cache, a batch of experts at a time, the next batch read while one
+ * computes. `planes` is the experts table with the chunk's scratch in place of the one-position one.
+ * ⛳ SCRATCH, in bytes: xs (n·H halves) · pairs (2·P) · wj (P halves) · gu (P·2I) · act · actr (P·I each) · the sum (n·H
+ * floats), P the chunk's picks. */
+static sys__heap_node ai_qwen_3__experts_rows__zzabi_apply(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx) {
+    if (argc != 4u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
+    uint64_t hands = 0, h_room = 0, routed = 0, r_room = 0;
+    if (!nn__primitives__room(&argv[0], &hands, &h_room) || !nn__primitives__room(&argv[2], &routed, &r_room)
+     || !sys__heap_node__carries_reference(argv[1].dtype) || !sys__node_array__is(argv[1].args[0]) || argv[3].dtype != SYS__KIND__VALUE_INT)
+        return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
+    uint64_t at[AI_QWEN_3__EXP__TABLE], room[AI_QWEN_3__EXP__TABLE], v[AI_QWEN_3__EXP__TABLE];
+    nn__expert__backing backing = {};
+    if (!ai_qwen_3__table__zzpackage_read(argv[1].args[0], AI_QWEN_3__EXP__LAYER, AI_QWEN_3__EXP__BACKING, at, room, v)
+     || !ai_qwen_3__moe__zzprivate_backing(argv[1].args[0], &backing))
+        return sys__engine__abi__error(AI_QWEN_3__MOE__FAULT_TABLE);
+    const uint64_t H = v[AI_QWEN_3__EXP__HIDDEN], I = v[AI_QWEN_3__EXP__INTER], E = v[AI_QWEN_3__EXP__EXPERTS];
+    const uint64_t K = v[AI_QWEN_3__EXP__TOP_K], layer = v[AI_QWEN_3__EXP__LAYER], type = v[AI_QWEN_3__EXP__EXPERT_TYPE];
+    const uint64_t D = v[AI_QWEN_3__EXP__EXPERT_D], n = argv[3].args[0], row = AI_QWEN_3__HAND__ROW(H, I, K);
+    if (H == 0u || I == 0u || K == 0u || K > E || K >= AI_QWEN_3__HAND__WEIGHTS || H > (1ull << 24) || I > (1ull << 24)
+     || n == 0u || n > AI_QWEN_3__ROWS_MAX || h_room / row < n || !nn__primitives__fits(n * H, r_room))
+        return sys__engine__abi__error(AI_QWEN_3__MOE__FAULT_TABLE);
+    const nn__doors* doors = nn__doors_for(ctx);
+    if (doors == 0) return sys__engine__abi__error(NN__PRIMITIVES__FAULT_NO_DEVICE);
+    unsigned int* over = ctx->fault_word;
+    /* ① every row's picks, read; inverted — each expert used, and its picks */
+    uint32_t* rows_of = (uint32_t*)malloc(sizeof(uint32_t) * n * K);
+    uint16_t* w_of = (uint16_t*)malloc(sizeof(uint16_t) * n * K);
+    uint32_t* expert_of = (uint32_t*)malloc(sizeof(uint32_t) * n * K);
+    uint32_t* count = (uint32_t*)calloc(E, sizeof(uint32_t));             /* each expert's picks */
+    uint32_t* begin = (uint32_t*)calloc(E, sizeof(uint32_t));             /* where they begin, in `order` */
+    uint32_t* fill = (uint32_t*)calloc(E, sizeof(uint32_t));
+    uint32_t* order = (uint32_t*)malloc(sizeof(uint32_t) * E);
+    uint32_t* pairs = 0;
+    uint16_t* wj = 0;
+    uint64_t fault = 0u, P = 0u, used = 0u;
+    if (rows_of == 0 || w_of == 0 || expert_of == 0 || count == 0 || begin == 0 || fill == 0 || order == 0) fault = SYS__OPCODES__FAULT_TYPE;
+    for (uint64_t t = 0u; t < n && fault == 0u; ++t) {
+        uint64_t chosen[AI_QWEN_3__HAND__WEIGHTS];
+        uint16_t weight[AI_QWEN_3__HAND__WEIGHTS];
+        const uint64_t hand = hands + t * row;
+        if (!sys__gpu__memory_read(ctx->family, chosen, (const void*)(uintptr_t)(hand + AI_QWEN_3__HAND__PICKS(H, I)), 8u * K)
+         || !sys__gpu__memory_read(ctx->family, weight, (const void*)(uintptr_t)(hand + 2u * H), 2u * K)) { fault = NN__PRIMITIVES__FAULT_NO_DEVICE; break; }
+        for (uint64_t j = 0u; j < K; ++j) {
+            if (chosen[j] >= E) { fault = AI_QWEN_3__MOE__FAULT_EXPERT; break; }
+            rows_of[P] = (uint32_t)t; w_of[P] = weight[j]; expert_of[P] = (uint32_t)chosen[j];
+            ++count[chosen[j]];
+            ++P;
+        }
+    }
+    /* ⭐ THE USED EXPERTS FROM THE LEAST PICKED TO THE MOST, and their picks laid out in that order: where the slots are a
+     *   cache, the ones this chunk used most are its most recent when it ends — the ones a token will want next — rather
+     *   than whichever came last by number. `MEASURED` on the 35B with 8 GB: in number order the answer after a prompt of
+     *   rows hit 83%, where a prompt read a position at a time left 94%. */
+    for (uint64_t e = 0u; e < E && fault == 0u; ++e) {
+        if (count[e] == 0u) continue;
+        uint64_t k = used++;
+        while (k > 0u && count[order[k - 1u]] > count[e]) { order[k] = order[k - 1u]; --k; }
+        order[k] = (uint32_t)e;
+    }
+    for (uint64_t o = 0u, at = 0u; o < used; ++o) { begin[order[o]] = (uint32_t)at; at += count[order[o]]; }
+    /* scratch */
+    const uint64_t xs = at[AI_QWEN_3__EXP__SCRATCH], pairs_at = xs + ((2u * n * H + 7u) & ~7ull), wj_at = pairs_at + 16u * P;
+    const uint64_t gu = (wj_at + 2u * P + 7u) & ~7ull, act = gu + 4u * P * I, actr = act + 2u * P * I, acc = (actr + 2u * P * I + 7u) & ~7ull;
+    if (fault == 0u && acc + 4u * n * H - xs > room[AI_QWEN_3__EXP__SCRATCH]) fault = AI_QWEN_3__MOE__FAULT_ROOM;
+    if (fault == 0u) {
+        pairs = (uint32_t*)malloc(sizeof(uint32_t) * 4u * (P + 1u));
+        wj = (uint16_t*)malloc(sizeof(uint16_t) * (P + 1u));
+        if (pairs == 0 || wj == 0) fault = SYS__OPCODES__FAULT_TYPE;
+    }
+    if (fault == 0u) {
+        /* the picks in expert order: up pairs (row -> j), then down pairs (j -> row), and the weights in that order */
+        uint32_t* up = pairs;
+        uint32_t* down = pairs + 2u * P;
+        for (uint64_t p = 0u; p < P; ++p) {
+            const uint64_t j = begin[expert_of[p]] + fill[expert_of[p]]++;
+            up[2u * j] = rows_of[p];   up[2u * j + 1u] = (uint32_t)j;
+            down[2u * j] = (uint32_t)j; down[2u * j + 1u] = rows_of[p];
+            wj[j] = w_of[p];
+        }
+        for (uint64_t t = 0u; t < n; ++t)                    /* the rows' inputs, contiguous */
+            doors->vector_copy((uint16_t*)(uintptr_t)(xs + 2u * t * H), (const uint16_t*)(uintptr_t)(hands + t * row), H);
+        if (!sys__gpu__memory_write(ctx->family, (void*)(uintptr_t)pairs_at, pairs, 16u * P)
+         || !sys__gpu__memory_write(ctx->family, (void*)(uintptr_t)wj_at, wj, 2u * P)
+         || !sys__gpu__memory_zerofill(ctx->family, (void*)(uintptr_t)acc, 4u * n * H))
+            fault = NN__PRIMITIVES__FAULT_NO_DEVICE;
+    }
+    /* ② batch by batch: each expert's gate-and-up over its rows, twelve experts a launch; the swiglus and rotations over
+     * the batch's picks; each expert's down weighted into the sum */
+    const uint64_t batch = backing.file != 0ull ? AI_QWEN_3__EXP__BATCH : (used == 0u ? 1u : used);
+    uint64_t pinned[2u * AI_QWEN_3__EXP__BATCH];
+    for (uint64_t b0 = 0u; b0 < used && fault == 0u; b0 += batch) {
+        const uint64_t b1 = b0 + batch < used ? b0 + batch : used;
+        if (backing.file != 0ull) {
+            const uint64_t n1 = b1 + batch < used ? b1 + batch : used;
+            unsigned np = 0u;
+            for (uint64_t o = b0; o < n1; ++o) pinned[np++] = order[o];
+            for (uint64_t o = b0; o < n1 && fault == 0u; ++o)
+                if (nn__expert__request(ctx->family, layer, type, order[o], &backing, false, pinned, np, 0) == NN__EXPERT__REFUSED)
+                    fault = AI_QWEN_3__MOE__FAULT_EXPERT;
+            for (uint64_t o = b0; o < b1 && fault == 0u; ++o)
+                if (!nn__expert__settle_one(layer, type, order[o])) fault = AI_QWEN_3__MOE__FAULT_EXPERT;
+        }
+        for (uint64_t o = b0; o < b1 && fault == 0u; ) {
+            nn__expert__groups g = {};
+            uint64_t k = 0u;
+            for (; o < b1 && k < NN__EXPERT__GROUPS_MAX; ++o) {
+                const uint64_t e0 = order[o];
+                sys__heap_node me;
+                if (!nn__expert__slot(layer, type, e0, &me) || me.args[NN__EXPERT__SLOT_AT] == 0ull) { fault = AI_QWEN_3__MOE__FAULT_EXPERT; break; }
+                const uint64_t slot = me.args[NN__EXPERT__SLOT_AT];
+                g.codes[k] = slot; g.luts[k] = slot + v[AI_QWEN_3__EXP__UP_LUT]; g.out_rows[k] = 2u * I; g.d[k] = D;
+                g.out_at[k] = 0u; g.pairs_at[k] = begin[e0]; g.pairs[k] = count[e0];
+                ++k;
+            }
+            g.count = k;
+            if (k > 0u && fault == 0u)
+                doors->expert_groups_int8((uint16_t*)(uintptr_t)gu, g, (const uint16_t*)(uintptr_t)xs, (const uint32_t*)(uintptr_t)pairs_at, H, over);
+        }
+        if (fault != 0u) break;
+        const uint64_t p0 = begin[order[b0]], p1 = begin[order[b1 - 1u]] + count[order[b1 - 1u]];
+        doors->swiglu_pairs((uint16_t*)(uintptr_t)(act + 2u * p0 * I), (const uint16_t*)(uintptr_t)(gu + 4u * p0 * I), p1 - p0, I, over);
+        doors->hadamard_rotate((uint16_t*)(uintptr_t)(actr + 2u * p0 * I), (const uint16_t*)(uintptr_t)(act + 2u * p0 * I),
+                               (const uint16_t*)(uintptr_t)at[AI_QWEN_3__EXP__SIGNS], (p1 - p0) * I, over);
+        for (uint64_t o = b0; o < b1 && fault == 0u; ++o) {
+            const uint64_t e = order[o];
+            sys__heap_node me;
+            if (!nn__expert__slot(layer, type, e, &me) || me.args[NN__EXPERT__SLOT_AT] == 0ull) { fault = AI_QWEN_3__MOE__FAULT_EXPERT; break; }
+            const uint64_t slot = me.args[NN__EXPERT__SLOT_AT];
+            doors->expert_rows_sum_int8((float*)(uintptr_t)acc, (const uint8_t*)(uintptr_t)(slot + v[AI_QWEN_3__EXP__DOWN]),
+                                        v[AI_QWEN_3__EXP__DOWN_LUT] - v[AI_QWEN_3__EXP__DOWN],
+                                        (const uint8_t*)(uintptr_t)(slot + v[AI_QWEN_3__EXP__DOWN_LUT]), 2u * H,
+                                        (const uint16_t*)(uintptr_t)actr, (const uint32_t*)(uintptr_t)(pairs_at + 8u * (P + begin[e])),
+                                        (const uint16_t*)(uintptr_t)wj_at, count[e], D, H, I);
+        }
+    }
+    if (fault == 0u) {
+        if (!sys__gpu__memory_zerofill(ctx->family, (void*)(uintptr_t)routed, 2u * n * H)) fault = NN__PRIMITIVES__FAULT_NO_DEVICE;
+        else doors->expert_rows_finish((uint16_t*)(uintptr_t)routed, (float*)(uintptr_t)acc, (const uint16_t*)(uintptr_t)routed, n * H, over);
+    }
+    free(rows_of); free(w_of); free(expert_of); free(count); free(begin); free(fill); free(order); free(pairs); free(wj);
+    return fault != 0u ? sys__engine__abi__error(fault) : nn__doors_answer(&argv[2]);
+}
+
 SYS__ENGINE__ABI__BRIDGE(ai_qwen_3__pre_expert__zzabi_adapter,  ai_qwen_3__pre_expert__zzabi_apply)
 SYS__ENGINE__ABI__BRIDGE(ai_qwen_3__experts__zzabi_adapter,     ai_qwen_3__experts__zzabi_apply)
 SYS__ENGINE__ABI__BRIDGE(ai_qwen_3__post_expert__zzabi_adapter, ai_qwen_3__post_expert__zzabi_apply)
 SYS__ENGINE__ABI__BRIDGE(ai_qwen_3__prefetch__zzabi_adapter,    ai_qwen_3__prefetch__zzabi_apply)
 SYS__ENGINE__ABI__BRIDGE(ai_qwen_3__experts_up__zzabi_adapter,   ai_qwen_3__experts_up__zzabi_apply)
 SYS__ENGINE__ABI__BRIDGE(ai_qwen_3__experts_down__zzabi_adapter, ai_qwen_3__experts_down__zzabi_apply)
+SYS__ENGINE__ABI__BRIDGE(ai_qwen_3__pre_expert_rows__zzabi_adapter,  ai_qwen_3__pre_expert_rows__zzabi_apply)
+SYS__ENGINE__ABI__BRIDGE(ai_qwen_3__experts_rows__zzabi_adapter,     ai_qwen_3__experts_rows__zzabi_apply)
+SYS__ENGINE__ABI__BRIDGE(ai_qwen_3__post_expert_rows__zzabi_adapter, ai_qwen_3__post_expert_rows__zzabi_apply)
 
 #endif /* SILVANN__PACKAGES_AI_QWEN_3_CPU_OPCODES_MOE__ABI_CUH */

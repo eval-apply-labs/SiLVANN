@@ -56,6 +56,12 @@
  * weights are the router's K and, at K, the shared expert's sigmoid gate. */
 #define AI_QWEN_3__HAND__WEIGHTS       16u
 #define AI_QWEN_3__HAND__HALVES(H, I)  ((H) + AI_QWEN_3__HAND__WEIGHTS + (I))
+/* ⭐ A PROMPT'S HAND ROWS — a row a position, each the hand above and then its `k` picks as words, so the CPU is handed
+ * a chunk's rows in one copy (`pre_expert_rows` · `experts_rows` · `post_expert_rows`). */
+#define AI_QWEN_3__HAND__PICKS(H, I)   ((2ull * AI_QWEN_3__HAND__HALVES(H, I) + 7ull) & ~7ull)
+#define AI_QWEN_3__HAND__ROW(H, I, K)  (AI_QWEN_3__HAND__PICKS(H, I) + 8ull * (K))
+/* a prompt's experts, where the slots are a cache: this many a batch, the next batch read while one computes */
+#define AI_QWEN_3__EXP__BATCH          16u
 
 /* `(ai_qwen_3__pre_expert h1 planes hand picks)` — the structure card's half before the experts */
 #define AI_QWEN_3__PRE__NORM             0u

@@ -41,6 +41,11 @@
     /* attending the cache's fp16 positions in order up to its own, and the warm and cold tiers. ▶ `prefill__abi.cuh`.    */ \
     X(PKG, 15, "ai_qwen_3__attention_tiered_rows", ai_qwen_3__attention_tiered_rows__zzabi_adapter, AI_QWEN_3__ATTENTION_TIERED_ROWS) \
     /* ⭐ THE DENSE MLP OVER A PROMPT'S ROWS, ITS NORM AND ITS RESIDUAL — the 27B's prompts as rows. ▶ `prefill__abi.cuh`. */ \
-    X(PKG, 16, "ai_qwen_3__mlp_rows",       ai_qwen_3__mlp_rows__zzabi_adapter,        AI_QWEN_3__MLP_ROWS)
+    X(PKG, 16, "ai_qwen_3__mlp_rows",       ai_qwen_3__mlp_rows__zzabi_adapter,        AI_QWEN_3__MLP_ROWS) \
+    /* ⭐ A PROMPT AS ROWS WITH THE EXPERTS ON THE CPU: the MoE's three words over a chunk — the card's route, the CPU's  */ \
+    /* experts expert-major, the card's close                                                                        */ \
+    X(PKG, 17, "ai_qwen_3__pre_expert_rows",  ai_qwen_3__pre_expert_rows__zzabi_adapter,  AI_QWEN_3__PRE_EXPERT_ROWS) \
+    X(PKG, 18, "ai_qwen_3__experts_rows",     ai_qwen_3__experts_rows__zzabi_adapter,     AI_QWEN_3__EXPERTS_ROWS) \
+    X(PKG, 19, "ai_qwen_3__post_expert_rows", ai_qwen_3__post_expert_rows__zzabi_adapter, AI_QWEN_3__POST_EXPERT_ROWS)
 
 #endif /* SILVANN__PACKAGES_AI_QWEN_3_CONTRACTS_MACROS_LANGUAGE_CONTRACT__VERBS_CUH */

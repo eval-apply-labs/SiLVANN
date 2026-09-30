@@ -152,6 +152,8 @@ static inline bool sys__gpu__file_read(sys__silicon_family__id family, uint64_t 
     { SYS__SILICON__ZZPRIVATE_DOOR(file_read, false)                return d->file_read(handle, offset, bytes, to); }
 static inline bool sys__gpu__memory_map_file(sys__silicon_family__id family, void* at, size_t bytes, uint64_t handle, uint64_t offset)
     { SYS__SILICON__ZZPRIVATE_DOOR(memory_map_file, false)          return d->memory_map_file(at, bytes, handle, offset); }
+static inline bool sys__gpu__memory_prefetch(sys__silicon_family__id family, const void* at, size_t bytes)
+    { SYS__SILICON__ZZPRIVATE_DOOR(memory_prefetch, true)           return d->memory_prefetch(at, bytes); }
 
 /* How many devices of a family this machine has, as its family counts them; zero with no family. */
 static inline uint32_t sys__silicon__device_count(sys__silicon_family__id family)
