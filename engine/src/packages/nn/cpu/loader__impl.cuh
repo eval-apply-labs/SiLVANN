@@ -3,6 +3,7 @@
 
 /* What this file needs, named where a reader — and an editor — can follow it. */
 #include <pthread.h>
+#include <time.h>
 #include <stdlib.h>
 #include "expert__header.cuh"                           /* the index this reads into, and what it publishes */
 #include "../../sys/cpu/silicon/silicon__header.cuh"   /* the family's file_read */
@@ -152,6 +153,7 @@ static bool nn__loader__zzprivate_room(uint64_t layer, uint64_t type, const uint
     return nn__loader__zzprivate_evict_oldest(layer, type, layer, pinned, npinned, slot, room);
 }
 
+
 static __device__ inline int nn__expert__request(sys__silicon_family__id family, uint64_t layer, uint64_t type, uint64_t expert,
                                                  const nn__expert__backing* backing, bool predicted,
                                                  const uint64_t* pinned, unsigned npinned, uint64_t* at) {
@@ -196,6 +198,17 @@ static __device__ inline int nn__expert__request(sys__silicon_family__id family,
     return NN__EXPERT__ARRIVING;
 }
 
+/* ⭐ A WAIT FOR A READ, TIMED — the lock held, as `pthread_cond_wait` needs it: the time is what a layer spent waiting on
+ *   the disk, the thing a cache's misses cost beyond the compute that overlaps them (`nn__expert__count`). */
+static inline void nn__loader__zzprivate_wait(void) {
+    struct timespec a, b;
+    clock_gettime(CLOCK_MONOTONIC, &a);
+    pthread_cond_wait(&nn__loader__zzprivate_done, &nn__loader__zzprivate_lock);
+    clock_gettime(CLOCK_MONOTONIC, &b);
+    nn__loader__zzprivate_count[NN__EXPERT__COUNT_WAIT_NS] += (uint64_t)(b.tv_sec - a.tv_sec) * 1000000000ull + (uint64_t)(b.tv_nsec - a.tv_nsec);
+    ++nn__loader__zzprivate_count[NN__EXPERT__COUNT_WAITS];
+}
+
 static __device__ inline bool nn__expert__settle(uint64_t layer, uint64_t type) {
     bool ok = true;
     const uint64_t owner = nn__expert__zzpackage_owner();
@@ -216,7 +229,7 @@ static __device__ inline bool nn__expert__settle(uint64_t layer, uint64_t type) 
             }
         }
         if (!waiting) break;
-        pthread_cond_wait(&nn__loader__zzprivate_done, &nn__loader__zzprivate_lock);
+        nn__loader__zzprivate_wait();
     }
     pthread_mutex_unlock(&nn__loader__zzprivate_lock);
     return ok;
@@ -230,7 +243,7 @@ static __device__ inline bool nn__expert__settle_one(uint64_t layer, uint64_t ty
         nn__loader__read* r = nn__loader__zzprivate_find(owner, layer, type, expert);
         if (r == 0) break;
         if (r->state == NN__LOADER__QUEUED || r->state == NN__LOADER__READING) {
-            pthread_cond_wait(&nn__loader__zzprivate_done, &nn__loader__zzprivate_lock);
+            nn__loader__zzprivate_wait();
             continue;
         }
         const bool read = r->state == NN__LOADER__DONE;

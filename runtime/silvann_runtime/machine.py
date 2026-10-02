@@ -36,8 +36,11 @@ class Machine:
             if os.path.isdir(at) and at not in sys.path:
                 sys.path.insert(0, at)
         self.e = importlib.import_module("silvann_engine_" + engine)
-        if silicon is None and self.e.devices("amd_rocm6_wave64") > 0:
-            silicon = "amd_rocm6_wave64"
+        # a card if any family drives one — its vendor's own first, then OpenCL — else the CPU's own cores. x86_avx2
+        # counts no devices on a CPU without AVX2, which leaves the portable host family
+        for family in ("amd_rocm6_wave64", "nvidia_cuda12", "khronos_opencl2", "x86_avx2"):
+            if silicon is None and self.e.devices(family) > 0:
+                silicon = family
         if silicon is not None:
             self.e.choose_silicon(silicon)
         self.silicon = silicon or "host"

@@ -4,7 +4,8 @@
   FOLDER/pack.json              the bundle's manifest: format, rotation, codec, policy, where it came from
   FOLDER/global.pkl · layers/   the weights
   FOLDER/config.json · tokenizer.json · chat_template.jinja · generation_config.json …   what the model is
-  FOLDER/loras/NAME/            an adapter merged into the matrices it adapts (`nn_lora_overlay.py`)
+  FOLDER/loras/NAME/            an adapter merged into the matrices it adapts (`nn_lora_overlay.py`), or a rank-1 mask the
+                                verbs apply beside them (`nn_rank1_mask.py`)
 ```
 The folder answers what the runtime needs before it touches a card: the architecture and its sizes, the tokenizer,
 which LoRAs exist, and the IDENTITY a conversation records, so a conversation saved on one model is refused by
@@ -48,7 +49,8 @@ class ModelFolder:
 
     def loras(self):
         d = os.path.join(self.path, "loras")
-        return sorted(n for n in os.listdir(d) if os.path.isfile(os.path.join(d, n, "pack.json"))) if os.path.isdir(d) else []
+        return sorted(n for n in os.listdir(d)
+                      if any(os.path.isfile(os.path.join(d, n, f)) for f in ("pack.json", "mask.json"))) if os.path.isdir(d) else []
 
     def identity(self):
         """What a conversation records and checks: the model — the raw weights it was packed from and how — and

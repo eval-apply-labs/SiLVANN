@@ -9,10 +9,9 @@ doors it uses — `create_executable` and `execute`. What it adds is the part a 
 does not care about: writing `(+ 1 2)` instead of naming kinds, verbs and symbol numbers by hand.
 
 ── WHAT IT IS FOR, AND WHAT IT IS NOT ──────────────────────────────────────────────────────────────
-It is the front end the engine has never had: every program the suite runs is built cell by cell by hand,
-which is why nothing in `src` has ever been scored against a reference. It is NOT a model composer — the
-verbs published today are the language's, so what can be written here is a lisp program and not a forward
-pass.
+It is the engine's front end, and the runtime writes each model with it: any verb the built engine publishes
+can be named — the language's, `nn`'s and a model package's (`ai_qwen_3__…`, `ai_glm_5_3__…`) — so what is
+written here is a model's forward pass as much as any other lisp program.
 
 ── HOW A PROGRAM IS BUILT ──────────────────────────────────────────────────────────────────────────
 Bottom up, one crossing per form. A form's cells are made first — numbers, names, and the CELLS that the

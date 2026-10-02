@@ -34,7 +34,7 @@ static sys__heap_node nn__expert__zzabi_apply_multiply_fp16(const sys__heap_node
 SYS__ENGINE__ABI__BRIDGE(nn__expert__zzabi_adapter_multiply_fp16, nn__expert__zzabi_apply_multiply_fp16)
 
 /* `(nn__expert__misses which)` -> the loader's counts: 0 reads picks asked for, 1 reads predictions queued, 2 of
- * those, how many a pick then wanted. */
+ * those, how many a pick then wanted, 3 the ns layers waited on reads, 4 how many times they waited. */
 static sys__heap_node nn__expert__zzabi_apply_misses(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx) {
     (void)ctx;
     if (argc != 1u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);

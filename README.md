@@ -1,6 +1,6 @@
 # SiLVANN
 
-> **Developer preview, v0.2.0.** It runs the models below well on the hardware it was tested on, and it is shared
+> **Developer preview, v0.2.1.** It runs the models below well on the hardware it was tested on, and it is shared
 > for people who can find their way around a build and a stack trace. The NVIDIA and Apple paths, and tensor
 > cores, are not tested yet.
 
@@ -19,97 +19,50 @@ weights are packed with TurboQuant: rotated rows at 4 or 8 bits, so a 35-billion
 | Model | Weights | Download |
 |---|---|---|
 | Qwen 3.6 35B-A3B (mixture of experts, 3B active) | 19 GB — experts 4 bits, the rest 8 | [eval-apply/Qwen3.6-35B-A3B_silvann_tq_D8E4](https://huggingface.co/eval-apply/Qwen3.6-35B-A3B_silvann_tq_D8E4) |
+| Qwen 3.6 35B-A3B, for the CPU alone | 19 GB — 4 bits | [eval-apply/Qwen3.6-35B-A3B_silvann_tq_D4E4](https://huggingface.co/eval-apply/Qwen3.6-35B-A3B_silvann_tq_D4E4) |
+| Qwen 3.5 122B-A10B (mixture of experts, 10B active), for 12 GB cards | 67 GB — experts 4 bits, the rest 8 | [eval-apply/Qwen3.5-122B-A10B_silvann_tq_D8E4](https://huggingface.co/eval-apply/Qwen3.5-122B-A10B_silvann_tq_D8E4) |
+| Qwen 3.5 122B-A10B, for 8 GB cards | 65 GB — 4 bits | [eval-apply/Qwen3.5-122B-A10B_silvann_tq_D4E4](https://huggingface.co/eval-apply/Qwen3.5-122B-A10B_silvann_tq_D4E4) |
 | Qwen 3.8 27B (dense) | 15 GB — 4 bits | [eval-apply/Qwen3.8-27B_silvann_tq_D4](https://huggingface.co/eval-apply/Qwen3.8-27B_silvann_tq_D4) |
 | GLM 5.3 Flash (288 experts, 8 active) | 151 GB — 4 bits | [eval-apply/GLM-5.3-Flash_silvann_tq_D4E4](https://huggingface.co/eval-apply/GLM-5.3-Flash_silvann_tq_D4E4) |
 
 `D8E4` names the bits: dense matrices at 8, experts at 4. Each model keeps its own licence (Qwen: Apache-2.0,
 GLM: MIT), which is in its folder once downloaded.
 
-## Which model for which machine
+## What it runs on
 
-| Your machine | Suggested model |
-|---|---|
-| A 2-4 GB card, 8-16 GB of RAM and an NVMe disk | Qwen 3.6 35B-A3B, its experts on the CPU and read from the disk as they are needed (`experts_on: "cpu"`, `experts_from: "disk"`) |
-| No graphics card | the same, the whole model on the CPU — *not yet in this release* |
-| An 8-16 GB card and 16-32 GB of RAM | Qwen 3.6 122B-A10B — *not yet in this release* |
-| An 8 GB card, 32-64 GB of RAM and an NVMe disk | GLM 5.3 Flash — its dense part (4.4 GB) on the card, the experts on the CPU, read from the disk as they are needed; about 200,000 positions of context — *not yet measured on an 8 GB card* |
-| A 16 GB card and 32 GB of RAM | Qwen 3.6 35B-A3B, the dense part on the card and its experts (16 GB) on the CPU in RAM (`experts_on: "cpu"`): about 16 tokens a second |
-| A 16 GB card | Qwen 3.8 27B (14 GB at a 32,000-token context), with a smaller context window than larger cards allow |
-| A 24-32 GB card | Qwen 3.6 35B-A3B entirely on the card (17 GB at a 32,000-token context): about 19-31 tokens a second |
-| A 16-32 GB card and 32-128 GB of RAM | GLM 5.3 Flash — the fixed matrices on the card, the experts on the CPU and the disk; the more RAM, the fewer reads: about 1 token a second with 32 GB, 3 with 128 GB |
-| A 16 GB card and 192 GB of RAM or more | GLM 5.3 Flash with all of its experts (142 GB) in RAM, nothing read from the disk: about 5 tokens a second |
+From a machine with no graphics card to a model near the frontier on salvaged server parts — one model a step, each the
+one that suits that machine best:
+
+| Your machine | Model, and how it runs | Answer |
+|---|---|---|
+| No graphics card, 12 GB of RAM, an NVMe disk (2.5 GB/s) | Qwen 3.6 35B-A3B (`D4E4`) on the CPU alone, its experts read from the disk, 8 GB of them kept in memory | 11.7 tokens/s |
+| A 16 GB card | Qwen 3.8 27B entirely on the card, at a 32,000-token context (14 GB) | 17.4 tokens/s (18.5 on a short prompt) |
+| A 24 GB card | Qwen 3.6 35B-A3B entirely on the card (17 GB at a 32,000-token context) | 37 tokens/s (40 on a short prompt) |
+| A 4 GB card, 8 GB of RAM, an NVMe disk | Qwen 3.6 35B-A3B — the dense part on the card, the experts on the CPU, read from the disk as they are needed | 11.9 tokens/s ◦ |
+| An 8 GB card, 32 GB of RAM, an NVMe disk | Qwen 3.5 122B-A10B (`D4E4`) — the same split | 4.7 tokens/s ◦ |
+| A 16 GB card, 64 GB of RAM, an NVMe disk reading 5 GB/s | GLM 5.3 Flash — the same split | about 2.5 tokens/s, projected |
+| A 16 GB card, 128 GB of RAM, an NVMe disk reading 5 GB/s | GLM 5.3 Flash — the same split | 5.7 tokens/s |
+| A 16 GB card, 150 GB of RAM | GLM 5.3 Flash with all of its experts (142 GB) in RAM, nothing read from the disk | 6.7 tokens/s |
+
+Measured on a Dell R730 (two Xeon E5-2680 v4, AMD Instinct MI50 cards; disk speed 5 GB/s, RAM speed 126 GB/s), each
+row with its process held to the memory it names — leave room beside it for the operating system — and from a cold
+start where the experts come from the disk. ◦ The dense part ran on a 32 GB MI50: it fits the smaller card, but a card that size has not been
+measured. The projected row is worked out from GLM's measured rows at 64 GB and 128 GB.
+
+Every measurement, the other packs and memory sizes, and what limits a model reading its experts from the disk:
+[`docs/results.md`](docs/results.md).
 
 The conversation's cache keeps its first 256 positions and the latest 4,096 at full precision and the rest at 8 bits.
 A model boots with a 32,000-token context; past the first 4,352, each 100 MB of the card's memory holds about 10,000
 more tokens of the 35B's conversation, 3,200 of the 27B's, and 8,800 of GLM 5.3 Flash's — set `max_context` in the
 model's `configs/default.json` to what your card has room for.
 
-## Performance
-
-Measured on a Dell R730: two Xeon E5-2680 v4, 256 GB of DDR4-2133, two AMD Instinct MI50, the experts read from an
-NVMe disk where they are not in memory. On the card: a prompt of about 2,000 positions, then 32-64 tokens. With the
-experts on the CPU: about 1,000 positions, then 128 tokens (the 35B) or 32 (GLM) — "all in RAM" with every expert
-already in memory, the others from a cold start under the memory limit shown. The answer's rate is measured after
-the prompt.
-
-| Model | Where it runs | Prompt | Answer |
-|---|---|---|---|
-| Qwen 3.6 35B-A3B | one MI50 | 81 positions/s | 19 tokens/s (31 on a short prompt) |
-| Qwen 3.8 27B | one MI50 | 32 positions/s | 5.8 tokens/s (7.6 on a short prompt) |
-| Qwen 3.6 35B-A3B | one MI50 for the dense part, the experts on the CPU, all in RAM | 51 positions/s | 16 tokens/s |
-| Qwen 3.6 35B-A3B | the same, the experts read from the disk, 8 GB of RAM | 32 positions/s† | 11.9 tokens/s — 90% of expert reads from memory |
-| Qwen 3.6 35B-A3B | the same, 6 GB of RAM | 31 positions/s† | 10.2 tokens/s — 83% from memory |
-| GLM 5.3 Flash | one MI50 for the dense part, the experts on the CPU, all in RAM | 18 positions/s | 4.3 tokens/s |
-| GLM 5.3 Flash | the same, the experts read from the disk, 128 GB of RAM | 10 positions/s† | 3.5 tokens/s — 96% from memory |
-| GLM 5.3 Flash | the same, 64 GB of RAM | 10 positions/s† | 1.6 tokens/s — 77% from memory |
-| GLM 5.3 Flash | the same, 32 GB of RAM | 11 positions/s† | 1.1 tokens/s — 61% from memory |
-
-With its experts on the CPU, a model reads a prompt a chunk of positions at a time through each layer — 256 for the
-35B, 1,024 for GLM — so each expert is read about once a chunk and runs once over every position that picked it.
-† Measured from a cold start, so reading the prompt is also when the experts are first read from the disk into
-memory; the answer that follows runs on what the prompt left in memory. The answer's rate is from its 10th token on.
-
-⚠ **Reading a prompt is not fully optimized yet.** It runs a chunk of positions through each layer at once — every
-matrix once a chunk, on the card through a tiled kernel and on the CPU in 8-bit integers, and GLM's latent attention
-over every row of the chunk at once — but that attention's kernel reads the cache once for each of its 64 heads where
-one read would serve them all, which makes it the second-largest part of a 1,024-position chunk after the experts.
-
-### What limits the experts on the disk: the drive
-
-With the experts on the CPU, each is kept in the engine's own memory once it has been used, and one that is not is read
-from its file straight into memory (`O_DIRECT`) while the others compute. A miss then costs what its bytes cost to read.
-One GLM 5.3 Flash MoE layer on one socket, one of its 8 picks not in memory, measured on the test machine:
-
-```
-scale: 20 characters = 1 ms          0 ms                1.0                 2.0       2.5
-                                     |-------------------|-------------------|---------|
-the 7 experts in memory              [============================]                        1.4 ms of compute
-the missing one, read (6.3 MB)       [===============================================]     2.4 ms — PCIe 3 x4 NVMe, 2.6 GB/s
-  then computed                                                                    [====]  0.2 ms
-                                                          ^ the layer waits ~1 ms for the disk
-
-the same read, a drive twice as fast [========================]                            ~1.2 ms — a PCIe 4 NVMe, or a
-  then computed                                               [====]                       RAID 0 of two: nothing waited for
-```
-
-**The test machine's limit is its PCIe 3 drive.** A PCIe 4 NVMe, or a RAID 0 of several NVMe drives, reads a missing
-expert inside the time the others take to compute, and pushes straight against that bottleneck. Where most of a token's
-experts come from the disk — GLM with 64 GB or 32 GB, ~1.2-1.7 GB of reads a token — the rate follows the drive's
-almost directly.
-
-How much memory a model needs for few misses depends on its router. The Qwen 35B uses a few of its experts for most
-tokens, so 8 GB holding about a third of them answers 90% of reads from memory; GLM 5.3 Flash spreads its tokens evenly
-over its experts, so holding 39% of them (64 GB) answers 77%.
-
-The 27B also runs split over machines (pipeline parallel): as three stages it answers the same tokens at 6.8
-tokens/s.
-
 ## Platforms
 
 | | |
 |---|---|
-| **Tested** | Linux with AMD Instinct MI50 (gfx906), ROCm 6 |
-| **Untested** | Windows; NVIDIA cards (the CUDA family builds, but has not been run); other AMD generations |
+| **Tested** | Linux with AMD Instinct MI50 (gfx906), ROCm 6; the CPU alone with AVX2 (Xeon E5-2680 v4); OpenCL 2.0 with sub-groups, on the MI50 — the 27B and the 35B checked against Hugging Face, the 27B answering at 9-11 tokens a second, its prompt still slow (about 4 positions a second) |
+| **Untested** | Windows; NVIDIA cards (the CUDA family builds, but has not been run); other AMD generations; OpenCL on other devices (an Intel iGPU among them) |
 | **Not yet** | Apple silicon; AVX-512 CPU paths |
 
 Images are not accepted yet: the server answers an image with 501.
@@ -125,8 +78,9 @@ venv/bin/python silvann_ui.py --port 8090                          # a chat in t
 ```
 
 A model that is not downloaded is refused with the command that fetches it. The settings a model boots with, the
-experts on the disk, and a model split over machines: [`docs/users.md`](docs/users.md). How it is built and how a
-model or a silicon is added: [`docs/developers.md`](docs/developers.md). The ideas behind the design, the Lisp lineage and the model as a collapse of meaning:
+experts on the disk, and a model split over machines: [`docs/users.md`](docs/users.md). Every measurement:
+[`docs/results.md`](docs/results.md). How it is built and how a model or a silicon is added:
+[`docs/developers.md`](docs/developers.md). The ideas behind the design, the Lisp lineage and the model as a collapse of meaning:
 [`docs/concepts.md`](docs/concepts.md); how the weights are packed: [`docs/compression.md`](docs/compression.md).
 Where the design could go next — a
 model whose output is a program the engine runs, sizing the experts after they answer, choosing an adapter at the
@@ -142,7 +96,8 @@ runtime/            the Python side: a model folder booted onto the machine, con
 silvann_core.py     download-model · list-models
 start_silvann_server.py, silvann_ui.py
 models/             where downloaded models go
-docs/               users.md — running it; developers.md — how it is built, adding a model or a silicon;
+docs/               users.md — running it; results.md — every measurement;
+                    developers.md — how it is built, adding a model or a silicon;
                     concepts.md — the ideas behind it; compression.md — how the weights are packed;
                     directions.md — where it could go
 ```
@@ -151,6 +106,11 @@ docs/               users.md — running it; developers.md — how it is built, 
 
 Questions, ideas and results from your own machine go in this repository's **Discussions** tab; bugs go in
 **Issues**. For anything you would rather not post in public, write to **admin@evalapply.co.uk**.
+
+## Contributing
+
+Reports from hardware we have not tried, bug reports and fixes are all welcome — see `CONTRIBUTING.md`. Pull
+requests are made under the Contributor License Agreement in `CLA.md`, which a bot asks you to accept once.
 
 ## Licence
 

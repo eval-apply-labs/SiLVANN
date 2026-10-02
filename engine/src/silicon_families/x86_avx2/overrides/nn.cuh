@@ -72,20 +72,13 @@ static void x86_avx2__zzprivate_exact4(void* a) {
     }
 }
 static float x86_avx2__zzprivate_levels8[256];
+static inline float x86_avx2__zzprivate_dot8(const uint8_t* row, const float* xf, uint64_t cols);
 static void x86_avx2__zzprivate_exact8(void* a) {
     const x86_avx2__gemv_call* c = (const x86_avx2__gemv_call*)a;
     uint64_t r0, r1; x86_avx2__zzprivate_rows(c, &r0, &r1);
-    for (uint64_t r = r0; r < r1; ++r) {
-        const uint8_t* row = c->weights + r * c->row_bytes;
-        __m256 a0 = _mm256_setzero_ps(), a1 = _mm256_setzero_ps();
-        for (uint64_t k = 0; k < c->cols; k += 16u) {
-            const __m256i i0 = _mm256_cvtepu8_epi32(_mm_loadl_epi64((const __m128i*)(row + k)));
-            const __m256i i1 = _mm256_cvtepu8_epi32(_mm_loadl_epi64((const __m128i*)(row + k + 8u)));
-            a0 = _mm256_fmadd_ps(_mm256_i32gather_ps(x86_avx2__zzprivate_levels8, i0, 4), _mm256_loadu_ps(c->xf + k), a0);
-            a1 = _mm256_fmadd_ps(_mm256_i32gather_ps(x86_avx2__zzprivate_levels8, i1, 4), _mm256_loadu_ps(c->xf + k + 8u), a1);
-        }
-        x86_avx2__zzprivate_write(c, r, x86_avx2__zzprivate_hsum(_mm256_add_ps(a0, a1)) * x86_avx2__zzprivate_row_scale(c->luts, r));
-    }
+    for (uint64_t r = r0; r < r1; ++r)
+        x86_avx2__zzprivate_write(c, r, x86_avx2__zzprivate_dot8(c->weights + r * c->row_bytes, c->xf, c->cols)
+                                        * x86_avx2__zzprivate_row_scale(c->luts, r));
 }
 
 /* ── the int8 route: nn's definition (`kernels.cuh`), x quantised once a call ─────────────────────── */
@@ -188,15 +181,20 @@ static inline float x86_avx2__zzprivate_dot4(const uint8_t* row, const float* xf
     }
     return x86_avx2__zzprivate_hsum(_mm256_add_ps(_mm256_add_ps(a0, a1), _mm256_add_ps(a2, a3)));
 }
+/* ⛳ FOUR GATHERS AND FOUR SUMS A STEP of 32 columns (the fit check holds `cols` to whole runs of 32): with two, each sum
+ *   waited on the FMA before it and the gathers could not overlap — `MEASURED` on the 35B on the CPU alone, ▶ the commit. */
 static inline float x86_avx2__zzprivate_dot8(const uint8_t* row, const float* xf, uint64_t cols) {
-    __m256 a0 = _mm256_setzero_ps(), a1 = _mm256_setzero_ps();
-    for (uint64_t k = 0; k < cols; k += 16u) {
-        const __m256i i0 = _mm256_cvtepu8_epi32(_mm_loadl_epi64((const __m128i*)(row + k)));
-        const __m256i i1 = _mm256_cvtepu8_epi32(_mm_loadl_epi64((const __m128i*)(row + k + 8u)));
+    __m256 a0 = _mm256_setzero_ps(), a1 = _mm256_setzero_ps(), a2 = _mm256_setzero_ps(), a3 = _mm256_setzero_ps();
+    for (uint64_t k = 0; k < cols; k += 32u) {
+        const __m128i b = _mm_loadu_si128((const __m128i*)(row + k)), c = _mm_loadu_si128((const __m128i*)(row + k + 16u));
+        const __m256i i0 = _mm256_cvtepu8_epi32(b), i1 = _mm256_cvtepu8_epi32(_mm_srli_si128(b, 8));
+        const __m256i i2 = _mm256_cvtepu8_epi32(c), i3 = _mm256_cvtepu8_epi32(_mm_srli_si128(c, 8));
         a0 = _mm256_fmadd_ps(_mm256_i32gather_ps(x86_avx2__zzprivate_levels8, i0, 4), _mm256_loadu_ps(xf + k), a0);
         a1 = _mm256_fmadd_ps(_mm256_i32gather_ps(x86_avx2__zzprivate_levels8, i1, 4), _mm256_loadu_ps(xf + k + 8u), a1);
+        a2 = _mm256_fmadd_ps(_mm256_i32gather_ps(x86_avx2__zzprivate_levels8, i2, 4), _mm256_loadu_ps(xf + k + 16u), a2);
+        a3 = _mm256_fmadd_ps(_mm256_i32gather_ps(x86_avx2__zzprivate_levels8, i3, 4), _mm256_loadu_ps(xf + k + 24u), a3);
     }
-    return x86_avx2__zzprivate_hsum(_mm256_add_ps(a0, a1));
+    return x86_avx2__zzprivate_hsum(_mm256_add_ps(_mm256_add_ps(a0, a1), _mm256_add_ps(a2, a3)));
 }
 static inline void x86_avx2__zzprivate_tables4(__m256i* tlo, __m256i* thi) {
     const uint16_t* lev = nn__turboquant__zzabi_levels(4u);
@@ -773,6 +771,43 @@ static void x86_avx2__override_expert_groups_int8(uint16_t* out, nn__expert__gro
 }
 
 /* Into nn's table, once, when the family is first asked for it. */
+/* ── THE ROTATION A HEAD AT A TIME — `hadamard_blocks`, a butterfly a block ─────────────────────────────────────────
+ * nn's definition (`kernels.cuh`): blocks of `block` (a power of two, at most 512), each `out = H·(S ⊙ in) / √block`,
+ * or with `inverse` `S ⊙ H·in / √block`; the generic body sums each output directly over its block, O(b²), with a lane an
+ * output. Here a pool block takes whole Hadamard blocks and runs the butterfly in floats — O(b log b), the same matrix
+ * (Sylvester's order, `(-1)^popcount(r & c)`) — and rounds each output to a half once, as the generic body does; only the
+ * order of the float sums differs. `MEASURED` before: ~9 ms of the 35B's ~87 ms a token on the CPU alone. */
+typedef struct x86_avx2__hblocks_call {
+    uint16_t* out; const uint16_t* in; const uint16_t* sign; uint64_t n, block, inverse; unsigned int* over;
+} x86_avx2__hblocks_call;
+static void x86_avx2__zzprivate_hblocks(void* a) {
+    const x86_avx2__hblocks_call* c = (const x86_avx2__hblocks_call*)a;
+    const uint64_t count = c->n / c->block, b = nn__silicon__block(), nb = nn__silicon__blocks();
+    const uint64_t q0 = count * b / nb, q1 = count * (b + 1u) / nb, B = c->block;
+    const float norm = 1.0f / sqrtf((float)B);
+    float v[512];
+    for (uint64_t q = q0; q < q1; ++q) {
+        const uint64_t at = q * B;
+        for (uint64_t e = 0u; e < B; ++e) v[e] = _cvtsh_ss(c->in[at + e]) * (c->inverse ? 1.0f : _cvtsh_ss(c->sign[e]));
+        for (uint64_t h = 1u; h < B; h <<= 1)
+            for (uint64_t i = 0u; i < B; i += 2u * h)
+                for (uint64_t j = i; j < i + h; ++j) { const float x = v[j], y = v[j + h]; v[j] = x + y; v[j + h] = x - y; }
+        for (uint64_t e = 0u; e < B; ++e)
+            c->out[at + e] = nn__kernels__zzabi_to_half(v[e] * norm * (c->inverse ? _cvtsh_ss(c->sign[e]) : 1.0f), c->over);
+    }
+}
+/* ⭐ Blocks of a power of two up to 512, `out` apart from `in`; anything else is the generic door. */
+static void x86_avx2__override_hadamard_blocks(uint16_t* out, const uint16_t* in, const uint16_t* sign, uint64_t n, uint64_t block,
+                                               uint64_t inverse, unsigned int* over) {
+    const bool apart = out + n <= in || in + n <= out;
+    if (block == 0u || block > 512u || (block & (block - 1u)) != 0u || n == 0u || n % block != 0u || !apart) {
+        nn__hadamard__zzabi_launch_blocks(out, in, sign, n, block, inverse, over);
+        return;
+    }
+    x86_avx2__hblocks_call c = { out, in, sign, n, block, inverse, over };
+    x86_avx2__zzpackage_run(x86_avx2__zzprivate_blocks_for(n / block), x86_avx2__zzprivate_hblocks, &c);
+}
+
 static inline void x86_avx2__override_doors(nn__doors* doors) {
     const uint16_t* lev = nn__turboquant__zzabi_levels(8u);
     for (int i = 0; i < 256; ++i) x86_avx2__zzprivate_levels8[i] = _cvtsh_ss(lev[i]);
@@ -783,6 +818,7 @@ static inline void x86_avx2__override_doors(nn__doors* doors) {
     doors->turboquant_gemv_groups_int8     = x86_avx2__override_gemv_groups_int8;
     doors->turboquant_gemv_groups_sum_int8 = x86_avx2__override_gemv_groups_sum_int8;
     doors->hadamard_rotate      = x86_avx2__override_hadamard_rotate;
+    doors->hadamard_blocks      = x86_avx2__override_hadamard_blocks;
     doors->deltanet_step        = x86_avx2__override_deltanet_step;
     doors->expert_rows          = x86_avx2__override_expert_rows;
     doors->expert_rows_sum      = x86_avx2__override_expert_rows_sum;

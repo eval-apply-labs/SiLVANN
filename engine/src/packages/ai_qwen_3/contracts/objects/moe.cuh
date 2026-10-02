@@ -120,6 +120,14 @@
 #define AI_QWEN_3__POST__SHARED_D        5u
 #define AI_QWEN_3__POST__TABLE           6u
 
+/* ⭐ A RANK-1 MASK ON THE DOWN PROJECTIONS — ▶ mixer.cuh. The routed experts share one `r` and keep a `v` an expert
+ * (`V`, a row an expert); the shared expert has its own. Each is three optional cells — `r`, `v` or `V`, and a scratch
+ * for the dots and the picks' indices — past the longest table, padded with zeros up to them. */
+#define AI_QWEN_3__MOE__MASK           29u   /* the routed experts' three, then the shared expert's */
+#define AI_QWEN_3__MOE__SHARED_MASK    32u
+#define AI_QWEN_3__EXP__MASK           16u   /* past the parts' cells */
+#define AI_QWEN_3__POST__MASK          6u    /* the shared expert's */
+
 /* ⭐ THE MOST ROWS A PROMPT VERB TAKES AT ONCE (`ai_qwen_3__*_rows`): its MoE lists a pair for every pick of every
  * row on the host, `rows · TOP_K` of them. A longer prompt is several calls, each its next rows. */
 #define AI_QWEN_3__ROWS_MAX            256u

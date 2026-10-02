@@ -13,7 +13,10 @@
 #define SYS__SILICON_FAMILY__KERNELS_BY_NAME 1
 #include "manifest.cuh"                           /* this family's answers to every package it supports */
 #include "../../packages/manifest__gpu.cuh"       /* every package's card side, written against them */
+#include "overrides/nn.cuh"                       /* the doors this family runs faster than the generic body */
 #define SYS__SILICON_FAMILY__THIS khronos_opencl2
+/* the hook is handed every package's door table, by package id; the one this family overrides is nn's */
+#define SYS__SILICON_FAMILY__OVERRIDE_DOORS(TABLES)  khronos_opencl2__override_doors((nn__doors*)(uintptr_t)(TABLES)[nn_pkg_id])
 #include "../entry.cuh"
 
 #endif /* SILVANN__SILICON_FAMILIES_KHRONOS_OPENCL2_UNIT_CUH */

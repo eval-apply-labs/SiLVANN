@@ -251,7 +251,9 @@ typedef struct nn__expert__backing {
 #define NN__EXPERT__COUNT_MISSES          0u   /* reads a pick had to ask for itself            */
 #define NN__EXPERT__COUNT_PREDICTED       1u   /* reads a prediction queued                     */
 #define NN__EXPERT__COUNT_PREDICTED_USED  2u   /* ...of which a pick then asked for the expert  */
-#define NN__EXPERT__COUNTS                3u
+#define NN__EXPERT__COUNT_WAIT_NS         3u   /* time a layer waited on its reads, in ns      */
+#define NN__EXPERT__COUNT_WAITS           4u   /* ...and how many times it had to              */
+#define NN__EXPERT__COUNTS                5u
 /* What a request found: the expert in memory, its read on the way, or no way to have it. */
 #define NN__EXPERT__RESIDENT   0
 #define NN__EXPERT__ARRIVING   1

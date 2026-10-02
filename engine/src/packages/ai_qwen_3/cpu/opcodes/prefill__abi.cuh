@@ -95,6 +95,9 @@ static sys__heap_node ai_qwen_3__deltanet_rows__zzabi_apply(const sys__heap_node
     doors->expert_rows((uint16_t*)(uintptr_t)ao, (const uint8_t*)(uintptr_t)at[AI_QWEN_3__DN__OUT], room[AI_QWEN_3__DN__OUT],
                        (const uint8_t*)(uintptr_t)at[AI_QWEN_3__DN__OUT_LUT], room[AI_QWEN_3__DN__OUT_LUT],
                        (const uint16_t*)(uintptr_t)crot, (const uint32_t*)(uintptr_t)pairs, T, v[AI_QWEN_3__DN__D_OUT], H, vdim, over);
+    const uint64_t masked = ai_qwen_3__table__zzpackage_masked(doors, over, argv[1].args[0], AI_QWEN_3__DN__MASK, ao, crot, T, H, vdim,
+                                                               AI_QWEN_3__MIXER__FAULT_TABLE);
+    if (masked != 0u) return sys__engine__abi__error(masked);
     doors->vector_add((uint16_t*)(uintptr_t)h1, (const uint16_t*)(uintptr_t)x, (const uint16_t*)(uintptr_t)ao, T * H, over);
     return nn__doors_answer(&argv[2]);
 }
@@ -159,8 +162,9 @@ static sys__heap_node ai_qwen_3__attention_rows__zzabi_apply(const sys__heap_nod
     doors->rmsnorm_rows((uint16_t*)(uintptr_t)kfirst, (const uint16_t*)(uintptr_t)kk, (const uint16_t*)(uintptr_t)at[AI_QWEN_3__AT__K_NORM],
                         hd, T * kvh, hd, hd, over);
     doors->rope_rows((uint16_t*)(uintptr_t)kfirst, (const uint16_t*)(uintptr_t)kfirst, (const float*)(uintptr_t)cs, T, kvh, hd, kvw, rot, over);
-    doors->attention_causal_scores((float*)(uintptr_t)at[AI_QWEN_3__AT__SCORES], (const uint16_t*)(uintptr_t)qn,
-                                   (const uint16_t*)(uintptr_t)at[AI_QWEN_3__AT__K_CACHE], qh, kvh, hd, first, T);
+    doors->attention_causal_scores_grouped((float*)(uintptr_t)at[AI_QWEN_3__AT__SCORES], (const uint16_t*)(uintptr_t)qn,
+                                                   (const uint16_t*)(uintptr_t)at[AI_QWEN_3__AT__K_CACHE], qh, kvh, hd, first, T);
+    doors->attention_causal_softmax((float*)(uintptr_t)at[AI_QWEN_3__AT__SCORES], qh, first, T);
     doors->attention_causal_mix((uint16_t*)(uintptr_t)att, (const float*)(uintptr_t)at[AI_QWEN_3__AT__SCORES],
                                 (const uint16_t*)(uintptr_t)at[AI_QWEN_3__AT__V_CACHE], qh, kvh, hd, first, T, over);
     doors->attention_gate_rows((uint16_t*)(uintptr_t)gated, (const uint16_t*)(uintptr_t)att, (const uint16_t*)(uintptr_t)qg, T * qh, hd, over);
@@ -168,6 +172,9 @@ static sys__heap_node ai_qwen_3__attention_rows__zzabi_apply(const sys__heap_nod
     doors->expert_rows((uint16_t*)(uintptr_t)ao, (const uint8_t*)(uintptr_t)at[AI_QWEN_3__AT__O], room[AI_QWEN_3__AT__O],
                        (const uint8_t*)(uintptr_t)at[AI_QWEN_3__AT__O_LUT], room[AI_QWEN_3__AT__O_LUT], (const uint16_t*)(uintptr_t)arot,
                        (const uint32_t*)(uintptr_t)pairs, T, v[AI_QWEN_3__AT__D_O], H, qw, over);
+    const uint64_t masked = ai_qwen_3__table__zzpackage_masked(doors, over, argv[1].args[0], AI_QWEN_3__AT__MASK, ao, arot, T, H, qw,
+                                                               AI_QWEN_3__MIXER__FAULT_TABLE);
+    if (masked != 0u) return sys__engine__abi__error(masked);
     doors->vector_add((uint16_t*)(uintptr_t)h1, (const uint16_t*)(uintptr_t)x, (const uint16_t*)(uintptr_t)ao, T * H, over);
     return nn__doors_answer(&argv[3]);
 }
@@ -320,8 +327,9 @@ static sys__heap_node ai_qwen_3__attention_tiered_rows__zzabi_apply(const sys__h
     /* ④ while the window is the whole cache — nothing warm or cold yet — the rows attend it at once, causally; past it
        each row: the window up to its own position, the warm and the cold tiers whole, a residual each, merged */
     if (n_warm == 0u && n_cold == 0u) {
-        doors->attention_causal_scores((float*)(uintptr_t)at[AI_QWEN_3__AT__ROWS_SCORES], (const uint16_t*)(uintptr_t)qr,
-                                       (const uint16_t*)(uintptr_t)wk, qh, kvh, hd, first_w, T);
+        doors->attention_causal_scores_grouped((float*)(uintptr_t)at[AI_QWEN_3__AT__ROWS_SCORES], (const uint16_t*)(uintptr_t)qr,
+                                                       (const uint16_t*)(uintptr_t)wk, qh, kvh, hd, first_w, T);
+        doors->attention_causal_softmax((float*)(uintptr_t)at[AI_QWEN_3__AT__ROWS_SCORES], qh, first_w, T);
         doors->attention_causal_mix((uint16_t*)(uintptr_t)attr, (const float*)(uintptr_t)at[AI_QWEN_3__AT__ROWS_SCORES],
                                     (const uint16_t*)(uintptr_t)wv, qh, kvh, hd, first_w, T, over);
     }
@@ -359,6 +367,9 @@ static sys__heap_node ai_qwen_3__attention_tiered_rows__zzabi_apply(const sys__h
     doors->expert_rows((uint16_t*)(uintptr_t)ao, (const uint8_t*)(uintptr_t)at[AI_QWEN_3__AT__O], room[AI_QWEN_3__AT__O],
                        (const uint8_t*)(uintptr_t)at[AI_QWEN_3__AT__O_LUT], room[AI_QWEN_3__AT__O_LUT], (const uint16_t*)(uintptr_t)arot,
                        (const uint32_t*)(uintptr_t)pairs, T, v[AI_QWEN_3__AT__D_O], H, qw, over);
+    const uint64_t masked = ai_qwen_3__table__zzpackage_masked(doors, over, argv[1].args[0], AI_QWEN_3__AT__MASK, ao, arot, T, H, qw,
+                                                               AI_QWEN_3__MIXER__FAULT_TABLE);
+    if (masked != 0u) return sys__engine__abi__error(masked);
     doors->vector_add((uint16_t*)(uintptr_t)h1, (const uint16_t*)(uintptr_t)x, (const uint16_t*)(uintptr_t)ao, T * H, over);
     return nn__doors_answer(&argv[3]);
 }
@@ -656,6 +667,33 @@ static sys__heap_node ai_qwen_3__moe_rows__zzabi_apply(const sys__heap_node* arg
             }
             ai_qwen_3__stream__zzprivate_counts[1] += ai_qwen_3__stream__zzprivate_now() - t0;
         }
+    }
+    /* ⑥ the masks, when the table carries them, onto the sum before it is rounded: the routed experts' over every pick
+     *   (its expert, in listing order, then spread through the down pairs), the shared expert's over every row */
+    uint64_t mk[3], mroom[3];
+    bool masked = false;
+    if (!ai_qwen_3__table__zzpackage_mask(table, AI_QWEN_3__MOE__MASK, mk, mroom, &masked)) return sys__engine__abi__error(AI_QWEN_3__MOE__FAULT_TABLE);
+    if (masked) {
+        if (!nn__primitives__fits(H, mroom[0]) || !nn__primitives__fits(E * I, mroom[1]) || mroom[2] < 8u * P)
+            return sys__engine__abi__error(AI_QWEN_3__MOE__FAULT_TABLE);
+        uint32_t ej[AI_QWEN_3__ROWS_MAX * NN__VECTOR__TOP_K_MAX];
+        for (uint64_t u = 0u; u < n_used; ++u)
+            for (uint64_t c = 0u; c < count_of[u]; ++c) ej[first_at[u] + c] = (uint32_t)used[u];
+        if (!sys__gpu__memory_write(ctx->family, (void*)(uintptr_t)mk[2], ej, (size_t)(4u * P)))
+            return sys__engine__abi__error(NN__PRIMITIVES__FAULT_NO_DEVICE);
+        doors->rank1_dots((float*)(uintptr_t)(mk[2] + 4u * P), (const uint16_t*)(uintptr_t)mk[1], (const uint32_t*)(uintptr_t)mk[2],
+                          (const uint16_t*)(uintptr_t)actr, (const uint16_t*)(uintptr_t)wj, 0, P, I, I, 1u);
+        doors->rank1_spread((float*)(uintptr_t)acc, (const uint16_t*)(uintptr_t)mk[0], (const float*)(uintptr_t)(mk[2] + 4u * P),
+                            (const uint32_t*)(uintptr_t)(p_id + 8u * at_down + 4u), P, H, 2u);
+    }
+    if (!ai_qwen_3__table__zzpackage_mask(table, AI_QWEN_3__MOE__SHARED_MASK, mk, mroom, &masked)) return sys__engine__abi__error(AI_QWEN_3__MOE__FAULT_TABLE);
+    if (masked) {
+        if (!nn__primitives__fits(H, mroom[0]) || !nn__primitives__fits(I, mroom[1]) || mroom[2] < 4u * T)
+            return sys__engine__abi__error(AI_QWEN_3__MOE__FAULT_TABLE);
+        doors->rank1_dots((float*)(uintptr_t)mk[2], (const uint16_t*)(uintptr_t)mk[1], 0, (const uint16_t*)(uintptr_t)(actr + 2u * P * I),
+                          (const uint16_t*)(uintptr_t)(wj + 2u * P), 0, T, I, I, 1u);
+        doors->rank1_spread((float*)(uintptr_t)acc, (const uint16_t*)(uintptr_t)mk[0], (const float*)(uintptr_t)mk[2],
+                            (const uint32_t*)(uintptr_t)p_id, T, H, 2u);
     }
     doors->expert_rows_finish((uint16_t*)(uintptr_t)out_at, (float*)(uintptr_t)acc, (const uint16_t*)(uintptr_t)h1_at, T * H, over);
     return nn__doors_answer(&argv[2]);

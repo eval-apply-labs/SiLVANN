@@ -45,6 +45,21 @@ static inline bool x86_avx2__memory_allocate(void** at, size_t bytes) {
     const size_t mapped = (bytes + 2u * X86_AVX2__ZZPRIVATE_PAGE - 1u) / X86_AVX2__ZZPRIVATE_PAGE * X86_AVX2__ZZPRIVATE_PAGE;
     void* base = mmap(0, mapped, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
     if (base == MAP_FAILED) return false;
+    /* ⭐ THE WHOLE MACHINE'S LARGE MEMORY INTERLEAVED OVER ITS NODES, a page a node in turn: its threads are on every
+     *   socket and each reads the rows its block was given, so a matrix spread evenly draws on every node's memory
+     *   controllers at once, where pages left where they were first touched drew unevenly (14 GiB and 22 on this box).
+     *   `MEASURED`, the 35B on the CPU alone, node03's two sockets, five pairs: 90.3 ms a token (median) -> 80.9, every
+     *   pair faster. A socket device is bound to its own node instead (below). */
+    if (node < 0 && x86_avx2__zzpackage_devices() > 2u) {
+        int interleave = 1;
+        unsigned long all[X86_AVX2__ZZPRIVATE_NODES / (8 * sizeof(unsigned long))] = {0};
+        for (uint32_t k = 1u; k < x86_avx2__zzpackage_devices(); ++k) {
+            const int n = x86_avx2__zzpackage_node_of(k);
+            all[n / (8 * sizeof(unsigned long))] |= 1ul << (n % (8 * sizeof(unsigned long)));
+        }
+        if (interleave)
+            (void)syscall(SYS_mbind, base, mapped, 3 /* MPOL_INTERLEAVE */, all, (unsigned long)X86_AVX2__ZZPRIVATE_NODES + 1ul, 0u);
+    }
     x86_avx2__held* h = (x86_avx2__held*)((uint8_t*)base + X86_AVX2__ZZPRIVATE_PAGE - sizeof *h);
     if (node < 0) {
         h->mapped = mapped; h->bytes = bytes;

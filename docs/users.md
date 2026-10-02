@@ -1,6 +1,7 @@
 # Running SiLVANN
 
-This is a **developer preview (v0.2.0)**. It is tested on Linux with AMD Instinct MI50 cards (gfx906, ROCm 6);
+This is a **developer preview (v0.2.1)**. It is tested on Linux with AMD Instinct MI50 cards (gfx906, ROCm 6), and on
+the CPU alone with AVX2;
 Windows and NVIDIA cards are untested, Apple silicon is not supported yet. If something does not build or does
 not run on your machine, you are expected to be able to read the error and the source.
 
@@ -39,6 +40,10 @@ The UI is a web page on port 8090 that talks to the server on port 8765; it can 
 can be exported and imported. One conversation runs at a time; a second request while one is running is
 answered `503` with `Retry-After: 5`, and the UI retries.
 
+On a machine with no AMD card the model runs on the CPU's own cores (the `x86_avx2` family). The pack made for
+that is `Qwen3.6-35B-A3B_silvann_tq_D4E4`: its dense part at 4 bits, about 15 tokens a second on the test machine's
+two Xeons.
+
 ## 4. The model's settings
 
 `models/<name>/configs/default.json` is read when the server starts; another file can be named as the server's
@@ -69,7 +74,7 @@ The Qwen models' `options`:
 | `kv` | `"tiered"` (default), `"fp16"` | the conversation's cache: tiered keeps the first 256 and the latest positions in halves and the rest at 8 bits |
 | `tiers` | `[sink, hot, warm]` | the tiers' sizes; `warm` may be `"rest"`. `[256, 4096, "rest"]` is the default; `[256, 4096, N]` puts what is older than `N` at 4 bits, for small cards |
 | `chunk` | positions, 1 to 256, default 256 | how many positions of a prompt go through a layer at once |
-| `experts_on` | `"card"` (default), `"cpu"` | the 35B's routed experts on the card, or on the CPU — the setup for a card too small to hold them |
+| `experts_on` | `"card"` (default), `"cpu"` | the routed experts on the card, or on the CPU — the setup for a card too small to hold them; the 122B's `default.json` starts with `"cpu"` |
 | `experts_from` | `"auto"`, `"ram"`, `"disk"`, `"mapped"` | with the experts on the CPU: copied into RAM, or read from a file on the disk as they are needed — `disk` keeps the ones used in the engine's own memory, as much of it as there is (`experts_ram_gb` to set it), `mapped` leaves that to the system's page cache and is slower; `auto` chooses by the memory there is |
 
 GLM 5.3 Flash's `options`:
@@ -83,11 +88,11 @@ GLM 5.3 Flash's `options`:
 ## 5. The experts on the disk
 
 With `experts_from: "disk"`, the first start writes the model's experts to `models/<name>/experts/` in the layout
-the CPU reads them in — about 150 GB for GLM 5.3 Flash, 16 GB for the 35B — and later starts map that file. The
+the CPU reads them in — about 150 GB for GLM 5.3 Flash, 55 GB for the 122B, 16 GB for the 35B — and later starts
+map that file. The
 disk should be an NVMe drive: RAM keeps the experts that are used, and every other one is read from the disk
 when a token picks it, so the disk's speed is the answer's speed. On our test machine GLM 5.3 Flash answered at
-3.5 tokens a second with 128 GB of RAM, 1.6 with 64 GB and 1.1 with 32 GB, from an NVMe drive that reads 2.6 GB/s,
-and read a prompt at 10-11 positions a second with `chunk: 1024` in all three. The engine keeps as many experts
+5.7 tokens a second with 128 GB of RAM from a disk that reads 5 GB/s. Keep the disk cool: a hot NVMe drive slows itself down. Every measurement: [`results.md`](results.md). The engine keeps as many experts
 as the memory there is allows — the process's own limit when it has one — less a quarter of it for everything else.
 
 ## 6. A model over several machines

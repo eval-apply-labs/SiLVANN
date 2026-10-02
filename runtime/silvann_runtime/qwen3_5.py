@@ -177,6 +177,9 @@ class Qwen35:
         big = max(8 << 20, self.QH * self.max_context * 4, self.VOCAB * 2,
                   (self.CHUNK * self.QH * self.max_context * 4) if self.MOE and not self.TIERED else 0,
                   self.ROWS_SCRATCH, self.WINDOW, self.WINDOW_SCORES)
+        # ⭐ a rank-1 mask lives in one buffer a worker, of the largest class, which it grows by one
+        self._mask_layout()
+        big = max(big, self.MASK_BYTES[CARD])
         types = "".join("nn__expert__type%d__up_bytes:%d\nnn__expert__type%d__down_bytes:%d\nnn__expert__type%d__slots:%d\n"
                         % (t, p.up_bytes, t, p.down_bytes, t, n) for t, p, n in self.collections)
         n_d = sum(1 for k in self.kinds.values() if k == "d")
@@ -184,7 +187,7 @@ class Qwen35:
         card = ("nn__buffer_resid__size_bytes:2097152\nnn__buffer_resid__qty:8\n"
                 "nn__buffer_main__size_bytes:4194304\nnn__buffer_main__qty:4\n"
                 "nn__buffer_attn_out__size_bytes:1048576\nnn__buffer_attn_out__qty:64\n"
-                "nn__buffer_logits__size_bytes:%d\nnn__buffer_logits__qty:6\n"
+                "nn__buffer_logits__size_bytes:%d\nnn__buffer_logits__qty:%d\n"
                 "nn__buffer_partials__size_bytes:1048576\nnn__buffer_partials__qty:8\n"
                 "nn__expert_cache_l1__size_mb:%d\n"
                 "nn__cartridge_sink__tokens:1\nnn__cartridge_sink__bytes_per_token_layer:64\n"
@@ -194,7 +197,7 @@ class Qwen35:
                 "nn__model__kv_cache_layers_fullattn:%d\nnn__model__kv_cache_layers_deltanet:%d\n"
                 "nn__conversation__text_size_kb:4\nnn__deltanet_state__bytes_per_layer:64\n"
                 "nn__model__layer_types:%s\nnn__expert__types:%d\n%s"
-                % (big, (self.arena + (256 << 20)) >> 20, self.LAYERS - n_d, n_d,
+                % (big, 6 + (self.MASK_BYTES[CARD] > 0), (self.arena + (256 << 20)) >> 20, self.LAYERS - n_d, n_d,
                    "".join(self.kinds[l] for l in range(self.LAYERS)), len(self.collections), types))
         if not self.CPU_EXPERTS:
             return card
@@ -203,11 +206,11 @@ class Qwen35:
         p = self.EPLAN
         P, I = self.CHUNK * self.TOPK, self.INTER
         self.RSCRATCH = 2 * self.CHUNK * self.H + 16 * P + 2 * P + 8 * P * I + 4 * self.CHUNK * self.H + 64
-        cbig = max(1 << 20, self.RSCRATCH, self.CHUNK * self.HAND_ROW)
+        cbig = max(1 << 20, self.RSCRATCH, self.CHUNK * self.HAND_ROW, self.MASK_BYTES[CPU])
         cpu = ("nn__buffer_resid__size_bytes:2097152\nnn__buffer_resid__qty:8\n"
                "nn__buffer_main__size_bytes:4194304\nnn__buffer_main__qty:1\n"
                "nn__buffer_attn_out__size_bytes:1048576\nnn__buffer_attn_out__qty:16\n"
-               "nn__buffer_logits__size_bytes:%d\nnn__buffer_logits__qty:5\n"
+               "nn__buffer_logits__size_bytes:%d\nnn__buffer_logits__qty:%d\n"
                "nn__buffer_partials__size_bytes:1048576\nnn__buffer_partials__qty:8\n"
                "nn__expert_cache_l1__size_mb:%d\n"
                "nn__cartridge_sink__tokens:1\nnn__cartridge_sink__bytes_per_token_layer:64\n"
@@ -218,14 +221,14 @@ class Qwen35:
                "nn__conversation__text_size_kb:4\nnn__deltanet_state__bytes_per_layer:64\n"
                "nn__model__layer_types:%s\nnn__expert__types:1\n"
                "nn__expert__type0__up_bytes:%d\nnn__expert__type0__down_bytes:%d\nnn__expert__type0__slots:%d\n"
-               % (cbig, (self.cpu_arena + (256 << 20)) >> 20, self.LAYERS - n_d, n_d,
+               % (cbig, 5 + (self.MASK_BYTES[CPU] > 0), (self.cpu_arena + (256 << 20)) >> 20, self.LAYERS - n_d, n_d,
                   "".join(self.kinds[l] for l in range(self.LAYERS)), p.up_bytes, p.down_bytes,
                   self.SLOTS if self.SLOTS is not None else self.EXPERTS * len(self.run_layers)))
         return {CARD: card, CPU: cpu}
 
     def workers(self):
         """The machine's workers: the card, and the CPU when the experts are there."""
-        return [("amd_rocm6_wave64", 0)] + ([("x86_avx2", 0)] if self.CPU_EXPERTS else [])
+        return [(self.m.silicon, 0)] + ([("x86_avx2", 0)] if self.CPU_EXPERTS else [])
 
     # ── ② the load ───────────────────────────────────────────────────────────────────────────────────────────
     def load(self, progress=None):
@@ -254,6 +257,8 @@ class Qwen35:
         if loader.handed() != 0:
             raise Refused("%d slots were reserved and never published" % loader.handed())
         self._buffers()
+        self.MASK_CELLS = {}
+        self._mask_buffers(cpu=False)
         self._tables()
         if self.CPU_EXPERTS:
             self._cpu_experts(progress)
@@ -300,14 +305,15 @@ class Qwen35:
         m.buffer(self.CHUNK * self.HAND_ROW, "c_hands")
         m.buffer(self.CHUNK * H * 2, "c_rrows")
         m.buffer(self.RSCRATCH, "c_rscratch")
+        self._mask_buffers(cpu=True)
         for l in layers:
             m.table("exc%d" % l, ["c_signs", "c_scratch", "c_zero", l, 0, e.at_up_lut, e.at_down_data, e.at_down_lut,
                                   H, self.INTER, self.EXPERTS, self.TOPK, int(self.b.record(l, GU).d),
-                                  backing.get((CPU, l), 0)])
+                                  backing.get((CPU, l), 0)] + self._masked(l, "moe", 16, 14))
             # a prompt's: the chunk's scratch in place of a position's, and a picture over the chunk
             m.table("exrc%d" % l, ["c_signs", "c_rscratch", "c_zero", l, 0, e.at_up_lut, e.at_down_data, e.at_down_lut,
                                    H, self.INTER, self.EXPERTS, self.TOPK, int(self.b.record(l, GU).d),
-                                   backing.get((CPU, l), 0)])
+                                   backing.get((CPU, l), 0)] + self._masked(l, "moe", 16, 14))
             m.picture("xr%d" % l, "(begin (nn__buffer__copy hands %d c_hands %d) "
                       "(ai_qwen_3__experts_rows c_hands exrc%d c_rrows (sys__node_array__get nrows 0)))"
                       % (CARD, self.CHUNK * self.HAND_ROW, l))
@@ -413,25 +419,82 @@ class Qwen35:
                    self.tier(l, "cold_c", "down"), self.tier(l, "cold_s", "down"),
                    "tier_scratch", self.SINK, self.HOT, self.WARM])
 
+    # ── the rank-1 mask, when the folder's LoRA is one (▶ `nn_rank1_mask.py`, the `rank1_*` doors) ─────────────────
+    def _mask_layout(self):
+        """Where each of the mask's tensors goes: `MASK_PLACE[(worker, l, site)]` its `r` and `v` as (start, count) in
+        halves inside that worker's one mask buffer, and `MASK_BYTES` each buffer's size — the scratch for the verbs'
+        dots first. The mixers and the shared expert are the card's; the routed experts go wherever they run."""
+        self.MASK_BYTES, self.MASK_PLACE = {CARD: 0, CPU: 0}, {}
+        mask = self.b.mask
+        if mask is None:
+            return
+        from safetensors.numpy import load_file
+        self._mask_tensors = t = load_file(mask["path"])
+        scratch = 8 * self.CHUNK * max(self.TOPK, 1) + 256
+        at = {CARD: scratch, CPU: scratch}
+        for l in self.run_layers:
+            for site in ("attn", "shared", "moe"):
+                if "layers.%d.%s.r" % (l, site) not in t:
+                    continue
+                w = CPU if site == "moe" and self.CPU_EXPERTS else CARD
+                place = []
+                for a in (t["layers.%d.%s.r" % (l, site)], t["layers.%d.%s.%s" % (l, site, "V" if site == "moe" else "v")]):
+                    place.append((at[w] // 2, a.size))
+                    at[w] += (a.nbytes + 255) & ~255
+                self.MASK_PLACE[(w, l, site)] = place
+        for w in (CARD, CPU):
+            if any(k[0] == w for k in self.MASK_PLACE):
+                self.MASK_BYTES[w] = at[w]
+        self._mask_scratch = scratch
+
+    def _mask_buffers(self, cpu):
+        """This worker's mask buffer, filled, and each site's three table cells: views of its `r`, its `v` and the
+        scratch."""
+        w = CPU if cpu else CARD
+        if not self.MASK_BYTES[w]:
+            return
+        m, t, name = self.m, self._mask_tensors, ("c_mk" if cpu else "mk")
+        base = m.buffer(self.MASK_BYTES[w], name)
+        view = lambda start, count: "(nn__vector__range %s %d %d)" % (name, start, count)
+        for (w_, l, site), place in self.MASK_PLACE.items():
+            if w_ != w:
+                continue
+            for (start, count), a in zip(place, (t["layers.%d.%s.r" % (l, site)],
+                                                 t["layers.%d.%s.%s" % (l, site, "V" if site == "moe" else "v")])):
+                m.write(base + 2 * start, np.ascontiguousarray(a, dtype="<f2").tobytes())
+            self.MASK_CELLS[(l, site)] = [view(*place[0]), view(*place[1]), view(0, self._mask_scratch // 2)]
+
+    def _masked(self, l, site, at, have=None, both=False):
+        """A table's mask cells for layer `l`'s site at cell `at` — zeros up to it from `have` cells — or nothing when the
+        folder has no mask. A site the mask leaves alone is a 0. `both`: the routed experts' three, then the shared's."""
+        if not self.MASK_CELLS and self.b.mask is None:
+            return []
+        pad = [0] * (at - have) if have is not None else []
+        cells = lambda s_: list(self.MASK_CELLS[(l, s_)]) if (l, s_) in self.MASK_CELLS else [0, 0, 0]
+        return pad + cells(site) + (cells("shared") if both else [])
+
     def _tables(self):
         m, b, pl = self.m, self.b, self.plane
         d = lambda l, n: b.record(l, n).d
         for l in self.run_layers:
+            # ⭐ a mask's cells, when the folder's LoRA is a rank-1 mask: past each table's longest form, padded up to them
+            mk = lambda cells, at: cells + self._masked(l, "attn", at, len(cells))
             if self.kinds[l] == "d":
-                m.table("mx%d" % l, self._mixer_cells(l, "mix_scratch") + ([1] if self.ROTATED else []))
+                m.table("mx%d" % l, mk(self._mixer_cells(l, "mix_scratch") + ([1] if self.ROTATED else []), 30))
             elif self.TIERED:
                 tiered = self._tiered_cells(l)
-                m.table("mx%d" % l, tiered)
+                m.table("mx%d" % l, mk(tiered, 48))
                 # a prompt's rows through the same tiers: ▶ ai_qwen_3__attention_tiered_rows
-                m.table("atr%d" % l, tiered + ["pf_scratch", "cs_rows", "win_k", "win_v", "rows_res", "window_scores"])
+                m.table("atr%d" % l, mk(tiered + ["pf_scratch", "cs_rows", "win_k", "win_v", "rows_res", "window_scores"], 48))
             else:
-                m.table("mx%d" % l, self._mixer_cells(l, "mix_scratch") + ([self.THETA, 1] if self.ROTATED else []))
+                m.table("mx%d" % l, mk(self._mixer_cells(l, "mix_scratch")
+                                       + ([self.THETA, 1] if self.ROTATED else [self.THETA, 0] if self.b.mask is not None else []), 48))
             # the rows' mixer tables, over the prompt's scratch
             flag = [1] if self.ROTATED else []
             if self.kinds[l] == "d":
-                m.table("dr%d" % l, self._mixer_cells(l, "pf_scratch") + flag)
+                m.table("dr%d" % l, mk(self._mixer_cells(l, "pf_scratch") + flag, 30))
             elif not self.TIERED:
-                m.table("ar%d" % l, self._mixer_cells(l, "pf_scratch", "cs_rows", "scores_rows") + [self.THETA] + flag)
+                m.table("ar%d" % l, mk(self._mixer_cells(l, "pf_scratch", "cs_rows", "scores_rows") + [self.THETA] + flag, 48))
             if not self.MOE:
                 ms = ["mlp.gate_proj.weight", "mlp.up_proj.weight", "mlp.down_proj.weight"]
                 for name, scratch in (("ml%d", "mix_scratch"), ("mlr%d", "pf_scratch")):     # a position's, and the rows'
@@ -449,7 +512,8 @@ class Qwen35:
                        d(l, "mlp.shared_expert.down_proj.weight")] + ([1] if self.ROTATED else []))
             m.table("post%d" % l, [pl(l, "mlp.shared_expert.down_proj.weight", "data"),
                                    pl(l, "mlp.shared_expert.down_proj.weight", "lut"),
-                                   self.H, self.INTER, self.TOPK, d(l, "mlp.shared_expert.down_proj.weight")])
+                                   self.H, self.INTER, self.TOPK, d(l, "mlp.shared_expert.down_proj.weight")]
+                    + self._masked(l, "shared", 6))
             if self.CPU_EXPERTS:
                 continue                # the experts' table is the CPU's (▶ `_cpu_experts`)
             # the fused MoE's rows table, its streaming cells empty
@@ -461,9 +525,11 @@ class Qwen35:
                        for c in (pl(l, n, "data"), pl(l, n, "lut"))]
                     + ["signs", "pf_scratch", l, self.T_EXPERT, e.at_up_lut, e.at_down_data, e.at_down_lut,
                        self.H, self.INTER, self.EXPERTS, self.TOPK, d(l, "mlp.gate.weight"),
-                       d(l, "mlp.shared_expert.down_proj.weight"), d(l, GU), 0, 0, 0] + flag)
+                       d(l, "mlp.shared_expert.down_proj.weight"), d(l, GU), 0, 0, 0]
+                    + (flag or ([0] if self.b.mask is not None else [])) + self._masked(l, "moe", 29, 29, both=True))
             m.table("ex%d" % l, ["signs", "exp_scratch", "zero_h", l, self.T_EXPERT, e.at_up_lut, e.at_down_data,
-                                 e.at_down_lut, self.H, self.INTER, self.EXPERTS, self.TOPK, d(l, GU), 0])
+                                 e.at_down_lut, self.H, self.INTER, self.EXPERTS, self.TOPK, d(l, GU), 0]
+                    + self._masked(l, "moe", 16, 14))
 
     # ── ③ the procedures, defined once ────────────────────────────────────────────────────────────────────────
     def _procedures(self):
@@ -646,6 +712,9 @@ class Qwen35:
         if name in self._lora_cache:
             return
         over = NL.Bundle(self.folder.path, lora=name)
+        if over.mask is not None or self.b.mask is not None:
+            # ⛳ a rank-1 mask is chosen at boot: its cells are in the tables the procedures were written over
+            raise Refused("a rank-1 mask is chosen at boot, not swapped: boot the folder with lora %r" % (name,))
         om = over.overlay
         pairs = [(l, k.split("layers.%d." % l, 1)[1]) for l in om.manifest["overlay"]["layers"] for k in om.index(l)]
         base = self._lora_cache.setdefault(None, NL.Bundle(self.folder.path))
@@ -677,6 +746,8 @@ class Qwen35:
     def lora_identity(self):
         if self.active_lora is None:
             return None
+        if self.b.mask is not None:
+            return dict(name=self.b.lora["name"], weights=self.b.lora["adapter"]["weights_sha"])
         self._ensure(self.active_lora)
         return self._lora_cache[self.active_lora]["ident"]
 
