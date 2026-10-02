@@ -12,7 +12,7 @@ Thank you for wanting to help. SiLVANN is a developer preview, and the most usef
 SiLVANN's engine is licensed under the AGPL-3.0 and is also offered under commercial terms. To keep both possible,
 every contribution is made under the **Contributor License Agreement** in [`CLA.md`](CLA.md): you keep the
 copyright in your work and grant the project a licence to distribute it under both. The **CLA Assistant** bot asks
-you to accept it on your first pull request; it covers every later one.
+you to accept it on your first pull request — you reply with the sentence it gives — and it covers every later one.
 
 ## How we work
 
