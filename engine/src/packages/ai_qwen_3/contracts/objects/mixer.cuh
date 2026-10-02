@@ -114,6 +114,14 @@
                                              attend it at once, causally */
 #define AI_QWEN_3__AT__TIERED_ROWS_TABLE 48u
 
+/* ⭐ A RANK-1 MASK ON THE OUTPUT PROJECTION — a changed model kept as `out_proj + r·vᵀ` (▶ nn's `rank1_*` doors and
+ * `python/nn_rank1_mask.py`). Three optional cells past the longest table of each mixer: `r` (H halves), `v` (the
+ * projection's input width, kept rotated as that input is) and a scratch for the dots, a float a row. An integer 0 in
+ * the first cell, or a table that stops short of it, is a layer the mask leaves alone; a table shorter than the longest
+ * is padded with zeros up to it. */
+#define AI_QWEN_3__DN__MASK         30u
+#define AI_QWEN_3__AT__MASK         48u
+
 /* ══ THE DENSE MLP'S PLANE TABLE — the half of a layer after the mixer, in a model without experts ══════════════
  * `(ai_qwen_3__mlp h1 planes out [residual])` -> `out = residual + down(swiglu(gate, up)(rmsnorm(h1)))`, the residual
  * `h1` when none is named. ⭐ UNDER TENSOR PARALLELISM a card holds INTER of the whole: its gate and up rows and the same

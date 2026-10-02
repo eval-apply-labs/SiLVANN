@@ -222,8 +222,16 @@ static uint64_t ai_glm_5_3__mla__zzprivate_row(const sys__heap_node* argv, sys__
             src = at[AI_GLM_5_3__IDX__GATHER];
         }
     }
-    doors->attention_scores((float*)(uintptr_t)at[AI_GLM_5_3__MLA__SCORES], (const uint16_t*)(uintptr_t)(qabs), (const uint16_t*)(uintptr_t)(src), heads, 1u,
-                            LAT, alen);
+    /* ⭐ the 64 heads' scores together, the latents read once for all of them (`attention_scores_grouped`), then each
+     *   head's softmax — `attention_scores`' answer, ~6-14x sooner on the MI50 (▶ nn's body) */
+    bool grouped = true;
+    if (grouped) {
+        doors->attention_scores_grouped((float*)(uintptr_t)at[AI_GLM_5_3__MLA__SCORES], (const uint16_t*)(uintptr_t)(qabs),
+                                        (const uint16_t*)(uintptr_t)(src), heads, 1u, LAT, alen);
+        doors->attention_softmax_rows((float*)(uintptr_t)at[AI_GLM_5_3__MLA__SCORES], heads, alen);
+    } else
+        doors->attention_scores((float*)(uintptr_t)at[AI_GLM_5_3__MLA__SCORES], (const uint16_t*)(uintptr_t)(qabs),
+                                (const uint16_t*)(uintptr_t)(src), heads, 1u, LAT, alen);
     doors->attention_mix((uint16_t*)(uintptr_t)(olat), (const float*)(uintptr_t)at[AI_GLM_5_3__MLA__SCORES], (const uint16_t*)(uintptr_t)(src), heads, 1u,
                          LAT, alen, over);
     doors->attention_expand((uint16_t*)(uintptr_t)(vh), (const uint16_t*)(uintptr_t)(olat), (const uint16_t*)(uintptr_t)(kvb), heads, VD, LAT, stride, NOPE, over);
@@ -822,8 +830,9 @@ static sys__heap_node ai_glm_5_3__mla_rows__zzabi_apply(const sys__heap_node* ar
             doors->attention_absorb((uint16_t*)(uintptr_t)(qabs_rows + 2u * r * heads * LAT),
                                     (const uint16_t*)(uintptr_t)(q + 2u * (b0 + r) * heads * NOPE), (const uint16_t*)(uintptr_t)kvb,
                                     heads, NOPE, LAT, stride, sqrtf((float)LAT / (float)NOPE), over);
-        doors->attention_causal_scores((float*)(uintptr_t)p_rows, (const uint16_t*)(uintptr_t)qabs_rows, (const uint16_t*)(uintptr_t)cache,
-                                       heads, 1u, LAT, first + b0, rows);
+        doors->attention_causal_scores_grouped((float*)(uintptr_t)p_rows, (const uint16_t*)(uintptr_t)qabs_rows, (const uint16_t*)(uintptr_t)cache,
+                                                       heads, 1u, LAT, first + b0, rows);
+        doors->attention_causal_softmax((float*)(uintptr_t)p_rows, heads, first + b0, rows);
         doors->attention_causal_mix((uint16_t*)(uintptr_t)olat_rows, (const float*)(uintptr_t)p_rows, (const uint16_t*)(uintptr_t)cache,
                                     heads, 1u, LAT, first + b0, rows, over);
         for (uint64_t r = 0u; r < rows; ++r)
@@ -862,8 +871,9 @@ static sys__heap_node ai_glm_5_3__mla_rows__zzabi_apply(const sys__heap_node* ar
         /* ⛳ the attention's own scale is 1/√latent and the model's 1/√head, so the absorbed query carries their ratio */
         doors->attention_absorb((uint16_t*)(uintptr_t)qabs, (const uint16_t*)(uintptr_t)(q + 2u * t * heads * NOPE),
                                 (const uint16_t*)(uintptr_t)kvb, heads, NOPE, LAT, stride, sqrtf((float)LAT / (float)NOPE), over);
-        doors->attention_scores((float*)(uintptr_t)at[AI_GLM_5_3__MLA__SCORES], (const uint16_t*)(uintptr_t)qabs,
-                                (const uint16_t*)(uintptr_t)src, heads, 1u, LAT, alen);
+        doors->attention_scores_grouped((float*)(uintptr_t)at[AI_GLM_5_3__MLA__SCORES], (const uint16_t*)(uintptr_t)qabs,
+                                        (const uint16_t*)(uintptr_t)src, heads, 1u, LAT, alen);
+        doors->attention_softmax_rows((float*)(uintptr_t)at[AI_GLM_5_3__MLA__SCORES], heads, alen);
         doors->attention_mix((uint16_t*)(uintptr_t)olat, (const float*)(uintptr_t)at[AI_GLM_5_3__MLA__SCORES],
                              (const uint16_t*)(uintptr_t)src, heads, 1u, LAT, alen, over);
         doors->attention_expand((uint16_t*)(uintptr_t)(vh + 2u * t * heads * VD), (const uint16_t*)(uintptr_t)olat,

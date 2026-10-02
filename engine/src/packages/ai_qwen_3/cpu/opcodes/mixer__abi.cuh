@@ -74,6 +74,9 @@ static sys__heap_node ai_qwen_3__deltanet__zzabi_apply(const sys__heap_node* arg
     doors->turboquant_gemv((uint16_t*)(uintptr_t)ao, (const uint8_t*)(uintptr_t)at[AI_QWEN_3__DN__OUT], room[AI_QWEN_3__DN__OUT],
                            (const uint8_t*)(uintptr_t)at[AI_QWEN_3__DN__OUT_LUT], room[AI_QWEN_3__DN__OUT_LUT],
                            (const uint16_t*)(uintptr_t)crot, v[AI_QWEN_3__DN__D_OUT], H, vdim, over);
+    const uint64_t masked = ai_qwen_3__table__zzpackage_masked(doors, over, argv[1].args[0], AI_QWEN_3__DN__MASK, ao, crot, 1u, H, vdim,
+                                                               AI_QWEN_3__MIXER__FAULT_TABLE);
+    if (masked != 0u) return sys__engine__abi__error(masked);
     doors->vector_add((uint16_t*)(uintptr_t)h1, (const uint16_t*)(uintptr_t)res, (const uint16_t*)(uintptr_t)ao, H, over);
     return nn__doors_answer(&argv[2]);
 }
@@ -126,18 +129,16 @@ static sys__heap_node ai_qwen_3__attention__zzabi_apply(const sys__heap_node* ar
     doors->turboquant_gemv((uint16_t*)(uintptr_t)vrow, (const uint8_t*)(uintptr_t)at[AI_QWEN_3__AT__V], room[AI_QWEN_3__AT__V],
                            (const uint8_t*)(uintptr_t)at[AI_QWEN_3__AT__V_LUT], room[AI_QWEN_3__AT__V_LUT],
                            (const uint16_t*)(uintptr_t)in, v[AI_QWEN_3__AT__D_V], kvw, H, over);
-    for (uint64_t k = 0u; k < qh; ++k) {        /* each head's query normed and rotated, its gate through a sigmoid */
-        const uint64_t q_in = qg + 2u * k * 2u * hd, q_out = qn + 2u * k * hd;
-        doors->rmsnorm((uint16_t*)(uintptr_t)q_out, (const uint16_t*)(uintptr_t)q_in, (const uint16_t*)(uintptr_t)at[AI_QWEN_3__AT__Q_NORM], hd, over);
-        doors->rope((uint16_t*)(uintptr_t)q_out, (const uint16_t*)(uintptr_t)q_out, (const float*)(uintptr_t)cs, 1u, rot, over);
-        doors->sigmoid((uint16_t*)(uintptr_t)(gate + 2u * k * hd), (const uint16_t*)(uintptr_t)(q_in + 2u * hd), hd, over);
-    }
-    for (uint64_t k = 0u; k < kvh; ++k) {       /* each key normed and rotated straight into its cache row */
-        const uint64_t k_out = krow + 2u * k * hd;
-        doors->rmsnorm((uint16_t*)(uintptr_t)k_out, (const uint16_t*)(uintptr_t)(kk + 2u * k * hd),
-                       (const uint16_t*)(uintptr_t)at[AI_QWEN_3__AT__K_NORM], hd, over);
-        doors->rope((uint16_t*)(uintptr_t)k_out, (const uint16_t*)(uintptr_t)k_out, (const float*)(uintptr_t)cs, 1u, rot, over);
-    }
+    /* every head's query normed and rotated in one launch each — a head a row, its query and gate side by side in
+     * `qg` — and each gate through a sigmoid; every key the same, straight into its cache row */
+    doors->rmsnorm_rows((uint16_t*)(uintptr_t)qn, (const uint16_t*)(uintptr_t)qg, (const uint16_t*)(uintptr_t)at[AI_QWEN_3__AT__Q_NORM],
+                        hd, qh, 2u * hd, hd, over);
+    doors->rope_rows((uint16_t*)(uintptr_t)qn, (const uint16_t*)(uintptr_t)qn, (const float*)(uintptr_t)cs, 1u, qh, hd, qw, rot, over);
+    for (uint64_t k = 0u; k < qh; ++k)
+        doors->sigmoid((uint16_t*)(uintptr_t)(gate + 2u * k * hd), (const uint16_t*)(uintptr_t)(qg + 2u * k * 2u * hd + 2u * hd), hd, over);
+    doors->rmsnorm_rows((uint16_t*)(uintptr_t)krow, (const uint16_t*)(uintptr_t)kk, (const uint16_t*)(uintptr_t)at[AI_QWEN_3__AT__K_NORM],
+                        hd, kvh, hd, hd, over);
+    doors->rope_rows((uint16_t*)(uintptr_t)krow, (const uint16_t*)(uintptr_t)krow, (const float*)(uintptr_t)cs, 1u, kvh, hd, kvw, rot, over);
     doors->attention_scores((float*)(uintptr_t)at[AI_QWEN_3__AT__SCORES], (const uint16_t*)(uintptr_t)qn,
                             (const uint16_t*)(uintptr_t)at[AI_QWEN_3__AT__K_CACHE], qh, kvh, hd, to);
     doors->attention_mix((uint16_t*)(uintptr_t)att, (const float*)(uintptr_t)at[AI_QWEN_3__AT__SCORES],
@@ -147,6 +148,9 @@ static sys__heap_node ai_qwen_3__attention__zzabi_apply(const sys__heap_node* ar
     doors->turboquant_gemv((uint16_t*)(uintptr_t)ao, (const uint8_t*)(uintptr_t)at[AI_QWEN_3__AT__O], room[AI_QWEN_3__AT__O],
                            (const uint8_t*)(uintptr_t)at[AI_QWEN_3__AT__O_LUT], room[AI_QWEN_3__AT__O_LUT],
                            (const uint16_t*)(uintptr_t)arot, v[AI_QWEN_3__AT__D_O], H, qw, over);
+    const uint64_t masked = ai_qwen_3__table__zzpackage_masked(doors, over, argv[1].args[0], AI_QWEN_3__AT__MASK, ao, arot, 1u, H, qw,
+                                                               AI_QWEN_3__MIXER__FAULT_TABLE);
+    if (masked != 0u) return sys__engine__abi__error(masked);
     doors->vector_add((uint16_t*)(uintptr_t)h1, (const uint16_t*)(uintptr_t)res, (const uint16_t*)(uintptr_t)ao, H, over);
     return nn__doors_answer(&argv[3]);
 }
@@ -270,18 +274,14 @@ static sys__heap_node ai_qwen_3__attention_tiered__zzabi_apply(const sys__heap_n
     doors->turboquant_gemv((uint16_t*)(uintptr_t)vt, (const uint8_t*)(uintptr_t)at[AI_QWEN_3__AT__V], room[AI_QWEN_3__AT__V],
                            (const uint8_t*)(uintptr_t)at[AI_QWEN_3__AT__V_LUT], room[AI_QWEN_3__AT__V_LUT],
                            (const uint16_t*)(uintptr_t)in, v[AI_QWEN_3__AT__D_V], kvw, H, over);
-    for (uint64_t k = 0u; k < qh; ++k) {
-        const uint64_t q_in = qg + 2u * k * 2u * hd, q_out = qn + 2u * k * hd;
-        doors->rmsnorm((uint16_t*)(uintptr_t)q_out, (const uint16_t*)(uintptr_t)q_in, (const uint16_t*)(uintptr_t)at[AI_QWEN_3__AT__Q_NORM], hd, over);
-        doors->rope((uint16_t*)(uintptr_t)q_out, (const uint16_t*)(uintptr_t)q_out, (const float*)(uintptr_t)cs, 1u, rot, over);
-        doors->sigmoid((uint16_t*)(uintptr_t)(gate + 2u * k * hd), (const uint16_t*)(uintptr_t)(q_in + 2u * hd), hd, over);
-    }
-    for (uint64_t k = 0u; k < kvh; ++k) {
-        const uint64_t k_out = kt + 2u * k * hd;
-        doors->rmsnorm((uint16_t*)(uintptr_t)k_out, (const uint16_t*)(uintptr_t)(kk + 2u * k * hd),
-                       (const uint16_t*)(uintptr_t)at[AI_QWEN_3__AT__K_NORM], hd, over);
-        doors->rope((uint16_t*)(uintptr_t)k_out, (const uint16_t*)(uintptr_t)k_out, (const float*)(uintptr_t)cs, 1u, rot, over);
-    }
+    doors->rmsnorm_rows((uint16_t*)(uintptr_t)qn, (const uint16_t*)(uintptr_t)qg, (const uint16_t*)(uintptr_t)at[AI_QWEN_3__AT__Q_NORM],
+                        hd, qh, 2u * hd, hd, over);
+    doors->rope_rows((uint16_t*)(uintptr_t)qn, (const uint16_t*)(uintptr_t)qn, (const float*)(uintptr_t)cs, 1u, qh, hd, qw, rot, over);
+    for (uint64_t k = 0u; k < qh; ++k)
+        doors->sigmoid((uint16_t*)(uintptr_t)(gate + 2u * k * hd), (const uint16_t*)(uintptr_t)(qg + 2u * k * 2u * hd + 2u * hd), hd, over);
+    doors->rmsnorm_rows((uint16_t*)(uintptr_t)kt, (const uint16_t*)(uintptr_t)kk, (const uint16_t*)(uintptr_t)at[AI_QWEN_3__AT__K_NORM],
+                        hd, kvh, hd, hd, over);
+    doors->rope_rows((uint16_t*)(uintptr_t)kt, (const uint16_t*)(uintptr_t)kt, (const float*)(uintptr_t)cs, 1u, kvh, hd, kvw, rot, over);
     /* ② the query rotated; this key and value rotated into their place, what they displace cooled first */
     doors->hadamard_blocks((uint16_t*)(uintptr_t)qr, (const uint16_t*)(uintptr_t)qn, (const uint16_t*)(uintptr_t)signs, qw, hd, 0u, over);
     uint64_t kdst = at[AI_QWEN_3__AT__K_CACHE] + 2u * pos * kvw, vdst = at[AI_QWEN_3__AT__V_CACHE] + 2u * pos * kvw;
@@ -351,6 +351,9 @@ static sys__heap_node ai_qwen_3__attention_tiered__zzabi_apply(const sys__heap_n
     doors->turboquant_gemv((uint16_t*)(uintptr_t)ao, (const uint8_t*)(uintptr_t)at[AI_QWEN_3__AT__O], room[AI_QWEN_3__AT__O],
                            (const uint8_t*)(uintptr_t)at[AI_QWEN_3__AT__O_LUT], room[AI_QWEN_3__AT__O_LUT],
                            (const uint16_t*)(uintptr_t)arot, v[AI_QWEN_3__AT__D_O], H, qw, over);
+    const uint64_t masked = ai_qwen_3__table__zzpackage_masked(doors, over, argv[1].args[0], AI_QWEN_3__AT__MASK, ao, arot, 1u, H, qw,
+                                                               AI_QWEN_3__MIXER__FAULT_TABLE);
+    if (masked != 0u) return sys__engine__abi__error(masked);
     doors->vector_add((uint16_t*)(uintptr_t)h1, (const uint16_t*)(uintptr_t)res, (const uint16_t*)(uintptr_t)ao, H, over);
     return nn__doors_answer(&argv[3]);
 }

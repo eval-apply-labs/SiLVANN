@@ -684,6 +684,119 @@ static __device__ inline void nn__attention__zzprivate_scores_head(float* ph, co
     for (uint64_t t = lane; t < length; t += lanes) ph[t] *= inv;
 }
 
+/* ⭐⭐ THE SCORES OF A KV HEAD'S QUERY HEADS TOGETHER — `attention_scores` without its softmax, the keys read once for
+ *   every query head that shares them. ⚖ planned from an outside review: GLM's latent attention has 64 query heads on one
+ *   kv head, and `attention_scores` gives each head its own block, which reads the whole cache again — and walks each
+ *   position's row on one lane, so the lanes of a wave read rows a whole row apart. `MEASURED` on the MI50 at that shape
+ *   (64 heads, one kv head of 512), 4,096 positions: 12.1 ms, the cache read at ~22 GB/s. ▶ the commit.
+ * Here a lane is a query head, and the lanes beside it the other heads of its kv head: every lane of a wave reads the
+ * same key element at once, so a key is read once for the group, and each lane keeps its query's row in its cache. A
+ * lane scores `NN__ATTENTION__GROUP_SPAN` positions, two halves a step through `dot2`: on a family whose `dot2` keeps
+ * the column order the scores are `attention_scores`' bit for bit; a card's two-way dot instruction may round the pair
+ * once rather than twice. `attention_softmax_rows` then makes each head's row its softmax. Into `p` a row a query head,
+ * `length` apart. */
+#define NN__ATTENTION__GROUP_SPAN 8u
+static __device__ inline void nn__attention__zzprivate_dots(float* dot, const uint16_t* qh, const uint16_t* kh, uint64_t row,
+                                                            uint64_t head_dim, uint64_t t0, uint64_t span);   /* below */
+static __device__ inline void nn__attention__zzabi_body_scores_grouped(float* p, const uint16_t* q, const uint16_t* k,
+                                                                        uint64_t q_heads, uint64_t kv_heads,
+                                                                        uint64_t head_dim, uint64_t length) {
+    const uint64_t group = q_heads / kv_heads, row = kv_heads * head_dim;
+    const uint64_t tiles = (length + NN__ATTENTION__GROUP_SPAN - 1ull) / NN__ATTENTION__GROUP_SPAN;
+    const float scale = 1.0f / nn__silicon__sqrtf((float)head_dim);
+    /* an item a (kv head, tile of positions, query head of the group), the query heads innermost — the lanes of a wave */
+    for (uint64_t it = nn__kernels__zzprivate_first(); it < kv_heads * tiles * group; it += nn__kernels__zzprivate_stride()) {
+        const uint64_t hg = it % group, rest = it / group, tile = rest % tiles, g = rest / tiles;
+        const uint64_t h = g * group + hg, t0 = tile * NN__ATTENTION__GROUP_SPAN;
+        const uint16_t* qh = q + h * head_dim;
+        const uint16_t* kh = k + g * head_dim;
+        float dot[NN__ATTENTION__GROUP_SPAN];
+        const uint64_t span = length - t0 < NN__ATTENTION__GROUP_SPAN ? length - t0 : NN__ATTENTION__GROUP_SPAN;
+        nn__attention__zzprivate_dots(dot, qh, kh, row, head_dim, t0, span);
+        for (uint64_t j = 0ull; j < span; ++j) p[h * length + t0 + j] = dot[j] * scale;
+    }
+}
+
+/* The dot of one query head with `span` consecutive key rows from `t0`, two halves a step through `dot2` where it can be
+ * — `attention_scores_grouped`'s inner work, which the causal one shares. */
+static __device__ inline void nn__attention__zzprivate_dots(float* dot, const uint16_t* qh, const uint16_t* kh, uint64_t row,
+                                                            uint64_t head_dim, uint64_t t0, uint64_t span) {
+    for (uint64_t j = 0ull; j < span; ++j) dot[j] = 0.0f;
+    if (head_dim % 2ull == 0ull && row % 2ull == 0ull && ((uintptr_t)qh) % 4u == 0u && ((uintptr_t)kh) % 4u == 0u) {
+        const uint32_t* q2 = (const uint32_t*)qh;
+        const uint32_t* k2 = (const uint32_t*)kh;
+        for (uint64_t e = 0ull; e < head_dim / 2ull; ++e) {
+            const uint32_t qe = q2[e];
+            for (uint64_t j = 0ull; j < span; ++j) dot[j] = nn__silicon__dot2(qe, k2[((t0 + j) * row) / 2ull + e], dot[j]);
+        }
+    } else {
+        for (uint64_t e = 0ull; e < head_dim; ++e) {
+            const float qe = nn__silicon__half_to_float(qh[e]);
+            for (uint64_t j = 0ull; j < span; ++j) dot[j] += qe * nn__silicon__half_to_float(kh[(t0 + j) * row + e]);
+        }
+    }
+}
+
+/* ⭐ THE CAUSAL SCORES GROUPED — `attention_causal_scores` without its softmax, a prompt's `rows` queries at positions
+ *   `first`, `first + 1`, … each over the cache up to itself, the lanes of a wave a kv head's query heads (▶ the grouped
+ *   scores above). Row `r`, head `h`'s scores at `p + (r · q_heads + h) · (first + rows)`; `attention_causal_softmax`
+ *   then makes each its softmax over its own length. */
+static __device__ inline void nn__attention__zzabi_body_causal_scores_grouped(float* p, const uint16_t* q, const uint16_t* k,
+                                                                               uint64_t q_heads, uint64_t kv_heads, uint64_t head_dim,
+                                                                               uint64_t first, uint64_t rows) {
+    const uint64_t group = q_heads / kv_heads, row = kv_heads * head_dim, span_all = first + rows;
+    const uint64_t tiles = (span_all + NN__ATTENTION__GROUP_SPAN - 1ull) / NN__ATTENTION__GROUP_SPAN;
+    const float scale = 1.0f / nn__silicon__sqrtf((float)head_dim);
+    for (uint64_t it = nn__kernels__zzprivate_first(); it < rows * kv_heads * tiles * group; it += nn__kernels__zzprivate_stride()) {
+        const uint64_t hg = it % group, rest = it / group, tile = rest % tiles, rg = rest / tiles, g = rg % kv_heads, r = rg / kv_heads;
+        const uint64_t len = first + r + 1ull, t0 = tile * NN__ATTENTION__GROUP_SPAN;
+        if (t0 >= len) continue;
+        const uint64_t h = g * group + hg, span = len - t0 < NN__ATTENTION__GROUP_SPAN ? len - t0 : NN__ATTENTION__GROUP_SPAN;
+        float dot[NN__ATTENTION__GROUP_SPAN];
+        nn__attention__zzprivate_dots(dot, q + (r * q_heads + h) * head_dim, k + g * head_dim, row, head_dim, t0, span);
+        for (uint64_t j = 0ull; j < span; ++j) p[(r * q_heads + h) * span_all + t0 + j] = dot[j] * scale;
+    }
+}
+
+/* ⭐ Each causal row's softmax in place: row `i` (query row `i / q_heads`) is `first + i / q_heads + 1` long, the rows
+ *   `first + rows` apart — a block a row, as `attention_softmax_rows`. */
+static __device__ inline void nn__attention__zzabi_body_causal_softmax(float* p, uint64_t q_heads, uint64_t first, uint64_t rows) {
+    const uint64_t lane = nn__silicon__lane(), lanes = nn__silicon__lanes(), span_all = first + rows;
+    for (uint64_t i = nn__silicon__block(); i < rows * q_heads; i += nn__silicon__blocks()) {
+        float* ph = p + i * span_all;
+        const uint64_t length = first + i / q_heads + 1ull;
+        float top = -NN__KERNELS__INFINITY;
+        for (uint64_t t = lane; t < length; t += lanes) if (ph[t] > top) top = ph[t];
+        top = nn__silicon__lanes_max(top);
+        float part = 0.0f;
+        for (uint64_t t = lane; t < length; t += lanes) {
+            ph[t] = nn__silicon__expf(ph[t] - top);
+            part += ph[t];
+        }
+        const float inv = 1.0f / nn__silicon__lanes_sum(part);
+        for (uint64_t t = lane; t < length; t += lanes) ph[t] *= inv;
+    }
+}
+
+/* ⭐ Each of `rows` rows of `p` (`length` apart) made its softmax in place: its largest, then e^(x − largest), then over their
+ *   sum — `attention_scores`' own second half, a block a row. */
+static __device__ inline void nn__attention__zzabi_body_softmax_rows(float* p, uint64_t rows, uint64_t length) {
+    const uint64_t lane = nn__silicon__lane(), lanes = nn__silicon__lanes();
+    for (uint64_t r = nn__silicon__block(); r < rows; r += nn__silicon__blocks()) {
+        float* ph = p + r * length;
+        float top = -NN__KERNELS__INFINITY;
+        for (uint64_t t = lane; t < length; t += lanes) if (ph[t] > top) top = ph[t];
+        top = nn__silicon__lanes_max(top);
+        float part = 0.0f;
+        for (uint64_t t = lane; t < length; t += lanes) {
+            ph[t] = nn__silicon__expf(ph[t] - top);
+            part += ph[t];
+        }
+        const float inv = 1.0f / nn__silicon__lanes_sum(part);
+        for (uint64_t t = lane; t < length; t += lanes) ph[t] *= inv;
+    }
+}
+
 static __device__ inline void nn__attention__zzabi_body_scores(float* p, const uint16_t* q, const uint16_t* k,
                                                                 uint64_t q_heads, uint64_t kv_heads,
                                                                 uint64_t head_dim, uint64_t length) {
@@ -2632,6 +2745,56 @@ static __device__ inline void nn__index__zzabi_body_gather(uint16_t* out, const 
 /* `out[i] = in[i]` for `n` halves — a gather's rows moved into place. */
 static __device__ inline void nn__vector__zzabi_body_copy(uint16_t* out, const uint16_t* in, uint64_t n) {
     for (uint64_t i = nn__kernels__zzprivate_first(); i < n; i += nn__kernels__zzprivate_stride()) out[i] = in[i];
+}
+
+/* ══ ⭐ A RANK-1 MASK — `W' = W + r·vᵀ`, APPLIED BESIDE THE MATRIX IT CHANGES ═══════════════════════════════
+ *
+ * A changed model kept as the one direction each of its matrices moved (an abliteration, ▶ `python/nn_rank1_mask.py`)
+ * adds `r · (v · x)` to what `W · x` gave. Three steps, so that every caller keeps its own layout of picks and rows:
+ * the dots, then either rounded onto rows of halves or spread onto an fp32 sum.
+ * ⛳ `v` is kept rotated as the matrix's input is, so each dot is taken on the rotated input the verb already has. */
+
+/* `s[j] = w_j · (v_j · x_j)`, a block a `j`: `x_j` is at `x + j · x_stride`, `v_j` is row `which[j]` of `v` (row 0 when
+ * `which` is null), and `w_j` is the half `w[w_at[j]]` — `w[j · w_stride]` when `w_at` is null, 1 when `w` is. */
+static __device__ inline void nn__rank1__zzabi_body_dots(float* s, const uint16_t* v, const uint32_t* which, const uint16_t* x,
+                                                        const uint16_t* w, const uint32_t* w_at, uint64_t n, uint64_t cols,
+                                                        uint64_t x_stride, uint64_t w_stride) {
+    for (uint64_t j = nn__silicon__block(); j < n; j += nn__silicon__blocks()) {
+        const uint16_t* vj = v + (which != 0 ? (uint64_t)which[j] : 0ull) * cols;
+        const uint16_t* xj = x + j * x_stride;
+        float part = 0.0f;
+        for (uint64_t c = nn__silicon__lane(); c < cols; c += nn__silicon__lanes())
+            part += nn__silicon__half_to_float(vj[c]) * nn__silicon__half_to_float(xj[c]);
+        const float dot = nn__silicon__lanes_sum(part);
+        if (nn__silicon__lane() == 0ull) {
+            const float wj = w == 0 ? 1.0f : nn__silicon__half_to_float(w[w_at != 0 ? (uint64_t)w_at[j] : j * w_stride]);
+            s[j] = wj * dot;
+        }
+    }
+}
+
+/* `out[t · out_stride + i] += r[i] · (s[t·per] + … + s[t·per + per - 1])` for `n` rows of `rows` halves, rounded once. */
+static __device__ inline void nn__rank1__zzabi_body_add(uint16_t* out, const uint16_t* r, const float* s, uint64_t n, uint64_t per,
+                                                       uint64_t rows, uint64_t out_stride, unsigned int* over) {
+    for (uint64_t e = nn__kernels__zzprivate_first(); e < n * rows; e += nn__kernels__zzprivate_stride()) {
+        const uint64_t t = e / rows, i = e - t * rows;
+        float st = 0.0f;
+        for (uint64_t k = 0ull; k < per; ++k) st += s[t * per + k];
+        uint16_t* o = out + t * out_stride + i;
+        bool hit = false;
+        *o = nn__primitives__zzpackage_float_to_half(nn__silicon__half_to_float(*o) + nn__silicon__half_to_float(r[i]) * st, &hit);
+        if (hit) *over = NN__KERNELS__OVERFLOWED;
+    }
+}
+
+/* `acc[row_of[j · row_stride] · rows + i] += r[i] · s[j]` for every `j`, onto an fp32 sum. A lane an element, walking
+ * the `j` in order, so two picks of one row never race and the sum's order is fixed. */
+static __device__ inline void nn__rank1__zzabi_body_spread(float* acc, const uint16_t* r, const float* s, const uint32_t* row_of,
+                                                          uint64_t n, uint64_t rows, uint64_t row_stride) {
+    for (uint64_t i = nn__kernels__zzprivate_first(); i < rows; i += nn__kernels__zzprivate_stride()) {
+        const float ri = nn__silicon__half_to_float(r[i]);
+        for (uint64_t j = 0ull; j < n; ++j) acc[(uint64_t)row_of[j * row_stride] * rows + i] += ri * s[j];
+    }
 }
 
 #endif /* SILVANN__PACKAGES_NN_GPU_KERNELS_KERNELS_CUH */

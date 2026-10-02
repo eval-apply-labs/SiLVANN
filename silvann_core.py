@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parent
 _HERE = ROOT / "runtime" if (ROOT / "runtime").is_dir() else ROOT.parent / "backstage" / "python"
 sys.path.insert(0, os.environ.get("SILVANN_RUNTIME", str(_HERE)))
 from silvann_runtime.fetch import KNOWN, ensure_model, present     # noqa: E402
+from silvann_runtime.model_folder import Refused                   # noqa: E402
 
 MODELS = ROOT / "models"
 DEFAULT_CONFIG = {"max_context": 32768, "lora": None, "thinking": True, "sampler": "generation", "options": {}}
@@ -30,11 +31,19 @@ TOKENS_PER_100MB = {
 }
 
 
+# the runtime options a model boots with unless its config says otherwise: the 122B's experts (54 GB) do not fit a card
+# it is meant for, so they start on the CPU, in RAM or read from the disk by the memory there is
+OPTIONS = {
+    "Qwen3.5-122B-A10B_silvann_tq_D8E4": {"experts_on": "cpu", "experts_from": "auto"},
+    "Qwen3.5-122B-A10B_silvann_tq_D4E4": {"experts_on": "cpu", "experts_from": "auto"},
+}
+
+
 def default_config(folder):
     """`configs/default.json` in a model folder, written when it has none."""
     cfg = Path(folder) / "configs" / "default.json"
     if not cfg.exists():
-        config = dict(DEFAULT_CONFIG)
+        config = dict(DEFAULT_CONFIG, options=dict(OPTIONS.get(Path(folder).name, {})))
         per = TOKENS_PER_100MB.get(Path(folder).name)
         if per:
             config = {"_note": "max_context is the longest conversation, and its cache is on the card from boot: "
@@ -47,7 +56,10 @@ def default_config(folder):
 
 def main(argv):
     if len(argv) >= 2 and argv[0] == "download-model":
-        folder = ensure_model(str(MODELS / argv[1]), yes=True)
+        try:
+            folder = ensure_model(str(MODELS / argv[1]), yes=True)
+        except Refused as ex:
+            raise SystemExit(str(ex))
         print("%s is in %s — configs: %s" % (argv[1], folder, default_config(folder)))
         return 0
     if argv[:1] == ["list-models"]:

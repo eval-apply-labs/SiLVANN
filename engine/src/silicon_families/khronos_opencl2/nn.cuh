@@ -33,13 +33,18 @@ typedef struct khronos_opencl2__kernel {
     cl_kernel   kernel;
 } khronos_opencl2__kernel;
 
-#define KHRONOS_OPENCL2__KERNELS_MAX  64u
+/* ⭐ AND HOW MANY KERNELS IT HOLDS — every package's with doors, as the build wrote them — which sizes each card's table
+ *   of made kernels. ⛳ THE BUILD COUNTS THEM BECAUSE ONLY IT KNOWS: it writes a kernel for each door row of each package
+ *   that has doors, nn's today and a model package's the day one has a fused body. A written 64 here once stood while
+ *   nn alone grew to 80, and a kernel past the 64th was never made: its launch did nothing. */
+extern "C" const unsigned khronos_opencl2__kernel_count;
+
 /* ⛳ ONE PROGRAM AND ONE SET OF KERNELS PER CARD, because each card has its own context (`sys.cuh`) and a
- *   program belongs to one. */
-static cl_program              khronos_opencl2__zzprivate_program[KHRONOS_OPENCL2__DEVICES_MAX];
-static bool                    khronos_opencl2__zzprivate_tried[KHRONOS_OPENCL2__DEVICES_MAX];
-static khronos_opencl2__kernel khronos_opencl2__zzprivate_kernels[KHRONOS_OPENCL2__DEVICES_MAX][KHRONOS_OPENCL2__KERNELS_MAX];
-static uint32_t                khronos_opencl2__zzprivate_kernel_count[KHRONOS_OPENCL2__DEVICES_MAX];
+ *   program belongs to one. The table is made with the program. */
+static cl_program               khronos_opencl2__zzprivate_program[KHRONOS_OPENCL2__DEVICES_MAX];
+static bool                     khronos_opencl2__zzprivate_tried[KHRONOS_OPENCL2__DEVICES_MAX];
+static khronos_opencl2__kernel* khronos_opencl2__zzprivate_kernels[KHRONOS_OPENCL2__DEVICES_MAX];
+static uint32_t                 khronos_opencl2__zzprivate_kernel_count[KHRONOS_OPENCL2__DEVICES_MAX];
 
 /* A card's program, built once, under the lock. A build that fails says why on stderr, once, and every
  * launch on that card after it does nothing — the verb's result then fails its own check. */
@@ -64,22 +69,41 @@ static inline bool khronos_opencl2__zzprivate_program_up(khronos_opencl2__state*
         (void)clReleaseProgram(p);
         return false;
     }
+    khronos_opencl2__zzprivate_kernels[card] =
+        (khronos_opencl2__kernel*)calloc(khronos_opencl2__kernel_count, sizeof(khronos_opencl2__kernel));
+    if (khronos_opencl2__zzprivate_kernels[card] == 0) { (void)clReleaseProgram(p); return false; }
     khronos_opencl2__zzprivate_program[card] = p;
     return true;
 }
 
 /* The kernel called `name` on `card`, made on first use. */
 static inline cl_kernel khronos_opencl2__zzprivate_kernel(khronos_opencl2__state* s, uint32_t card, const char* name) {
-    khronos_opencl2__kernel* ks = khronos_opencl2__zzprivate_kernels[card];
     uint32_t* count = &khronos_opencl2__zzprivate_kernel_count[card];
+    if (!khronos_opencl2__zzprivate_program_up(s, card)) return 0;
+    khronos_opencl2__kernel* ks = khronos_opencl2__zzprivate_kernels[card];
     for (uint32_t i = 0u; i < *count; ++i)
         if (strcmp(ks[i].name, name) == 0) return ks[i].kernel;
-    if (!khronos_opencl2__zzprivate_program_up(s, card) || *count == KHRONOS_OPENCL2__KERNELS_MAX) return 0;
+    if (*count == khronos_opencl2__kernel_count) return 0;
     cl_int err = CL_SUCCESS;
     cl_kernel k = clCreateKernel(khronos_opencl2__zzprivate_program[card], name, &err);
-    if (err != CL_SUCCESS) return 0;
+    /* ⛳ A KERNEL THE PROGRAM DOES NOT HAVE IS REMEMBERED TOO, as a null one — an override's where the driver has no
+     *   sub-groups — so asking again costs a lookup and not a `clCreateKernel` a launch. */
+    if (err != CL_SUCCESS) k = 0;
     ks[*count].name = name; ks[*count].kernel = k; ++*count;
     return k;
+}
+
+/* ⭐ WHETHER THE BOUND CARD'S PROGRAM HAS THE KERNEL CALLED `name` — the family's overrides ask, since theirs are left out
+ * where the driver has no sub-groups (`overrides/kernels.cuh`). Answered from the table of made kernels after the first
+ * time, under the lock. */
+static inline bool khronos_opencl2__zzpackage_has_kernel(const char* name) {
+    khronos_opencl2__state* s = khronos_opencl2__zzpackage_up();
+    if (s == 0) return false;
+    pthread_mutex_lock(&s->lock);
+    const uint32_t card = khronos_opencl2__bound_device();
+    const bool has = card < s->count && khronos_opencl2__zzprivate_kernel(s, card, name) != 0;
+    pthread_mutex_unlock(&s->lock);
+    return has;
 }
 
 /* The bound card's live allocations, gathered for a launch — the ones its kernels may be handed. Under the

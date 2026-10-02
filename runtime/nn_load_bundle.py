@@ -47,6 +47,7 @@ SAME object with the second half empty: one slice, `[data | lut]`, and `down_byt
 address the card chose. ▶ `RESUME.md`, the open question.
 """
 
+import hashlib
 import json
 import os
 import pickle
@@ -121,9 +122,24 @@ class Bundle:
         #   we say it in the json which lora we want"*. ⛔ Refused unless it was made from this bundle's model and packed
         #   the way this bundle was — named by identity, because a record quantised another way decodes as a
         #   plausible wrong matrix. A path to an overlay elsewhere is accepted too; the identity decides either way.
-        self.lora, self.overlay = None, None
+        self.lora, self.overlay, self.mask = None, None, None
+        where = (lora if os.sep in lora else os.path.join(path, "loras", lora)) if lora else None
+        # ⭐ OR A RANK-1 MASK — a changed model kept as `W + r·vᵀ` for each matrix it changed (`nn_rank1_mask.py`), applied
+        #   by the verbs beside the matrices rather than written into them. ⛔ Refused unless it was made from this
+        #   bundle's model with its residual kept the same way: its `v` is rotated as this bundle's inputs are.
+        if where and os.path.isfile(os.path.join(where, "mask.json")):
+            mj = json.load(open(os.path.join(where, "mask.json")))
+            mine = dict(index_sha=self.manifest["source"]["index_sha"], residual=self.manifest.get("residual") or "plain")
+            theirs = dict(index_sha=(mj.get("base") or {}).get("index_sha"), residual=mj.get("residual"))
+            if mj.get("kind") != "rank1-mask" or theirs != mine:
+                raise Refused("the mask %r was made for another base: %r, this bundle's %r" % (lora, theirs, mine))
+            tensors = os.path.join(where, "mask.safetensors")
+            with open(tensors, "rb") as fh:
+                sha = hashlib.sha256(fh.read()).hexdigest()[:16]
+            self.mask = dict(name=mj["name"], path=tensors, layers=mj.get("layers", {}))
+            self.lora = dict(name=mj["name"], adapter=dict(weights_sha=sha, kind="rank1-mask"))
+            lora = None
         if lora:
-            where = lora if os.sep in lora else os.path.join(path, "loras", lora)
             self.overlay = Bundle(where)
             om = self.overlay.manifest.get("overlay")
             if om is None:
@@ -144,19 +160,20 @@ class Bundle:
         right for every checkpoint this tree has ever seen and wrong for the first plain-convention one,
         with no symptom but a model that answers badly. ⇒ ★ A CONSTANT THAT IS RIGHT FOR EVERY INPUT SO
         FAR IS THE HARDEST KIND TO FIND WRONG. `None` here makes `gain_offset` REFUSE rather than guess.
-        ⛳ THE PREDICATE IS `src_old`'s, verbatim in effect: `model_type.startswith("qwen3")`."""
+        ⛳ THE PREDICATE IS `src_old`'s, verbatim in effect: `model_type.startswith("qwen3")`.
+        ⛔⛔ AND THE CONFIG IS THE BUNDLE'S OWN FIRST — the model's files are carried into it (`nn_pack_model.py`) — and the
+        raw model's only when the bundle has none. `source.path` names a folder on the machine that packed it: it does not
+        exist where a bundle is downloaded to, and is gone here once the raw weights are deleted, and reading only it
+        refused every Qwen and GLM bundle on any other machine (`MEASURED`: the 35B, its raw folder deleted, `None`)."""
         src = (self.manifest.get("source") or {}).get("path")
-        if not src:
-            return None
-        cfg = os.path.join(src, "config.json")
-        if not os.path.exists(cfg):
-            return None
-        try:
-            man = json.load(open(cfg))
-        except (ValueError, OSError):
-            return None
-        mt = str((man.get("text_config") or man).get("model_type") or man.get("model_type") or "")
-        return 1.0 if mt.startswith("qwen3") else 0.0
+        for cfg in [os.path.join(self.path, "config.json")] + ([os.path.join(src, "config.json")] if src else []):
+            try:
+                man = json.load(open(cfg))
+            except (ValueError, OSError):
+                continue
+            mt = str((man.get("text_config") or man).get("model_type") or man.get("model_type") or "")
+            return 1.0 if mt.startswith("qwen3") else 0.0
+        return None
 
     def gain_offset(self, short_name):
         """What to add to this tensor's weights before they go on the card. ⛳ 0.0 for anything that is

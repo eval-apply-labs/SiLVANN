@@ -313,7 +313,12 @@ static inline void x86_avx2__zzpackage_bind(uint32_t device) {
 /* ⭐ ONE LAUNCH: `blocks` runs of `fn(arg)`, spread over the pool and the caller, returning when all are done.
  * ⛳ One launch at a time a pool: the caller is the worker that bound its device, and nn's doors are called from
  * it in order. Two workers on two devices launch at once, each on its own pool. */
+static inline void x86_avx2__zzprivate_run_body(uint32_t blocks, void (*fn)(void*), void* arg);
 static inline void x86_avx2__zzpackage_run(uint32_t blocks, void (*fn)(void*), void* arg) {
+    x86_avx2__zzprivate_run_body(blocks, fn, arg);
+}
+
+static inline void x86_avx2__zzprivate_run_body(uint32_t blocks, void (*fn)(void*), void* arg) {
     x86_avx2__pool* p = x86_avx2__zzpackage_start();
     if (blocks == 0u) return;
     if (p->workers == 0u || blocks == 1u) {

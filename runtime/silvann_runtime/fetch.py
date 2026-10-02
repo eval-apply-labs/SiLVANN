@@ -17,6 +17,9 @@ from .model_folder import Refused
 
 KNOWN = {
     "Qwen3.6-35B-A3B_silvann_tq_D8E4": ("eval-apply/Qwen3.6-35B-A3B_silvann_tq_D8E4", "20 GB"),
+    "Qwen3.6-35B-A3B_silvann_tq_D4E4": ("eval-apply/Qwen3.6-35B-A3B_silvann_tq_D4E4", "19 GB"),
+    "Qwen3.5-122B-A10B_silvann_tq_D8E4": ("eval-apply/Qwen3.5-122B-A10B_silvann_tq_D8E4", "67 GB"),
+    "Qwen3.5-122B-A10B_silvann_tq_D4E4": ("eval-apply/Qwen3.5-122B-A10B_silvann_tq_D4E4", "65 GB"),
     "Qwen3.8-27B_silvann_tq_D4": ("eval-apply/Qwen3.8-27B_silvann_tq_D4", "16 GB"),
     "GLM-5.3-Flash_silvann_tq_D4E4": ("eval-apply/GLM-5.3-Flash_silvann_tq_D4E4", "151 GB"),
 }

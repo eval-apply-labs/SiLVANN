@@ -30,6 +30,36 @@ static bool ai_qwen_3__table__zzpackage_flag(uint64_t table, unsigned index) {
     return n.dtype == SYS__KIND__VALUE_INT && n.args[0] == 1ull;
 }
 
+/* ⭐ A RANK-1 MASK'S THREE CELLS at `first` — its `r`, its `v` and its scratch, as addresses and rooms — or none. None is
+ * a table that stops short of them or an integer 0 in the first; `*present` says which. False on anything else. */
+static bool ai_qwen_3__table__zzpackage_mask(uint64_t table, unsigned first, uint64_t* at, uint64_t* room, bool* present) {
+    *present = false;
+    if (sys__node_array__length(table) <= first) return true;
+    const sys__heap_node r = sys__node_array__borrow(table, first);
+    if (r.dtype == SYS__KIND__VALUE_INT && r.args[0] == 0ull) return true;
+    if (sys__node_array__length(table) < first + 3u) return false;
+    for (unsigned i = 0u; i < 3u; ++i) {
+        const sys__heap_node n = sys__node_array__borrow(table, first + i);
+        if (!nn__primitives__room(&n, &at[i], &room[i])) return false;
+    }
+    *present = true;
+    return true;
+}
+
+/* ⭐ THE MASK ON A PROJECTION'S ANSWER, when the table carries one at `first`: `ao` (`T` rows of `H`) += `r · (v · x)`, `x`
+ * the projection's input (`cols` a row, rotated). 0, or `fault` when a cell is not what it should be. */
+static uint64_t ai_qwen_3__table__zzpackage_masked(const nn__doors* doors, unsigned int* over, uint64_t table, unsigned first,
+                                                   uint64_t ao, uint64_t x, uint64_t T, uint64_t H, uint64_t cols, uint64_t fault) {
+    uint64_t mk[3], mroom[3];
+    bool present = false;
+    if (!ai_qwen_3__table__zzpackage_mask(table, first, mk, mroom, &present)) return fault;
+    if (!present) return 0u;
+    if (!nn__primitives__fits(H, mroom[0]) || !nn__primitives__fits(cols, mroom[1]) || mroom[2] < 4u * T) return fault;
+    doors->rank1_dots((float*)(uintptr_t)mk[2], (const uint16_t*)(uintptr_t)mk[1], 0, (const uint16_t*)(uintptr_t)x, 0, 0, T, cols, cols, 0u);
+    doors->rank1_add((uint16_t*)(uintptr_t)ao, (const uint16_t*)(uintptr_t)mk[0], (const float*)(uintptr_t)mk[2], T, 1u, H, H, over);
+    return 0u;
+}
+
 /* The router's `k` largest of `n` logits: their indices into the first `k` elements of `picks` (a node array)
  * and into `chosen`, their softmax into `weights`. The card writes the nodes itself when the heap is
  * registered with it, and a card buffer lands them otherwise — `nn__vector__top_k`'s two paths. Waits for

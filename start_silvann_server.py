@@ -205,12 +205,14 @@ def _describe(cid, x_web_user_id=None):
 # ── boot ────────────────────────────────────────────────────────────────────────────────────────────────────
 def _boot(args):
     folder = Path(ensure_model(args.model))
-    cfg = {}
     if args.config:
         p = Path(args.config)
         if not p.exists():
             p = folder / "configs" / args.config
-        cfg = json.load(open(p))
+    else:
+        from silvann_core import default_config                              # the folder's own, written if absent
+        p = default_config(folder)
+    cfg = json.load(open(p))
     S.config = cfg
     t0 = time.time()
     S.model = SR.open_model(str(folder), lora=cfg.get("lora"), max_context=int(cfg.get("max_context", 32768)),
@@ -567,7 +569,10 @@ def main():
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8765)          # the port the UI looks for by default
     args = p.parse_args()
-    _boot(args)
+    try:
+        _boot(args)
+    except SR.Refused as ex:                                  # a model not here, a config not found: said, not traced
+        raise SystemExit(str(ex))
     import uvicorn
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
 
