@@ -326,13 +326,14 @@ static __device__ inline bool nn__expert__zzprivate_type_row(uint64_t up_bytes,
         const uint64_t count = (slots - first < NN__EXPERT__LINKS_PER_PAGE) ? slots - first : NN__EXPERT__LINKS_PER_PAGE;
         const uint64_t page = sys__node_array__create(count);
         if (page == 0ull) return false;
-        bool filled = true;
-        for (uint64_t k = 0ull; filled && k < count; ++k) {
+        sys__node_array_walk lw;
+        bool filled = sys__node_array__walk(page, 0ull, &lw);
+        for (uint64_t k = 0ull; filled && k < count; ++k, sys__node_array__next(&lw)) {
             const uint64_t i = first + k;
             sys__heap_node link = sys__heap_node__nothing();
             link.dtype = SYS__KIND__VALUE_INT; link.num_args = 0u; link.op_code = 0ull;
             link.args[0] = (i + 1ull < slots) ? (i + 2ull) : NN__EXPERT__TYPE_FREE_NONE;
-            filled = sys__node_array__set(page, k, &link);
+            filled = sys__node_array__walk_set(&lw, &link);
         }
         const sys__heap_node held = sys__heap_object__reference_to(page);
         filled = filled && sys__node_array__set(*link_pages, p, &held);
@@ -489,12 +490,14 @@ static __device__ inline bool nn__expert__zzpackage_stand_index(uint64_t layers)
         const uint64_t ends = sys__node_array__create((uint64_t)NN__EXPERT__MAX_TYPES);
         if (ends == 0ull) { (void)sys__heap_object__release(band); ok = false; break; }
 
-        for (uint64_t t = 0ull; ok && t < (uint64_t)NN__EXPERT__MAX_TYPES; ++t) {
+        sys__node_array_walk ew;
+        ok = sys__node_array__walk(ends, 0ull, &ew);
+        for (uint64_t t = 0ull; ok && t < (uint64_t)NN__EXPERT__MAX_TYPES; ++t, sys__node_array__next(&ew)) {
             sys__heap_node row;
             row.dtype = SYS__KIND__VALUE_INT; row.num_args = 0u; row.op_code = 0ull;
             row.args[0] = 0ull; row.args[1] = 0ull; row.args[2] = 0ull;
             row.args[3] = 0ull; row.args[4] = 0ull; row.args[5] = 0ull;
-            ok = sys__node_array__set(ends, t, &row);
+            ok = sys__node_array__walk_set(&ew, &row);
         }
         if (ok) {
             sys__heap_node held;
@@ -593,15 +596,16 @@ static __device__ inline bool nn__expert__layer_stand(uint64_t layer, uint64_t t
     /* ⛳ EVERY SLOT IS WRITTEN, not left at the null the array was filled with — because a slot is asked
      * "where is this expert" on the hot path and `VALUE_INT` with a zero address is the answer "nowhere",
      * whereas a null would make the reader distinguish two shapes for one fact. */
-    bool ok = true;
-    for (uint64_t e = 0ull; ok && e < experts; ++e) {
+    sys__node_array_walk sw;
+    bool ok = sys__node_array__walk(inner, 0ull, &sw);
+    for (uint64_t e = 0ull; ok && e < experts; ++e, sys__node_array__next(&sw)) {
         sys__heap_node slot;
         slot.dtype = SYS__KIND__VALUE_INT; slot.num_args = 0u; slot.op_code = 0ull;
         slot.args[NN__EXPERT__SLOT_AT]    = 0ull;   slot.args[NN__EXPERT__SLOT_PREV]  = NN__EXPERT__NONE;
         slot.args[NN__EXPERT__SLOT_NEXT]  = NN__EXPERT__NONE;
         slot.args[NN__EXPERT__SLOT_AT_L2] = 0ull;   slot.args[NN__EXPERT__SLOT_TYPE]  = 0ull;
         slot.args[5]                      = 0ull;   /* ⛳ spare — ▶ the header */
-        ok = sys__node_array__set(inner, e, &slot);
+        ok = sys__node_array__walk_set(&sw, &slot);
     }
     if (ok) {
         sys__heap_node held;
@@ -797,6 +801,43 @@ static __device__ inline bool nn__expert__touch(uint64_t layer, uint64_t type, u
     if (me.args[NN__EXPERT__SLOT_AT] == 0ull)        return false;
     return nn__expert__zzprivate_unlink(layer, type, expert)
         && nn__expert__zzprivate_push_front(layer, type, expert);
+}
+
+/* ── THE PROMOTION QUALIFIER ───────────────────────────────────────────────────────────────────────── ▶ the header
+ * The two call times live in the slot's last word, the newer in its high half and the older in its low: 32 bits of a
+ * clock that moves once a layer's visit is some four billion visits. */
+#define NN__EXPERT__ZZPRIVATE_CALLS 5u
+static __device__ inline uint64_t nn__expert__tick(void) {
+    static uint64_t clock = 0ull;
+    return __atomic_add_fetch(&clock, 1ull, __ATOMIC_RELAXED) & 0xFFFFFFFFull;
+}
+static __device__ inline bool nn__expert__zzprivate_older(uint64_t layer, uint64_t type, uint64_t expert, uint64_t* older) {
+    sys__heap_node me;
+    if (!nn__expert__slot(layer, type, expert, &me)) return false;
+    *older = me.args[NN__EXPERT__ZZPRIVATE_CALLS] & 0xFFFFFFFFull;
+    return true;
+}
+static __device__ inline bool nn__expert__called(uint64_t layer, uint64_t type, uint64_t expert, uint64_t now) {
+    sys__heap_node me;
+    if (!nn__expert__slot(layer, type, expert, &me)) return false;
+    const uint64_t newer = me.args[NN__EXPERT__ZZPRIVATE_CALLS] >> 32;
+    me.args[NN__EXPERT__ZZPRIVATE_CALLS] = ((now & 0xFFFFFFFFull) << 32) | newer;
+    return nn__expert__zzprivate_slot_set(layer, type, expert, &me);
+}
+static __device__ inline bool nn__expert__qualifies(uint64_t layer, uint64_t type, uint64_t expert) {
+    uint64_t score = 0ull, tail = 0ull, tail_score = 0ull;
+    /* ⚖ *"when the cache is empty … the first batch all of the choices go into the cache, then once it fills only those
+     *   chosen three times"*: while the layer holds less than its share of the collection and a slot is free, a first
+     *   call is enough — RAM keeps every expert, so a slot given to one used once costs nothing to take back */
+    if (nn__expert__type_free(type) != NN__EXPERT__TYPE_FREE_NONE) {
+        const uint64_t layers = nn__expert__index_layers();
+        uint64_t banded = 0ull;
+        for (uint64_t l = 0ull; l < layers; ++l) banded += nn__expert__layer_experts(l, type) != 0ull ? 1ull : 0ull;
+        if (banded != 0ull && nn__expert__layer_resident(layer, type) < nn__expert__type_slots(type) / banded) return true;
+    }
+    if (!nn__expert__zzprivate_older(layer, type, expert, &score) || score == 0ull) return false;   /* fewer than three calls */
+    if (!nn__expert__oldest(layer, type, &tail)) return false;           /* nothing of this band to give its slot up */
+    return nn__expert__zzprivate_older(layer, type, tail, &tail_score) && score > tail_score;
 }
 
 /* ⚖ *"an evicted expert gets an offset of 0 and no previous/next."* ⛳ THE TYPE SURVIVES

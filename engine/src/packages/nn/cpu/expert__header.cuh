@@ -135,6 +135,15 @@ static __device__ __noinline__ void nn__weights__zzpackage_release_internal(sys_
 
 /* The LRU's two ends of one (layer, type) band, as EXPERT IDS. False when that band holds nothing
  * resident. */
+/* ⭐ THE PROMOTION QUALIFIER (NN-48) — ⚖ *"the lru is still ordered by absolute recency … the score is a promotion qualifier
+ * not an organizer"*. Every expert of a band keeps its last two call times, on a clock that `tick` moves once a layer's
+ * visit; its score is the older of the two. `called` records a call now; `qualifies`, asked BEFORE the call is recorded,
+ * says whether an expert not resident has earned a slot: any call while its layer holds less than its share and a slot is
+ * free; past that, three calls (two recorded and this one) and an older time newer than the band's least recently used
+ * resident's. */
+static __device__ inline uint64_t nn__expert__tick(void);
+static __device__ inline bool nn__expert__called(uint64_t layer, uint64_t type, uint64_t expert, uint64_t now);
+static __device__ inline bool nn__expert__qualifies(uint64_t layer, uint64_t type, uint64_t expert);
 static __device__ inline bool nn__expert__recent(uint64_t layer, uint64_t type, uint64_t* expert);
 static __device__ inline bool nn__expert__oldest(uint64_t layer, uint64_t type, uint64_t* expert);
 static __device__ inline uint64_t nn__expert__layer_resident(uint64_t layer, uint64_t type);
@@ -183,6 +192,35 @@ static __device__ inline bool nn__expert__settle_one(uint64_t layer, uint64_t ty
 static __device__ inline bool nn__expert__fetch(sys__silicon_family__id family, uint64_t layer, uint64_t type, uint64_t expert,
                                                 const nn__expert__backing* backing, uint64_t* at, bool* missed);
 static __device__ inline uint64_t nn__expert__count(unsigned which);
+/* ⭐ A PROMOTION (NN-48): `expert` of a (layer, type) band of this worker's collection given a slot — by the same rule as a
+ *   read's: a free one, or the least recently used expert not among `pinned` — and its bytes gathered into it by a loader
+ *   thread (▶ `nn__expert__gather`). RESIDENT if it already is, ARRIVING once queued or while on the way, REFUSED when
+ *   there is no slot or no room in flight. `settle_ready` admits every promotion of the band that has finished and waits
+ *   for none, so the expert is computed where it was until its copy has landed. */
+static __device__ inline int nn__expert__promote(sys__silicon_family__id family, uint64_t layer, uint64_t type, uint64_t expert,
+                                                 const nn__expert__gather* gather, const uint64_t* pinned, unsigned npinned);
+static __device__ inline bool nn__expert__settle_ready(uint64_t layer, uint64_t type);
+/* How many more reads or promotions may be on their way at once — so a verb can choose which of its experts get the room. */
+static __device__ inline unsigned nn__expert__flight_free(void);
+
+/* ══ ⭐⭐ A CARD'S TIER OF EXPERTS (NN-48) — WHAT A MODEL'S EXPERTS VERBS ASK OF IT ══════════════════════════════════
+ * A card holds some of a model's routed experts, the CPUs every one; the card computes the picks it holds and the CPUs the
+ * rest, and an expert the CPUs computed earns a slot (`qualifies`, `promote`). The model knows its arithmetic, its hands
+ * and how one of its experts is cut from the CPUs' memory — a `stitch` writes that expert's gather; nn keeps the rest.
+ *   tier_visit   one position: the copies that landed admitted, every pick's call recorded, `held[j]` set for each pick
+ *                the card holds (touched), and up to `landing` of the others that qualify promoted
+ *   tier_chunk   a prompt chunk of `n` rows of picks: every call recorded row by row; the card takes every expert it holds
+ *                and every other one picked `threshold` times or more — as many as the loader has room for, the most
+ *                picked first — queued from the fewest picks to the most; each pick it takes marked in `chosen` (its
+ *                number plus `experts`) for the CPUs to skip
+ * A null `stitch` promotes nothing: the tier stays what boot made it. */
+typedef bool (*nn__expert__stitch)(const void* model, uint64_t expert, nn__expert__gather* gather);
+static __device__ inline bool nn__expert__tier_visit(sys__silicon_family__id family, uint64_t layer, uint64_t type, const uint64_t* ids,
+                                                     unsigned k, bool* held, unsigned landing, nn__expert__stitch stitch,
+                                                     const void* model);
+static __device__ inline bool nn__expert__tier_chunk(sys__silicon_family__id family, uint64_t layer, uint64_t type, uint64_t experts,
+                                                     uint64_t* chosen, uint64_t n, unsigned k, uint64_t threshold,
+                                                     nn__expert__stitch stitch, const void* model);
 static __device__ inline uint64_t nn__expert__zzpackage_owner(void);
 /* ⭐ WHERE THE SLOTS ARE A MAPPED FILE, "RESIDENT" SAYS ONLY THAT THE EXPERT HAS AN ADDRESS: its bytes are in memory
  * when the system has kept the file's pages. `in_memory` answers whether every byte of the slot at `at` is there now —

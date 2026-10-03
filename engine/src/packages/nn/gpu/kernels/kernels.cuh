@@ -160,8 +160,10 @@ static __device__ inline void nn__vector__zzabi_body_pointwise_mul(uint16_t* z, 
  * ⚠ The sum's order is the combine step's, so the output can differ from the serial loop's in its last
  * bits — the same on every card of a family, run after run. */
 
+/* ⛳ THE EPSILON IS THE CALLER'S, because it is the model's: its config says it (Qwen's 1e-6, GLM's 1e-5),
+ * and one fixed here would be every model normed as one of them. */
 static __device__ inline void nn__rmsnorm__zzabi_body(uint16_t* o, const uint16_t* x,
-                                                       const uint16_t* w, uint64_t n,
+                                                       const uint16_t* w, uint64_t n, float eps,
                                                        unsigned int* over) {
     const uint64_t lane = nn__silicon__lane(), lanes = nn__silicon__lanes();
     float part = 0.0f;
@@ -170,7 +172,7 @@ static __device__ inline void nn__rmsnorm__zzabi_body(uint16_t* o, const uint16_
         part += v * v;
     }
     const float mean  = nn__silicon__lanes_sum(part) / (float)n;
-    const float scale = 1.0f / nn__silicon__sqrtf(mean + 1e-6f);
+    const float scale = 1.0f / nn__silicon__sqrtf(mean + eps);
     for (uint64_t i = lane; i < n; i += lanes) {
         bool hit = false;
         o[i] = nn__primitives__zzpackage_float_to_half(
@@ -1303,9 +1305,9 @@ static __device__ inline void nn__expert__zzabi_body_rows_finish(uint16_t* out, 
 /* Each row normed: a block a row, as the one-row door is one block. */
 static __device__ inline void nn__rmsnorm__zzabi_body_rows(uint16_t* o, const uint16_t* x, const uint16_t* w, uint64_t n,
                                                            uint64_t rows, uint64_t x_stride, uint64_t o_stride,
-                                                           unsigned int* over) {
+                                                           float eps, unsigned int* over) {
     for (uint64_t r = nn__silicon__block(); r < rows; r += nn__silicon__blocks())
-        nn__rmsnorm__zzabi_body(o + r * o_stride, x + r * x_stride, w, n, over);
+        nn__rmsnorm__zzabi_body(o + r * o_stride, x + r * x_stride, w, n, eps, over);
 }
 
 /* Each row's heads rotated by that row's own angles: row `r`'s angles are `cs + r·rot` (the `rot/2` cosines,

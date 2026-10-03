@@ -16,12 +16,13 @@
  * reduces in fp32 too, and a wider accumulator here would make the oracle disagree with the thing it is
  * supposed to agree with. ⚠ It is also the less accurate choice, and that is a real trade — a model's
  * hidden dim is thousands of terms. It is what the old tree does. */
-/* `(nn__rmsnorm__apply x w out n)` — a length of zero has no mean, so it is refused before anything
- * divides by it. */
+/* `(nn__rmsnorm__apply x w out n eps)` — a length of zero has no mean, so it is refused before anything
+ * divides by it. The epsilon is a real and is not defaulted: it is the model's, and a default would be
+ * one model's number standing in for every other's. */
 static sys__heap_node nn__rmsnorm__zzabi_apply(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx) {
-    if (argc != 4u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
+    if (argc != 5u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
     uint64_t x_at = 0, w_at = 0, o_at = 0, x_room = 0, w_room = 0, o_room = 0;
-    if (argv[3].dtype != SYS__KIND__VALUE_INT
+    if (argv[3].dtype != SYS__KIND__VALUE_INT || argv[4].dtype != SYS__KIND__VALUE_FLOAT
      || !nn__primitives__room(&argv[0], &x_at, &x_room)
      || !nn__primitives__room(&argv[1], &w_at, &w_room)
      || !nn__primitives__room(&argv[2], &o_at, &o_room)) return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
@@ -33,7 +34,7 @@ static sys__heap_node nn__rmsnorm__zzabi_apply(const sys__heap_node* argv, unsig
     const nn__doors* doors = nn__doors_for(ctx);
     if (doors == 0) return sys__engine__abi__error(NN__PRIMITIVES__FAULT_NO_DEVICE);
     doors->rmsnorm((uint16_t*)(uintptr_t)o_at, (const uint16_t*)(uintptr_t)x_at, (const uint16_t*)(uintptr_t)w_at, n,
-                   ctx->fault_word);
+                   (float)sys__heap_node__real(argv[4].args[0]), ctx->fault_word);
     return nn__doors_answer(&argv[2]);
 }
 

@@ -35,7 +35,7 @@ static inline void ai_glm_5_3__layer__zzprivate_collapse(const nn__doors* doors,
                         H, M, eps);
     doors->hyper_pre((uint16_t*)(uintptr_t)(xin), (float*)(uintptr_t)scratch, (const uint16_t*)(uintptr_t)(streams), (const uint16_t*)(uintptr_t)(at[AI_GLM_5_3__HC_BASE]),
                      (const uint16_t*)(uintptr_t)(at[AI_GLM_5_3__HC_SCALE]), H, M, iters, hc_eps, over);
-    doors->rmsnorm((uint16_t*)(uintptr_t)(h), (const uint16_t*)(uintptr_t)(xin), (const uint16_t*)(uintptr_t)(at[AI_GLM_5_3__NORM]), H, over);
+    doors->rmsnorm((uint16_t*)(uintptr_t)(h), (const uint16_t*)(uintptr_t)(xin), (const uint16_t*)(uintptr_t)(at[AI_GLM_5_3__NORM]), H, eps, over);
 }
 
 /* The streams mixed again with the sublayer's output `y`, by the weights the collapse left in the carry. */
@@ -138,15 +138,17 @@ static uint64_t ai_glm_5_3__mla__zzprivate_row(const sys__heap_node* argv, sys__
     const bool indexed = sys__node_array__length(table) >= AI_GLM_5_3__IDX__TABLE;
     uint64_t IH = 0u, ID = 0u, KP = 1u, TOPK = 0u, id_[4] = {0u, 0u, 0u, 0u};
     if (indexed) {
-        for (unsigned i = AI_GLM_5_3__MLA__TABLE; i < AI_GLM_5_3__IDX__PLANES; ++i) {
-            const sys__heap_node n = sys__node_array__borrow(table, i);
-            if (!nn__primitives__room(&n, &at[i], &room[i])) return AI_GLM_5_3__LAYER__FAULT_TABLE;
+        sys__node_array_walk w;
+        if (!sys__node_array__walk(table, AI_GLM_5_3__MLA__TABLE, &w)) return AI_GLM_5_3__LAYER__FAULT_TABLE;
+        for (unsigned i = AI_GLM_5_3__MLA__TABLE; i < AI_GLM_5_3__IDX__PLANES; ++i, sys__node_array__next(&w)) {
+            const sys__heap_node* n = sys__node_array__walk_cell(&w);
+            if (n == 0 || !nn__primitives__room(n, &at[i], &room[i])) return AI_GLM_5_3__LAYER__FAULT_TABLE;
         }
         uint64_t iv[AI_GLM_5_3__IDX__TABLE - AI_GLM_5_3__IDX__PLANES];
-        for (unsigned i = AI_GLM_5_3__IDX__PLANES; i < AI_GLM_5_3__IDX__TABLE; ++i) {
-            const sys__heap_node n = sys__node_array__borrow(table, i);
-            if (n.dtype != SYS__KIND__VALUE_INT) return AI_GLM_5_3__LAYER__FAULT_TABLE;
-            iv[i - AI_GLM_5_3__IDX__PLANES] = n.args[0];
+        for (unsigned i = AI_GLM_5_3__IDX__PLANES; i < AI_GLM_5_3__IDX__TABLE; ++i, sys__node_array__next(&w)) {
+            const sys__heap_node* n = sys__node_array__walk_cell(&w);
+            if (n == 0 || n->dtype != SYS__KIND__VALUE_INT) return AI_GLM_5_3__LAYER__FAULT_TABLE;
+            iv[i - AI_GLM_5_3__IDX__PLANES] = n->args[0];
         }
         IH = iv[0]; ID = iv[1]; KP = iv[2]; TOPK = iv[3];
         for (unsigned i = 0u; i < 4u; ++i) id_[i] = iv[4u + i];
@@ -184,10 +186,10 @@ static uint64_t ai_glm_5_3__mla__zzprivate_row(const sys__heap_node* argv, sys__
     ai_glm_5_3__table__zzpackage_group(&g, 1u, at, AI_GLM_5_3__MLA__KVA, LAT, d[1], QR);
     g.count = 2u;
     doors->turboquant_gemv_groups((uint16_t*)(uintptr_t)(qa), g, (const uint16_t*)(uintptr_t)(hr), H, over);
-    doors->rmsnorm((uint16_t*)(uintptr_t)(qn), (const uint16_t*)(uintptr_t)(qa), (const uint16_t*)(uintptr_t)(at[AI_GLM_5_3__MLA__QA_NORM]), QR, over);
+    doors->rmsnorm((uint16_t*)(uintptr_t)(qn), (const uint16_t*)(uintptr_t)(qa), (const uint16_t*)(uintptr_t)(at[AI_GLM_5_3__MLA__QA_NORM]), QR, r[AI_GLM_5_3__MLA__EPS], over);
     doors->hadamard_rotate((uint16_t*)(uintptr_t)(qnr), (const uint16_t*)(uintptr_t)(qn), (const uint16_t*)(uintptr_t)(signs), QR, over);
     ai_glm_5_3__layer__zzprivate_gemv(doors, over, at, room, AI_GLM_5_3__MLA__QB, q, qnr, d[2], heads * NOPE, QR);
-    doors->rmsnorm((uint16_t*)(uintptr_t)(ckn), (const uint16_t*)(uintptr_t)(kv), (const uint16_t*)(uintptr_t)(at[AI_GLM_5_3__MLA__KVA_NORM]), LAT, over);
+    doors->rmsnorm((uint16_t*)(uintptr_t)(ckn), (const uint16_t*)(uintptr_t)(kv), (const uint16_t*)(uintptr_t)(at[AI_GLM_5_3__MLA__KVA_NORM]), LAT, r[AI_GLM_5_3__MLA__EPS], over);
     doors->hadamard_rotate((uint16_t*)(uintptr_t)(cache + 2u * pos * LAT), (const uint16_t*)(uintptr_t)(ckn), (const uint16_t*)(uintptr_t)(signs), LAT, over);
     /* ⛳ the attention's own scale is 1/√latent and the model's 1/√head, so the absorbed query carries their ratio */
     doors->attention_absorb((uint16_t*)(uintptr_t)(qabs), (const uint16_t*)(uintptr_t)(q), (const uint16_t*)(uintptr_t)(kvb), heads, NOPE, LAT, stride,
@@ -371,6 +373,66 @@ static sys__heap_node ai_glm_5_3__close__zzabi_apply(const sys__heap_node* argv,
     return nn__doors_answer(&argv[0]);
 }
 
+/* Whether the experts table says its worker holds only the experts resident in its collection (▶ `AI_GLM_5_3__EXP__HOLDS`). */
+static bool ai_glm_5_3__experts__zzprivate_holds(uint64_t table) {
+    if (sys__node_array__length(table) <= AI_GLM_5_3__EXP__HOLDS) return false;
+    const sys__heap_node n = sys__node_array__borrow(table, AI_GLM_5_3__EXP__HOLDS);
+    return n.dtype == SYS__KIND__VALUE_INT && n.args[0] == 1ull;
+}
+
+/* A tier's feed (▶ `AI_GLM_5_3__EXP__SOURCES`): its cells read, or false when the table does not feed its tier. */
+typedef struct ai_glm_5_3__feed {
+    uint64_t sources, parts, p_up_lut, p_down, p_down_lut, gate_row, down_row, landing;
+} ai_glm_5_3__feed;
+static bool ai_glm_5_3__experts__zzprivate_feed(uint64_t table, ai_glm_5_3__feed* f) {
+    if (sys__node_array__length(table) < AI_GLM_5_3__EXP__FED) return false;
+    const sys__heap_node src = sys__node_array__borrow(table, AI_GLM_5_3__EXP__SOURCES);
+    if (!sys__heap_node__carries_reference(src.dtype) || !sys__node_array__is(src.args[0])) return false;
+    f->sources = src.args[0];
+    uint64_t v[AI_GLM_5_3__EXP__FED - AI_GLM_5_3__EXP__PARTS];
+    for (unsigned i = AI_GLM_5_3__EXP__PARTS; i < AI_GLM_5_3__EXP__FED; ++i) {
+        const sys__heap_node n = sys__node_array__borrow(table, i);
+        if (n.dtype != SYS__KIND__VALUE_INT) return false;
+        v[i - AI_GLM_5_3__EXP__PARTS] = n.args[0];
+    }
+    f->parts = v[0]; f->p_up_lut = v[1]; f->p_down = v[2]; f->p_down_lut = v[3];
+    f->gate_row = v[4]; f->down_row = v[5]; f->landing = v[6];
+    return f->parts >= 1u && 5u * f->parts + 1u <= NN__EXPERT__GATHER_RUNS && f->down_row % f->parts == 0u;
+}
+
+/* Expert `x`'s parts in the CPUs' memory stitched into one whole slot, as the runs a promotion gathers: per part its gate
+ * rows, its up rows, their scales, and its columns of every down row spliced in; every down row's scale once. */
+static bool ai_glm_5_3__experts__zzprivate_stitch(const ai_glm_5_3__feed* f, const uint64_t* v, uint64_t x, nn__expert__gather* g) {
+    const uint64_t H = v[AI_GLM_5_3__EXP__HIDDEN], I = v[AI_GLM_5_3__EXP__INTER], P = f->parts, PI = I / P, cols = f->down_row / P;
+    if (I % P != 0u) return false;
+    g->runs = 0u;
+    uint64_t first = 0u;
+    for (uint64_t p = 0u; p < P; ++p) {
+        const sys__heap_node at = sys__node_array__borrow(f->sources, x * P + p);
+        if (at.dtype != SYS__KIND__VALUE_INT || at.args[0] == 0ull) return false;
+        const uint64_t src = at.args[0];
+        if (p == 0u) first = src;
+        const nn__expert__run runs[5] = {
+            { src,                              0u,      p * PI * f->gate_row,                                    0u, PI * f->gate_row, 1u },
+            { src + PI * f->gate_row,           0u,      I * f->gate_row + p * PI * f->gate_row,                  0u, PI * f->gate_row, 1u },
+            { src + f->p_up_lut,                0u,      v[AI_GLM_5_3__EXP__UP_LUT] + p * PI * 2u,                0u, PI * 2u,          1u },
+            { src + f->p_up_lut + PI * 2u,      0u,      v[AI_GLM_5_3__EXP__UP_LUT] + I * 2u + p * PI * 2u,       0u, PI * 2u,          1u },
+            { src + f->p_down,                  cols,    v[AI_GLM_5_3__EXP__DOWN] + p * cols,                     f->down_row, cols, H },
+        };
+        for (unsigned r = 0u; r < 5u; ++r) g->run[g->runs++] = runs[r];
+    }
+    const nn__expert__run scales = { first + f->p_down_lut, 0u, v[AI_GLM_5_3__EXP__DOWN_LUT], 0u, H * 2u, 1u };
+    g->run[g->runs++] = scales;
+    return true;
+}
+
+/* The stitch as nn's tier asks for it (▶ `nn__expert__stitch`): the feed and the table's integers it reads. */
+typedef struct ai_glm_5_3__stitching { const ai_glm_5_3__feed* feed; const uint64_t* v; } ai_glm_5_3__stitching;
+static bool ai_glm_5_3__experts__zzprivate_stitcher(const void* model, uint64_t x, nn__expert__gather* g) {
+    const ai_glm_5_3__stitching* s = (const ai_glm_5_3__stitching*)model;
+    return ai_glm_5_3__experts__zzprivate_stitch(s->feed, s->v, x, g);
+}
+
 /* The experts table's backing, when it has one: none is `file` zero. False when the cell is there and not a backing. */
 static bool ai_glm_5_3__experts__zzprivate_backing(uint64_t table, nn__expert__backing* backing) {
     const nn__expert__backing none = {};
@@ -437,19 +499,36 @@ static sys__heap_node ai_glm_5_3__experts__zzabi_apply(const sys__heap_node* arg
     if (!nn__primitives__fits(4u * K * I, room[AI_GLM_5_3__EXP__SCRATCH])) return sys__engine__abi__error(AI_GLM_5_3__LAYER__FAULT_ROOM);
     nn__expert__backing backing = {};
     if (!ai_glm_5_3__experts__zzprivate_backing(argv[2].args[0], &backing)) return sys__engine__abi__error(AI_GLM_5_3__LAYER__FAULT_TABLE);
+    const bool holds = ai_glm_5_3__experts__zzprivate_holds(argv[2].args[0]);
+    if (holds && backing.file != 0ull) return sys__engine__abi__error(AI_GLM_5_3__LAYER__FAULT_TABLE);
+    /* a tier fed from the CPUs' memory: the copies that have landed since this layer's last visit admitted first */
+    ai_glm_5_3__feed feed = {};
+    const bool fed = holds && ai_glm_5_3__experts__zzprivate_feed(argv[2].args[0], &feed);
     /* ① the picks this worker holds: the ones in memory first — and the others on their way, read into a slot where the
      *   slots are a cache (a backing), their pages started where the slots are a mapped file */
     uint64_t slot[AI_GLM_5_3__TOP_K_MAX], which[AI_GLM_5_3__TOP_K_MAX], away_slot[AI_GLM_5_3__TOP_K_MAX], away[AI_GLM_5_3__TOP_K_MAX];
     uint64_t held[AI_GLM_5_3__TOP_K_MAX], away_id[AI_GLM_5_3__TOP_K_MAX];
     uint64_t ready = 0u, n_away = 0u, n_held = 0u;
-    for (uint64_t j = 0u; j < K; ++j) {
-        const sys__heap_node p = sys__node_array__borrow(picks, j);
-        if (p.dtype != SYS__KIND__VALUE_INT || p.args[0] >= E) return sys__engine__abi__error(AI_GLM_5_3__LAYER__FAULT_EXPERT);
-        if (p.args[0] >= first && p.args[0] < first + count) held[n_held++] = p.args[0] - first;
+    /* Every pick read once, here; the loop after works from the ids this keeps. */
+    uint64_t ids[AI_GLM_5_3__TOP_K_MAX];
+    sys__node_array_walk pw;
+    if (!sys__node_array__walk(picks, 0ull, &pw)) return sys__engine__abi__error(AI_GLM_5_3__LAYER__FAULT_EXPERT);
+    for (uint64_t j = 0u; j < K; ++j, sys__node_array__next(&pw)) {
+        const sys__heap_node* p = sys__node_array__walk_cell(&pw);
+        /* a pick numbered `experts` or past it is one a card already holds (▶ AI_GLM_5_3__EXP__HOLDS) */
+        if (p == 0 || p->dtype != SYS__KIND__VALUE_INT || p->args[0] >= 2u * E) return sys__engine__abi__error(AI_GLM_5_3__LAYER__FAULT_EXPERT);
+        ids[j] = p->args[0];
+        if (p->args[0] >= first && p->args[0] < first + count) held[n_held++] = p->args[0] - first;
     }
+    /* a tier's visit (▶ nn's `tier_visit`): which picks it holds, and the promotions of those it does not */
+    bool on_card[AI_GLM_5_3__TOP_K_MAX] = {};
+    const ai_glm_5_3__stitching stitching = { &feed, v };
+    if (holds && !nn__expert__tier_visit(ctx->family, layer, type, ids, (unsigned)K, on_card, fed ? (unsigned)feed.landing : 0u,
+                                         fed ? ai_glm_5_3__experts__zzprivate_stitcher : 0, &stitching))
+        return sys__engine__abi__error(AI_GLM_5_3__LAYER__FAULT_EXPERT);
     for (uint64_t j = 0u; j < K; ++j) {
-        const uint64_t id = sys__node_array__borrow(picks, j).args[0];
-        if (id < first || id >= first + count) continue;                            /* another worker's */
+        const uint64_t id = ids[j];
+        if (id < first || id >= first + count) continue;                            /* another worker's, or held already */
         uint64_t at_ = 0u;
         if (backing.file != 0ull) {
             const int got = nn__expert__request(ctx->family, layer, type, id - first, &backing, false, held, (unsigned)n_held, &at_);
@@ -459,8 +538,17 @@ static sys__heap_node ai_glm_5_3__experts__zzabi_apply(const sys__heap_node* arg
             continue;
         }
         sys__heap_node me;
-        if (!nn__expert__slot(layer, type, id - first, &me) || me.args[NN__EXPERT__SLOT_AT] == 0ull)
-            return sys__engine__abi__error(AI_GLM_5_3__LAYER__FAULT_EXPERT);
+        if (!nn__expert__slot(layer, type, id - first, &me)) return sys__engine__abi__error(AI_GLM_5_3__LAYER__FAULT_EXPERT);
+        if (holds) {
+            /* a tier: the picks it holds are this worker's, marked held for the others; the rest are left to them */
+            if (!on_card[j]) continue;
+            sys__heap_node mark;
+            mark.dtype = SYS__KIND__VALUE_INT; mark.num_args = 0u; mark.op_code = 0ull; mark.args[0] = id + E;
+            if (!sys__node_array__set(picks, j, &mark)) return sys__engine__abi__error(AI_GLM_5_3__LAYER__FAULT_EXPERT);
+            slot[ready] = me.args[NN__EXPERT__SLOT_AT]; which[ready] = j; ++ready;
+            continue;
+        }
+        if (me.args[NN__EXPERT__SLOT_AT] == 0ull) return sys__engine__abi__error(AI_GLM_5_3__LAYER__FAULT_EXPERT);
         at_ = me.args[NN__EXPERT__SLOT_AT];
         if (nn__expert__in_memory(ctx->family, type, at_)) { slot[ready] = at_; which[ready] = j; ++ready; }
         else { away_slot[n_away] = at_; away_id[n_away] = id - first; away[n_away] = j; ++n_away; }
@@ -568,7 +656,7 @@ static inline void ai_glm_5_3__rows__zzprivate_collapse(const nn__doors* doors, 
                           (const uint16_t*)(uintptr_t)at[AI_GLM_5_3__HC_BASE], (const uint16_t*)(uintptr_t)at[AI_GLM_5_3__HC_SCALE],
                           H, M, iters, hc_eps, n, AI_GLM_5_3__ROWS__MIX_FLOATS, over);
     doors->rmsnorm_rows((uint16_t*)(uintptr_t)h, (const uint16_t*)(uintptr_t)xin, (const uint16_t*)(uintptr_t)at[AI_GLM_5_3__NORM],
-                        H, n, H, H, over);
+                        H, n, H, H, eps, over);
 }
 
 /* Every row's streams mixed again with its output, a row of `y`, by the weights in its record of `mixes`. */
@@ -724,15 +812,17 @@ static sys__heap_node ai_glm_5_3__mla_rows__zzabi_apply(const sys__heap_node* ar
     const bool indexed = sys__node_array__length(table) >= AI_GLM_5_3__IDX__TABLE;
     uint64_t IH = 0u, ID = 0u, KP = 1u, TOPK = 0u, id_[4] = {0u, 0u, 0u, 0u};
     if (indexed) {
-        for (unsigned i = AI_GLM_5_3__MLA__TABLE; i < AI_GLM_5_3__IDX__PLANES; ++i) {
-            const sys__heap_node p = sys__node_array__borrow(table, i);
-            if (!nn__primitives__room(&p, &at[i], &room[i])) return sys__engine__abi__error(AI_GLM_5_3__LAYER__FAULT_TABLE);
+        sys__node_array_walk w;
+        if (!sys__node_array__walk(table, AI_GLM_5_3__MLA__TABLE, &w)) return sys__engine__abi__error(AI_GLM_5_3__LAYER__FAULT_TABLE);
+        for (unsigned i = AI_GLM_5_3__MLA__TABLE; i < AI_GLM_5_3__IDX__PLANES; ++i, sys__node_array__next(&w)) {
+            const sys__heap_node* p = sys__node_array__walk_cell(&w);
+            if (p == 0 || !nn__primitives__room(p, &at[i], &room[i])) return sys__engine__abi__error(AI_GLM_5_3__LAYER__FAULT_TABLE);
         }
         uint64_t iv[AI_GLM_5_3__IDX__TABLE - AI_GLM_5_3__IDX__PLANES];
-        for (unsigned i = AI_GLM_5_3__IDX__PLANES; i < AI_GLM_5_3__IDX__TABLE; ++i) {
-            const sys__heap_node p = sys__node_array__borrow(table, i);
-            if (p.dtype != SYS__KIND__VALUE_INT) return sys__engine__abi__error(AI_GLM_5_3__LAYER__FAULT_TABLE);
-            iv[i - AI_GLM_5_3__IDX__PLANES] = p.args[0];
+        for (unsigned i = AI_GLM_5_3__IDX__PLANES; i < AI_GLM_5_3__IDX__TABLE; ++i, sys__node_array__next(&w)) {
+            const sys__heap_node* p = sys__node_array__walk_cell(&w);
+            if (p == 0 || p->dtype != SYS__KIND__VALUE_INT) return sys__engine__abi__error(AI_GLM_5_3__LAYER__FAULT_TABLE);
+            iv[i - AI_GLM_5_3__IDX__PLANES] = p->args[0];
         }
         IH = iv[0]; ID = iv[1]; KP = iv[2]; TOPK = iv[3];
         for (unsigned i = 0u; i < 4u; ++i) id_[i] = iv[4u + i];
@@ -784,11 +874,11 @@ static sys__heap_node ai_glm_5_3__mla_rows__zzabi_apply(const sys__heap_node* ar
     g.count = 2u;
     doors->expert_groups((uint16_t*)(uintptr_t)qa, g, (const uint16_t*)(uintptr_t)hr, (const uint32_t*)(uintptr_t)pairs, H, over);
     doors->rmsnorm_rows((uint16_t*)(uintptr_t)qn, (const uint16_t*)(uintptr_t)qa, (const uint16_t*)(uintptr_t)at[AI_GLM_5_3__MLA__QA_NORM],
-                        QR, n, QR, QR, over);
+                        QR, n, QR, QR, r[AI_GLM_5_3__MLA__EPS], over);
     doors->hadamard_rotate((uint16_t*)(uintptr_t)qnr, (const uint16_t*)(uintptr_t)qn, (const uint16_t*)(uintptr_t)signs, n * QR, over);
     ai_glm_5_3__rows__zzprivate_gemm(doors, over, at, room, AI_GLM_5_3__MLA__QB, q, qnr, pairs, n, d[2], heads * NOPE, QR);
     doors->rmsnorm_rows((uint16_t*)(uintptr_t)ckn, (const uint16_t*)(uintptr_t)kv, (const uint16_t*)(uintptr_t)at[AI_GLM_5_3__MLA__KVA_NORM],
-                        LAT, n, LAT, LAT, over);
+                        LAT, n, LAT, LAT, r[AI_GLM_5_3__MLA__EPS], over);
     doors->hadamard_rotate((uint16_t*)(uintptr_t)(cache + 2u * first * LAT), (const uint16_t*)(uintptr_t)ckn,
                            (const uint16_t*)(uintptr_t)signs, n * LAT, over);
     if (indexed) {
@@ -1029,6 +1119,9 @@ static sys__heap_node ai_glm_5_3__experts_rows__zzabi_apply(const sys__heap_node
     const uint64_t hand_bytes = AI_GLM_5_3__HAND(H, K);
     /* ⚖ *"two different instructions so at boot time the lisp can decide"*: the table says which arithmetic */
     const bool int8 = v[AI_GLM_5_3__EXP__INT8] == 1u;
+    /* a card's tier (▶ `experts_note`): only the picks marked held are this worker's, computed from the fewest picks to
+     * the most, each waited for only while its copy is still on its way; a worker that holds every one skips them */
+    const bool holds = ai_glm_5_3__experts__zzprivate_holds(argv[1].args[0]);
     if (H == 0u || I == 0u || K == 0u || K > E || K > AI_GLM_5_3__TOP_K_MAX || H > (1ull << 24) || I > (1ull << 24)
      || count == 0u || first >= E || count > E - first || v[AI_GLM_5_3__EXP__INT8] > 1u || h_room / hand_bytes < n
      || !nn__primitives__fits(n * H, r_room))
@@ -1057,9 +1150,12 @@ static sys__heap_node ai_glm_5_3__experts_rows__zzabi_apply(const sys__heap_node
         if (!sys__gpu__memory_read(ctx->family, chosen, (const void*)(uintptr_t)(hand + AI_GLM_5_3__HAND_PICKS(H, K)), 8u * K)
          || !sys__gpu__memory_read(ctx->family, weight, (const void*)(uintptr_t)(hand + 2u * H), 2u * K)) { fault = NN__PRIMITIVES__FAULT_NO_DEVICE; break; }
         for (uint64_t j = 0u; j < K; ++j) {
-            if (chosen[j] >= E) { fault = AI_GLM_5_3__LAYER__FAULT_EXPERT; break; }
-            if (chosen[j] < first || chosen[j] >= first + count) continue;         /* another worker's */
-            rows_of[P] = (uint32_t)t; w_of[P] = weight[j]; expert_of[P] = (uint32_t)(chosen[j] - first);
+            if (chosen[j] >= 2u * E) { fault = AI_GLM_5_3__LAYER__FAULT_EXPERT; break; }
+            const bool marked = chosen[j] >= E;                                    /* held by a card's tier */
+            if (marked != holds) continue;
+            const uint64_t id = marked ? chosen[j] - E : chosen[j];
+            if (id < first || id >= first + count) continue;                       /* another worker's */
+            rows_of[P] = (uint32_t)t; w_of[P] = weight[j]; expert_of[P] = (uint32_t)(id - first);
             ++picked[expert_of[P]];
             ++P;
         }
@@ -1075,7 +1171,7 @@ static sys__heap_node ai_glm_5_3__experts_rows__zzabi_apply(const sys__heap_node
     uint64_t used = 0u, away = 0u;
     for (uint64_t e = 0u; e < count && fault == 0u; ++e) {
         if (picked[e] == 0u) continue;
-        if (backing.file != 0ull) {
+        if (backing.file != 0ull || holds) {
             uint64_t k = used++;
             while (k > 0u && picked[order[k - 1u]] > picked[e]) { order[k] = order[k - 1u]; --k; }
             order[k] = (uint32_t)e;
@@ -1116,10 +1212,15 @@ static sys__heap_node ai_glm_5_3__experts_rows__zzabi_apply(const sys__heap_node
     }
     /* ② batch by batch: each expert's gate-and-up over its rows, twelve experts a launch; the swiglus and rotations over
      * the batch's picks; each expert's down weighted into the sum */
-    const uint64_t batch = backing.file != 0ull ? AI_GLM_5_3__EXP__BATCH : used;
+    /* a tier computes four experts a batch, so a batch runs while the next one's copies land */
+    const uint64_t batch = backing.file != 0ull ? AI_GLM_5_3__EXP__BATCH : holds ? 4u : used;
     uint64_t pinned[2u * AI_GLM_5_3__EXP__BATCH];
-    for (uint64_t b0 = 0u; b0 < used && fault == 0u && P > 0u; b0 += batch) {
-        const uint64_t b1 = b0 + batch < used ? b0 + batch : used;
+    /* and its first launch is one expert, so the card begins after one copy has landed */
+    for (uint64_t b0 = 0u, b_end = holds ? 1u : batch; b0 < used && fault == 0u && P > 0u; b0 = b_end, b_end = b0 + batch) {
+        const uint64_t b1 = b_end < used ? b_end : used;
+        if (holds)                                                   /* a copy still on its way, waited for here */
+            for (uint64_t o = b0; o < b1 && fault == 0u; ++o)
+                if (!nn__expert__settle_one(layer, type, order[o])) fault = AI_GLM_5_3__LAYER__FAULT_EXPERT;
         if (backing.file != 0ull) {
             /* this batch's reads, if not asked for already, and the next batch's, both kept from being given up */
             const uint64_t n1 = b1 + batch < used ? b1 + batch : used;
@@ -1176,6 +1277,54 @@ static sys__heap_node ai_glm_5_3__experts_rows__zzabi_apply(const sys__heap_node
     return fault != 0u ? sys__engine__abi__error(fault) : nn__doors_answer(&argv[2]);
 }
 
+/* `(ai_glm_5_3__experts_note hands table n line)` -> `hands`. A card's tier of experts (▶ AI_GLM_5_3__EXP__HOLDS) given its
+ * share of a prompt chunk — `n` rows of hands — before the CPUs are handed theirs. ⚖ *"draw a line on the experts that
+ * makes no sense to compute on the gpu and we compute them on the cpu, then we start computing from the ones that are
+ * lower hits and move up"*:
+ *   · every pick's call recorded, row by row (a tick of nn's clock each), and a resident expert touched
+ *   · the card takes every expert it holds, and every other one the chunk picked `line` times or more (the program's — a
+ *     machine's copy against its CPUs' time a row, measured at boot and bound by name) — as many of those
+ *     as the loader has room for, the most picked first — queued to be copied from fewest picks to most, so the card
+ *     computes them in that order (`experts_rows`), waiting only for a copy still on its way, and the most picked end
+ *     the chunk as the most recent
+ *   · each pick the card takes marked held in its row (its number plus `experts`), which the CPUs skip. */
+static sys__heap_node ai_glm_5_3__experts_note__zzabi_apply(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx) {
+    if (argc != 4u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
+    uint64_t hands = 0, h_room = 0, n = 0u;
+    if (!nn__primitives__room(&argv[0], &hands, &h_room) || !sys__heap_node__carries_reference(argv[1].dtype)
+     || !sys__node_array__is(argv[1].args[0]) || !ai_glm_5_3__layer__zzprivate_rows(&argv[2], &n)
+     || argv[3].dtype != SYS__KIND__VALUE_INT)
+        return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
+    const uint64_t line = argv[3].args[0];
+    uint64_t at[AI_GLM_5_3__EXP__TABLE], room[AI_GLM_5_3__EXP__TABLE], v[AI_GLM_5_3__EXP__TABLE];
+    float r[AI_GLM_5_3__EXP__TABLE];
+    if (!ai_glm_5_3__table__zzpackage_read(argv[1].args[0], AI_GLM_5_3__EXP__PLANES, AI_GLM_5_3__EXP__LIMIT, AI_GLM_5_3__EXP__TABLE,
+                                           at, room, v, r)
+     || !ai_glm_5_3__experts__zzprivate_holds(argv[1].args[0]))
+        return sys__engine__abi__error(AI_GLM_5_3__LAYER__FAULT_TABLE);
+    const uint64_t H = v[AI_GLM_5_3__EXP__HIDDEN], E = v[AI_GLM_5_3__EXP__EXPERTS], K = v[AI_GLM_5_3__EXP__TOP_K];
+    const uint64_t layer = v[AI_GLM_5_3__EXP__LAYER], type = v[AI_GLM_5_3__EXP__TYPE];
+    const uint64_t hand_bytes = AI_GLM_5_3__HAND(H, K);
+    if (K == 0u || K > E || K > AI_GLM_5_3__TOP_K_MAX || h_room / hand_bytes < n) return sys__engine__abi__error(AI_GLM_5_3__LAYER__FAULT_TABLE);
+    ai_glm_5_3__feed feed = {};
+    const bool fed = ai_glm_5_3__experts__zzprivate_feed(argv[1].args[0], &feed);
+    const ai_glm_5_3__stitching stitching = { &feed, v };
+    uint64_t* chosen = (uint64_t*)malloc(sizeof(uint64_t) * n * K);
+    uint64_t fault = chosen == 0 ? SYS__OPCODES__FAULT_TYPE : 0u;
+    for (uint64_t t = 0u; t < n && fault == 0u; ++t)
+        if (!sys__gpu__memory_read(ctx->family, chosen + t * K, (const void*)(uintptr_t)(hands + t * hand_bytes + AI_GLM_5_3__HAND_PICKS(H, K)), 8u * K))
+            fault = NN__PRIMITIVES__FAULT_NO_DEVICE;
+    /* the split (▶ nn's `tier_chunk`), then the card's picks marked held in their rows, for the CPUs to skip */
+    if (fault == 0u && !nn__expert__tier_chunk(ctx->family, layer, type, E, chosen, n, (unsigned)K, line,
+                                               fed ? ai_glm_5_3__experts__zzprivate_stitcher : 0, &stitching))
+        fault = AI_GLM_5_3__LAYER__FAULT_EXPERT;
+    for (uint64_t t = 0u; t < n && fault == 0u; ++t)
+        if (!sys__gpu__memory_write(ctx->family, (void*)(uintptr_t)(hands + t * hand_bytes + AI_GLM_5_3__HAND_PICKS(H, K)), chosen + t * K, 8u * K))
+            fault = NN__PRIMITIVES__FAULT_NO_DEVICE;
+    free(chosen);
+    return fault != 0u ? sys__engine__abi__error(fault) : nn__doors_answer(&argv[0]);
+}
+
 SYS__ENGINE__ABI__BRIDGE(ai_glm_5_3__kda__zzabi_adapter,     ai_glm_5_3__kda__zzabi_apply)
 SYS__ENGINE__ABI__BRIDGE(ai_glm_5_3__mla__zzabi_adapter,     ai_glm_5_3__mla__zzabi_apply)
 SYS__ENGINE__ABI__BRIDGE(ai_glm_5_3__mlp__zzabi_adapter,     ai_glm_5_3__mlp__zzabi_apply)
@@ -1189,5 +1338,6 @@ SYS__ENGINE__ABI__BRIDGE(ai_glm_5_3__mlp_rows__zzabi_adapter,     ai_glm_5_3__ml
 SYS__ENGINE__ABI__BRIDGE(ai_glm_5_3__route_rows__zzabi_adapter,   ai_glm_5_3__route_rows__zzabi_apply)
 SYS__ENGINE__ABI__BRIDGE(ai_glm_5_3__close_rows__zzabi_adapter,   ai_glm_5_3__close_rows__zzabi_apply)
 SYS__ENGINE__ABI__BRIDGE(ai_glm_5_3__experts_rows__zzabi_adapter, ai_glm_5_3__experts_rows__zzabi_apply)
+SYS__ENGINE__ABI__BRIDGE(ai_glm_5_3__experts_note__zzabi_adapter, ai_glm_5_3__experts_note__zzabi_apply)
 
 #endif /* SILVANN__PACKAGES_AI_GLM_5_3_CPU_OPCODES_LAYER__ABI_CUH */

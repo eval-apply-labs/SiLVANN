@@ -211,12 +211,15 @@ static sys__heap_node nn__vector__zzprivate_top_k(const sys__heap_node* argv, sy
      || sys__node_array__length(picks) < k
      || !nn__primitives__fits(n, x_room) || !nn__primitives__fits(k, w_room))
         return sys__engine__abi__error(NN__PRIMITIVES__FAULT_BOUNDS);
-    for (uint64_t j = 0ull; j < k; ++j) {
-        const sys__kind kind = sys__node_array__type(picks, j);
+    sys__node_array_walk pw;
+    if (!sys__node_array__walk(picks, 0ull, &pw)) return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
+    for (uint64_t j = 0ull; j < k; ++j, sys__node_array__next(&pw)) {
+        const sys__heap_node* cell = sys__node_array__walk_cell(&pw);
+        const sys__kind kind = cell != 0 ? cell->dtype : SYS__KIND__INVALID;
         if (kind == SYS__KIND__VALUE_NULL) {
             sys__heap_node zero = sys__heap_node__nothing();
             zero.dtype = SYS__KIND__VALUE_INT; zero.args[0] = 0ull;
-            if (!sys__node_array__set(picks, j, &zero)) return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
+            if (!sys__node_array__walk_set(&pw, &zero)) return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
         } else if (kind != SYS__KIND__VALUE_INT) {
             return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
         }

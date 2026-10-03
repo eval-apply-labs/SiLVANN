@@ -311,6 +311,21 @@ static __device__ inline sys__heap_node* sys__list__walk_cell(sys__list_walk* w)
  * unconditionally and ask `walk_cell` whether there was anything there. */
 static __device__ inline void sys__list__walk_step(sys__list_walk* w);
 
+/* ── A WALK PUT DOWN AND PICKED UP AGAIN — the evaluator's, and nobody else's ─────────────────────────
+ * When the evaluator descends into a sub-form it remembers where it was in the parent, and comes back to
+ * that cell to write the answer and to carry on scanning. Remembered as an INDEX, every return found the
+ * cell again from the head of the chain — a hop per chunk passed, three or four times a sub-form — which
+ * made a program's evaluation quadratic in its length. Remembered as a WALK, the return is where it left.
+ * `park` writes the walk into the four words a place leaves free (`args[2..5]`: chunk, base, used, total);
+ * the list and the index are the place's own two. `unpark` stands a walk back up from them on the same
+ * list at the same index, and if the list's total has moved since — something changed its shape — it
+ * opens a fresh walk at that index instead, so a stale place costs the old search and never a wrong cell.
+ * ⚠ `REASONED`, premise: nothing between the park and the unpark both removes and adds values to the
+ * parent's store. The evaluator runs only the sub-form in between, and a sub-form is a list of its own. */
+static __device__ inline void sys__list__zzengine_walk_park(const sys__list_walk* w, sys__heap_node* place);
+static __device__ inline bool sys__sublist__zzengine_walk_unpark(uint64_t sublist, uint64_t from,
+                                                                  const sys__heap_node* place, sys__list_walk* w);
+
 /* The rest: another view over the same store, starting one further along. It allocates, because it is an
  * object a program can hold and put somewhere — and it is registered, so what it names keeps meaning the
  * same thing when the list changes underneath it.

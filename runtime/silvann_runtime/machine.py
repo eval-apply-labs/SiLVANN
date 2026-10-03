@@ -7,6 +7,7 @@ read and write a card's memory.
 """
 import importlib
 import os
+import re
 import sys
 
 from .composer import Composer
@@ -27,9 +28,23 @@ def _indent(text):
     return "".join(out).replace(" \n", "\n")
 
 
+def _unindent(text):
+    """`_indent` undone: each line break and the indent after it back to the one space it replaced."""
+    return re.sub(r"\n +", " ", text.strip())
+
+
+# A program's line in `programs.lisp`, before its text: what it is, its name, and the worker it was defined as.
+_ENTRY = re.compile(r"^;; (defun|picture|view)(?: (\S+))?, as worker (-?\d+)$")
+
+
 class Machine:
     def __init__(self, silicon=None, engine="cpu"):
-        self.programs = []             # every procedure and picture defined, in order, as text — ▶ `write_programs`
+        # every procedure, picture and view defined, in order: (what, worker, name, text) — ▶ `write_programs`
+        self.programs = []
+        self.worker = -1               # the worker `act_as` last chose
+        self.recording = False         # True: the definitions are recorded and not made — ▶ `composed_programs`
+        self.read_from = None          # the file the programs were read from, when they were
+        self.programs_file = None      # (path, key): where a boot looks for its programs before composing them
         root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         # where the built engine sits: `lib/` in a release, the tree's root in development
         for at in (os.path.join(root, "lib"), root):
@@ -66,7 +81,9 @@ class Machine:
 
     def act_as(self, worker):
         """What runs from here runs as `worker`: its buffers, its device, its tables. -1 is the default again."""
-        self.e.act_as(worker)
+        self.worker = worker
+        if not self.recording:
+            self.e.act_as(worker)
 
     # ── running ──────────────────────────────────────────────────────────────────────────────────────
     def run(self, text):
@@ -118,29 +135,94 @@ class Machine:
 
     def picture(self, name, text):
         """A program frozen and bound by name — what `sys__compute` hands another block."""
+        self.programs.append(("picture", self.worker, name, text))
+        if self.recording:
+            return
         cell = self.comp.compose(text)
         pic = self.e.freeze(cell)
         self.e.release(cell[2])
         self.bind(name, pic)
-        self.programs.append(";; picture %s — run by another worker when a program hands it over\n%s" % (name, text))
 
     def view(self, name):
         """A read-only snapshot of the bindings as they stand, bound by name — the names a computed block sees."""
+        self.programs.append(("view", self.worker, name, ""))
+        if self.recording:
+            return
         e, K, V = self.e, self.K, self.V
         self.bind(name, e.create_executable([(K["sys__standard"], V["sys__bindings__viewonly"], 0),
                                              (K["sys__object_reference"], 0, self.env)]))
 
     def defun(self, text):
-        self.must(text, "the procedure %r" % text[:60], "sys__value_true")
-        self.programs.append(text)
+        self.programs.append(("defun", self.worker, None, text))
+        if not self.recording:
+            self.must(text, "the procedure %r" % text[:60], "sys__value_true")
 
-    def write_programs(self, path, heading):
-        """The procedures and pictures defined so far, as the Lisp they were written in, one after another — what a
-        model IS in this engine, readable. ⛳ Written from the text each was defined with; nothing is reconstructed."""
+    # ── ⭐ THE PROGRAMS AS A FILE: written once, read at every boot after ────────────────────────────────
+    # A model composes its procedures in Python once; the file holds them with the key of what they were composed
+    # from — the pack, the settings, and the runtime's own source — and a boot whose key matches defines what the
+    # file holds instead of composing them again. Each program carries the worker it was defined as.
+    def write_programs(self, path, heading, key):
+        """The programs defined so far, as the Lisp they were written in, one after another — what a model IS in this
+        engine, readable. ⛳ Written from the text each was defined with; nothing is reconstructed."""
         with open(path, "w") as f:
-            f.write(";; %s\n;; %d programs, in the order they were defined\n\n" % (heading, len(self.programs)))
-            for text in self.programs:
-                f.write(_indent(text) + "\n\n")
+            f.write(";; %s\n;; key %s\n;; %d programs, in the order they were defined\n\n" % (heading, key, len(self.programs)))
+            for what, worker, name, text in self.programs:
+                f.write(";; %s%s, as worker %d\n" % (what, "" if name is None else " " + name, worker))
+                f.write((_indent(text) + "\n\n") if text else "\n")
+
+    @staticmethod
+    def programs_in(path, key):
+        """The programs a file holds, [(what, worker, name, text)], if it was written for `key`; else None."""
+        try:
+            with open(path) as f:
+                lines = f.read().split("\n")
+        except OSError:
+            return None
+        if ";; key %s" % key not in lines[:4]:
+            return None
+        out, body = [], None
+        for line in lines[3:] + [";; end"]:
+            m = _ENTRY.match(line)
+            if m or line == ";; end":
+                if body is not None:
+                    out[-1] = out[-1][:3] + (_unindent("\n".join(body)),)
+                if line == ";; end":
+                    break
+                out.append((m.group(1), int(m.group(3)), m.group(2), ""))
+                body = []
+            elif body is not None:
+                body.append(line)
+        return out
+
+    def read_programs(self, path, key):
+        """Every program the file holds defined as it was, if the file was written for `key`. Answers whether it was."""
+        held = self.programs_in(path, key)
+        if held is None:
+            return False
+        before = self.worker
+        for what, worker, name, text in held:
+            self.act_as(worker)
+            {"defun": lambda: self.defun(text), "picture": lambda: self.picture(name, text),
+             "view": lambda: self.view(name)}[what]()
+        self.act_as(before)
+        self.read_from = path
+        return True
+
+    def define_programs(self, compose):
+        """A model's programs: read from `programs_file` when it was written for this key, else `compose()`d."""
+        if self.programs_file is None or not self.read_programs(*self.programs_file):
+            compose()
+
+    def composed_programs(self, compose):
+        """What `compose()` would define, recorded and not made — to set beside what a file held."""
+        programs, worker = self.programs, self.worker
+        self.programs, self.recording = [], True
+        try:
+            compose()
+            return self.programs
+        finally:
+            self.programs, self.recording = programs, False
+            self.act_as(worker)
 
     def loader(self):
         """`nn_load_bundle.Loader` over this machine: the verbs it runs are built as cells, as a C caller would."""

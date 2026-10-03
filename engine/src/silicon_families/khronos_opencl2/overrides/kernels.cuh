@@ -283,4 +283,131 @@ __kernel void khronos_opencl2__attention_mix(ulong res__address, ulong p__addres
 }
 
 #endif /* __OPENCL_C_VERSION__ && cl_khr_subgroups */
+
+/* ══ ⭐⭐ THE EXPERT-MAJOR GEMM IN TILES — a prompt's rows against a matrix, each weight and each row of `x` read once a tile ═
+ * The ROCm family's tile, in OpenCL C: a work-group takes 64 matrix rows by `TP` pairs and walks the columns 32 at a
+ * time, staging the tile's slice of `x` and of the matrix (its codes decoded to levels, once) in local memory, and each
+ * lane sums 4 rows by `PT` pairs from there. Two shapes, as there: 64 by 64 for a matrix many rows read (a dense
+ * projection over a chunk), 64 by 16 for the few rows a routed expert gets. A launch is up to twelve matrices
+ * (`nn__expert__groups`), each its own tiles.
+ * ⛳ THE SLICE IS STAGED AS FLOATS, where ROCm's is packed halves: OpenCL 2.0 has no two-halves dot, so a float tile keeps
+ *   the inner loop to plain multiply-adds. 32 columns rather than 64 keep the two tiles near 17 KB, so more than one
+ *   work-group fits a compute unit (ROCm measured 33 KB a block as one a unit).
+ * ⛳ NO SUB-GROUPS, so it is outside the guard above: a device without them gets it too. The arithmetic is the generic
+ *   body's: fp32 sums of level · x, the row's scale once, a half rounded once; only the order of the sum differs. */
+#if defined(__OPENCL_C_VERSION__)
+#define KHRONOS_OPENCL2__ZZPRIVATE_KT  32u       /* the columns a slice stages */
+#define KHRONOS_OPENCL2__ZZPRIVATE_XP  68u       /* a staged column of `x`: the tile's pairs, four over so the columns' banks differ */
+#define KHRONOS_OPENCL2__ZZPRIVATE_WP  68u       /* a staged column of the matrix: its 64 rows, four over */
+#define KHRONOS_OPENCL2__ZZPRIVATE_TR  64u       /* matrix rows a tile */
+#define KHRONOS_OPENCL2__ZZPRIVATE_RT  4u        /* of those, a lane's */
+
+static inline void khronos_opencl2__zzprivate_tile(nn__expert__groups g, __global uint16_t* out, __global float* acc,
+                                                   __global const uint16_t* x, __global const uint32_t* rows,
+                                                   __global const uint16_t* w, uint64_t cols, __global unsigned int* over,
+                                                   const uint32_t TP, const uint32_t PT, __local float* ws, __local float* xs,
+                                                   __local float* lev4, __local float* lev8) {
+    const uint32_t TR = KHRONOS_OPENCL2__ZZPRIVATE_TR, RT = KHRONOS_OPENCL2__ZZPRIVATE_RT;
+    const uint32_t KT = KHRONOS_OPENCL2__ZZPRIVATE_KT, XP = KHRONOS_OPENCL2__ZZPRIVATE_XP, WP = KHRONOS_OPENCL2__ZZPRIVATE_WP;
+    const uint32_t t = (uint32_t)get_local_id(0), n = (uint32_t)get_local_size(0);
+    const uint16_t* t4 = nn__turboquant__zzabi_levels(4u);
+    const uint16_t* t8 = nn__turboquant__zzabi_levels(8u);
+    for (uint32_t e = t; e < 256u; e += n) { lev8[e] = nn__silicon__half_to_float(t8[e]); if (e < 16u) lev4[e] = nn__silicon__half_to_float(t4[e]); }
+    barrier(CLK_LOCAL_MEM_FENCE);
+    /* where each matrix's tiles start among the launch's */
+    uint64_t first[sizeof g.pairs / sizeof g.pairs[0] + 1u];
+    first[0] = 0ul;
+    for (uint64_t i = 0ul; i < g.count; ++i)
+        first[i + 1u] = first[i] + ((g.out_rows[i] + TR - 1u) / TR) * ((g.pairs[i] + TP - 1u) / TP);
+    const uint32_t tr = (t / (TP / PT)) * RT, tp = (t % (TP / PT)) * PT;
+    for (uint64_t b = get_group_id(0); b < first[g.count]; b += get_num_groups(0)) {
+        uint64_t i = 0ul;
+        while (b >= first[i + 1u]) ++i;
+        const uint64_t tiles_p = (g.pairs[i] + TP - 1u) / TP, within = b - first[i];
+        const uint64_t r0 = (within / tiles_p) * TR, p0 = (within % tiles_p) * TP;
+        const uint32_t d = (uint32_t)g.d[i], per = 16u / d, mask = (1u << d) - 1u;
+        const uint64_t row_bytes = cols * d / 8u;
+        __global const uint8_t* codes = (__global const uint8_t*)g.codes[i];
+        __local const float* lev = d == 4u ? lev4 : lev8;
+        __global const uint32_t* pr = rows + 2u * g.pairs_at[i];
+        float sum[4][4];
+        for (uint32_t a = 0u; a < RT; ++a)
+            for (uint32_t q = 0u; q < PT; ++q) sum[a][q] = 0.0f;
+        for (uint64_t k0 = 0ul; k0 < cols; k0 += KT) {
+            /* `x` two halves a read, converted by the device's own instruction */
+            for (uint32_t e = t; e < TP * (KT / 2u); e += n) {
+                const uint32_t p = e / (KT / 2u), c = 2u * (e % (KT / 2u));
+                const float2 v = p0 + p < g.pairs[i]
+                    ? vload_half2(0, (__global const half*)(x + (uint64_t)pr[2u * (p0 + p)] * cols + k0 + c)) : (float2)(0.0f, 0.0f);
+                xs[c * XP + p] = v.x;
+                xs[(c + 1u) * XP + p] = v.y;
+            }
+            /* a lane a 16-bit unit of codes — `per` columns of one row — read once and decoded into all of them */
+            const uint32_t units = KT / per;
+            for (uint32_t e = t; e < TR * units; e += n) {
+                const uint32_t r = e / units, u = e % units;
+                const uint32_t unit = r0 + r < g.out_rows[i]
+                    ? ((__global const uint16_t*)(codes + (r0 + r) * row_bytes))[k0 / per + u] : 0u;
+                const bool live = r0 + r < g.out_rows[i];
+                for (uint32_t j = 0u; j < per; ++j)
+                    ws[(u * per + j) * WP + r] = live ? lev[(unit >> (j * d)) & mask] : 0.0f;
+            }
+            barrier(CLK_LOCAL_MEM_FENCE);
+            /* the slices are stored a column at a time, so a lane's four rows and its pairs are each one vector read */
+            for (uint32_t c = 0u; c < KT; ++c) {
+                const float4 wv = vload4(0, ws + c * WP + tr);
+                float xv[4];
+                if (PT == 4u) { const float4 x4 = vload4(0, xs + c * XP + tp); xv[0] = x4.x; xv[1] = x4.y; xv[2] = x4.z; xv[3] = x4.w; }
+                else xv[0] = xs[c * XP + tp];
+                for (uint32_t q = 0u; q < PT; ++q) {
+                    sum[0][q] = fma(wv.x, xv[q], sum[0][q]);
+                    sum[1][q] = fma(wv.y, xv[q], sum[1][q]);
+                    sum[2][q] = fma(wv.z, xv[q], sum[2][q]);
+                    sum[3][q] = fma(wv.w, xv[q], sum[3][q]);
+                }
+            }
+            barrier(CLK_LOCAL_MEM_FENCE);
+        }
+        __global const uint8_t* lut = (__global const uint8_t*)g.luts[i];
+        for (uint32_t a = 0u; a < RT; ++a) {
+            const uint64_t r = r0 + tr + a;
+            if (r >= g.out_rows[i]) continue;
+            const float scale = nn__silicon__half_to_float((uint16_t)((uint32_t)lut[r * 2u] | ((uint32_t)lut[r * 2u + 1u] << 8)));
+            for (uint32_t q = 0u; q < PT; ++q) {
+                const uint64_t p = p0 + tp + q;
+                if (p >= g.pairs[i]) continue;
+                const uint64_t at = (uint64_t)pr[2u * p + 1u] * g.out_rows[i] + r;
+                const float v = sum[a][q] * scale;
+                if (out != 0) (out + g.out_at[i])[at] = nn__kernels__zzabi_to_half(v, over);
+                else acc[at] += v * nn__silicon__half_to_float(w[pr[2u * p]]);
+            }
+        }
+    }
+}
+
+/* The two shapes: 64 matrix rows by 64 pairs, and by 16 for a routed expert's few. */
+__kernel void khronos_opencl2__tile_wide(nn__expert__groups g, ulong out__address, ulong acc__address, ulong x__address,
+                                         ulong rows__address, ulong w__address, uint64_t cols, ulong over__address) {
+    __local float ws[KHRONOS_OPENCL2__ZZPRIVATE_KT * KHRONOS_OPENCL2__ZZPRIVATE_WP];
+    __local float xs[KHRONOS_OPENCL2__ZZPRIVATE_KT * KHRONOS_OPENCL2__ZZPRIVATE_XP];
+    __local float lev4[16];
+    __local float lev8[256];
+    khronos_opencl2__zzprivate_tile(g, (__global uint16_t*)out__address, (__global float*)acc__address,
+                                    (__global const uint16_t*)x__address, (__global const uint32_t*)rows__address,
+                                    (__global const uint16_t*)w__address, cols, (__global unsigned int*)over__address,
+                                    64u, 4u, ws, xs, lev4, lev8);
+}
+__kernel void khronos_opencl2__tile_few(nn__expert__groups g, ulong out__address, ulong acc__address, ulong x__address,
+                                        ulong rows__address, ulong w__address, uint64_t cols, ulong over__address) {
+    __local float ws[KHRONOS_OPENCL2__ZZPRIVATE_KT * KHRONOS_OPENCL2__ZZPRIVATE_WP];
+    __local float xs[KHRONOS_OPENCL2__ZZPRIVATE_KT * KHRONOS_OPENCL2__ZZPRIVATE_XP];
+    __local float lev4[16];
+    __local float lev8[256];
+    khronos_opencl2__zzprivate_tile(g, (__global uint16_t*)out__address, (__global float*)acc__address,
+                                    (__global const uint16_t*)x__address, (__global const uint32_t*)rows__address,
+                                    (__global const uint16_t*)w__address, cols, (__global unsigned int*)over__address,
+                                    16u, 1u, ws, xs, lev4, lev8);
+}
+#endif /* __OPENCL_C_VERSION__ */
+
 #endif /* SILVANN__SILICON_FAMILIES_KHRONOS_OPENCL2_OVERRIDES_KERNELS_CUH */

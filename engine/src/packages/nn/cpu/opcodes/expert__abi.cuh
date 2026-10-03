@@ -66,10 +66,12 @@ static sys__heap_node nn__expert__zzprivate_ask(const sys__heap_node* argv, unsi
     const uint64_t n = sys__node_array__length(picks);
     if (n > NN__EXPERT__ASK_MAX) return sys__engine__abi__error(NN__EXPERT__FAULT_SPAN);
     uint64_t ids[NN__EXPERT__ASK_MAX];
-    for (uint64_t j = 0u; j < n; ++j) {
-        const sys__heap_node p = sys__node_array__borrow(picks, j);
-        if (p.dtype != SYS__KIND__VALUE_INT) return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
-        ids[j] = p.args[0];
+    sys__node_array_walk pw;
+    if (!sys__node_array__walk(picks, 0ull, &pw)) return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
+    for (uint64_t j = 0u; j < n; ++j, sys__node_array__next(&pw)) {
+        const sys__heap_node* p = sys__node_array__walk_cell(&pw);
+        if (p == 0 || p->dtype != SYS__KIND__VALUE_INT) return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
+        ids[j] = p->args[0];
     }
     uint64_t arriving = 0u;
     for (uint64_t j = 0u; j < n; ++j) {

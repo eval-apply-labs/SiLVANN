@@ -227,7 +227,9 @@ static __device__ inline bool nn__cartridge__zzpackage_carve(uint64_t from,
         const uint8_t* letters = sys__string__bytes(types);
         uint64_t seen[NN__CARTRIDGE__MECHANISMS];
         for (unsigned m = 0u; m < (unsigned)NN__CARTRIDGE__MECHANISMS; ++m) seen[m] = 0ull;
-        for (uint64_t l = 0ull; ok && l < total; ++l) {
+        sys__node_array_walk lw;
+        ok = sys__node_array__walk(layer_table, 0ull, &lw);
+        for (uint64_t l = 0ull; ok && l < total; ++l, sys__node_array__next(&lw)) {
             unsigned which = (unsigned)NN__CARTRIDGE__MECHANISMS;
             switch (letters[l]) {
 #define NN__CARTRIDGE__ZZPRIVATE_LETTER_ROW(id, letter, name, key)                                      \
@@ -246,7 +248,7 @@ static __device__ inline bool nn__cartridge__zzpackage_carve(uint64_t from,
             lrow.args[NN__CARTRIDGE__LAYER_LANE]      = seen[which];
             lrow.args[2] = 0ull; lrow.args[3] = 0ull; lrow.args[4] = 0ull; lrow.args[5] = 0ull;
             seen[which] += 1ull;
-            ok = sys__node_array__set(layer_table, l, &lrow);
+            ok = sys__node_array__walk_set(&lw, &lrow);
         }
         /* ⛔ AND EVERY TALLY MUST MATCH ITS OWN KEY, not just add up to the right total — `fdfd` and
          * `ffdd` have the same length and the same two tallies, and a config that swapped the two counts

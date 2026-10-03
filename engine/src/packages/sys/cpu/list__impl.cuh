@@ -168,6 +168,31 @@ static __device__ inline void sys__list__walk_step(sys__list_walk* w) {
     sys__list__zzprivate_walk_settle(w);
 }
 
+static __device__ inline void sys__list__zzengine_walk_park(const sys__list_walk* w, sys__heap_node* place) {
+    place->args[2] = w->chunk;
+    place->args[3] = w->base;
+    place->args[4] = w->used;
+    place->args[5] = w->total;
+}
+
+static __device__ inline bool sys__sublist__zzengine_walk_unpark(uint64_t sublist, uint64_t from,
+                                                                  const sys__heap_node* place, sys__list_walk* w) {
+    sys__heap_node* f = sys__sublist__zzprivate_fields(sublist);
+    if (f == 0 || place == 0 || place->args[2] == 0ull) return sys__sublist__walk(sublist, from, w);
+    const uint64_t store = f->args[SYS__SUBLIST__STORE];
+    if (sys__list__zzprivate_total(store) != place->args[5]) return sys__sublist__walk(sublist, from, w);
+    w->store = store;
+    w->at    = f->args[SYS__SUBLIST__START] + from;
+    w->chunk = place->args[2];
+    w->base  = place->args[3];
+    w->used  = place->args[4];
+    w->total = place->args[5];
+    /* And the index has to fall in the chunk it was parked in, which a total that came back to the same
+     * number by a removal and an addition would not promise. */
+    if (w->at < w->base || w->at >= w->base + w->used) return sys__sublist__walk(sublist, from, w);
+    return true;
+}
+
 /* ── THE ROLL ────────────────────────────────────────────────────────────────────────────────────────
  * The store's second chain, holding one entry per view that is looking at it. An entry is a BARE OFFSET
  * and takes no hold, which would otherwise be a cycle — a view holds the store, and a store holding its
@@ -778,9 +803,11 @@ static __device__ inline uint64_t sys__sublist__create_viewonly_array(uint64_t s
     if (picture == 0ull) return 0ull;
     const uint64_t store = f->args[SYS__SUBLIST__STORE];
     const uint64_t start = f->args[SYS__SUBLIST__START];
-    for (uint64_t i = 0ull; i < length; ++i) {
+    sys__node_array_walk pw;
+    if (!sys__node_array__walk(picture, 0ull, &pw)) { (void)sys__heap_object__release(picture); return 0ull; }
+    for (uint64_t i = 0ull; i < length; ++i, sys__node_array__next(&pw)) {
         const sys__heap_node value = sys__list__zzprivate_at(store, start + i);
-        if (!sys__node_array__set(picture, i, &value)) { (void)sys__heap_object__release(picture); return 0ull; }
+        if (!sys__node_array__walk_set(&pw, &value)) { (void)sys__heap_object__release(picture); return 0ull; }
     }
     return picture;
 }
@@ -821,7 +848,10 @@ static __device__ inline uint64_t sys__sublist__deep_copy_to_node_array(uint64_t
              * cell here would be the bulk of what `freeze` costs. */
             sys__list_walk sw;
             if (!sys__sublist__walk(source, 0ull, &sw)) { ok = false; break; }
-            for (uint64_t k = 0ull; ok && k < n; ++k, sys__list__walk_step(&sw)) {
+            /* And one walk for the picture, filled in the same order the list is read. */
+            sys__node_array_walk pw;
+            if (!sys__node_array__walk(picture, 0ull, &pw)) { ok = false; break; }
+            for (uint64_t k = 0ull; ok && k < n; ++k, sys__list__walk_step(&sw), sys__node_array__next(&pw)) {
                 const sys__heap_node* found = sys__list__walk_cell(&sw);
                 if (found == 0) { ok = false; break; }   /* `n` said it was there and it was not */
                 sys__heap_node cell = *found;
@@ -860,7 +890,7 @@ static __device__ inline uint64_t sys__sublist__deep_copy_to_node_array(uint64_t
                     }
                     cell.dtype = SYS__KIND__QUOTED_ARRAY;
                 }
-                if (!sys__node_array__set(picture, k, &cell)) ok = false;
+                if (!sys__node_array__walk_set(&pw, &cell)) ok = false;
             }
         }
         if (ok) {
@@ -917,9 +947,11 @@ static __device__ inline uint64_t sys__list__zzprivate_thaw(uint64_t array_base,
         const sys__heap_node next = sys__stack__pop(&work);
         const uint64_t picture = next.args[0];
         const uint64_t list    = next.args[1];
-        const uint64_t n       = sys__node_array__length(picture);
-        for (uint64_t k = 0ull; ok && k < n; ++k) {
-            sys__heap_node cell = sys__node_array__borrow(picture, k);
+        sys__node_array_walk pw;
+        if (!sys__node_array__walk(picture, 0ull, &pw)) { ok = false; break; }
+        for (const sys__heap_node* at = sys__node_array__walk_cell(&pw); ok && at != 0;
+             sys__node_array__next(&pw), at = sys__node_array__walk_cell(&pw)) {
+            sys__heap_node cell = *at;
             if (lazy && cell.dtype == SYS__KIND__OBJECT_REFERENCE
                      && sys__node_array__is(cell.args[0])) {
                 /* ⭐ NAMED, NOT MADE. The cell keeps the array it came from and takes a hold of it, the
@@ -1014,9 +1046,11 @@ static __device__ inline bool sys__list__thaw_running_into(uint64_t array_base, 
     bool     ok      = true;
 
     for (;;) {
-        const uint64_t n = sys__node_array__length(picture);
-        for (uint64_t k = 0ull; ok && k < n; ++k) {
-            sys__heap_node cell = sys__node_array__borrow(picture, k);
+        sys__node_array_walk pw;
+        if (!sys__node_array__walk(picture, 0ull, &pw)) { ok = false; break; }
+        for (const sys__heap_node* at = sys__node_array__walk_cell(&pw); ok && at != 0;
+             sys__node_array__next(&pw), at = sys__node_array__walk_cell(&pw)) {
+            sys__heap_node cell = *at;
             if (cell.dtype == SYS__KIND__OBJECT_REFERENCE && sys__node_array__is(cell.args[0])) {
                 cell.dtype = SYS__KIND__FROZEN_LIST;      /* named, not made; `append` takes the hold */
                 ok = sys__sublist__append(into, &cell);

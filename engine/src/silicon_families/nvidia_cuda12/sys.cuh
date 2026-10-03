@@ -25,7 +25,8 @@ static inline bool nvidia_cuda12__memory_write(void* to, const void* from, size_
     return cudaMemcpy(to, from, bytes, cudaMemcpyHostToDevice) == cudaSuccess;
 }
 
-static inline bool nvidia_cuda12__compute_completed(void) { return cudaDeviceSynchronize() == cudaSuccess; }
+/* the caller's work on stream 0, not the device's — ▶ amd_rocm6_wave64's own (`REASONED` the same here; not measured) */
+static inline bool nvidia_cuda12__compute_completed(void) { return cudaStreamSynchronize(0) == cudaSuccess; }
 
 static inline bool nvidia_cuda12__side_open(void** channel) {
     return cudaStreamCreateWithFlags((cudaStream_t*)channel, cudaStreamNonBlocking) == cudaSuccess;

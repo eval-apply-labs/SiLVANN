@@ -181,7 +181,8 @@ static __device__ inline uint16_t nn__primitives__zzpackage_float_to_half(float 
  * ⇒ ★ A VERB WHOSE ALGORITHM CHANGES WITH ITS ARGUMENTS IS TWO VERBS WEARING ONE NAME. The caller
  * passes a second buffer, which it has. */
 
-/* `(nn__rmsnorm__apply x weight out n)` — `out[i] = x[i] * rsqrt(mean(x^2) + 1e-6) * weight[i]`.
+/* `(nn__rmsnorm__apply x weight out n eps)` — `out[i] = x[i] * rsqrt(mean(x^2) + eps) * weight[i]`, `eps` the
+ * model's own (its config's `rms_norm_eps`).
  * ⛔ THE EPSILON IS INSIDE THE SQUARE ROOT, NOT ADDED TO IT, and the old tree puts it there too:
  * `rsqrt(sum/n + eps)`. Outside it would be a different function, and on a near-zero row the difference
  * is not small — it is the difference between a finite answer and a division by zero. */

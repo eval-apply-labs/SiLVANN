@@ -11,14 +11,16 @@
 static bool ai_qwen_3__table__zzpackage_read(uint64_t table, unsigned planes, unsigned length,
                                              uint64_t* at, uint64_t* room, uint64_t* v) {
     if (sys__node_array__length(table) < length) return false;
-    for (unsigned i = 0u; i < planes; ++i) {
-        const sys__heap_node n = sys__node_array__borrow(table, i);
-        if (!nn__primitives__room(&n, &at[i], &room[i])) return false;
+    sys__node_array_walk w;
+    if (!sys__node_array__walk(table, 0ull, &w)) return false;
+    for (unsigned i = 0u; i < planes; ++i, sys__node_array__next(&w)) {
+        const sys__heap_node* n = sys__node_array__walk_cell(&w);
+        if (n == 0 || !nn__primitives__room(n, &at[i], &room[i])) return false;
     }
-    for (unsigned i = planes; i < length; ++i) {
-        const sys__heap_node n = sys__node_array__borrow(table, i);
-        if (n.dtype != SYS__KIND__VALUE_INT) return false;
-        v[i] = n.args[0];
+    for (unsigned i = planes; i < length; ++i, sys__node_array__next(&w)) {
+        const sys__heap_node* n = sys__node_array__walk_cell(&w);
+        if (n == 0 || n->dtype != SYS__KIND__VALUE_INT) return false;
+        v[i] = n->args[0];
     }
     return true;
 }
@@ -38,9 +40,11 @@ static bool ai_qwen_3__table__zzpackage_mask(uint64_t table, unsigned first, uin
     const sys__heap_node r = sys__node_array__borrow(table, first);
     if (r.dtype == SYS__KIND__VALUE_INT && r.args[0] == 0ull) return true;
     if (sys__node_array__length(table) < first + 3u) return false;
-    for (unsigned i = 0u; i < 3u; ++i) {
-        const sys__heap_node n = sys__node_array__borrow(table, first + i);
-        if (!nn__primitives__room(&n, &at[i], &room[i])) return false;
+    sys__node_array_walk w;
+    if (!sys__node_array__walk(table, first, &w)) return false;
+    for (unsigned i = 0u; i < 3u; ++i, sys__node_array__next(&w)) {
+        const sys__heap_node* n = sys__node_array__walk_cell(&w);
+        if (n == 0 || !nn__primitives__room(n, &at[i], &room[i])) return false;
     }
     *present = true;
     return true;
@@ -69,10 +73,13 @@ static bool ai_qwen_3__table__zzpackage_top_k(sys__engine__ctx* ctx, const nn__d
     if (sys__node_array__length(picks) < k) return false;
     sys__heap_node zero = sys__heap_node__nothing();
     zero.dtype = SYS__KIND__VALUE_INT; zero.args[0] = 0ull;
-    for (uint64_t j = 0u; j < k; ++j) {
-        const sys__kind kind = sys__node_array__type(picks, j);
-        if (kind != SYS__KIND__VALUE_INT && kind != SYS__KIND__VALUE_NULL) return false;   /* holds nothing to lose */
-        if (!sys__node_array__set(picks, j, &zero)) return false;
+    sys__node_array_walk w;
+    if (!sys__node_array__walk(picks, 0ull, &w)) return false;
+    for (uint64_t j = 0u; j < k; ++j, sys__node_array__next(&w)) {
+        const sys__heap_node* cell = sys__node_array__walk_cell(&w);
+        if (cell == 0) return false;
+        if (cell->dtype != SYS__KIND__VALUE_INT && cell->dtype != SYS__KIND__VALUE_NULL) return false;   /* holds nothing to lose */
+        if (!sys__node_array__walk_set(&w, &zero)) return false;
     }
     sys__heap_node* cells = sys__node_array__cells(picks, k);
     if (cells == 0) return false;

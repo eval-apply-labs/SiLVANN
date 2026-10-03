@@ -1,6 +1,6 @@
 # SiLVANN
 
-> **Developer preview, v0.2.1.** It runs the models below well on the hardware it was tested on, and it is shared
+> **Developer preview, v0.3.0.** It runs the models below well on the hardware it was tested on, and it is shared
 > for people who can find their way around a build and a stack trace. The NVIDIA and Apple paths, and tensor
 > cores, are not tested yet.
 
@@ -42,12 +42,19 @@ one that suits that machine best:
 | An 8 GB card, 32 GB of RAM, an NVMe disk | Qwen 3.5 122B-A10B (`D4E4`) — the same split | 4.7 tokens/s ◦ |
 | A 16 GB card, 64 GB of RAM, an NVMe disk reading 5 GB/s | GLM 5.3 Flash — the same split | about 2.5 tokens/s, projected |
 | A 16 GB card, 128 GB of RAM, an NVMe disk reading 5 GB/s | GLM 5.3 Flash — the same split | 5.7 tokens/s |
-| A 16 GB card, 150 GB of RAM | GLM 5.3 Flash with all of its experts (142 GB) in RAM, nothing read from the disk | 6.7 tokens/s |
+| A 16 GB card, 150 GB of RAM | GLM 5.3 Flash with all of its experts (142 GB) in RAM, a 300,000-token context, and 6 GB of the card the tier of experts used most | 7.5 tokens/s (6.8 without the tier) |
+| A 32 GB card, 80 GB of RAM | Qwen 3.5 122B-A10B (`D4E4`), its experts in RAM and 24 GB of them on the card | 19.9 tokens/s (10.9 without the tier) |
+| A 32 GB card, 160 GB of RAM | GLM 5.3 Flash, its experts in RAM and 18 GB of them on the card | 8.1 tokens/s |
 
 Measured on a Dell R730 (two Xeon E5-2680 v4, AMD Instinct MI50 cards; disk speed 5 GB/s, RAM speed 126 GB/s), each
 row with its process held to the memory it names — leave room beside it for the operating system — and from a cold
 start where the experts come from the disk. ◦ The dense part ran on a 32 GB MI50: it fits the smaller card, but a card that size has not been
 measured. The projected row is worked out from GLM's measured rows at 64 GB and 128 GB.
+
+**New in v0.3.0: the card's tier of experts.** With a model's experts on the CPU, `card_experts_gb` in its config gives
+part of the card to the experts used most; the card computes those while the CPU computes the rest, and the CPU copies
+an expert over while the card works, so a token never waits for one. The rows that name a tier above are this. They ran on the machine's 256 GB of RAM; the RAM they name is what the experts and the process need, not a limit they were held to.
+[`docs/users.md`](docs/users.md#the-cards-tier-of-experts) says how to set it.
 
 Every measurement, the other packs and memory sizes, and what limits a model reading its experts from the disk:
 [`docs/results.md`](docs/results.md).
@@ -61,7 +68,7 @@ model's `configs/default.json` to what your card has room for.
 
 | | |
 |---|---|
-| **Tested** | Linux with AMD Instinct MI50 (gfx906), ROCm 6; the CPU alone with AVX2 (Xeon E5-2680 v4); OpenCL 2.0 with sub-groups, on the MI50 — the 27B and the 35B checked against Hugging Face, the 27B answering at 9-11 tokens a second, its prompt still slow (about 4 positions a second) |
+| **Tested** | Linux with AMD Instinct MI50 (gfx906), ROCm 6; the CPU alone with AVX2 (Xeon E5-2680 v4); OpenCL 2.0 with sub-groups, on the MI50 — the 27B and the 35B checked against Hugging Face, the 27B answering at 9-11 tokens a second and reading a prompt at 49 positions a second; the 122B's tier of experts, 11.7 tokens a second with 18 GB of the card (9.7 without) |
 | **Untested** | Windows; NVIDIA cards (the CUDA family builds, but has not been run); other AMD generations; OpenCL on other devices (an Intel iGPU among them) |
 | **Not yet** | Apple silicon; AVX-512 CPU paths |
 
