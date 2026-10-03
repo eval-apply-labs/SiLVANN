@@ -299,6 +299,9 @@ static __device__ inline sys__heap_node sys__heap_object__reference_to(uint64_t 
  *                  ARRAY in the picture it would be made from — the SAME
  *                  array, shared, exactly as QUOTED_ARRAY is, and the tag
  *                  only says this one is meant to be RUN rather than read   reference · ---
+ *   NODE_ARRAY_CONE  the rest of a long array, named from the last cell of
+ *                  the run before it. The array is the runs together, so
+ *                  the tail is part of it and dies with it              reference · substructure
  * ```
  * ⭐⭐ `FROZEN_LIST` SITS IN THE SAME TWO BOXES AS `QUOTED_ARRAY`, AND THAT IS THE ARGUMENT FOR IT RATHER
  * THAN A COINCIDENCE. It is a reference, because the array must outlive the cell that names it and a hold
@@ -317,7 +320,8 @@ static __device__ inline bool sys__heap_node__carries_reference(sys__kind dtype)
         || dtype == SYS__KIND__QUOTED_LIST
         || dtype == SYS__KIND__PROCEDURE_REFERENCE
         || dtype == SYS__KIND__QUOTED_ARRAY
-        || dtype == SYS__KIND__FROZEN_LIST;
+        || dtype == SYS__KIND__FROZEN_LIST
+        || dtype == SYS__KIND__NODE_ARRAY_CONE;
 }
 
 /* Whether what this cell names is PART OF the structure rather than something it merely points at — the
@@ -325,7 +329,8 @@ static __device__ inline bool sys__heap_node__carries_reference(sys__kind dtype)
  * is there and what it means, and the CONTAINER still has to say the offset is one of its own kind. */
 static __device__ inline bool sys__heap_node__is_substructure(sys__kind dtype) {
     return dtype == SYS__KIND__OBJECT_REFERENCE
-        || dtype == SYS__KIND__QUOTED_LIST;
+        || dtype == SYS__KIND__QUOTED_LIST
+        || dtype == SYS__KIND__NODE_ARRAY_CONE;
 }
 
 /* Become one of the holders. Answers the count afterwards, so a caller can tell a first holder from a

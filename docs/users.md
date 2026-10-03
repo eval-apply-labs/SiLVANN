@@ -1,6 +1,6 @@
 # Running SiLVANN
 
-This is a **developer preview (v0.2.1)**. It is tested on Linux with AMD Instinct MI50 cards (gfx906, ROCm 6), and on
+This is a **developer preview (v0.3.0)**. It is tested on Linux with AMD Instinct MI50 cards (gfx906, ROCm 6), and on
 the CPU alone with AVX2;
 Windows and NVIDIA cards are untested, Apple silicon is not supported yet. If something does not build or does
 not run on your machine, you are expected to be able to read the error and the source.
@@ -76,6 +76,7 @@ The Qwen models' `options`:
 | `chunk` | positions, 1 to 256, default 256 | how many positions of a prompt go through a layer at once |
 | `experts_on` | `"card"` (default), `"cpu"` | the routed experts on the card, or on the CPU — the setup for a card too small to hold them; the 122B's `default.json` starts with `"cpu"` |
 | `experts_from` | `"auto"`, `"ram"`, `"disk"`, `"mapped"` | with the experts on the CPU: copied into RAM, or read from a file on the disk as they are needed — `disk` keeps the ones used in the engine's own memory, as much of it as there is (`experts_ram_gb` to set it), `mapped` leaves that to the system's page cache and is slower; `auto` chooses by the memory there is |
+| `card_experts_gb` | gigabytes, default `0` | with the experts on the CPU: the card's own tier of them, below |
 
 GLM 5.3 Flash's `options`:
 
@@ -84,6 +85,18 @@ GLM 5.3 Flash's `options`:
 | `experts_from` | `"auto"`, `"ram"`, `"disk"`, `"mapped"` | its routed experts (142 GB) in RAM, or read from a file on the disk as they are needed — `disk` keeps the ones used in the engine's own memory (`experts_ram_gb` to set how much), `mapped` leaves that to the system's page cache; `auto` puts them in RAM when they leave a fifth of the available memory free — about 180 GB available |
 | `chunk` | positions, default 256 | how many positions of a prompt go through a layer at once; with the experts on the disk, 1024 reads a prompt faster |
 | `sockets` | `1`, `2` | the CPU sockets the experts are split over; by default, all of them |
+| `card_experts_gb` | gigabytes, default `0` | the card's own tier of experts, below |
+
+### The card's tier of experts
+
+With the experts on the CPU, `card_experts_gb` gives that much of the card's memory to the experts used most, and
+the card computes those while the CPU computes the rest. It starts empty and fills as the model is used — the first
+prompt fills most of it. An expert moves to the card when it has been used three times more recently than the one
+it would replace; the CPU copies it over while the card computes, so a token never waits on one. In a prompt, the
+experts too few positions pick stay on the CPU; how many is worked out at boot from the card and the CPU's speeds.
+Give it the card's memory the model's dense part and its cache leave: on our MI50 GLM 5.3 Flash went from 6.8 to 7.5
+tokens a second with a 300,000-position cache and a 6 GB tier in 16 GB, and to 8.1 with 18 GB on a 32 GB card; the
+122B went from 10.9 to 19.9 with 24 GB. [`results.md`](results.md) has every run.
 
 ## 5. The experts on the disk
 

@@ -320,7 +320,7 @@ static __device__ inline uint64_t sys__bindings__create(uint64_t symbols, uint64
     head[1].args[SYS__BINDINGS__UNBOUND] = 0ull;
     const uint64_t bindings = sys__heap__offset(head + 1);
 
-    const uint64_t scopes = sys__node_array__create(width + SYS__BINDINGS__FIRST_NAME);
+    const uint64_t scopes = sys__node_array__zzpackage_create_run(width + SYS__BINDINGS__FIRST_NAME);
     if (scopes == 0ull) { (void)sys__heap_object__release(bindings); return 0ull; }
     head[1].args[SYS__BINDINGS__SCOPES] = scopes;
 
@@ -557,7 +557,7 @@ static __device__ inline uint64_t sys__bindings__create_viewonly_array(uint64_t 
     const uint64_t symbols = sys__bindings__symbols(bindings);
     if (symbols == 0ull) return 0ull;              /* it raised whichever of the two it was */
 
-    const uint64_t picture = sys__node_array__create(symbols + SYS__BINDINGS__FIRST_NAME);
+    const uint64_t picture = sys__node_array__zzpackage_create_run(symbols + SYS__BINDINGS__FIRST_NAME);
     if (picture == 0ull) return 0ull;
 
     /* ⭐ THE WALK IS WHY THE OBJECT IS A HEADER OVER TWO TABLES. ⚖ ARCHITECT: *"this should make it

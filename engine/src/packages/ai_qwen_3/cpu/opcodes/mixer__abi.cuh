@@ -44,7 +44,7 @@ static sys__heap_node ai_qwen_3__deltanet__zzabi_apply(const sys__heap_node* arg
     unsigned int* over = ctx->fault_word;
 
     const bool rotated = ai_qwen_3__table__zzpackage_flag(argv[1].args[0], AI_QWEN_3__DN__RESIDUAL_ROTATED);
-    doors->rmsnorm((uint16_t*)(uintptr_t)h, (const uint16_t*)(uintptr_t)x, (const uint16_t*)(uintptr_t)at[AI_QWEN_3__DN__INPUT_NORM], H, over);
+    doors->rmsnorm((uint16_t*)(uintptr_t)h, (const uint16_t*)(uintptr_t)x, (const uint16_t*)(uintptr_t)at[AI_QWEN_3__DN__INPUT_NORM], H, AI_QWEN_3__RMS_NORM_EPS, over);
     if (!rotated) doors->hadamard_rotate((uint16_t*)(uintptr_t)hrot, (const uint16_t*)(uintptr_t)h, (const uint16_t*)(uintptr_t)signs, H, over);
     const uint64_t in = rotated ? h : hrot;
     nn__turboquant__groups g = {};
@@ -118,7 +118,7 @@ static sys__heap_node ai_qwen_3__attention__zzabi_apply(const sys__heap_node* ar
     unsigned int* over = ctx->fault_word;
 
     const bool rotated = ai_qwen_3__table__zzpackage_flag(argv[1].args[0], AI_QWEN_3__AT__RESIDUAL_ROTATED);
-    doors->rmsnorm((uint16_t*)(uintptr_t)h, (const uint16_t*)(uintptr_t)x, (const uint16_t*)(uintptr_t)at[AI_QWEN_3__AT__INPUT_NORM], H, over);
+    doors->rmsnorm((uint16_t*)(uintptr_t)h, (const uint16_t*)(uintptr_t)x, (const uint16_t*)(uintptr_t)at[AI_QWEN_3__AT__INPUT_NORM], H, AI_QWEN_3__RMS_NORM_EPS, over);
     if (!rotated) doors->hadamard_rotate((uint16_t*)(uintptr_t)hrot, (const uint16_t*)(uintptr_t)h, (const uint16_t*)(uintptr_t)signs, H, over);
     const uint64_t in = rotated ? h : hrot;
     nn__turboquant__groups g = {};
@@ -130,20 +130,20 @@ static sys__heap_node ai_qwen_3__attention__zzabi_apply(const sys__heap_node* ar
                            (const uint8_t*)(uintptr_t)at[AI_QWEN_3__AT__V_LUT], room[AI_QWEN_3__AT__V_LUT],
                            (const uint16_t*)(uintptr_t)in, v[AI_QWEN_3__AT__D_V], kvw, H, over);
     /* every head's query normed and rotated in one launch each — a head a row, its query and gate side by side in
-     * `qg` — and each gate through a sigmoid; every key the same, straight into its cache row */
+     * `qg`, the gates left there for the answer; every key the same, straight into its cache row */
     doors->rmsnorm_rows((uint16_t*)(uintptr_t)qn, (const uint16_t*)(uintptr_t)qg, (const uint16_t*)(uintptr_t)at[AI_QWEN_3__AT__Q_NORM],
-                        hd, qh, 2u * hd, hd, over);
+                        hd, qh, 2u * hd, hd, AI_QWEN_3__RMS_NORM_EPS, over);
     doors->rope_rows((uint16_t*)(uintptr_t)qn, (const uint16_t*)(uintptr_t)qn, (const float*)(uintptr_t)cs, 1u, qh, hd, qw, rot, over);
-    for (uint64_t k = 0u; k < qh; ++k)
-        doors->sigmoid((uint16_t*)(uintptr_t)(gate + 2u * k * hd), (const uint16_t*)(uintptr_t)(qg + 2u * k * 2u * hd + 2u * hd), hd, over);
     doors->rmsnorm_rows((uint16_t*)(uintptr_t)krow, (const uint16_t*)(uintptr_t)kk, (const uint16_t*)(uintptr_t)at[AI_QWEN_3__AT__K_NORM],
-                        hd, kvh, hd, hd, over);
+                        hd, kvh, hd, hd, AI_QWEN_3__RMS_NORM_EPS, over);
     doors->rope_rows((uint16_t*)(uintptr_t)krow, (const uint16_t*)(uintptr_t)krow, (const float*)(uintptr_t)cs, 1u, kvh, hd, kvw, rot, over);
     doors->attention_scores((float*)(uintptr_t)at[AI_QWEN_3__AT__SCORES], (const uint16_t*)(uintptr_t)qn,
                             (const uint16_t*)(uintptr_t)at[AI_QWEN_3__AT__K_CACHE], qh, kvh, hd, to);
     doors->attention_mix((uint16_t*)(uintptr_t)att, (const float*)(uintptr_t)at[AI_QWEN_3__AT__SCORES],
                          (const uint16_t*)(uintptr_t)at[AI_QWEN_3__AT__V_CACHE], qh, kvh, hd, to, over);
-    doors->vector_pointwise_mul((uint16_t*)(uintptr_t)gated, (const uint16_t*)(uintptr_t)att, (const uint16_t*)(uintptr_t)gate, qw, over);
+    /* the gate read out of `qg` beside each head's query, through its sigmoid and onto the answer in one launch: the same
+     * arithmetic as a sigmoid a head and a product, the gate rounded to a half between them */
+    doors->attention_gate_rows((uint16_t*)(uintptr_t)gated, (const uint16_t*)(uintptr_t)att, (const uint16_t*)(uintptr_t)qg, qh, hd, over);
     doors->hadamard_rotate((uint16_t*)(uintptr_t)arot, (const uint16_t*)(uintptr_t)gated, (const uint16_t*)(uintptr_t)signs, qw, over);
     doors->turboquant_gemv((uint16_t*)(uintptr_t)ao, (const uint8_t*)(uintptr_t)at[AI_QWEN_3__AT__O], room[AI_QWEN_3__AT__O],
                            (const uint8_t*)(uintptr_t)at[AI_QWEN_3__AT__O_LUT], room[AI_QWEN_3__AT__O_LUT],
@@ -181,7 +181,7 @@ static sys__heap_node ai_qwen_3__mlp__zzabi_apply(const sys__heap_node* argv, un
     unsigned int* over = ctx->fault_word;
 
     const bool rotated = ai_qwen_3__table__zzpackage_flag(argv[1].args[0], AI_QWEN_3__MLP__RESIDUAL_ROTATED);
-    doors->rmsnorm((uint16_t*)(uintptr_t)h, (const uint16_t*)(uintptr_t)h1, (const uint16_t*)(uintptr_t)at[AI_QWEN_3__MLP__NORM], H, over);
+    doors->rmsnorm((uint16_t*)(uintptr_t)h, (const uint16_t*)(uintptr_t)h1, (const uint16_t*)(uintptr_t)at[AI_QWEN_3__MLP__NORM], H, AI_QWEN_3__RMS_NORM_EPS, over);
     if (!rotated) doors->hadamard_rotate((uint16_t*)(uintptr_t)hrot, (const uint16_t*)(uintptr_t)h, (const uint16_t*)(uintptr_t)signs, H, over);
     nn__turboquant__groups g = {};
     g.codes[0] = at[AI_QWEN_3__MLP__GATE]; g.luts[0] = at[AI_QWEN_3__MLP__GATE_LUT]; g.rows[0] = I; g.d[0] = v[AI_QWEN_3__MLP__D_GATE]; g.out_at[0] = 0u;
@@ -216,11 +216,14 @@ static sys__heap_node ai_qwen_3__attention_tiered__zzabi_apply(const sys__heap_n
     if (!ai_qwen_3__table__zzpackage_read(table, AI_QWEN_3__AT__HIDDEN, AI_QWEN_3__AT__HOT_K, at, room, v)
      || sys__node_array__length(table) < AI_QWEN_3__AT__TIERED_TABLE)
         return sys__engine__abi__error(AI_QWEN_3__MIXER__FAULT_TABLE);
-    for (unsigned i = AI_QWEN_3__AT__HOT_K; i < AI_QWEN_3__AT__TIERED_TABLE; ++i) {
-        const sys__heap_node n = sys__node_array__borrow(table, i);
-        if (i < AI_QWEN_3__AT__SINK) { if (!nn__primitives__room(&n, &at[i], &room[i])) return sys__engine__abi__error(AI_QWEN_3__MIXER__FAULT_TABLE); }
-        else if (n.dtype != SYS__KIND__VALUE_INT) return sys__engine__abi__error(AI_QWEN_3__MIXER__FAULT_TABLE);
-        else v[i] = n.args[0];
+    sys__node_array_walk w;
+    if (!sys__node_array__walk(table, AI_QWEN_3__AT__HOT_K, &w)) return sys__engine__abi__error(AI_QWEN_3__MIXER__FAULT_TABLE);
+    for (unsigned i = AI_QWEN_3__AT__HOT_K; i < AI_QWEN_3__AT__TIERED_TABLE; ++i, sys__node_array__next(&w)) {
+        const sys__heap_node* n = sys__node_array__walk_cell(&w);
+        if (n == 0) return sys__engine__abi__error(AI_QWEN_3__MIXER__FAULT_TABLE);
+        if (i < AI_QWEN_3__AT__SINK) { if (!nn__primitives__room(n, &at[i], &room[i])) return sys__engine__abi__error(AI_QWEN_3__MIXER__FAULT_TABLE); }
+        else if (n->dtype != SYS__KIND__VALUE_INT) return sys__engine__abi__error(AI_QWEN_3__MIXER__FAULT_TABLE);
+        else v[i] = n->args[0];
     }
     const uint64_t H = v[AI_QWEN_3__AT__HIDDEN], qh = v[AI_QWEN_3__AT__Q_HEADS], kvh = v[AI_QWEN_3__AT__KV_HEADS];
     const uint64_t hd = v[AI_QWEN_3__AT__HEAD_DIM], rot = v[AI_QWEN_3__AT__ROT], pos = argv[2].args[0];
@@ -263,7 +266,7 @@ static sys__heap_node ai_qwen_3__attention_tiered__zzabi_apply(const sys__heap_n
 
     /* ① the projections, as the one-cache verb makes them — the value into `vt` rather than a cache row */
     const bool rotated = ai_qwen_3__table__zzpackage_flag(table, AI_QWEN_3__AT__RESIDUAL_ROTATED);
-    doors->rmsnorm((uint16_t*)(uintptr_t)h, (const uint16_t*)(uintptr_t)x, (const uint16_t*)(uintptr_t)at[AI_QWEN_3__AT__INPUT_NORM], H, over);
+    doors->rmsnorm((uint16_t*)(uintptr_t)h, (const uint16_t*)(uintptr_t)x, (const uint16_t*)(uintptr_t)at[AI_QWEN_3__AT__INPUT_NORM], H, AI_QWEN_3__RMS_NORM_EPS, over);
     if (!rotated) doors->hadamard_rotate((uint16_t*)(uintptr_t)hrot, (const uint16_t*)(uintptr_t)h, (const uint16_t*)(uintptr_t)signs, H, over);
     const uint64_t in = rotated ? h : hrot;
     nn__turboquant__groups g = {};
@@ -275,12 +278,10 @@ static sys__heap_node ai_qwen_3__attention_tiered__zzabi_apply(const sys__heap_n
                            (const uint8_t*)(uintptr_t)at[AI_QWEN_3__AT__V_LUT], room[AI_QWEN_3__AT__V_LUT],
                            (const uint16_t*)(uintptr_t)in, v[AI_QWEN_3__AT__D_V], kvw, H, over);
     doors->rmsnorm_rows((uint16_t*)(uintptr_t)qn, (const uint16_t*)(uintptr_t)qg, (const uint16_t*)(uintptr_t)at[AI_QWEN_3__AT__Q_NORM],
-                        hd, qh, 2u * hd, hd, over);
+                        hd, qh, 2u * hd, hd, AI_QWEN_3__RMS_NORM_EPS, over);
     doors->rope_rows((uint16_t*)(uintptr_t)qn, (const uint16_t*)(uintptr_t)qn, (const float*)(uintptr_t)cs, 1u, qh, hd, qw, rot, over);
-    for (uint64_t k = 0u; k < qh; ++k)
-        doors->sigmoid((uint16_t*)(uintptr_t)(gate + 2u * k * hd), (const uint16_t*)(uintptr_t)(qg + 2u * k * 2u * hd + 2u * hd), hd, over);
     doors->rmsnorm_rows((uint16_t*)(uintptr_t)kt, (const uint16_t*)(uintptr_t)kk, (const uint16_t*)(uintptr_t)at[AI_QWEN_3__AT__K_NORM],
-                        hd, kvh, hd, hd, over);
+                        hd, kvh, hd, hd, AI_QWEN_3__RMS_NORM_EPS, over);
     doors->rope_rows((uint16_t*)(uintptr_t)kt, (const uint16_t*)(uintptr_t)kt, (const float*)(uintptr_t)cs, 1u, kvh, hd, kvw, rot, over);
     /* ② the query rotated; this key and value rotated into their place, what they displace cooled first */
     doors->hadamard_blocks((uint16_t*)(uintptr_t)qr, (const uint16_t*)(uintptr_t)qn, (const uint16_t*)(uintptr_t)signs, qw, hd, 0u, over);
@@ -346,7 +347,9 @@ static sys__heap_node ai_qwen_3__attention_tiered__zzabi_apply(const sys__heap_n
     doors->attention_finish((uint16_t*)(uintptr_t)attr, (const float*)(uintptr_t)r0, qh, hd, over);
     /* ④ the answer rotated back a head at a time, then the one-cache verb's gate, rotation and out projection */
     doors->hadamard_blocks((uint16_t*)(uintptr_t)att, (const uint16_t*)(uintptr_t)attr, (const uint16_t*)(uintptr_t)signs, qw, hd, 1u, over);
-    doors->vector_pointwise_mul((uint16_t*)(uintptr_t)gated, (const uint16_t*)(uintptr_t)att, (const uint16_t*)(uintptr_t)gate, qw, over);
+    /* the gate read out of `qg` beside each head's query, through its sigmoid and onto the answer in one launch: the same
+     * arithmetic as a sigmoid a head and a product, the gate rounded to a half between them */
+    doors->attention_gate_rows((uint16_t*)(uintptr_t)gated, (const uint16_t*)(uintptr_t)att, (const uint16_t*)(uintptr_t)qg, qh, hd, over);
     doors->hadamard_rotate((uint16_t*)(uintptr_t)arot, (const uint16_t*)(uintptr_t)gated, (const uint16_t*)(uintptr_t)signs, qw, over);
     doors->turboquant_gemv((uint16_t*)(uintptr_t)ao, (const uint8_t*)(uintptr_t)at[AI_QWEN_3__AT__O], room[AI_QWEN_3__AT__O],
                            (const uint8_t*)(uintptr_t)at[AI_QWEN_3__AT__O_LUT], room[AI_QWEN_3__AT__O_LUT],

@@ -33,6 +33,10 @@ typedef struct nn__loader__read {
     sys__silicon_family__id family;
     uint64_t layer, type, expert, slot, room;
     nn__expert__backing backing;
+    uint64_t seq;                  /* when it was queued: the threads take the oldest first */
+    bool gather;                   /* a promotion: `runs` gathered from memory into `room`, `bytes` long, not a file read */
+    uint64_t bytes;
+    nn__expert__gather runs;
 } nn__loader__read;
 
 static nn__loader__read nn__loader__zzprivate_reads[NN__EXPERT__FLIGHT_MAX];
@@ -43,14 +47,46 @@ static pthread_t        nn__loader__zzprivate_threads[NN__EXPERT__LOADERS_MAX];
 static unsigned         nn__loader__zzprivate_started = 0u;
 static bool             nn__loader__zzprivate_stopping = false;
 static uint64_t         nn__loader__zzprivate_count[NN__EXPERT__COUNTS];
+static uint64_t         nn__loader__zzprivate_seq = 0ull;             /* the queue's clock, under the lock */
+
+/* A promotion's bytes, on a loader thread: the runs copied into this thread's pinned staging buffer in the slot's layout,
+ * then written to the card's slot on this thread's side channel — which overlaps the kernels on the card's own stream. */
+static bool nn__loader__zzprivate_gather(const nn__loader__read* r) {
+    static __thread void* stage = 0;
+    static __thread void* stage_card = 0;
+    static __thread uint64_t stage_bytes = 0ull;
+    static __thread void* channel = 0;
+    if (stage_bytes < r->bytes) {
+        if (stage != 0) sys__gpu__memory_free_host_ram(r->family, stage);
+        stage = 0; stage_bytes = 0ull;
+        if (!sys__gpu__memory_allocate_host_ram_mapped(r->family, &stage, &stage_card, (size_t)r->bytes)) return false;
+        stage_bytes = r->bytes;
+    }
+    if (channel == 0 && !sys__gpu__side_open(r->family, &channel)) return false;
+    /* the runs are this process's own memory — a CPU worker's slots — so they are read through the host family's door */
+    static __thread sys__silicon_family__id host = SYS__SILICON_FAMILY__NONE;
+    if (host == SYS__SILICON_FAMILY__NONE) host = sys__silicon_family__named("host");
+    for (unsigned i = 0u; i < r->runs.runs; ++i) {
+        const nn__expert__run* u = &r->runs.run[i];
+        for (uint64_t c = 0ull; c < u->count; ++c) {
+            if (u->into + c * u->into_stride + u->bytes > r->bytes) return false;
+            if (!sys__gpu__memory_read(host, (uint8_t*)stage + u->into + c * u->into_stride,
+                                       (const void*)(uintptr_t)(u->from + c * u->from_stride), (size_t)u->bytes))
+                return false;
+        }
+    }
+    return sys__gpu__side_memory_write(r->family, (void*)(uintptr_t)r->room, stage, (size_t)r->bytes, channel);
+}
 
 static void* nn__loader__zzprivate_run(void* unused) {
     (void)unused;
     pthread_mutex_lock(&nn__loader__zzprivate_lock);
     for (;;) {
+        /* the oldest queued first — so a layer's promotions land in the order its verb will compute them */
         nn__loader__read* job = 0;
-        for (unsigned i = 0u; i < NN__EXPERT__FLIGHT_MAX && job == 0; ++i)
-            if (nn__loader__zzprivate_reads[i].state == NN__LOADER__QUEUED) job = &nn__loader__zzprivate_reads[i];
+        for (unsigned i = 0u; i < NN__EXPERT__FLIGHT_MAX; ++i)
+            if (nn__loader__zzprivate_reads[i].state == NN__LOADER__QUEUED && (job == 0 || nn__loader__zzprivate_reads[i].seq < job->seq))
+                job = &nn__loader__zzprivate_reads[i];
         if (job == 0) {
             if (nn__loader__zzprivate_stopping) break;
             pthread_cond_wait(&nn__loader__zzprivate_work, &nn__loader__zzprivate_lock);
@@ -60,7 +96,8 @@ static void* nn__loader__zzprivate_run(void* unused) {
         const nn__loader__read r = *job;
         pthread_mutex_unlock(&nn__loader__zzprivate_lock);
         bool ok = true;
-        for (unsigned i = 0u; ok && i < NN__EXPERT__SLICES; ++i) {
+        if (r.gather) ok = nn__loader__zzprivate_gather(&r);
+        for (unsigned i = 0u; ok && !r.gather && i < NN__EXPERT__SLICES; ++i) {
             if (r.backing.bytes[i] == 0ull) continue;
             ok = sys__gpu__file_read(r.family, r.backing.file, r.backing.from[i] + r.expert * r.backing.bytes[i], r.backing.bytes[i],
                                      (void*)(uintptr_t)(r.room + r.backing.into[i]));
@@ -192,6 +229,8 @@ static __device__ inline int nn__expert__request(sys__silicon_family__id family,
     free_read->layer = layer; free_read->type = type; free_read->expert = expert;
     free_read->slot = slot; free_read->room = room;
     free_read->backing = *backing;
+    free_read->gather = false;
+    free_read->seq = ++nn__loader__zzprivate_seq;
     ++nn__loader__zzprivate_count[predicted ? NN__EXPERT__COUNT_PREDICTED : NN__EXPERT__COUNT_MISSES];
     pthread_cond_signal(&nn__loader__zzprivate_work);
     pthread_mutex_unlock(&nn__loader__zzprivate_lock);
@@ -230,6 +269,75 @@ static __device__ inline bool nn__expert__settle(uint64_t layer, uint64_t type) 
         }
         if (!waiting) break;
         nn__loader__zzprivate_wait();
+    }
+    pthread_mutex_unlock(&nn__loader__zzprivate_lock);
+    return ok;
+}
+
+static __device__ inline int nn__expert__promote(sys__silicon_family__id family, uint64_t layer, uint64_t type, uint64_t expert,
+                                                 const nn__expert__gather* gather, const uint64_t* pinned, unsigned npinned) {
+    sys__heap_node me;
+    if (gather == 0 || gather->runs == 0u || gather->runs > NN__EXPERT__GATHER_RUNS || !nn__expert__slot(layer, type, expert, &me))
+        return NN__EXPERT__REFUSED;
+    if (me.args[NN__EXPERT__SLOT_AT] != 0ull) return NN__EXPERT__RESIDENT;
+    const uint64_t owner = nn__expert__zzpackage_owner(), bytes = nn__expert__type_bytes(type);
+    pthread_mutex_lock(&nn__loader__zzprivate_lock);
+    nn__loader__read* free_read = 0;
+    for (unsigned i = 0u; i < NN__EXPERT__FLIGHT_MAX; ++i) {
+        nn__loader__read* r = &nn__loader__zzprivate_reads[i];
+        if (r->state != NN__LOADER__FREE && r->owner == owner && r->layer == layer && r->type == type && r->expert == expert) {
+            pthread_mutex_unlock(&nn__loader__zzprivate_lock);
+            return NN__EXPERT__ARRIVING;
+        }
+        if (r->state == NN__LOADER__FREE && free_read == 0) free_read = r;
+    }
+    pthread_mutex_unlock(&nn__loader__zzprivate_lock);
+    if (free_read == 0 || bytes == 0ull) return NN__EXPERT__REFUSED;      /* no room in flight: the CPU keeps it this time */
+    uint64_t slot = 0ull, room = 0ull;
+    if (!nn__loader__zzprivate_room(layer, type, pinned, npinned, &slot, &room)) return NN__EXPERT__REFUSED;
+    pthread_mutex_lock(&nn__loader__zzprivate_lock);
+    if (free_read->state != NN__LOADER__FREE || !nn__loader__zzprivate_start()) {
+        pthread_mutex_unlock(&nn__loader__zzprivate_lock);
+        (void)nn__expert__type_give(type, slot);
+        return NN__EXPERT__REFUSED;
+    }
+    free_read->state = NN__LOADER__QUEUED;
+    free_read->predicted = false;
+    free_read->owner = owner;
+    free_read->family = family;
+    free_read->layer = layer; free_read->type = type; free_read->expert = expert;
+    free_read->slot = slot; free_read->room = room;
+    free_read->gather = true; free_read->bytes = bytes; free_read->runs = *gather;
+    free_read->seq = ++nn__loader__zzprivate_seq;
+    ++nn__loader__zzprivate_count[NN__EXPERT__COUNT_PROMOTED];
+    pthread_cond_signal(&nn__loader__zzprivate_work);
+    pthread_mutex_unlock(&nn__loader__zzprivate_lock);
+    return NN__EXPERT__ARRIVING;
+}
+
+static __device__ inline unsigned nn__expert__flight_free(void) {
+    unsigned n = 0u;
+    pthread_mutex_lock(&nn__loader__zzprivate_lock);
+    for (unsigned i = 0u; i < NN__EXPERT__FLIGHT_MAX; ++i) n += nn__loader__zzprivate_reads[i].state == NN__LOADER__FREE;
+    pthread_mutex_unlock(&nn__loader__zzprivate_lock);
+    return n;
+}
+
+static __device__ inline bool nn__expert__settle_ready(uint64_t layer, uint64_t type) {
+    bool ok = true;
+    const uint64_t owner = nn__expert__zzpackage_owner();
+    pthread_mutex_lock(&nn__loader__zzprivate_lock);
+    for (unsigned i = 0u; i < NN__EXPERT__FLIGHT_MAX; ++i) {
+        nn__loader__read* r = &nn__loader__zzprivate_reads[i];
+        if (r->owner != owner || r->layer != layer || r->type != type) continue;
+        if (r->state != NN__LOADER__DONE && r->state != NN__LOADER__FAILED) continue;      /* free, or still on its way */
+        const bool landed = r->state == NN__LOADER__DONE;
+        const uint64_t slot = r->slot, room = r->room, expert = r->expert;
+        r->state = NN__LOADER__FREE;
+        if (!landed || !nn__expert__admit(layer, expert, room, type)) {
+            (void)nn__expert__type_give(type, slot);
+            ok = false;
+        }
     }
     pthread_mutex_unlock(&nn__loader__zzprivate_lock);
     return ok;
@@ -274,10 +382,12 @@ static __device__ inline uint64_t nn__expert__count(unsigned which) {
 static __device__ inline bool nn__expert__backing_of(uint64_t array, nn__expert__backing* backing) {
     if (backing == 0 || !sys__node_array__is(array) || sys__node_array__length(array) < NN__EXPERT__BACKING__LENGTH) return false;
     uint64_t v[NN__EXPERT__BACKING__LENGTH];
-    for (unsigned i = 0u; i < NN__EXPERT__BACKING__LENGTH; ++i) {
-        const sys__heap_node n = sys__node_array__borrow(array, i);
-        if (n.dtype != SYS__KIND__VALUE_INT) return false;
-        v[i] = n.args[0];
+    sys__node_array_walk w;
+    if (!sys__node_array__walk(array, 0ull, &w)) return false;
+    for (unsigned i = 0u; i < NN__EXPERT__BACKING__LENGTH; ++i, sys__node_array__next(&w)) {
+        const sys__heap_node* n = sys__node_array__walk_cell(&w);
+        if (n == 0 || n->dtype != SYS__KIND__VALUE_INT) return false;
+        v[i] = n->args[0];
     }
     backing->file = v[NN__EXPERT__BACKING__FILE];
     for (unsigned i = 0u; i < NN__EXPERT__SLICES; ++i) {
@@ -286,6 +396,79 @@ static __device__ inline bool nn__expert__backing_of(uint64_t array, nn__expert_
         backing->into[i] = v[NN__EXPERT__BACKING__INTO(i)];
     }
     return true;
+}
+
+/* ── A CARD'S TIER ───────────────────────────────────────────────────────────────────────────────────── ▶ the header */
+static __device__ inline bool nn__expert__tier_visit(sys__silicon_family__id family, uint64_t layer, uint64_t type, const uint64_t* ids,
+                                                     unsigned k, bool* held, unsigned landing, nn__expert__stitch stitch,
+                                                     const void* model) {
+    if (k > NN__EXPERT__TIER_K_MAX) return false;
+    if (stitch != 0) (void)nn__expert__settle_ready(layer, type);
+    const uint64_t now = nn__expert__tick();
+    uint64_t pinned[NN__EXPERT__TIER_K_MAX];
+    unsigned n_pinned = 0u;
+    for (unsigned j = 0u; j < k; ++j) {
+        sys__heap_node me;
+        if (!nn__expert__slot(layer, type, ids[j], &me)) return false;
+        held[j] = me.args[NN__EXPERT__SLOT_AT] != 0ull;
+        if (held[j]) { (void)nn__expert__touch(layer, type, ids[j]); pinned[n_pinned++] = ids[j]; }
+    }
+    /* each asked before its call is recorded: the call `qualifies` reads is the one before this */
+    unsigned started = 0u;
+    for (unsigned j = 0u; j < k && stitch != 0; ++j) {
+        nn__expert__gather g;
+        if (!held[j] && started < landing && nn__expert__qualifies(layer, type, ids[j]) && stitch(model, ids[j], &g)
+         && nn__expert__promote(family, layer, type, ids[j], &g, pinned, n_pinned) == NN__EXPERT__ARRIVING)
+            ++started;
+    }
+    for (unsigned j = 0u; j < k; ++j) (void)nn__expert__called(layer, type, ids[j], now);
+    return true;
+}
+
+static __device__ inline bool nn__expert__tier_chunk(sys__silicon_family__id family, uint64_t layer, uint64_t type, uint64_t experts,
+                                                     uint64_t* chosen, uint64_t n, unsigned k, uint64_t threshold,
+                                                     nn__expert__stitch stitch, const void* model) {
+    if (stitch != 0) (void)nn__expert__settle_ready(layer, type);
+    uint32_t* picked = (uint32_t*)calloc(experts, sizeof(uint32_t));
+    uint8_t* card = (uint8_t*)calloc(experts, 1u);                 /* 1: the card computes this expert for the chunk */
+    uint64_t* list = (uint64_t*)malloc(sizeof(uint64_t) * experts);
+    uint64_t* pinned = (uint64_t*)malloc(sizeof(uint64_t) * experts);
+    bool ok = picked != 0 && card != 0 && list != 0 && pinned != 0;
+    /* every call recorded a row at a time, every resident expert touched */
+    for (uint64_t t = 0u; t < n && ok; ++t) {
+        const uint64_t now = nn__expert__tick();
+        for (unsigned j = 0u; j < k && ok; ++j) {
+            const uint64_t id = chosen[t * k + j];
+            sys__heap_node me;
+            if (id >= experts || !nn__expert__slot(layer, type, id, &me)) { ok = false; break; }
+            ++picked[id];
+            if (me.args[NN__EXPERT__SLOT_AT] != 0ull) { (void)nn__expert__touch(layer, type, id); card[id] = 1u; }
+            (void)nn__expert__called(layer, type, id, now);
+        }
+    }
+    unsigned n_pinned = 0u;
+    for (uint64_t e = 0u; e < experts && ok; ++e) if (card[e]) pinned[n_pinned++] = e;
+    /* the line: the experts not on the card picked `threshold` times or more, the most picked first, as many as there is room */
+    if (ok && stitch != 0) {
+        uint64_t m = 0u;
+        for (uint64_t e = 0u; e < experts; ++e) {
+            if (card[e] || picked[e] == 0u || picked[e] < threshold) continue;
+            uint64_t q = m++;
+            while (q > 0u && picked[list[q - 1u]] < picked[e]) { list[q] = list[q - 1u]; --q; }
+            list[q] = e;
+        }
+        const uint64_t room = nn__expert__flight_free();
+        if (m > room) m = room;
+        for (uint64_t q = m; q-- > 0u; ) {                         /* queued from the fewest picks to the most */
+            nn__expert__gather g;
+            if (stitch(model, list[q], &g)
+             && nn__expert__promote(family, layer, type, list[q], &g, pinned, n_pinned) == NN__EXPERT__ARRIVING)
+                card[list[q]] = 1u;
+        }
+    }
+    for (uint64_t i = 0u; i < n * k && ok; ++i) if (card[chosen[i]]) chosen[i] += experts;
+    free(picked); free(card); free(list); free(pinned);
+    return ok;
 }
 
 #endif /* SILVANN__PACKAGES_NN_CPU_LOADER__IMPL_CUH */

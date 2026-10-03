@@ -67,8 +67,11 @@
 /* Make one, `elements` long, and answer where its first element sits. Zero is refused rather than served,
  * because the reference this hands back names the first element and an array without one has nothing to
  * name. Every element starts as a null value, so the first thing written over is a known state and not
- * whatever the room held before. */
+ * whatever the room held before. An array too long for one run is made as several, joined by cones. */
 static __device__ inline uint64_t   sys__node_array__create(uint64_t elements);
+/* The same, as ONE run or not at all: past a run's width the allocator refuses, on geometry. For a caller
+ * that hands out the address of an element and adds to it, which only one run can promise. */
+static __device__ inline uint64_t   sys__node_array__zzpackage_create_run(uint64_t elements);
 /* The same array in room the CALLER owns, for the one thing whose address must be known before a
  * computing base can be found. The room must lie inside the memory the allocator was published over —
  * see the body, which argues the precondition rather than stating it. */
@@ -76,6 +79,21 @@ static __device__ inline uint64_t   sys__node_array__zzpackage_place(sys__heap_n
 
 /* How many elements it has, read off the allocation rather than remembered anywhere. */
 static __device__ inline uint64_t   sys__node_array__length(uint64_t array_base);
+
+/* ── WALKING ONE, IN ORDER ───────────────────────────────────────────────────────────────────────────
+ * `walk` opens a walk on element `from` — at the length it opens already at its end, past it it refuses
+ * with NARO — `walk_cell` answers the element it stands on, nothing once it has run off the end, and
+ * `next` steps to the following one, following a cone where a run ends. `walk_set` writes the element
+ * it stands on with `set`'s holds. Reading this way costs one addition a step however long the array is,
+ * where `get` by index costs a hop per run it has to pass. ⛔ A WALK TAKES NO HOLD: what `walk_cell`
+ * answers is the cell itself, read in place the way `borrow` reads, and safe where `borrow` is. A value
+ * goes in through `walk_set`, never through the pointer, or the holds go wrong. */
+static __device__ inline bool            sys__node_array__walk(uint64_t array_base, uint64_t from,
+                                                               sys__node_array_walk* w);
+static __device__ inline sys__heap_node* sys__node_array__walk_cell(const sys__node_array_walk* w);
+static __device__ inline void            sys__node_array__next(sys__node_array_walk* w);
+static __device__ inline bool            sys__node_array__walk_set(const sys__node_array_walk* w,
+                                                                   const sys__heap_node* value);
 
 /* Whether this names one at all. Asked before the reach by every verb that checks — they share one check,
  * so they cannot come to different conclusions about the same reference — and by `length` before it answers.
@@ -89,7 +107,8 @@ static __device__ inline bool       sys__node_array__is(uint64_t array_base);
 static __device__ inline sys__heap_node sys__node_array__get(uint64_t array_base, uint64_t index);
 
 /* The cell at an index, with nothing checked and no hold taken. ⛔ `zzpackage_` because it trusts its
- * caller twice over: that the base names an array, and that the index is inside it. TWO callers have
+ * caller twice over: that the base names an array, and that the index is inside it — inside its FIRST
+ * RUN, which an array made by `zzpackage_create_run` or placed is all of. TWO callers have
  * earned that and they earn it by DIFFERENT arguments — the bindings reach by holding a base that cannot
  * move and having checked both when it armed, the procedure verbs by asking the kind first and indexing
  * with constants into a thing that is two elements by construction. The implementation states each in
@@ -100,7 +119,8 @@ static __device__ inline sys__heap_node* sys__node_array__zzpackage_at(uint64_t 
 /* ⭐ WHERE THE FIRST `count` ELEMENTS SIT, for a door that writes values into nodes a program made for it —
  * ⚖ *"i can allocate the return nodes beforehand and send the node array base address as an object so the
  * gpu has a base to compute its output slots"*. Element `i` is the answer plus `i`. Zero when this is not
- * an array or it is shorter than `count`. ⛔ IT CHECKS BOTH THINGS `zzpackage_at` TRUSTS, and it is for
+ * an array or it is shorter than `count`, and zero with NARS when the `count` crosses from one run into
+ * the next, because one address cannot reach past a cone. ⛔ IT CHECKS BOTH THINGS `zzpackage_at` TRUSTS, and it is for
  * VALUE WORDS ONLY: a caller writes `args[0]` of elements that hold no reference, having asked each one's
  * kind first, so no hold is ever made or lost behind the array's back. */
 static __device__ inline sys__heap_node* sys__node_array__cells(uint64_t array_base, uint64_t count);

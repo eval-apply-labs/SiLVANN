@@ -9,6 +9,8 @@
   fetch          a model folder that is not there, asked for and downloaded
   composer       text in, a program in the engine's heap out
 """
+import glob
+import hashlib
 import json
 import os
 
@@ -28,19 +30,42 @@ def open_model(path, lora=None, max_context=4096, silicon=None, **options):
         raise Refused("no runtime for a %r model" % folder.architecture)
     machine = Machine(silicon=silicon)
     model = arch(folder, machine, max_context=max_context, **options)
+    # ⭐ THE PROGRAMS ARE READ, NOT COMPOSED, when `programs.lisp` was written for this key
+    path = os.path.join(folder.path, "programs.lisp")
+    key = programs_key(folder, folder.architecture, max_context, options)
+    machine.programs_file = (path, key)
     params = model.device_params()
     if isinstance(params, dict):          # a section a worker: the card and the CPU's
         machine.boot(params[0], workers=model.workers(), worker_params=params)
     else:
         machine.boot(params)
     model.load()
-    # ⭐ THE MODEL AS THE PROGRAMS IT RUNS, beside it: what the runtime wrote for this machine and these settings
-    try:
-        machine.write_programs(os.path.join(folder.path, "programs.lisp"),
-                               "%s (%s) — the procedures silvann_runtime/%s wrote at this boot\n"
-                               ";; for max_context %d, options %s — other settings write other tables and procedures"
-                               % (os.path.basename(folder.path.rstrip(os.sep)), folder.architecture,
-                                  arch.__module__.split(".")[-1] + ".py", max_context, json.dumps(options, sort_keys=True)))
-    except OSError:
-        pass                       # a read-only folder keeps its model; the programs are a view, not a need
+    # ⭐ THE MODEL AS THE PROGRAMS IT RUNS, beside it — written when they were composed, for the boots that follow
+    if machine.read_from is None:
+        try:
+            machine.write_programs(path,
+                                   "%s (%s) — the procedures silvann_runtime/%s composed\n"
+                                   ";; for max_context %d, options %s, LoRA %s — other settings compose other procedures,\n"
+                                   ";; and a boot with these reads them from here rather than composing them again"
+                                   % (os.path.basename(folder.path.rstrip(os.sep)), folder.architecture,
+                                      arch.__module__.split(".")[-1] + ".py", max_context,
+                                      json.dumps(options, sort_keys=True), folder.lora),
+                                   key)
+        except OSError:
+            pass                   # a read-only folder keeps its model; the programs are composed at each boot
     return model
+
+
+def programs_key(folder, architecture, max_context, options):
+    """What a model's programs are composed from, as one digest: the pack, the settings, and the source of the code that
+    composes them — this package and the bundle loader whose type ids and plane offsets they carry. ⛳ The silicon is not
+    in it: no composer reads it (`REASONED` from qwen3_5.py and glm5.py, where it only names the card's worker)."""
+    from .model_folder import NL
+    h = hashlib.sha256()
+    with open(os.path.join(folder.path, "pack.json"), "rb") as f:
+        h.update(f.read())
+    h.update(json.dumps([architecture, max_context, folder.lora, options], sort_keys=True, default=str).encode())
+    for src in sorted(glob.glob(os.path.join(os.path.dirname(os.path.abspath(__file__)), "*.py"))) + [NL.__file__]:
+        with open(src, "rb") as f:
+            h.update(f.read())
+    return h.hexdigest()[:32]

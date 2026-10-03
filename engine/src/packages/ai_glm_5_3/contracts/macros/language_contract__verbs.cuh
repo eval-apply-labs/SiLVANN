@@ -23,6 +23,8 @@
     X(PKG, 9, "ai_glm_5_3__mlp_rows",     ai_glm_5_3__mlp_rows__zzabi_adapter,     AI_GLM_5_3__MLP_ROWS)     \
     X(PKG, 10, "ai_glm_5_3__route_rows",  ai_glm_5_3__route_rows__zzabi_adapter,   AI_GLM_5_3__ROUTE_ROWS)   \
     X(PKG, 11, "ai_glm_5_3__close_rows",  ai_glm_5_3__close_rows__zzabi_adapter,   AI_GLM_5_3__CLOSE_ROWS)   \
-    X(PKG, 12, "ai_glm_5_3__experts_rows", ai_glm_5_3__experts_rows__zzabi_adapter, AI_GLM_5_3__EXPERTS_ROWS)
+    X(PKG, 12, "ai_glm_5_3__experts_rows", ai_glm_5_3__experts_rows__zzabi_adapter, AI_GLM_5_3__EXPERTS_ROWS) \
+    /* ⭐ A CARD'S TIER OF EXPERTS TOLD OF A PROMPT'S PICKS, so the prompt warms it (NN-48)                    */ \
+    X(PKG, 13, "ai_glm_5_3__experts_note", ai_glm_5_3__experts_note__zzabi_adapter, AI_GLM_5_3__EXPERTS_NOTE)
 
 #endif /* SILVANN__PACKAGES_AI_GLM_5_3_CONTRACTS_MACROS_LANGUAGE_CONTRACT__VERBS_CUH */

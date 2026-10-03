@@ -130,6 +130,10 @@
     /* in the same field, which is the whole reason they are two rows.                              */ \
     X(PKG, 10, "sys__object_reference",    SYS__KIND__OBJECT_REFERENCE)                                     \
     X(PKG, 11, "sys__procedure_reference", SYS__KIND__PROCEDURE_REFERENCE)                                  \
+    /* ⭐ AND THE CELL THAT ENDS ONE RUN OF A LONG ARRAY. It names the run that carries on and is not */ \
+    /* an element: the array's verbs step over it, so no reader is ever handed one. It holds the next */ \
+    /* run the way a reference holds an object, which is how a dying array takes its tail with it.   */ \
+    X(PKG, 35, "sys__node_array_cone",     SYS__KIND__NODE_ARRAY_CONE)                                      \
                                                                                                        \
     /* ── WHAT THE LANGUAGE'S OBJECTS ARE ───────────────────────────────────────────────────────── */ \
     /* Every one of these has a row in `contracts/macros/language_contract__objects.cuh` saying how it is        */ \

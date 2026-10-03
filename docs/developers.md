@@ -27,11 +27,13 @@ shape and on the settings it boots with, so they are generated rather than kept 
 
 | runtime | where its programs are written |
 |---|---|
-| `runtime/silvann_runtime/qwen3_5.py` | `_procedures` (a layer at a position, a layer over a chunk of rows, the embedding, the head), `_tables` (what each verb reads), `_cpu_experts` (the pictures a CPU worker runs) |
-| `runtime/silvann_runtime/glm5.py` | `_procedures` and `_fused_tables` (a token, the hand-off to the CPU sockets), `_rows_procedures` (a prompt as rows) |
+| `runtime/silvann_runtime/qwen3_5.py` | `_procedures` (a layer at a position, a layer over a chunk of rows, the embedding, the head, and the pictures a CPU worker runs); `_tables` (what each verb reads) |
+| `runtime/silvann_runtime/glm5.py` | `_procedures`, `_fused_body` (a token, the hand-off to the CPU sockets) and `_rows_procedures` (a prompt as rows); `_tables` (what each verb reads) |
 
-**Every boot writes them out**: `models/<name>/programs.lisp` holds every procedure and picture the model defined,
-in order, one form a line. The published models' programs, at their default settings, are in
+**The programs are composed once and read after that**: `models/<name>/programs.lisp` holds every procedure, picture and
+view the model defined, in order, one form a line, each with the worker it was defined as. Its header carries a key — the
+pack, the settings and the runtime's own source — and a boot whose key matches defines what the file holds instead of
+composing it again; any other boot composes and rewrites it. Tables are made at every boot. The published models' programs, at their default settings, are in
 [`docs/programs/`](programs/) and in each model's Hugging Face folder. A layer of the 35B reads:
 
 ```lisp
@@ -44,6 +46,14 @@ in order, one form a line. The published models' programs, at their default sett
 and a token is the one program the runtime composes a step — `(begin (embed 0 0) (nn__rope__angles cs POS …)
 (layers POS) (head))` — in `step`. A table (`mx0`, `mr0`) is a node array of the weights' planes and the shape's
 integers; the cells each verb reads are named in its package's `contracts/objects/`.
+
+**The card's tier of experts** is the `nn` package's: its expert records keep each expert's last two calls, and
+`nn__expert__qualifies` moves one to the card when the older of them is newer than the older of the one it would
+replace (and freely while the layer has room); `tier_visit` (a token) and `tier_chunk` (a prompt) run a layer's picks
+through it. A model's verbs only say where its slots are. Over a prompt, an expert fewer positions pick than
+`nn__expert_major__vram_promotion_threshold_picks` stays on the CPU: a variable bound at boot
+(`runtime/silvann_runtime/expert_tier.py`) by timing an expert's copy to the card against the CPU computing one — 15 for GLM and 4 for the 35B on
+the test machine — and read by the prompt's program.
 
 ## Adding a model
 

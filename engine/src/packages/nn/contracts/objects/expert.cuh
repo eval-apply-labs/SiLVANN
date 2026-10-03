@@ -139,7 +139,8 @@
  * quant"* — which is ONE for this 35B across all 40 layers.
  * ══════════════════════════════════════════════════════════════════════════════════════════════════ */
 
-/* ⚖⚖ THIRTY-TWO, RULED — ARCHITECT: *"raise max_types to 32"*. It was EIGHT, and eight was
+/* ⚖⚖ SIXTY-FOUR, RULED — ARCHITECT, 2026-10-03: *"yes raise it to 64"*: GLM 5.3 Flash's dense shapes took all thirty-two,
+ * and a card's tier of routed experts (NN-48) is one collection more. Before that: ⚖ *"raise max_types to 32"*. It was EIGHT, and eight was
  * picked when this package held no model: `MEASURED` the same day, the MoE block ALONE stands FOUR
  * (routed gate_up, routed down, shared gate_up, shared down) and a whole 35B layer wants roughly twenty
  * — the four attention projections, the five DeltaNet projections, `conv1d`, `A_log`, `dt_bias`, the two
@@ -148,7 +149,9 @@
  * has to be a string the compiler wrote; raising it is this line and nothing else. */
 #define NN__EXPERT_TYPE_SLOT_LIST(X)                                                                    \
     X(0)  X(1)  X(2)  X(3)  X(4)  X(5)  X(6)  X(7)  X(8)  X(9)  X(10) X(11) X(12) X(13) X(14) X(15)     \
-    X(16) X(17) X(18) X(19) X(20) X(21) X(22) X(23) X(24) X(25) X(26) X(27) X(28) X(29) X(30) X(31)
+    X(16) X(17) X(18) X(19) X(20) X(21) X(22) X(23) X(24) X(25) X(26) X(27) X(28) X(29) X(30) X(31)     \
+    X(32) X(33) X(34) X(35) X(36) X(37) X(38) X(39) X(40) X(41) X(42) X(43) X(44) X(45) X(46) X(47)     \
+    X(48) X(49) X(50) X(51) X(52) X(53) X(54) X(55) X(56) X(57) X(58) X(59) X(60) X(61) X(62) X(63)
 
 #define NN__EXPERT__ZZPRIVATE_TYPE_TALLY(n)  + 1u
 enum { NN__EXPERT__MAX_TYPES = 0u NN__EXPERT_TYPE_SLOT_LIST(NN__EXPERT__ZZPRIVATE_TYPE_TALLY) };
@@ -213,10 +216,12 @@ enum { NN__EXPERT__MAX_TYPES = 0u NN__EXPERT_TYPE_SLOT_LIST(NN__EXPERT__ZZPRIVAT
 #define NN__EXPERT__SLOT_NEXT   2u
 #define NN__EXPERT__SLOT_AT_L2  3u   /* the RAM tier's address. 0 means not there either               */
 #define NN__EXPERT__SLOT_TYPE   4u   /* which COLLECTION holds it. ⛔ STATIC — ▶ why, below            */
-/* ⛳ AND ARGUMENT 5 IS FREE. A page id lived there while a slot had to say which page it was cut from;
- * a collection's slots are one run at a fixed stride, so the slot index is `(at - base) / bytes` and the
- * word that stored it has nothing left to store. ⛔ IT STAYS FREE — ▶ the type table's own note on the
- * page node's spare words, and for the same reason: the room is a dividend, not an opening. */
+/* ⛳ ARGUMENT 5 holds the expert's last two call times — the promotion qualifier's (NN-48, ▶ `nn__expert__qualifies`),
+ * the newer in its high half. ⚖ RULED, 2026-10-03: *"yes keep it in word 5"* — in the LRU's own record of the expert,
+ * not in the expert's bytes. A page id lived there while a slot had to say which page it was cut from; a collection's
+ * slots are one run at a fixed stride, so the slot index is `(at - base) / bytes` and the word fell free. Its old note
+ * said it would stay free — *"a dividend … not an opportunity to find tenants for"* — and, as with the type row's
+ * EVICTABLE word above, a ruled property arriving and needing a home is the case that note was not about. */
 
 /* ⛔⛔ THE LINKS ARE `expert + 1`, AND 0 MEANS NONE. **AN EXPERT ID OF 0 IS PERFECTLY ORDINARY**, so 0
  * cannot mean "none" until the id is shifted by one — the same shift the free list makes, `slot + 1`,
@@ -253,7 +258,19 @@ typedef struct nn__expert__backing {
 #define NN__EXPERT__COUNT_PREDICTED_USED  2u   /* ...of which a pick then asked for the expert  */
 #define NN__EXPERT__COUNT_WAIT_NS         3u   /* time a layer waited on its reads, in ns      */
 #define NN__EXPERT__COUNT_WAITS           4u   /* ...and how many times it had to              */
-#define NN__EXPERT__COUNTS                5u
+#define NN__EXPERT__COUNT_PROMOTED        5u   /* promotions queued — an expert gathered into a card's slot */
+#define NN__EXPERT__COUNTS                6u
+
+/* ⭐ AN EXPERT PROMOTED FROM RAM TO A CARD (NN-48). Its bytes are in memory already, so a promotion is a GATHER: a few runs
+ * copied into the card's slot in the slot's own layout — through a staging buffer of pinned memory and one write on the
+ * family's side channel, off the evaluator's thread, so the copy overlaps what the card is computing. A run is `count`
+ * pieces of `bytes`, the i-th read at `from + i · from_stride` and landing at `into + i · into_stride` in the slot — so a
+ * matrix whose columns were split between two sockets is spliced back with one run a part. The model knows its layout;
+ * nn only moves the bytes. */
+#define NN__EXPERT__GATHER_RUNS 12u
+#define NN__EXPERT__TIER_K_MAX  16u    /* the most picks one position of a tier's visit takes */
+typedef struct nn__expert__run { uint64_t from, from_stride, into, into_stride, bytes, count; } nn__expert__run;
+typedef struct nn__expert__gather { nn__expert__run run[NN__EXPERT__GATHER_RUNS]; unsigned runs; } nn__expert__gather;
 /* What a request found: the expert in memory, its read on the way, or no way to have it. */
 #define NN__EXPERT__RESIDENT   0
 #define NN__EXPERT__ARRIVING   1
@@ -268,15 +285,11 @@ typedef struct nn__expert__backing {
 #define NN__EXPERT__LRU_OLDEST  1u   /* the eviction candidate, as a LINK                         */
 #define NN__EXPERT__LRU_COUNT   2u   /* how many are in the chain — this layer's residents         */
 
-/* ⛔⛔ 509 EXPERTS PER LAYER IS A REAL BOUND AND IT IS NOT FAR AWAY. An allocation must fit the room left
- * in ONE heap chunk, and a `node_array` of E elements costs E+1 nodes against `SYS__HEAP__CHUNK_NODES`
- * (512) less `SYS__CHUNK__FIRST` (2). ⇒ 256 experts is comfortable, **512 IS NOT EXPRESSIBLE**, and the
- * next doubling of expert counts meets this.
- * ⛳ ITS RETIREMENT CONDITION: `SYS__HEAP__CHUNK_NODES` is a compile-time `#define`, so raising it is a
- * rebuild rather than a redesign — but it widens EVERY chunk in the pool, so it is a memory decision and
- * not a local one. The alternative is a third level, which costs an indirection on every lookup.
- * **Neither is owed until a model needs it; what is owed is that the bound is stated rather than met.** */
-#define NN__EXPERT__MAX_PER_LAYER  (SYS__HEAP__CHUNK_NODES - SYS__CHUNK__FIRST - 1ull)
+/* The most experts a layer may name: as many as one collection has slots (`NN__EXPERT__MAX_SLOTS`, 65,536 in the
+ * shipping geometry), since a layer wider than that could never have every expert resident at once. A layer's experts
+ * are one node array, which chains past a chunk, so the array itself sets no bound; this one keeps an over-wide ask an
+ * answer (`false`) rather than a heap that runs out and raises. The 397B is 512 a layer, which one chunk could not hold. */
+#define NN__EXPERT__MAX_PER_LAYER  ((uint64_t)SYS__HEAP__CHUNK_NODES / 2ull * ((uint64_t)SYS__HEAP__CHUNK_NODES / 2ull))
 
 #define NN__EXPERT__FAULT_INDEX  0x4E455831ull   /* "NEX1" — the index could not be stood up */
 

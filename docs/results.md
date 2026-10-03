@@ -28,7 +28,7 @@ measured before them, and where a card does part of the work they are a floor.
 | Where it runs | Prompt | Answer |
 |---|---|---|
 | one MI50 | 95 positions/s | 17.4 tokens/s (18.5 on a short prompt) |
-| one MI50 through OpenCL | 4.2 positions/s | 9.3 tokens/s (11.2 on a short prompt) |
+| one MI50 through OpenCL | 48.7 positions/s | 9.3 tokens/s (11.2 on a short prompt) |
 | three stages over machines (pipeline parallel) | — | 6.8 tokens/s, the same tokens |
 
 ## Qwen 3.5 122B-A10B
@@ -39,6 +39,10 @@ measured before them, and where a card does part of the work they are a floor.
 | `D4E4` | the same, the experts read from the disk, 32 GB of RAM | 11 positions/s† | 4.7 tokens/s — 87% from memory |
 | `D4E4` | the same, 16 GB of RAM | 10 positions/s† | 3.2 tokens/s — 73% from memory |
 | `D8E4` | one MI50 for the dense part, the experts on the CPU, all in RAM | 25 positions/s | 6.1 tokens/s |
+| `D4E4` | one MI50, the experts on the CPU, all in RAM — measured beside the tier rows | 38 positions/s | 10.9 tokens/s |
+| `D4E4` | the same, 24 GB of the card the tier of experts (v0.3.0) | 52 positions/s | 19.9 tokens/s |
+| `D4E4` | one MI50 through OpenCL, the experts on the CPU, all in RAM | 28 positions/s | 9.7 tokens/s |
+| `D4E4` | the same, 18 GB of the card the tier of experts (OpenCL allocates at most 85% of the card at once) | 32 positions/s | 11.7 tokens/s |
 | `D8E4` | the same, the experts read from the disk, 32 GB of RAM | 11 positions/s† | 3.9 tokens/s — 85% from memory |
 
 ## GLM 5.3 Flash
@@ -48,6 +52,9 @@ One MI50 for the dense part, the experts on the CPU.
 | Experts | Disk | Prompt | Answer |
 |---|---|---|---|
 | all in RAM | — | 23.9 positions/s | 6.7 tokens/s |
+| all in RAM, measured beside the tier rows | — | 18.1 positions/s | 6.8 tokens/s |
+| all in RAM, 18 GB of the card the tier of experts (v0.3.0) | — | 25.0 positions/s | 8.1 tokens/s |
+| all in RAM, a 300,000-position cache and 6 GB of tier — 15.0 GB of the card in all | — | 26.5 positions/s | 7.5 tokens/s |
 | 128 GB of RAM | 5 GB/s | 13.2 positions/s† | 5.7 tokens/s — 97% from memory, 132 MB read a token |
 | 128 GB of RAM | 2.6 GB/s | — | 4.2 tokens/s — 97% from memory ◦ |
 | 64 GB of RAM | 2.6 GB/s | — | 1.9 tokens/s — 79% from memory ◦ |
@@ -66,6 +73,11 @@ sustained reading.
 ⚠ **Reading a prompt is not fully optimized yet.** It runs a chunk of positions through each layer at once — every
 matrix once a chunk, on the card through a tiled kernel and on the CPU in 8-bit integers, and GLM's latent attention
 over every row of the chunk at once, its 64 heads sharing each read of the cache.
+
+The tier of experts starts empty in each of these runs; the prompt fills most of it, and the answer's rate climbs as the
+rest fills — GLM's reaches about 9 tokens a second by its 240th token with 18 GB. Each tier run answers with the same
+words as its run without, until a near-tie in the 122B's ~20 words in: the card sums its experts in another order than
+the CPU does.
 
 ## What limits the experts on the disk: the drive
 

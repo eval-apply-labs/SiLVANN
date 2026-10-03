@@ -128,6 +128,16 @@
 #define AI_QWEN_3__EXP__MASK           16u   /* past the parts' cells */
 #define AI_QWEN_3__POST__MASK          6u    /* the shared expert's */
 
+/* ⭐ A CARD'S TIER OF THE ROUTED EXPERTS (NN-48) — optional cells past the mask's. `HOLDS` 1: this worker (a card) holds
+ * only the experts resident in its collection; it computes the picks it holds, marks each held (its number plus
+ * `experts`), and a worker that holds every one (the CPU) skips a held pick. `SOURCES`: every expert's address in the CPU
+ * worker's memory, a node array, its slot laid out as the card's — so a promotion copies the slot whole; `LANDING`: the
+ * most promotions a position's visit starts. ▶ nn's `tier_visit` / `tier_chunk`. A tier and a mask are not taken together. */
+#define AI_QWEN_3__EXP__HOLDS          19u
+#define AI_QWEN_3__EXP__SOURCES        20u
+#define AI_QWEN_3__EXP__LANDING        21u
+#define AI_QWEN_3__EXP__FED            22u
+
 /* ⭐ THE MOST ROWS A PROMPT VERB TAKES AT ONCE (`ai_qwen_3__*_rows`): its MoE lists a pair for every pick of every
  * row on the host, `rows · TOP_K` of them. A longer prompt is several calls, each its next rows. */
 #define AI_QWEN_3__ROWS_MAX            256u

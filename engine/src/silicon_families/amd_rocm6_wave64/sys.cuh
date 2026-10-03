@@ -24,7 +24,11 @@ static inline bool amd_rocm6_wave64__memory_write(void* to, const void* from, si
     return hipMemcpy(to, from, bytes, hipMemcpyHostToDevice) == hipSuccess;
 }
 
-static inline bool amd_rocm6_wave64__compute_completed(void) { return hipDeviceSynchronize() == hipSuccess; }
+/* ⛳ THE CALLER'S WORK, NOT THE DEVICE'S: every kernel nn launches goes on stream 0, and "every operation I asked for has
+ * finished" is that stream drained. A side channel's copy is waited for by the thread that issued it (`side_memory_*`), so
+ * waiting for the whole device here waited for other threads' copies too — `MEASURED` 2026-10-03 on GLM's card tier
+ * (NN-48): each MoE layer's router read stalled behind the promotions on the loader's channels, ~2.5 ms a promotion. */
+static inline bool amd_rocm6_wave64__compute_completed(void) { return hipStreamSynchronize(0) == hipSuccess; }
 
 static inline bool amd_rocm6_wave64__side_open(void** channel) {
     return hipStreamCreateWithFlags((hipStream_t*)channel, hipStreamNonBlocking) == hipSuccess;

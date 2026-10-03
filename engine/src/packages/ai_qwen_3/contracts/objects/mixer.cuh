@@ -5,6 +5,10 @@
 #define AI_QWEN_3__MIXER__FAULT_TABLE 0x51334D58ull   /* "Q3MX" — the mixer's table is not what the verb reads */
 #define AI_QWEN_3__MIXER__FAULT_ROOM  0x51334D59ull   /* "Q3MY" — a buffer is too small for the shapes         */
 
+/* The norms' epsilon, every one of them: what Qwen's configs say (`rms_norm_eps`, 1e-6 in each of the 3.5, 3.6
+ * and 3.8 sizes). The runtime refuses a config that says otherwise, so this cannot be quietly wrong. */
+#define AI_QWEN_3__RMS_NORM_EPS 1e-6f
+
 /* ══ THE MIXERS' PLANE TABLES — the half of a layer before the MoE, each owning its state ═════════════════
  * Both answer `h1 = x + mixer(rmsnorm(x))` — or `residual + mixer(rmsnorm(x))` when a last argument names one: under
  * tensor parallelism a card holds some of the heads and the same columns of the out projection, and every card

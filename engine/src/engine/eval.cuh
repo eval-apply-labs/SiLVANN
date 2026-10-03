@@ -205,16 +205,19 @@ static __device__ inline bool eng__eval__zzprivate_is_procedure(sys__heap_node v
  * exposure rather than an inelegance: any two-element list whose first element was a quoted list would
  * have been read as a procedure and silently refused entry. The tag is one word and nothing can satisfy
  * it by accident. */
-static __device__ inline uint64_t eng__eval__zzprivate_first_form(uint64_t form, uint64_t from) {
+static __device__ inline uint64_t eng__eval__zzprivate_first_form(uint64_t form, uint64_t from, sys__list_walk* w,
+                                                                 bool standing) {
     const uint64_t n = sys__sublist__length(form);
     /* ⭐ `from` MADE THE SCAN RESUME AND THE WALK IS WHAT MAKES RESUMING FREE. The index said "everything
      * before here is already a value", but each `nth` then started at the head of the chunk chain again —
-     * so the evaluator re-followed `from/SLOTS` links on every pass over a form it had already crossed,
-     * which is where a flat program's residual quadratic lived. ▶ `sys__sublist__walk`. */
-    sys__list_walk w;
-    if (!sys__sublist__walk(form, from, &w)) return n;
-    for (uint64_t i = from; i < n; ++i, sys__list__walk_step(&w)) {
-        const sys__heap_node* cell = sys__list__walk_cell(&w);
+     * so the evaluator re-followed `from/SLOTS` links on every pass over a form it had already crossed.
+     * ⭐⭐ AND OPENING THE WALK AT `from` WAS STILL THAT SEARCH, once a pass: a walk opens at the head and
+     * steps to its index. So a caller coming back to a place hands the walk it stood up from the place,
+     * already `standing` at `from`, and the walk is left on the form found — which is what the descent
+     * parks. ▶ `sys__list__zzengine_walk_park`. */
+    if (!standing && !sys__sublist__walk(form, from, w)) return n;
+    for (uint64_t i = from; i < n; ++i, sys__list__walk_step(w)) {
+        const sys__heap_node* cell = sys__list__walk_cell(w);
         if (cell == 0) break;
         if (cell->dtype == SYS__KIND__OBJECT_REFERENCE && sys__sublist__is(cell->args[0])) return i;
         /* ⭐⭐ A FROZEN SUB-FORM IS SOMETHING TO DESCEND INTO, AND IT COSTS ONE COMPARE ON A TAG THIS
@@ -301,20 +304,26 @@ static __device__ __noinline__ bool eng__eval__zzprivate_expand(uint64_t binding
         sys__heap_node v = verb; v.op_code = SYS__OPCODES__REMOVE_BINDINGS; (void)sys__sublist__append(drop, &v);
         sys__heap_node e; e.dtype = SYS__KIND__VALUE_INT; e.num_args = 0u; e.args[0] = bindings;
         (void)sys__sublist__append(drop, &e);
-        for (uint64_t i = 0ull; i < arity; ++i) {
-            const sys__heap_node pname = sys__node_array__borrow(params, i);
-            (void)sys__sublist__append(drop, &pname);
-        }
+        sys__node_array_walk pw;
+        (void)sys__node_array__walk(params, 0ull, &pw);
+        for (const sys__heap_node* pname = sys__node_array__walk_cell(&pw); pname != 0;
+             sys__node_array__next(&pw), pname = sys__node_array__walk_cell(&pw))
+            (void)sys__sublist__append(drop, pname);
         const sys__heap_node ref = sys__heap_object__reference_to(drop);
         (void)sys__sublist__append(form, &ref);
         (void)sys__heap_object__release(drop);
     }
 
     /* Each parameter enters its scope now, reading the argument out of the cell it is still in. */
-    for (uint64_t i = 0ull; i < arity; ++i) {
-        const sys__heap_node arg = sys__sublist__nth(form, i + 1ull);
-        const sys__heap_node pname = sys__node_array__borrow(params, i);
-        (void)sys__bindings__add(bindings, &pname, &arg);
+    if (arity > 0ull) {
+        sys__node_array_walk pw;
+        (void)sys__node_array__walk(params, 0ull, &pw);
+        for (uint64_t i = 0ull; i < arity; ++i, sys__node_array__next(&pw)) {
+            const sys__heap_node* pname = sys__node_array__walk_cell(&pw);
+            if (pname == 0) break;
+            const sys__heap_node arg = sys__sublist__nth(form, i + 1ull);
+            (void)sys__bindings__add(bindings, pname, &arg);
+        }
     }
 
     /* ⭐ AND THE CALL FORM BECOMES THE PROGRAM — IT IS NOT REPLACED BY ONE. ⚖ ARCHITECT: *"expanding the
@@ -370,6 +379,11 @@ static __device__ inline sys__heap_node eng__eval(uint64_t bindings, uint64_t pr
     places = sys__stack__create();
     if (places.dtype != SYS__KIND__OBJECT_REFERENCE) return sys__heap_node__nothing();
 
+    /* Where the scan of `current` stands, when a return put it back there: a walk stood up from the place,
+     * so the next scan starts at the cell just written rather than finding it again. */
+    sys__list_walk scan;
+    bool           standing = false;
+
     current  = program;
     answer   = sys__heap_node__nothing();
     entering = true;                 /* nothing has run this yet */
@@ -420,20 +434,29 @@ static __device__ inline sys__heap_node eng__eval(uint64_t bindings, uint64_t pr
                 const uint64_t finished = current;
                 (void)sys__heap_object__retain(finished);
                 current = place.args[0];
-                (void)sys__sublist__replace(current, place.args[1], &only);
+                (void)sys__sublist__zzengine_walk_unpark(current, place.args[1], &place, &scan);
+                sys__heap_node* back = sys__list__walk_cell(&scan);
+                if (back != 0) sys__heap_object__set(back, &only);
+                else (void)sys__sublist__replace(current, place.args[1], &only);
+                standing = (back != 0);
                 (void)sys__sublist__discard(finished, 0ull, sys__sublist__length(finished));
                 if (!eng__eval__zzprivate_pool_put(zzhot_pool, finished))
                     (void)sys__heap_object__release(finished);   /* no room: the ordinary end */
 #else
                 current = place.args[0];                    /* borrowed: the chain above still holds it */
-                (void)sys__sublist__replace(current, place.args[1], &only);
+                (void)sys__sublist__zzengine_walk_unpark(current, place.args[1], &place, &scan);
+                sys__heap_node* back = sys__list__walk_cell(&scan);
+                if (back != 0) sys__heap_object__set(back, &only);
+                else (void)sys__sublist__replace(current, place.args[1], &only);
+                standing = (back != 0);
 #endif
                 resume  = place.args[1];                    /* everything before it is already a value */
                 continue;   /* and still coming back — reaching here at all required it */
             }
         }
 
-        const uint64_t at = eng__eval__zzprivate_first_form(current, resume);
+        const uint64_t at = eng__eval__zzprivate_first_form(current, resume, &scan, standing);
+        standing = false;
         if (at < sys__sublist__length(current)) {
             /* Descend. The place is the list and the position in it, and the push is a bare transfer:
              * ⛔ IT TAKES NO HOLD OF THAT LIST. What we came back to is kept by the cell of ITS parent
@@ -442,6 +465,7 @@ static __device__ inline sys__heap_node eng__eval(uint64_t bindings, uint64_t pr
             sys__heap_node place;
             place.dtype = SYS__KIND__OBJECT_REFERENCE; place.num_args = 0u;
             place.args[0] = current; place.args[1] = at;
+            sys__list__zzengine_walk_park(&scan, &place);     /* and where the scan stands, to come back to */
             if (!sys__stack__zzengine_compute_stack_push(&places, &place)) {
                 sys__fault__raise(0ull, ENG__EVAL__FAULT_DEPTH);
                 answer = sys__heap_node__nothing();
@@ -453,7 +477,8 @@ static __device__ inline sys__heap_node eng__eval(uint64_t bindings, uint64_t pr
              * we are leaving. Every level is held by the level above it, up to the program the engine
              * holds — so the stack borrows those holds instead of adding a second set that would only
              * ever be cancelled on the way back. */
-            sys__heap_node into = sys__sublist__nth(current, at);
+            sys__heap_node* found = sys__list__walk_cell(&scan);
+            sys__heap_node into = (found != 0) ? *found : sys__sublist__nth(current, at);
 #if SILVANN_LAZY_THAW
             /* ⭐⭐ THE FORM IS MADE HERE, AT THE MOMENT IT IS ENTERED, AND NOWHERE ELSE. The cell named
              * an array in the picture; it now names the list thawed from it, and that list's own
@@ -483,7 +508,8 @@ static __device__ inline sys__heap_node eng__eval(uint64_t bindings, uint64_t pr
                     break;
                 }
                 const sys__heap_node ref = sys__heap_object__reference_to(made);
-                (void)sys__sublist__replace(current, at, &ref);
+                if (found != 0) sys__heap_object__set(found, &ref);
+                else (void)sys__sublist__replace(current, at, &ref);
                 (void)sys__heap_object__release(made);   /* the cell holds it now */
                 into = ref;
             }

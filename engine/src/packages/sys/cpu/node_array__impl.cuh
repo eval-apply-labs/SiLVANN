@@ -10,11 +10,91 @@
 #include "stack__header.cuh"  /* where a dying array moves what it was holding */
 #include "node_array__header.cuh"  /* the verbs it fills in, and the three fault words they raise */
 
-/* Where an element sits, which is the whole of what an array is for: a reference names element zero, so
- * element `i` is `i` nodes along from it. One line, and it is here rather than written out five times
- * because the five verbs below would each have had to get the same arithmetic right. */
+/* Where an element sits in a run: a reference names element zero, so element `i` is `i` nodes along from
+ * it. Inside one run this is the whole of finding an element, and everything below that crosses runs comes
+ * back to it once it knows which run. */
+static __device__ inline sys__heap_node* sys__node_array__zzprivate_in_run(uint64_t run, uint64_t index) {
+    return sys__heap__object_full_address(run + index);
+}
+
+/* The cone that ends this run, or nothing when the run is the array's last. Only a full run can end in
+ * one, so a shorter run answers off its head and its last cell is never read. */
+static __device__ inline sys__heap_node* sys__node_array__zzprivate_cone(uint64_t run) {
+    const uint64_t cells = SYS__HEAP_OBJECT__NODES(sys__heap_node__zzpackage_head(run)) - 1ull;
+    if (cells != SYS__NODE_ARRAY__RUN_CELLS) return (sys__heap_node*)0;
+    sys__heap_node* last = sys__node_array__zzprivate_in_run(run, cells - 1ull);
+    return last->dtype == SYS__KIND__NODE_ARRAY_CONE ? last : (sys__heap_node*)0;
+}
+
+/* How many elements this run holds: every cell past the head, less the cone if there is one. */
+static __device__ inline uint64_t sys__node_array__zzprivate_run_length(uint64_t run, const sys__heap_node* cone) {
+    return SYS__HEAP_OBJECT__NODES(sys__heap_node__zzpackage_head(run)) - 1ull - (cone != 0 ? 1ull : 0ull);
+}
+
+/* Where an element sits, following the cones from the run named: one hop per run passed. It is what an
+ * array without a table pays, and how the table itself is read. */
+static __device__ inline sys__heap_node* sys__node_array__zzprivate_at_by_cones(uint64_t run, uint64_t index) {
+    for (;;) {
+        const sys__heap_node* cone = sys__node_array__zzprivate_cone(run);
+        const uint64_t held = sys__node_array__zzprivate_run_length(run, cone);
+        if (cone == 0 || index < held) return sys__node_array__zzprivate_in_run(run, index);
+        index -= held;
+        run = cone->args[0];
+    }
+}
+
+/* How many elements, following the cones from the run named. */
+static __device__ inline uint64_t sys__node_array__zzprivate_length_by_cones(uint64_t run) {
+    uint64_t length = 0ull;
+    for (;;) {
+        const sys__heap_node* cone = sys__node_array__zzprivate_cone(run);
+        length += sys__node_array__zzprivate_run_length(run, cone);
+        if (cone == 0) return length;
+        run = cone->args[0];
+    }
+}
+
+/* The table of runs a chained array keeps, or nothing — for an array that fits, which has none, and for
+ * a table, which is never given one of its own. */
+static __device__ inline uint64_t sys__node_array__zzprivate_indexer(uint64_t array_base, const sys__heap_node* cone) {
+    if (cone == 0) return 0ull;
+    return sys__heap_node__zzpackage_head(array_base)->args[SYS__NODE_ARRAY__INDEXER];
+}
+
+/* Which run an index falls in, and how far into it. Every run but the last holds the same number of
+ * elements, so the table answers the run by a division and one read; with no table it is the cones. False
+ * past the end, with the last run and how far past its start the index lies. */
+static __device__ inline bool sys__node_array__zzprivate_locate(uint64_t array_base, uint64_t index,
+                                                               uint64_t* run_out, uint64_t* within_out) {
+    uint64_t run = array_base;
+    const sys__heap_node* cone = sys__node_array__zzprivate_cone(run);
+    const uint64_t table = sys__node_array__zzprivate_indexer(run, cone);
+    if (table != 0ull) {
+        const uint64_t chained = SYS__NODE_ARRAY__RUN_CELLS - 1ull;
+        const uint64_t runs = sys__node_array__zzprivate_length_by_cones(table);
+        uint64_t r = index / chained;
+        if (r >= runs) r = runs - 1ull;                    /* the last run may hold one more than the rest */
+        run = sys__node_array__zzprivate_at_by_cones(table, r)->args[0];
+        index -= r * chained;
+        cone = sys__node_array__zzprivate_cone(run);
+    }
+    for (;;) {
+        const uint64_t held = sys__node_array__zzprivate_run_length(run, cone);
+        *run_out = run;
+        *within_out = index;
+        if (index < held) return true;
+        if (cone == 0) return false;
+        index -= held;
+        run = cone->args[0];
+        cone = sys__node_array__zzprivate_cone(run);
+    }
+}
+
+/* Where an element sits in the whole array: the addition above, in the run the index falls in. */
 static __device__ inline sys__heap_node* sys__node_array__zzprivate_at(uint64_t array_base, uint64_t index) {
-    return sys__heap__object_full_address(array_base + index);
+    uint64_t run = 0ull, within = 0ull;
+    (void)sys__node_array__zzprivate_locate(array_base, index, &run, &within);
+    return sys__node_array__zzprivate_in_run(run, within);
 }
 
 static __device__ inline bool sys__node_array__is(uint64_t array_base) {
@@ -28,10 +108,17 @@ static __device__ inline uint64_t sys__node_array__length(uint64_t array_base) {
         sys__fault__raise(0ull, SYS__NODE_ARRAY__FAULT_KIND);
         return 0ull;
     }
-    /* The head is one node and the elements are the rest, so the length is what the allocation reaches
-     * minus that one. Nothing records it separately, which is the point: a second copy of a number is a
-     * second thing that can be wrong, and this one was already being written by the carve. */
-    return SYS__HEAP_OBJECT__NODES(sys__heap_node__zzpackage_head(array_base)) - 1ull;
+    /* Each run's head is one node and its elements are the rest less a cone, so the length is what the
+     * allocations reach. Nothing records it separately, which is the point: a second copy of a number is a
+     * second thing that can be wrong, and this one is already written by the carve. An array that fits is
+     * one run and answers off its head; a chained one is every run but the last, full, and the last. */
+    const sys__heap_node* cone = sys__node_array__zzprivate_cone(array_base);
+    const uint64_t table = sys__node_array__zzprivate_indexer(array_base, cone);
+    if (table == 0ull) return sys__node_array__zzprivate_length_by_cones(array_base);
+    const uint64_t runs = sys__node_array__zzprivate_length_by_cones(table);
+    const uint64_t last = sys__node_array__zzprivate_at_by_cones(table, runs - 1ull)->args[0];
+    return (runs - 1ull) * (SYS__NODE_ARRAY__RUN_CELLS - 1ull)
+         + sys__node_array__zzprivate_run_length(last, sys__node_array__zzprivate_cone(last));
 }
 
 /* One question, asked the same way by every verb that reaches an element — the three that read one and the
@@ -51,6 +138,9 @@ static __device__ inline bool sys__node_array__zzprivate_reaches(uint64_t array_
 
 /* The cell at an index, with nothing checked and no hold taken. ⛔ IT IS `zzpackage_` AND NOT PUBLIC
  * BECAUSE IT TRUSTS ITS CALLER TWICE OVER: that the base names an array, and that the index is inside it.
+ * ⛳ AND INSIDE ITS FIRST RUN, which both callers have by construction: the bindings make their tables
+ * through `zzpackage_create_run`, which refuses rather than chains, and a procedure is two elements. An
+ * array placed in room somebody else owns is one run however long it is.
  * Two callers have earned that, and they earn it by different arguments. The bindings reach checked both
  * when it armed and holds a base that cannot move — `args[SCOPES]` is written at creation and at teardown
  * and nowhere else. The procedure verbs ask `sys__procedure__is` first, which is the kind, and index with
@@ -59,12 +149,18 @@ static __device__ inline bool sys__node_array__zzprivate_reaches(uint64_t array_
  * ⛳ A FURTHER CALLER IS A DECISION, NOT AN ADDITION: it owes one of those two arguments in full, or it
  * reaches through a verb that checks. */
 static __device__ inline sys__heap_node* sys__node_array__zzpackage_at(uint64_t array_base, uint64_t index) {
-    return sys__node_array__zzprivate_at(array_base, index);
+    return sys__node_array__zzprivate_in_run(array_base, index);
 }
 
 static __device__ inline sys__heap_node* sys__node_array__cells(uint64_t array_base, uint64_t count) {
     if (count == 0ull || !sys__node_array__zzprivate_reaches(array_base, count - 1ull)) return (sys__heap_node*)0;
-    return sys__node_array__zzprivate_at(array_base, 0ull);
+    /* The answer is one pointer and the caller adds to it, so the cells have to be one run. An array long
+     * enough to be chained still answers when the count fits in its first run. */
+    if (count > sys__node_array__zzprivate_run_length(array_base, sys__node_array__zzprivate_cone(array_base))) {
+        sys__fault__raise(0ull, SYS__NODE_ARRAY__FAULT_SPLIT);
+        return (sys__heap_node*)0;
+    }
+    return sys__node_array__zzprivate_in_run(array_base, 0ull);
 }
 
 static __device__ inline sys__heap_node sys__node_array__get(uint64_t array_base, uint64_t index) {
@@ -96,6 +192,12 @@ static __device__ inline bool sys__node_array__set(uint64_t array_base, uint64_t
         sys__fault__raise(0ull, SYS__HEAP_OBJECT__FAULT_NO_VALUE);
         return false;
     }
+    /* A cone is the array's own joint and never an element: one stored here would read as the end of a
+     * run to every verb that came after it. */
+    if (value->dtype == SYS__KIND__NODE_ARRAY_CONE) {
+        sys__fault__raise(0ull, SYS__NODE_ARRAY__FAULT_KIND);
+        return false;
+    }
     if (!sys__node_array__zzprivate_reaches(array_base, index)) return false;
     /* ⭐ THE ARRAY OWNS WHAT IT HOLDS, so storing takes a hold and what was there gives one up — and the
      * order of those two is the whole of why this is one call and not two lines here: they can be the
@@ -122,12 +224,13 @@ static __device__ inline void sys__node_array__zzprivate_fill(sys__heap_node* he
     }
 }
 
-static __device__ inline uint64_t sys__node_array__create(uint64_t elements) {
+static __device__ inline uint64_t sys__node_array__zzpackage_create_run(uint64_t elements) {
     if (elements == 0ull) {
         sys__fault__raise(0ull, SYS__NODE_ARRAY__FAULT_EMPTY);
         return 0ull;
     }
-    /* The head is a node of its own, so the room asked for is one more than the count. */
+    /* The head is a node of its own, so the room asked for is one more than the count. Past one chunk the
+     * allocator refuses, on geometry, and says so. */
     sys__heap_node* head = sys__heap__zzpackage_make_sized(SYS__KIND__NODE_ARRAY, elements + 1ull);
     if (head == 0) return 0ull;                  /* the carve raised, and said which of its reasons */
 
@@ -135,6 +238,125 @@ static __device__ inline uint64_t sys__node_array__create(uint64_t elements) {
     /* A reference names the node after the head, which here is element zero — so the thing a caller holds
      * and the thing the arithmetic starts from are the same offset, and neither has to be converted. */
     return sys__heap__offset(head + 1);
+}
+
+/* The runs of a chained array, made back to front so each cone is written naming a run that already
+ * exists — the hold that run was made with becomes the cone's, and nothing is retained or let go on the
+ * way. Every run but the last is full and gives its last cell to the cone; the last takes what is left, up
+ * to a full run of elements. When a `table` is handed in, it is told where each run starts and the first
+ * run's head names it; without one, every head says there is none.
+ * ⛳ A RUN THAT CANNOT BE MADE TAKES THE ONES ALREADY MADE WITH IT: letting go of the newest reaches every
+ * run behind it through the cones, by the same teardown any array dies by. The table is the caller's. */
+static __device__ inline uint64_t sys__node_array__zzprivate_chain(uint64_t elements, uint64_t table) {
+    const uint64_t chained = SYS__NODE_ARRAY__RUN_CELLS - 1ull;          /* elements in a run with a cone */
+    uint64_t runs_before = 0ull;
+    uint64_t tail_elements = elements;
+    while (tail_elements > SYS__NODE_ARRAY__RUN_CELLS) { tail_elements -= chained; ++runs_before; }
+
+    uint64_t run = sys__node_array__zzpackage_create_run(tail_elements);
+    uint64_t r = runs_before;
+    while (run != 0ull) {
+        sys__heap_node__zzpackage_head(run)->args[SYS__NODE_ARRAY__INDEXER] = 0ull;
+        if (table != 0ull) {
+            sys__heap_node* entry = sys__node_array__zzprivate_at_by_cones(table, r);
+            entry->dtype = SYS__KIND__VALUE_INT; entry->num_args = 0u; entry->op_code = 0ull;
+            entry->args[0] = run;
+        }
+        if (r == 0ull) break;
+        const uint64_t before = sys__node_array__zzpackage_create_run(SYS__NODE_ARRAY__RUN_CELLS);
+        if (before == 0ull) { (void)sys__heap_object__release(run); return 0ull; }
+        sys__heap_node* cone = sys__node_array__zzprivate_in_run(before, chained);
+        cone->dtype    = SYS__KIND__NODE_ARRAY_CONE;
+        cone->num_args = 0u;
+        cone->op_code  = 0ull;
+        cone->args[0]  = run;
+        run = before;
+        --r;
+    }
+    if (run != 0ull) sys__heap_node__zzpackage_head(run)->args[SYS__NODE_ARRAY__INDEXER] = table;
+    return run;
+}
+
+static __device__ inline uint64_t sys__node_array__create(uint64_t elements) {
+    if (elements <= SYS__NODE_ARRAY__RUN_CELLS) return sys__node_array__zzpackage_create_run(elements);
+
+    /* ⭐ TOO LONG FOR ONE RUN, SO IT IS SEVERAL, AND A TABLE OF THEM. The table is itself a node array,
+     * one element a run; past a run's width of runs it is chained too, and keeps no table of its own —
+     * reading it then costs a hop per run of the table, which is a quarter of a million elements in. */
+    const uint64_t chained = SYS__NODE_ARRAY__RUN_CELLS - 1ull;
+    uint64_t runs = 1ull;
+    for (uint64_t tail = elements; tail > SYS__NODE_ARRAY__RUN_CELLS; tail -= chained) ++runs;
+    const uint64_t table = (runs <= SYS__NODE_ARRAY__RUN_CELLS) ? sys__node_array__zzpackage_create_run(runs)
+                                                                : sys__node_array__zzprivate_chain(runs, 0ull);
+    if (table == 0ull) return 0ull;                 /* the carve raised, and said which of its reasons */
+    const uint64_t array = sys__node_array__zzprivate_chain(elements, table);
+    if (array == 0ull) { (void)sys__heap_object__release(table); return 0ull; }
+    return array;
+}
+
+/* ── WALKING ONE ────────────────────────────────────────────────────────────────────────────────────
+ * Every element in order, stepping over the cones. A step inside a run is one addition; the step that
+ * lands on a cone follows it, so a reader never sees one. */
+static __device__ inline void sys__node_array__zzprivate_walk_settle(sys__node_array_walk* w) {
+    if (w->cell != w->last) return;
+    const sys__heap_node* at = sys__node_array__zzprivate_in_run(w->cell, 0ull);
+    if (at->dtype != SYS__KIND__NODE_ARRAY_CONE) return;
+    w->cell = at->args[0];
+    w->last = w->cell + SYS__HEAP_OBJECT__NODES(sys__heap_node__zzpackage_head(w->cell)) - 2ull;
+}
+
+static __device__ inline bool sys__node_array__walk(uint64_t array_base, uint64_t from, sys__node_array_walk* w) {
+    if (w == 0) return false;
+    w->cell = 0ull; w->last = 0ull;
+    if (!sys__node_array__is(array_base)) {
+        sys__fault__raise(0ull, SYS__NODE_ARRAY__FAULT_KIND);
+        return false;
+    }
+    /* Into the run `from` falls in — what an index costs, paid once for the walk. Opening at the length is
+     * a walk already at its end, as an empty loop over the rest would be. */
+    uint64_t run = 0ull, within = 0ull;
+    if (!sys__node_array__zzprivate_locate(array_base, from, &run, &within)) {
+        if (within == sys__node_array__zzprivate_run_length(run, 0)) return true;
+        sys__fault__raise(0ull, SYS__NODE_ARRAY__FAULT_RANGE);
+        return false;
+    }
+    from = within;
+    w->cell = run + from;
+    w->last = run + SYS__HEAP_OBJECT__NODES(sys__heap_node__zzpackage_head(run)) - 2ull;
+    sys__node_array__zzprivate_walk_settle(w);
+    return true;
+}
+
+static __device__ inline sys__heap_node* sys__node_array__walk_cell(const sys__node_array_walk* w) {
+    if (w == 0 || w->cell == 0ull) return (sys__heap_node*)0;
+    return sys__node_array__zzprivate_in_run(w->cell, 0ull);
+}
+
+/* Put a value in the element the walk stands on, exactly as `set` puts one by index: the array takes a hold
+ * of what goes in and gives up its hold on what was there. A walk at its end has no element and refuses. */
+static __device__ inline bool sys__node_array__walk_set(const sys__node_array_walk* w, const sys__heap_node* value) {
+    if (value == 0) {
+        sys__fault__raise(0ull, SYS__HEAP_OBJECT__FAULT_NO_VALUE);
+        return false;
+    }
+    if (value->dtype == SYS__KIND__NODE_ARRAY_CONE) {
+        sys__fault__raise(0ull, SYS__NODE_ARRAY__FAULT_KIND);
+        return false;
+    }
+    sys__heap_node* cell = sys__node_array__walk_cell(w);
+    if (cell == 0) {
+        sys__fault__raise(0ull, SYS__NODE_ARRAY__FAULT_RANGE);
+        return false;
+    }
+    sys__heap_object__set(cell, value);
+    return true;
+}
+
+static __device__ inline void sys__node_array__next(sys__node_array_walk* w) {
+    if (w == 0 || w->cell == 0ull) return;
+    if (w->cell == w->last) { w->cell = 0ull; return; }       /* the last run's last element: the end */
+    w->cell += 1ull;
+    sys__node_array__zzprivate_walk_settle(w);
 }
 
 /* ── PLACING ONE IN ROOM SOMEBODY ELSE OWNS ──────────────────────────────────────────────────────────
@@ -197,7 +419,20 @@ static __device__ __noinline__ void sys__node_array__zzpackage_release_internal(
      * short of it: the head records how far this one reaches and the elements are all of it but the head.
      * Nothing here needs the length verb, which asks what kind this is — and what kind it is, is how the
      * teardown got here. */
+    /* ⛳ A CONE IS MOVED LIKE ANY REFERENCE, which is how the runs after this one die with it: each is
+     * an array in its own right, and the drain reaches it the way it reaches any other. */
     const uint64_t nodes = SYS__HEAP_OBJECT__NODES(head);
+    /* ⛳ AND THE TABLE OF RUNS GOES WITH THE FIRST, moved the same way. Only an array starts a chain, so a
+     * procedure — which shares this teardown — is never asked; the word is cleared as it is moved. */
+    if (head->dtype == SYS__KIND__NODE_ARRAY) {
+        const uint64_t first = sys__heap__offset(head + 1);
+        const uint64_t table = sys__node_array__zzprivate_indexer(first, sys__node_array__zzprivate_cone(first));
+        if (table != 0ull) {
+            head->args[SYS__NODE_ARRAY__INDEXER] = 0ull;
+            sys__heap_node held = sys__heap_object__reference_to(table);
+            sys__stack__transfer(releaser_stack, &held);
+        }
+    }
     for (uint64_t i = 1ull; i < nodes; ++i)
         if (sys__heap_node__carries_reference(head[i].dtype))
             sys__stack__transfer(releaser_stack, &head[i]);
