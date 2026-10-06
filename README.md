@@ -1,6 +1,6 @@
 # SiLVANN
 
-> **Developer preview, v0.3.1.** It runs the models below well on the hardware it was tested on, and it is shared
+> **Developer preview, v0.3.2.** It runs the models below well on the hardware it was tested on, and it is shared
 > for people who can find their way around a build and a stack trace. The NVIDIA and Apple paths, and tensor
 > cores, are not tested yet.
 
@@ -35,6 +35,10 @@ on the card, which ran on the machine's 256 GB and name what the model needs. �
 smaller one, which has not been measured. **Every model and pack, the other machines (down to a 4 GB card
 reading its experts from the disk), and how long a conversation fits: [`docs/models.md`](docs/models.md)**; every
 measurement: [`docs/results.md`](docs/results.md).
+
+**New in v0.3.2:** a fix — on a machine busy when the engine starts, the CPU's pool of threads could be sized to none,
+and the experts on the CPU were then skipped without an error, so the answers were wrong. Upgrade if your experts run
+on the CPU. And GLM 5.3 Flash on a 32 GB card, measured again with 24 GB of tier: 10.7 tokens/s.
 
 **New in v0.3.1:** Mistral AI's Ministral 3 14B (Apache 2.0) — the first model of a third family, in two packs; two more
 packs, the 397B and GLM 5.3 Flash with its dense part at 8 bits; how close each pack comes to the original weights, as
