@@ -34,7 +34,7 @@ def _half(a):
 class Qwen35:
     def __init__(self, folder, machine, max_context=4096, fused_moe=True, kv="tiered", tiers=None, experts_on="card",
                  experts_from="auto", experts_dir=None, layers=None, chunk=256, experts_ram_gb=None, card_experts_gb=0,
-                 card_landing=2, card_line=None):
+                 card_landing=1, card_line=None, experts_int8=False):
         if folder.architecture not in ARCHITECTURES:
             raise Refused("%s is a %r model, not one of %s" % (folder.path, folder.architecture, ARCHITECTURES))
         c, b = folder.config, folder.bundle
@@ -104,9 +104,14 @@ class Qwen35:
         #   well: the card computes the picks it holds, the CPU the rest; an expert the CPU computed earns a slot by nn's
         #   qualifier and is copied whole from the CPU's memory while the card computes (`card_landing` a visit at most); a
         #   prompt chunk gives the card every expert past `nn__expert_major__vram_promotion_threshold_picks`, measured at boot
-        #   (`card_line` fixes it). ▶ glm5.py's, and nn's `tier_visit` / `tier_chunk`
+        #   (`card_line` fixes it). ▶ glm5.py's, and nn's `nn__expert_tier__*`
         self.CARD_GB, self.CARD_LANDING = float(card_experts_gb or 0), int(card_landing)
         self.CARD_LINE = int(card_line) if card_line else None
+        # a position's experts on the CPU multiplied in integers (nn's int8 gemvs, as GLM's) rather than exactly — the
+        # prompt's rows there are in integers either way. ▶ AI_QWEN_3__EXP__INT8
+        self.EXPERTS_INT8 = bool(experts_int8)
+        if self.EXPERTS_INT8 and not self.CPU_EXPERTS:
+            raise Refused("experts_int8 is the CPU's arithmetic: experts_on 'cpu'")
         if self.CARD_GB and not self.CPU_EXPERTS:
             raise Refused("a card's tier of experts is beside the CPU's — experts_on='cpu'")
         if self.CARD_GB and b.mask is not None:
@@ -350,9 +355,12 @@ class Qwen35:
         m.buffer(self.RSCRATCH, "c_rscratch")
         self._mask_buffers(cpu=True)
         for l in layers:
-            m.table("exc%d" % l, ["c_signs", "c_scratch", "c_zero", l, 0, e.at_up_lut, e.at_down_data, e.at_down_lut,
-                                  H, self.INTER, self.EXPERTS, self.TOPK, int(self.b.record(l, GU).d),
-                                  backing.get((CPU, l), 0)] + self._masked(l, "moe", 16, 14))
+            cells = ["c_signs", "c_scratch", "c_zero", l, 0, e.at_up_lut, e.at_down_data, e.at_down_lut,
+                     H, self.INTER, self.EXPERTS, self.TOPK, int(self.b.record(l, GU).d),
+                     backing.get((CPU, l), 0)] + self._masked(l, "moe", 16, 14)
+            if self.EXPERTS_INT8:                          # ▶ AI_QWEN_3__EXP__INT8, past the mask's cells
+                cells += [0] * (19 - len(cells)) + [1]
+            m.table("exc%d" % l, cells)
             # a prompt's: the chunk's scratch in place of a position's, and a picture over the chunk
             m.table("exrc%d" % l, ["c_signs", "c_rscratch", "c_zero", l, 0, e.at_up_lut, e.at_down_data, e.at_down_lut,
                                    H, self.INTER, self.EXPERTS, self.TOPK, int(self.b.record(l, GU).d),
@@ -576,18 +584,21 @@ class Qwen35:
                     + self._masked(l, "moe", 16, 14))
 
     def _tier_tables(self):
-        """The card's tier's experts tables (▶ AI_QWEN_3__EXP__HOLDS): a position's and a chunk's, each with its own scratch,
-        and fed from the CPU's memory where every expert is there (the experts in RAM)."""
+        """The card's tier (▶ nn's `nn__expert_tier`): its experts tables, a position's and a chunk's, each with its own
+        scratch; the tier, fed from the CPU's memory where every expert is there (the experts in RAM); and the binding."""
         m, e = self.m, self.EPLAN
         for l in self.run_layers:
             d = int(self.b.record(l, GU).d)
-            cells = [l, self.T_CEXP, e.at_up_lut, e.at_down_data, e.at_down_lut, self.H, self.INTER, self.EXPERTS, self.TOPK,
-                     d, 0, 0, 0, 0, 0, 0, 1]
             if l in self.SRC:
                 self._int_array("src%d" % l, self.SRC[l])
-                cells += ["src%d" % l, self.CARD_LANDING]
+            cells = [l, self.T_CEXP, e.at_up_lut, e.at_down_data, e.at_down_lut, self.H, self.INTER, self.EXPERTS, self.TOPK,
+                     d, 0, 0, 0, 0, 0, 0]
             m.table("exk%d" % l, ["signs", "kscratch", "zero_h"] + cells)
             m.table("exkr%d" % l, ["signs", "krscratch", "zero_h"] + cells)
+        # a card slot laid out as the CPU's, so a promotion copies one whole
+        expert_tier.tier(m, "tier_card", self.T_CEXP, self.EXPERTS, self.TOPK, self.H, self.INTER, e, self.LAYERS,
+                         {l: "src%d" % l for l in self.run_layers if l in self.SRC}, landing=self.CARD_LANDING)
+        expert_tier.bind(m, {CARD: "tier_card"}, len(self.workers()))
 
     def _int_array(self, name, values):
         """A node array of integers, bound by name — filled a hundred at a time, as a program must fit one heap chunk."""
@@ -651,9 +662,11 @@ class Qwen35:
                 #   computed while the CPU computes the rest, the two sums added
                 tier = self.CPLAN is not None
                 mlp = ("(ai_qwen_3__pre_expert_rows h1s pre%d hands n) " % l
-                       + ("(ai_qwen_3__experts_note hands exkr%d n %s) " % (l, expert_tier.THRESHOLD) if tier else "")
+                       + ("(nn__expert_tier__note hands %s %d n %d %d %s) " % (expert_tier.BINDING, l, self.HAND_ROW,
+                                                                          self.HAND_ROW - 8 * self.TOPK, expert_tier.THRESHOLD)
+                          if tier else "")
                        + "(sys__compute %d names xr%d) " % (CPU, l)
-                       + ("(ai_qwen_3__experts_rows hands exkr%d rrows_k n) " % l if tier else "")
+                       + ("(ai_qwen_3__experts_rows hands exkr%d rrows_k n %s) " % (l, expert_tier.BINDING) if tier else "")
                        + "(while '(sys__eq (sys__completed %d) (< 1 0)) '(< 0 1)) (sys__result %d) "
                          "(nn__buffer__copy c_rrows %d rrows %d) " % (CPU, CPU, CPU, self.CHUNK * H * 2)
                        + ("(nn__vector__add rrows rrows_k rrows %d) " % (self.CHUNK * H) if tier else "")
@@ -673,7 +686,7 @@ class Qwen35:
             elif self.CPU_EXPERTS:
                 tier = self.CPLAN is not None
                 body = (mixer % (l, "h1") + " (ai_qwen_3__pre_expert h1 pre%d hand picks) " % l
-                        + ("(ai_qwen_3__experts hand picks exk%d routed_k) " % l if tier else "")
+                        + ("(ai_qwen_3__experts hand picks exk%d routed_k %s) " % (l, expert_tier.BINDING) if tier else "")
                         + "(sys__compute %d names xq%d) (sys__result %d) (nn__buffer__copy c_routed %d routed %d) "
                           % (CPU, l, CPU, CPU, 2 * self.H)
                         + ("(nn__vector__add routed routed_k routed %d) " % self.H if tier else "")

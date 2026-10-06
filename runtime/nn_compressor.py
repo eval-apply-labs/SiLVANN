@@ -769,6 +769,17 @@ def _codes_of(planes, r, d, cols):
 _HDR = {}
 
 
+_IDX = {}
+PER_EXPERT = "per_expert"    # a view's weight_map value: this stacked expert tensor is assembled from one tensor an expert
+
+
+def _index(raw):
+    """A checkpoint's `model.safetensors.index.json`, read once — the 397B heretic's holds 93,411 names."""
+    if raw not in _IDX:
+        _IDX[raw] = json.load(open(os.path.join(raw, "model.safetensors.index.json")))
+    return _IDX[raw]
+
+
 def read_tensor(raw, name, expert=None):
     """One tensor (or one expert's slice of a 3-D expert stack) as fp32, from its bytes in the dtype the file says.
 
@@ -776,9 +787,38 @@ def read_tensor(raw, name, expert=None):
     1 GiB, and a packer that reads it entire to take one expert pays that per expert.
     ⛔⛔ THE DTYPE IS READ FROM THE HEADER, NOT ASSUMED. It was always bf16, which every Qwen checkpoint is; GLM 5.3
     Flash keeps 291 small tensors in F32 (`hc_*`, `e_score_correction_bias`, `A_log`, `dt_bias`), and read as bf16
-    they came out as values like 4e37 and NaN — from half their bytes. `MEASURED`."""
-    wm = json.load(open(os.path.join(raw, "model.safetensors.index.json")))["weight_map"]
-    f = wm[name]
+    they came out as values like 4e37 and NaN — from half their bytes. `MEASURED`.
+    ⭐ A VIEW (▶ `nn_expert_view.py`) may name a stacked expert tensor `per_expert`: a checkpoint that keeps its experts
+    one tensor each (the 397B heretic's `experts.<e>.{gate,up,down}_proj.weight`) is read as the stacked layout its
+    base uses — `down_proj` the experts' downs stacked, `gate_up_proj` each expert's gate rows then its up rows."""
+    idx = _index(raw)
+    if idx["weight_map"].get(name) == PER_EXPERT:
+        return _read_per_expert(raw, idx, name, expert)
+    return _read_from(raw, idx["weight_map"][name], stored_name(idx, name), expert)
+
+
+def stored_name(idx, name):
+    """The name a tensor has in its file. ⭐ A VIEW MAY RENAME (▶ `nn_rename_view.py`): its index names the tensor as the
+    runtime does and keeps, in `stored_names`, what the checkpoint called it — Mistral 3's `language_model.model.layers.N…`
+    read as `model.language_model.layers.N…`."""
+    return idx.get("stored_names", {}).get(name, name)
+
+
+def _read_per_expert(raw, idx, name, expert):
+    pm = idx["per_expert_map"]
+    stem, kind = name.rsplit(".", 1)                         # `…mlp.experts`, `down_proj` | `gate_up_proj`
+    parts = {"down_proj": ("down_proj",), "gate_up_proj": ("gate_proj", "up_proj")}[kind]
+    key = lambda e, part: "%s.%d.%s.weight" % (stem, e, part)
+    one = lambda e: np.concatenate([_read_from(raw, pm[key(e, part)], key(e, part)) for part in parts], axis=0)
+    if expert is not None:
+        return one(expert)
+    n = 0
+    while key(n, parts[0]) in pm:
+        n += 1
+    return np.stack([one(e) for e in range(n)])
+
+
+def _read_from(raw, f, name, expert=None):
     if f not in _HDR:
         with open(os.path.join(raw, f), "rb") as fh:
             hl = int.from_bytes(fh.read(8), "little")
@@ -801,8 +841,8 @@ def read_tensor(raw, name, expert=None):
             fh.seek(8 + hl + start + expert * per * size)
             return widen(fh.read(per * size), per).reshape(shape[1], shape[2])
     n = 1
-    for s in shape:
-        n *= s
+    for s_ in shape:
+        n *= s_
     with open(os.path.join(raw, f), "rb") as fh:
         fh.seek(8 + hl + start)
         return widen(fh.read(n * size), n).reshape(shape)

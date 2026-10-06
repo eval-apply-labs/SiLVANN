@@ -172,26 +172,6 @@
  * worker's slots are a cache in its own memory: an expert that is not in it is read from the file straight into a slot
  * (nn's loader), the least recently used one of the layer's given up for it. Without, every expert has its slot. */
 #define AI_GLM_5_3__EXP__BACKING    17u
-/* ⭐ optional: 1 where this worker holds only the experts resident in its collection — a card's tier of them — and 0 or
- * absent where it holds every one numbered `first` up to `first + count`. Such a worker computes the picks it holds, marks
- * each in `picks` as held (its number plus `experts`), and leaves the rest; a worker that holds every one then skips a pick
- * numbered `experts` or past it, so the workers' sums still add up to the layer's. It runs before the others are handed
- * the picks. */
-#define AI_GLM_5_3__EXP__HOLDS      18u
-/* ⭐ and where a tier is fed from the CPUs' memory (NN-48): each expert's part on every socket — a node array of
- * `experts · parts` addresses, part `p` of expert `x` at `x · parts + p` — and a part slot's layout (▶ glm5.py's
- * `_slot_pieces`): its gate rows then its up rows, their scales likewise, its columns of every down row, every down row's
- * scale. A promotion stitches the parts back into one whole slot (`UP_LUT`, `DOWN`, `DOWN_LUT` above are the whole
- * slot's offsets). `LANDING`: the most promotions one visit of a layer may start. */
-#define AI_GLM_5_3__EXP__SOURCES    19u
-#define AI_GLM_5_3__EXP__PARTS      20u
-#define AI_GLM_5_3__EXP__P_UP_LUT   21u
-#define AI_GLM_5_3__EXP__P_DOWN     22u
-#define AI_GLM_5_3__EXP__P_DOWN_LUT 23u
-#define AI_GLM_5_3__EXP__GATE_ROW   24u     /* a gate (and up) row's bytes */
-#define AI_GLM_5_3__EXP__DOWN_ROW   25u     /* a whole down row's bytes */
-#define AI_GLM_5_3__EXP__LANDING    26u
-#define AI_GLM_5_3__EXP__FED        27u     /* the length of a table that feeds its tier */
 /* A prompt's experts, where the slots are a cache: this many a batch, the next batch read while one computes — so a
  * worker's cache needs room for two batches beside what it keeps. */
 #define AI_GLM_5_3__EXP__BATCH      16u

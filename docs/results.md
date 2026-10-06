@@ -12,6 +12,38 @@ entirely on one MI50, the 35B's and the 122B D4E4's all in RAM, and GLM's rows w
 release's card kernels; the others were
 measured before them, and where a card does part of the work they are a floor.
 
+## How good each pack is: perplexity
+
+The same text through every pack: the first 16 windows of 512 tokens of WikiText-2's test split, each read from a fresh
+conversation, every next token scored from the model's own logits. **Perplexity** compares packs of one model, or of
+models sharing a tokenizer (the Qwen ones); **bits per byte** — the same score over the text's bytes instead of its
+tokens — compares any two models. Lower is better in both. The original weights' score (bf16, through Hugging Face's own
+implementation) is given where the checkpoint fits this machine's memory.
+
+| model | pack | weights | perplexity | bits per byte | against the original |
+|---|---|---|---|---|---|
+| GLM 5.3 Flash | D8E4 | 154 GiB | 3.018 | 0.3584 | |
+| GLM 5.3 Flash | D4E4 (published) | 151 GiB | 3.095 | 0.3666 | |
+| Qwen 3.5 397B-A17B | D4E4 (published) | 193 GiB | 3.548 | 0.4167 | |
+| Qwen 3.5 122B-A10B | D8E4 (published) | 63 GiB | 5.926 | 0.5855 | |
+| Qwen 3.5 122B-A10B | D4E4 (published) | 61 GiB | 7.017 | 0.6411 | |
+| Qwen 3.6 35B-A3B | original (bf16) | 67 GiB | 8.886 | 0.7188 | — |
+| Qwen 3.6 35B-A3B | D8E8 | 34 GiB | 8.887 | 0.7189 | +0.01% |
+| Qwen 3.6 35B-A3B | D8E5 | 23 GiB | 8.900 | 0.7193 | +0.15% |
+| Qwen 3.6 35B-A3B | D8E4 (published) | 18 GiB | 8.958 | 0.7215 | +0.8% |
+| Qwen 3.6 35B-A3B | D4E4 (published) | 18 GiB | 9.430 | 0.7384 | +6.1% |
+| Qwen 3.8 27B | D8 | 26 GiB | 9.053 | 0.7250 | |
+| Qwen 3.8 27B | D4 (published) | 15 GiB | 9.259 | 0.7324 | |
+| Ministral 3 14B | original (bf16) | 25 GiB | 9.807 | 0.7623 | — |
+| Ministral 3 14B | D8 (published) | 12.6 GiB | 9.814 | 0.7626 | +0.07% |
+| Ministral 3 14B | D4 (published) | 6.9 GiB | 10.275 | 0.7779 | +4.8% |
+
+The dense part's precision is what costs: 8 bits there instead of 4 gains the 35B 6%, the 122B 18%, GLM 2.5%, the 27B
+(all dense) 2.2% — while the experts past 4 bits gain under 1% (▶ `compression.md` for why). Between models the order is
+the one their sizes suggest, but read it as how well each predicts encyclopedia text, which rewards having seen and
+kept more of it; it does not measure reasoning, code or following instructions. The 35B with its experts on the CPU
+scores 8.962 exact and 8.963 with `experts_int8`.
+
 ## Qwen 3.6 35B-A3B
 
 | Where it runs | Prompt | Answer |
@@ -30,6 +62,17 @@ measured before them, and where a card does part of the work they are a floor.
 | one MI50 | 95 positions/s | 17.4 tokens/s (18.5 on a short prompt) |
 | one MI50 through OpenCL | 48.7 positions/s | 9.3 tokens/s (11.2 on a short prompt) |
 | three stages over machines (pipeline parallel) | — | 6.8 tokens/s, the same tokens |
+
+## Ministral 3 14B
+
+| Pack | Where it runs | Prompt | Answer |
+|---|---|---|---|
+| D4 | one MI50 | 36 positions/s | 52 tokens/s |
+| D8 | one MI50 | 15 positions/s | 26 tokens/s |
+
+Its first runtime reads a prompt a position at a time, so its prompt rate is close to its answer rate; reading a prompt
+as rows, as the Qwen and GLM runtimes do, is the next step for it. The prompt rates are the perplexity runs', which also
+read every position's logits back.
 
 ## Qwen 3.5 122B-A10B
 

@@ -46,8 +46,6 @@
     /* experts expert-major, the card's close                                                                        */ \
     X(PKG, 17, "ai_qwen_3__pre_expert_rows",  ai_qwen_3__pre_expert_rows__zzabi_adapter,  AI_QWEN_3__PRE_EXPERT_ROWS) \
     X(PKG, 18, "ai_qwen_3__experts_rows",     ai_qwen_3__experts_rows__zzabi_adapter,     AI_QWEN_3__EXPERTS_ROWS) \
-    X(PKG, 19, "ai_qwen_3__post_expert_rows", ai_qwen_3__post_expert_rows__zzabi_adapter, AI_QWEN_3__POST_EXPERT_ROWS) \
-    /* a card's tier of the routed experts told of a prompt chunk's picks, its share taken (NN-48) */ \
-    X(PKG, 20, "ai_qwen_3__experts_note",     ai_qwen_3__experts_note__zzabi_adapter,     AI_QWEN_3__EXPERTS_NOTE)
+    X(PKG, 19, "ai_qwen_3__post_expert_rows", ai_qwen_3__post_expert_rows__zzabi_adapter, AI_QWEN_3__POST_EXPERT_ROWS)
 
 #endif /* SILVANN__PACKAGES_AI_QWEN_3_CONTRACTS_MACROS_LANGUAGE_CONTRACT__VERBS_CUH */

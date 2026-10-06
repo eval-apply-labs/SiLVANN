@@ -125,6 +125,8 @@ static __device__ inline bool nn__expert__admit(uint64_t layer, uint64_t expert,
                                                 uint64_t type);
 static __device__ inline bool nn__expert__touch(uint64_t layer, uint64_t type, uint64_t expert);
 static __device__ inline bool nn__expert__evict(uint64_t layer, uint64_t type, uint64_t expert);
+/* `from`'s slot given to `to` without the free list — ▶ the impl. */
+static __device__ inline bool nn__expert__hand_over(uint64_t lf, uint64_t from, uint64_t lt, uint64_t to, uint64_t type);
 
 /* What an `nn__weights` hands over when its last hold goes — ▶ `NN__WEIGHTS__HELD`. A page view holds
  * nothing and returns at once; a buffer view moves the object it retained onto the chain the release
@@ -205,22 +207,31 @@ static __device__ inline unsigned nn__expert__flight_free(void);
 
 /* ══ ⭐⭐ A CARD'S TIER OF EXPERTS (NN-48) — WHAT A MODEL'S EXPERTS VERBS ASK OF IT ══════════════════════════════════
  * A card holds some of a model's routed experts, the CPUs every one; the card computes the picks it holds and the CPUs the
- * rest, and an expert the CPUs computed earns a slot (`qualifies`, `promote`). The model knows its arithmetic, its hands
- * and how one of its experts is cut from the CPUs' memory — a `stitch` writes that expert's gather; nn keeps the rest.
- *   tier_visit   one position: the copies that landed admitted, every pick's call recorded, `held[j]` set for each pick
- *                the card holds (touched), and up to `landing` of the others that qualify promoted
- *   tier_chunk   a prompt chunk of `n` rows of picks: every call recorded row by row; the card takes every expert it holds
- *                and every other one picked `threshold` times or more — as many as the loader has room for, the most
- *                picked first — queued from the fewest picks to the most; each pick it takes marked in `chosen` (its
- *                number plus `experts`) for the CPUs to skip
- * A null `stitch` promotes nothing: the tier stays what boot made it. */
-typedef bool (*nn__expert__stitch)(const void* model, uint64_t expert, nn__expert__gather* gather);
-static __device__ inline bool nn__expert__tier_visit(sys__silicon_family__id family, uint64_t layer, uint64_t type, const uint64_t* ids,
-                                                     unsigned k, bool* held, unsigned landing, nn__expert__stitch stitch,
-                                                     const void* model);
-static __device__ inline bool nn__expert__tier_chunk(sys__silicon_family__id family, uint64_t layer, uint64_t type, uint64_t experts,
-                                                     uint64_t* chosen, uint64_t n, unsigned k, uint64_t threshold,
-                                                     nn__expert__stitch stitch, const void* model);
+ * rest, and an expert the CPUs computed earns a slot (`qualifies`, `promote`). The program hands a verb the binding
+ * `nn__expert_tier` (▶ NN__EXPERT_TIER__) and the model keeps its arithmetic; nn keeps the rest.
+ *   of       this worker's tier out of the binding, as layer `layer` reads it. False where this worker holds none, or the
+ *            entry is not a tier's cells.
+ *   stitch   expert `x`'s parts in the CPUs' memory as the runs that make one whole card slot of it
+ *   visit    one position: the copies that landed admitted, every pick's call recorded, `held[j]` set for each pick the
+ *            card holds (touched), and up to `landing` of the others that qualify promoted
+ *   chunk    a prompt chunk of `n` rows of picks: every call recorded row by row; the card takes every expert it holds and
+ *            every other one picked `threshold` times or more — as many as the loader has room for, the most picked
+ *            first — queued from the fewest picks to the most; each pick it takes marked in `chosen` (its number plus
+ *            `experts`) for the CPUs to skip
+ * A layer whose sources are 0 promotes nothing: it stays what boot made it. */
+static __device__ inline bool nn__expert_tier__of(uint64_t binding, uint64_t layer, nn__expert_tier* tier);
+static __device__ inline bool nn__expert_tier__stitch(const nn__expert_tier* tier, uint64_t x, nn__expert__gather* gather);
+static __device__ inline bool nn__expert_tier__visit(sys__silicon_family__id family, const nn__expert_tier* tier, const uint64_t* ids,
+                                                     bool* held);
+static __device__ inline bool nn__expert_tier__chunk(sys__silicon_family__id family, const nn__expert_tier* tier, uint64_t* chosen,
+                                                     uint64_t n, uint64_t threshold);
+/* An EXCLUSIVE tier (▶ NN__EXPERT_TIER__EXCLUSIVE): a promotion into a FREE slot with its demotion candidate sent OUTGOING,
+ * the commit that sends the outgoing ones to RAM, and the wait a CPU makes for an expert still being written there. */
+static __device__ inline int  nn__expert_tier__promote(sys__silicon_family__id family, const nn__expert_tier* tier, uint64_t x,
+                                                       const uint64_t* pinned, unsigned npinned);
+static __device__ inline bool nn__expert_tier__commit(sys__silicon_family__id family, const nn__expert_tier* tier);
+static __device__ inline void nn__expert__wait_written(uint64_t layer, uint64_t type, uint64_t expert);
+static __device__ inline void nn__expert_tier__written(void);
 static __device__ inline uint64_t nn__expert__zzpackage_owner(void);
 /* ⭐ WHERE THE SLOTS ARE A MAPPED FILE, "RESIDENT" SAYS ONLY THAT THE EXPERT HAS AN ADDRESS: its bytes are in memory
  * when the system has kept the file's pages. `in_memory` answers whether every byte of the slot at `at` is there now —

@@ -32,8 +32,47 @@ conversation's cache uses the same codec for its older positions — 8 bits, the
 | the **scale** | a row | it is what makes the fixed codebook fit the row at all; one scale for a whole tensor costs from a few percent to many times the error, and more at more bits |
 
 A model's widths are chosen by name when it is packed: the published models put their routed experts at 4 bits
-and the rest at 8 (`D8E4`, the 35B) or at 4 (`D4`, the 27B; `D4E4`, GLM 5.3 Flash). The embedding and the output
+and the rest at 8 (`D8E4`, the 35B) or at 4 (`D4`, the 27B; `D4E4`, GLM 5.3 Flash) — ▶ the section below for why the
+dense part is the one worth the bits. The embedding and the output
 head are at 8 bits; one-dimensional tensors — norms, biases — are kept at 16.
+
+## Why the dense part gets more bits than the experts
+
+The rotation does more than make one codebook fit every row. It makes the quantisation error behave like small,
+independent Gaussian noise added to each weight, the same for every row and with no preferred direction: no feature,
+head or channel is hit harder than another. What that noise does to the model then depends on where the weight sits.
+
+**A routed expert's error is added once.** A token's experts are a weighted sum: eight of them for these models, each
+weighted by the router. Each expert's error is independent noise, so in the sum it stays additive and partly averages
+out. And each expert serves only some of the tokens.
+
+**A dense matrix's error is multiplied.** Every token goes through every dense matrix — the attention's projections,
+the shared expert — and through all of them in turn, layer after layer. An error introduced there is carried into the
+next matrix and multiplied by it, and by the one after that, so it compounds with depth instead of adding once.
+
+So a clean base makes up for slightly noisier experts, and the measurements agree. Perplexity on WikiText-2's test split
+(16 windows of 512 tokens), against the original weights:
+
+| | the 35B | against the original |
+|---|---|---|
+| original (bf16) | 8.886 | — |
+| D8E8 — everything at 8 bits | 8.887 | +0.01% |
+| D8E5 | 8.900 | +0.15% |
+| **D8E4** — the dense part at 8 bits, the experts at 4 | **8.959** | **+0.8%** |
+| D4E4 — everything at 4 bits | 9.430 | +6.1% |
+
+On the 122B the gap between the two published packs is wider: D8E4 5.926, D4E4 7.017, 18% higher. Taking the experts
+past 4 bits buys well under 1%; taking the dense part from 4 to 8 bits buys 6% on the 35B and 18% on the 122B. The
+experts are most of a model's bytes, so D8E4 keeps nearly all of the size saving and loses almost none of the quality.
+
+**5 bits are not published.** The format defines a 5-bit width and the D8E5 row above was measured with it, but it buys
+0.15 points of perplexity over D8E4 for 25% more expert bytes, and the card's and the CPU's fast kernels take 4 and 8 bits
+only — at 5 bits the generic ones run, at half the speed. So no 5-bit pack is offered; the width stays in the format, and
+fast 5-bit kernels can be added if a model ever wants it.
+
+**Choosing a pack:** take D8E4 wherever it fits. D4E4 exists for cards too small to hold D8E4's dense part (the 122B
+on an 8 GB card); it works, at the cost the table shows. The CPU's `experts_int8` arithmetic changes the 35B's
+perplexity by 0.02%.
 
 ## The files
 

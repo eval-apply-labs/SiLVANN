@@ -49,8 +49,17 @@ integers; the cells each verb reads are named in its package's `contracts/object
 
 **The card's tier of experts** is the `nn` package's: its expert records keep each expert's last two calls, and
 `nn__expert__qualifies` moves one to the card when the older of them is newer than the older of the one it would
-replace (and freely while the layer has room); `tier_visit` (a token) and `tier_chunk` (a prompt) run a layer's picks
-through it. A model's verbs only say where its slots are. Over a prompt, an expert fewer positions pick than
+replace (and freely while the layer has room). The tier is a binding, `nn__expert_tier`: an entry for every worker, each
+the tier its card holds (the card slot's layout, and where the CPUs keep every expert's parts, a layer at a time) or 0. A
+program hands it to the verbs that use it and each reads its own worker's entry, so two cards hold two tiers under one
+name. nn does the rest — `nn__expert_tier__visit` runs a token's picks through it, the `nn__expert_tier__note` word a
+prompt chunk's, and `nn__expert_tier__stitch` puts an expert's parts back together in a card slot. A model's verbs keep
+only their arithmetic.
+
+**The experts' sums do not depend on which expert was ready first.** A verb computes the experts that are in memory while
+the rest arrive, but each pick's output is kept apart and the picks are added in their own order — a token's downs in
+one launch, a prompt chunk's in a slot each, added by `expert_rows_reduce` — so the same prompt gives the same answer
+bit for bit, whatever the system had paged in. Over a prompt, an expert fewer positions pick than
 `nn__expert_major__vram_promotion_threshold_picks` stays on the CPU: a variable bound at boot
 (`runtime/silvann_runtime/expert_tier.py`) by timing an expert's copy to the card against the CPU computing one — 15 for GLM and 4 for the 35B on
 the test machine — and read by the prompt's program.

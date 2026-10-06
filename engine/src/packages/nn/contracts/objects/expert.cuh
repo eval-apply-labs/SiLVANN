@@ -248,6 +248,7 @@ typedef struct nn__expert__backing {
 #define NN__EXPERT__BACKING__INTO(i)   (3u + 3u * (i))
 #define NN__EXPERT__BACKING__LENGTH    13u
 #define NN__EXPERT__FAULT_BACKING      0x4E45424Bull   /* "NEBK" — a backing that is not 13 integers */
+#define NN__EXPERT_TIER__FAULT        0x4E455452ull   /* "NETR" — no tier for this worker, or not a tier's cells */
 
 /* ⭐ THE LOADER — reads in flight at once, the threads that do them, and what it counts. ▶ `cpu/loader__impl.cuh`. */
 #define NN__EXPERT__FLIGHT_MAX        64u   /* reads queued or in flight at once, over every layer */
@@ -259,7 +260,17 @@ typedef struct nn__expert__backing {
 #define NN__EXPERT__COUNT_WAIT_NS         3u   /* time a layer waited on its reads, in ns      */
 #define NN__EXPERT__COUNT_WAITS           4u   /* ...and how many times it had to              */
 #define NN__EXPERT__COUNT_PROMOTED        5u   /* promotions queued — an expert gathered into a card's slot */
-#define NN__EXPERT__COUNTS                6u
+#define NN__EXPERT__COUNT_DEMOTED         6u   /* an exclusive tier's experts sent from a card back to RAM         */
+#define NN__EXPERT__COUNT_WRITE_FAILED    7u   /* ...and a write of one into its RAM slot that failed — must stay 0 */
+#define NN__EXPERT__COUNT_CHANNEL_WAIT_NS  8u   /* time promotions waited for an evacuation channel to come free, ns */
+#define NN__EXPERT__COUNT_WRITTEN_WAIT_NS  9u   /* time CPUs waited for an expert's write into RAM, ns            */
+#define NN__EXPERT__COUNT_CHANNEL_FULL    10u   /* promotions refused because every channel was held             */
+#define NN__EXPERT__COUNT_LAND_NS         11u   /* time from a promotion's read queued to its expert landing, ns  */
+#define NN__EXPERT__COUNT_LANDED          12u   /* ...over how many landed                                        */
+#define NN__EXPERT__COUNT_PICKED_ARRIVING 13u   /* a token's picks whose expert was still on its way to the card  */
+#define NN__EXPERT__COUNT_PICKS           14u   /* a token's picks a card's tier visited                          */
+#define NN__EXPERT__COUNT_HITS            15u   /* ...of which the card held                                      */
+#define NN__EXPERT__COUNTS               16u
 
 /* ⭐ AN EXPERT PROMOTED FROM RAM TO A CARD (NN-48). Its bytes are in memory already, so a promotion is a GATHER: a few runs
  * copied into the card's slot in the slot's own layout — through a staging buffer of pinned memory and one write on the
@@ -271,6 +282,66 @@ typedef struct nn__expert__backing {
 #define NN__EXPERT__TIER_K_MAX  16u    /* the most picks one position of a tier's visit takes */
 typedef struct nn__expert__run { uint64_t from, from_stride, into, into_stride, bytes, count; } nn__expert__run;
 typedef struct nn__expert__gather { nn__expert__run run[NN__EXPERT__GATHER_RUNS]; unsigned runs; } nn__expert__gather;
+
+/* ⭐ A CARD'S TIER (NN-48) — THE BINDING `nn__expert_tier`: a node array with an entry for every computing base, indexed by
+ * the worker's number, each the tier that worker's card holds or 0 where it holds none. A program hands the binding to the
+ * verbs that use it, and each reads its own worker's entry — so two cards hold two tiers under one name.
+ * A tier, the entry: how one of its experts is cut, and where the CPUs keep every expert's parts, a layer at a time.
+ *   SOURCES     a node array on the model's layers, each a node array of `experts · parts` addresses (part p of expert
+ *               x at x · parts + p), or 0 where nothing feeds that layer, which then stays what boot made it
+ *   a slot's plan, a part's plan: the gate rows then the up rows, their scales likewise, then the down codes and the
+ *               down scales. A part holds `inter / parts` of the gate and up rows and its columns of every down row;
+ *               the down scales are whole in each part.
+ *   GATE_ROW, DOWN_ROW   the bytes of one gate (or up) row, and of one whole down row
+ *   LANDING     the most promotions one visit of a layer may start */
+#define NN__EXPERT_TIER__SOURCES     0u
+#define NN__EXPERT_TIER__TYPE        1u    /* the card's collection of expert slots */
+#define NN__EXPERT_TIER__EXPERTS     2u
+#define NN__EXPERT_TIER__TOP_K       3u
+#define NN__EXPERT_TIER__HIDDEN      4u
+#define NN__EXPERT_TIER__INTER       5u
+#define NN__EXPERT_TIER__UP_LUT      6u    /* the card slot's offsets */
+#define NN__EXPERT_TIER__DOWN        7u
+#define NN__EXPERT_TIER__DOWN_LUT    8u
+#define NN__EXPERT_TIER__PARTS       9u
+#define NN__EXPERT_TIER__P_UP_LUT   10u    /* a part slot's offsets */
+#define NN__EXPERT_TIER__P_DOWN     11u
+#define NN__EXPERT_TIER__P_DOWN_LUT 12u
+#define NN__EXPERT_TIER__GATE_ROW   13u
+#define NN__EXPERT_TIER__DOWN_ROW   14u
+#define NN__EXPERT_TIER__LANDING    15u
+#define NN__EXPERT_TIER__LENGTH     16u
+/* ⭐ optional, an EXCLUSIVE tier (NN-48) — an expert lives on the card or in the CPUs' memory, never both, so a model can be
+ * bigger than the RAM. A promotion lands in a FREE card slot (a recycled one); the card's least recently used expert of
+ * the band then goes OUTGOING — its bytes read off the card into an evacuation channel while it is still computed there —
+ * and at the next commit (a layer's visit or a chunk's note, the CPUs idle) it leaves the card, its slot back to FREE, and
+ * takes the RAM slots the promoted expert gave up; the channel is written into them, and a CPU reaching it first waits.
+ *   EXCLUSIVE     1, or absent / 0 for an inclusive tier
+ *   PART_WORKER   the worker that holds part 0 of every expert; part p is that worker plus p
+ *   PART_TYPE     the CPUs' collection of expert parts */
+#define NN__EXPERT_TIER__EXCLUSIVE   16u
+#define NN__EXPERT_TIER__PART_WORKER 17u
+#define NN__EXPERT_TIER__PART_TYPE   18u
+/*   DUPLEX        1 where a copy to the card and one back run at once at full speed (measured at boot, bound in Lisp as
+ *                 `nn__expert_tier_duplex`): a promotion's gather and its evacuation are launched together. 0: the gather
+ *                 first, the evacuation at the next commit, once it has landed. */
+#define NN__EXPERT_TIER__DUPLEX      19u
+#define NN__EXPERT_TIER__LENGTH_EXCLUSIVE 20u
+/*   LANDING_LINE  the hits of a visit above which it starts one promotion, at or below it `LANDING` — ⚖ 2026-10-06: *"1 if
+ *                 the hits are more than 3/8 … two if it is below that (the compute on cpu masks the loading)"*: with few
+ *                 picks on the card the CPUs' share is long, and two copies hide behind it. Bound in Lisp as
+ *                 `nn__expert_tier_landing_line`. Absent: every visit `LANDING`. */
+#define NN__EXPERT_TIER__LANDING_LINE 20u
+#define NN__EXPERT_TIER__LENGTH_LINE  21u
+/* A tier as one layer reads it: `sources` that layer's addresses, or 0. */
+typedef struct nn__expert_tier {
+    uint64_t sources, layer, type, experts, top_k, hidden, inter, up_lut, down, down_lut;
+    uint64_t parts, p_up_lut, p_down, p_down_lut, gate_row, down_row, landing;
+    uint64_t exclusive, part_worker, part_type, duplex, layers;   /* `layers`: the sources' node array on the layers */
+    uint64_t landing_line;
+} nn__expert_tier;
+#define NN__EXPERT_TIER__CHANNELS  16u   /* evacuation channels, each an expert's bytes in pinned memory */
+#define NN__EXPERT_TIER__OUTGOING  64u   /* swaps in flight, over every layer */
 /* What a request found: the expert in memory, its read on the way, or no way to have it. */
 #define NN__EXPERT__RESIDENT   0
 #define NN__EXPERT__ARRIVING   1
