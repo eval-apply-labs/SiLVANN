@@ -118,9 +118,15 @@ static inline bool x86_avx2__zzprivate_x_room_for(uint64_t cols) {
     x86_avx2__zzprivate_x_room = (x86_avx2__zzprivate_xf && x86_avx2__zzprivate_xq && x86_avx2__zzprivate_xs) ? cols : 0u;
     return x86_avx2__zzprivate_x_room != 0u;
 }
-/* How many blocks to cut a call's rows into: a few a thread, so a slow one does not hold the rest. */
+/* How many blocks to cut a call's rows into: a few a thread, so a slow one does not hold the rest.
+ * ⛔⛔ NEVER NONE: a socket's pool is sized at boot to the cores then free, and on a busy machine that is ZERO — its
+ *   thread count then 0, and `4 × 0` blocks is a launch that computes NOTHING. `MEASURED` (NN-59, 2026-10-06): booted
+ *   beside a busy card or busy CPUs, GLM's experts on the CPUs were silently skipped — the layer added whatever its
+ *   output buffer held — and the decode came out different, and exactly repeatable, against a quiet boot's. With an
+ *   empty pool the caller runs the blocks itself (▶ `x86_avx2__zzprivate_run_body`), slowly and correctly. */
 static inline uint32_t x86_avx2__zzprivate_blocks_for(uint64_t rows) {
-    const uint64_t want = 4ull * x86_avx2__zzpackage_threads();
+    const uint32_t threads = x86_avx2__zzpackage_threads();
+    const uint64_t want = 4ull * (threads > 0u ? threads : 1u);
     return (uint32_t)(rows < want ? rows : want);
 }
 

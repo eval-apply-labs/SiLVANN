@@ -1,6 +1,6 @@
 # Running SiLVANN
 
-This is a **developer preview (v0.3.1)**. It is tested on Linux with AMD Instinct MI50 cards (gfx906, ROCm 6), and on
+This is a **developer preview (v0.3.2)**. It is tested on Linux with AMD Instinct MI50 cards (gfx906, ROCm 6), and on
 the CPU alone with AVX2;
 Windows and NVIDIA cards are untested, Apple silicon is not supported yet. If something does not build or does
 not run on your machine, you are expected to be able to read the error and the source.

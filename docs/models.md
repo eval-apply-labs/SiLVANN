@@ -42,7 +42,7 @@ From a machine with no graphics card to a model near the frontier on salvaged se
 | A 16 GB card, 128 GB of RAM, an NVMe disk reading 5 GB/s | GLM 5.3 Flash — the same split | 5.7 tokens/s |
 | A 16 GB card, 150 GB of RAM | GLM 5.3 Flash with all of its experts (142 GB) in RAM, a 300,000-token context, and 6 GB of the card the tier of experts used most | 7.5 tokens/s (6.8 without the tier) |
 | A 32 GB card, 80 GB of RAM | Qwen 3.5 122B-A10B (`D4E4`), its experts in RAM and 24 GB of them on the card | 19.9 tokens/s (10.9 without the tier) |
-| A 32 GB card, 160 GB of RAM | GLM 5.3 Flash, its experts in RAM and 18 GB of them on the card | 8.1 tokens/s |
+| A 32 GB card, 160 GB of RAM | GLM 5.3 Flash, its experts in RAM and 24 GB of them on the card | 10.7 tokens/s |
 | A 32 GB card, 256 GB of RAM | Qwen 3.5 397B-A17B, its experts in RAM and 24 GB of them on the card | 9.0 tokens/s (6.3 without the tier) |
 
 Measured on a Dell R730 (two Xeon E5-2680 v4, AMD Instinct MI50 cards; disk speed 5 GB/s, RAM speed 126 GB/s), each

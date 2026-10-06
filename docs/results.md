@@ -97,6 +97,7 @@ One MI50 for the dense part, the experts on the CPU.
 | all in RAM | — | 23.9 positions/s | 6.7 tokens/s |
 | all in RAM, measured beside the tier rows | — | 18.1 positions/s | 6.8 tokens/s |
 | all in RAM, 18 GB of the card the tier of experts (v0.3.0) | — | 25.0 positions/s | 8.1 tokens/s |
+| all in RAM, 24 GB of the card the tier of experts (v0.3.1, from token 224) | — | — | 10.7 tokens/s |
 | all in RAM, a 300,000-position cache and 6 GB of tier — 15.0 GB of the card in all | — | 26.5 positions/s | 7.5 tokens/s |
 | 128 GB of RAM | 5 GB/s | 13.2 positions/s† | 5.7 tokens/s — 97% from memory, 132 MB read a token |
 | 128 GB of RAM | 2.6 GB/s | — | 4.2 tokens/s — 97% from memory ◦ |
