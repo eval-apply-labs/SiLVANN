@@ -11,8 +11,13 @@ and a later turn continues from it.
   GLM 5.3     [gMASK]<sop><|system|>Reasoning Effort: Max<|system|> … <|user|> … <|assistant|><think>
               a later turn: … <|assistant|><think>    (the answer ended on <|user|>, which opens the next)
               thinking off: Reasoning Effort: Low
+  Mistral 3   <s>[SYSTEM_PROMPT] … [/SYSTEM_PROMPT][INST] … [/INST]
+              a later turn: [INST] … [/INST]    (the answer ended on </s>)
+              no thinking to turn off; with no system prompt given, Mistral's own (`SYSTEM_PROMPT.txt`, its dates filled
+              in as Mistral's tooling does — the chat template leaves `{today}` unfilled)
 ```
 """
+import datetime
 import os
 
 from .model_folder import Refused
@@ -28,6 +33,9 @@ class Chat:
             self.stop.add(self.tok.token_to_id("<|im_end|>"))
         elif self.arch.startswith("glm5"):
             self.user = self.tok.token_to_id("<|user|>")
+        elif self.arch.startswith("ministral3"):
+            sp = os.path.join(folder.path, "SYSTEM_PROMPT.txt")
+            self.default_system = open(sp, encoding="utf-8").read() if os.path.isfile(sp) else None
         else:
             raise Refused("no chat framing for a %r model" % self.arch)
         self.stop.discard(None)
@@ -50,6 +58,15 @@ class Chat:
             if not thinking:
                 s += "<think>\n\n</think>\n\n"
             return self.encode(s)
+        if self.arch.startswith("ministral3"):
+            s = ""
+            if first:
+                if system is None and self.default_system:
+                    today = datetime.date.today()
+                    system = self.default_system.replace("{today}", today.isoformat()).replace(
+                        "{yesterday}", (today - datetime.timedelta(days=1)).isoformat())
+                s = "<s>" + ("[SYSTEM_PROMPT]%s[/SYSTEM_PROMPT]" % system if system else "")
+            return self.encode(s + "[INST]%s[/INST]" % text)
         # GLM 5.3
         s = ""
         if first:

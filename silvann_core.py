@@ -28,14 +28,25 @@ TOKENS_PER_100MB = {
     "Qwen3.6-35B-A3B_silvann_tq_D8E4": 10000,
     "Qwen3.8-27B_silvann_tq_D4": 3200,
     "GLM-5.3-Flash_silvann_tq_D4E4": 8800,
+    "GLM-5.3-Flash_silvann_tq_D8E4": 8800,         # the same cache: a pack's widths are its weights', not its cache's
+    "Ministral-3-14B_silvann_tq_D4": 625,          # every position in halves: 40 layers' keys and values
+    "Ministral-3-14B_silvann_tq_D8": 625,
+}
+
+# a model's context unless its config says otherwise, where the release's default does not suit it: Mistral 3's cache
+# is every position in halves, so on a 16 GB card its D4 leaves room for 32k positions and its D8 for 8k
+MAX_CONTEXT = {
+    "Ministral-3-14B_silvann_tq_D4": 32768,
+    "Ministral-3-14B_silvann_tq_D8": 8192,
 }
 
 
-# the runtime options a model boots with unless its config says otherwise: the 122B's experts (54 GB) do not fit a card
+# the runtime options a model boots with unless its config says otherwise: the 122B's experts (54 GB) and the 397B's do not fit a card
 # it is meant for, so they start on the CPU, in RAM or read from the disk by the memory there is
 OPTIONS = {
     "Qwen3.5-122B-A10B_silvann_tq_D8E4": {"experts_on": "cpu", "experts_from": "auto"},
     "Qwen3.5-122B-A10B_silvann_tq_D4E4": {"experts_on": "cpu", "experts_from": "auto"},
+    "Qwen3.5-397B-A17B_silvann_tq_D4E4": {"experts_on": "cpu", "experts_from": "auto"},
 }
 
 
@@ -44,6 +55,8 @@ def default_config(folder):
     cfg = Path(folder) / "configs" / "default.json"
     if not cfg.exists():
         config = dict(DEFAULT_CONFIG, options=dict(OPTIONS.get(Path(folder).name, {})))
+        if Path(folder).name in MAX_CONTEXT:
+            config["max_context"] = MAX_CONTEXT[Path(folder).name]
         per = TOKENS_PER_100MB.get(Path(folder).name)
         if per:
             config = {"_note": "max_context is the longest conversation, and its cache is on the card from boot: "

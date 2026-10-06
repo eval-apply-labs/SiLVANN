@@ -1,6 +1,6 @@
 # SiLVANN
 
-> **Developer preview, v0.3.0.** It runs the models below well on the hardware it was tested on, and it is shared
+> **Developer preview, v0.3.1.** It runs the models below well on the hardware it was tested on, and it is shared
 > for people who can find their way around a build and a stack trace. The NVIDIA and Apple paths, and tensor
 > cores, are not tested yet.
 
@@ -14,55 +14,35 @@ models, and the two things it is made of:
 A model is a program in that language (`engine/src/packages/ai_qwen_3`, `engine/src/packages/ai_glm_5_3`), and the
 weights are packed with TurboQuant: rotated rows at 4 or 8 bits, so a 35-billion-parameter model fits in 19 GB.
 
-## Models
+## Models, and what they run on
 
-| Model | Weights | Download |
+One model a kind of machine — the one that suits it best, measured:
+
+| Your machine | Model | Answer |
 |---|---|---|
-| Qwen 3.6 35B-A3B (mixture of experts, 3B active) | 19 GB — experts 4 bits, the rest 8 | [eval-apply/Qwen3.6-35B-A3B_silvann_tq_D8E4](https://huggingface.co/eval-apply/Qwen3.6-35B-A3B_silvann_tq_D8E4) |
-| Qwen 3.6 35B-A3B, for the CPU alone | 19 GB — 4 bits | [eval-apply/Qwen3.6-35B-A3B_silvann_tq_D4E4](https://huggingface.co/eval-apply/Qwen3.6-35B-A3B_silvann_tq_D4E4) |
-| Qwen 3.5 122B-A10B (mixture of experts, 10B active), for 12 GB cards | 67 GB — experts 4 bits, the rest 8 | [eval-apply/Qwen3.5-122B-A10B_silvann_tq_D8E4](https://huggingface.co/eval-apply/Qwen3.5-122B-A10B_silvann_tq_D8E4) |
-| Qwen 3.5 122B-A10B, for 8 GB cards | 65 GB — 4 bits | [eval-apply/Qwen3.5-122B-A10B_silvann_tq_D4E4](https://huggingface.co/eval-apply/Qwen3.5-122B-A10B_silvann_tq_D4E4) |
-| Qwen 3.8 27B (dense) | 15 GB — 4 bits | [eval-apply/Qwen3.8-27B_silvann_tq_D4](https://huggingface.co/eval-apply/Qwen3.8-27B_silvann_tq_D4) |
-| GLM 5.3 Flash (288 experts, 8 active) | 151 GB — 4 bits | [eval-apply/GLM-5.3-Flash_silvann_tq_D4E4](https://huggingface.co/eval-apply/GLM-5.3-Flash_silvann_tq_D4E4) |
+| No graphics card, 12 GB of RAM, an NVMe disk | [Qwen 3.6 35B-A3B](https://huggingface.co/eval-apply/Qwen3.6-35B-A3B_silvann_tq_D4E4) (`D4E4`) on the CPU alone, its experts read from the disk | 11.7 tokens/s |
+| An 8 GB card | [Ministral 3 14B](https://huggingface.co/eval-apply/Ministral-3-14B_silvann_tq_D4) (`D4`) on the card, at a 4,096-token context | 52 tokens/s ◦ |
+| A 16 GB card | [Qwen 3.8 27B](https://huggingface.co/eval-apply/Qwen3.8-27B_silvann_tq_D4) on the card | 17.4 tokens/s |
+| A 16 GB card — alt | [Ministral 3 14B](https://huggingface.co/eval-apply/Ministral-3-14B_silvann_tq_D8) (`D8`) on the card, at an 8,192-token context | 26 tokens/s ◦ |
+| A 24 GB card | [Qwen 3.6 35B-A3B](https://huggingface.co/eval-apply/Qwen3.6-35B-A3B_silvann_tq_D8E4) on the card | 37 tokens/s |
+| An 8 GB card, 32 GB of RAM, an NVMe disk | [Qwen 3.5 122B-A10B](https://huggingface.co/eval-apply/Qwen3.5-122B-A10B_silvann_tq_D4E4) (`D4E4`) — the dense part on the card, the experts on the CPU | 4.7 tokens/s ◦ |
+| A 32 GB card, 80 GB of RAM | Qwen 3.5 122B-A10B, its experts in RAM and 24 GB of them on the card | 19.9 tokens/s |
+| A 16 GB card, 150 GB of RAM | [GLM 5.3 Flash](https://huggingface.co/eval-apply/GLM-5.3-Flash_silvann_tq_D4E4), its experts in RAM and 6 GB of them on the card | 7.5 tokens/s |
+| A 32 GB card, 256 GB of RAM | [Qwen 3.5 397B-A17B](https://huggingface.co/eval-apply/Qwen3.5-397B-A17B_silvann_tq_D4E4), its experts in RAM and 24 GB of them on the card | 9.0 tokens/s |
 
-`D8E4` names the bits: dense matrices at 8, experts at 4. Each model keeps its own licence (Qwen: Apache-2.0,
-GLM: MIT), which is in its folder once downloaded.
+On AMD Instinct MI50 cards in a Dell R730, each process held to the memory its row names — except the rows with experts
+on the card, which ran on the machine's 256 GB and name what the model needs. ◦ Ran on a 32 GB card: the model fits the
+smaller one, which has not been measured. **Every model and pack, the other machines (down to a 4 GB card
+reading its experts from the disk), and how long a conversation fits: [`docs/models.md`](docs/models.md)**; every
+measurement: [`docs/results.md`](docs/results.md).
 
-## What it runs on
-
-From a machine with no graphics card to a model near the frontier on salvaged server parts — one model a step, each the
-one that suits that machine best:
-
-| Your machine | Model, and how it runs | Answer |
-|---|---|---|
-| No graphics card, 12 GB of RAM, an NVMe disk (2.5 GB/s) | Qwen 3.6 35B-A3B (`D4E4`) on the CPU alone, its experts read from the disk, 8 GB of them kept in memory | 11.7 tokens/s |
-| A 16 GB card | Qwen 3.8 27B entirely on the card, at a 32,000-token context (14 GB) | 17.4 tokens/s (18.5 on a short prompt) |
-| A 24 GB card | Qwen 3.6 35B-A3B entirely on the card (17 GB at a 32,000-token context) | 37 tokens/s (40 on a short prompt) |
-| A 4 GB card, 8 GB of RAM, an NVMe disk | Qwen 3.6 35B-A3B — the dense part on the card, the experts on the CPU, read from the disk as they are needed | 11.9 tokens/s ◦ |
-| An 8 GB card, 32 GB of RAM, an NVMe disk | Qwen 3.5 122B-A10B (`D4E4`) — the same split | 4.7 tokens/s ◦ |
-| A 16 GB card, 64 GB of RAM, an NVMe disk reading 5 GB/s | GLM 5.3 Flash — the same split | about 2.5 tokens/s, projected |
-| A 16 GB card, 128 GB of RAM, an NVMe disk reading 5 GB/s | GLM 5.3 Flash — the same split | 5.7 tokens/s |
-| A 16 GB card, 150 GB of RAM | GLM 5.3 Flash with all of its experts (142 GB) in RAM, a 300,000-token context, and 6 GB of the card the tier of experts used most | 7.5 tokens/s (6.8 without the tier) |
-| A 32 GB card, 80 GB of RAM | Qwen 3.5 122B-A10B (`D4E4`), its experts in RAM and 24 GB of them on the card | 19.9 tokens/s (10.9 without the tier) |
-| A 32 GB card, 160 GB of RAM | GLM 5.3 Flash, its experts in RAM and 18 GB of them on the card | 8.1 tokens/s |
-
-Measured on a Dell R730 (two Xeon E5-2680 v4, AMD Instinct MI50 cards; disk speed 5 GB/s, RAM speed 126 GB/s), each
-row with its process held to the memory it names — leave room beside it for the operating system — and from a cold
-start where the experts come from the disk. ◦ The dense part ran on a 32 GB MI50: it fits the smaller card, but a card that size has not been
-measured. The projected row is worked out from GLM's measured rows at 64 GB and 128 GB.
-
-**New in v0.3.0: the card's tier of experts.** With a model's experts on the CPU, `card_experts_gb` in its config gives
-part of the card to the experts used most; the card computes those while the CPU computes the rest, and the CPU copies
-an expert over while the card works, so a token never waits for one. The rows that name a tier above are this. They ran on the machine's 256 GB of RAM; the RAM they name is what the experts and the process need, not a limit they were held to.
-[`docs/users.md`](docs/users.md#the-cards-tier-of-experts) says how to set it.
-
-Every measurement, the other packs and memory sizes, and what limits a model reading its experts from the disk:
-[`docs/results.md`](docs/results.md).
-
-The conversation's cache keeps its first 256 positions and the latest 4,096 at full precision and the rest at 8 bits.
-A model boots with a 32,000-token context; past the first 4,352, each 100 MB of the card's memory holds about 10,000
-more tokens of the 35B's conversation, 3,200 of the 27B's, and 8,800 of GLM 5.3 Flash's — set `max_context` in the
-model's `configs/default.json` to what your card has room for.
+**New in v0.3.1:** Mistral AI's Ministral 3 14B (Apache 2.0) — the first model of a third family, in two packs; two more
+packs, the 397B and GLM 5.3 Flash with its dense part at 8 bits; how close each pack comes to the original weights, as
+perplexity and bits per byte ([`docs/results.md`](docs/results.md#how-good-each-pack-is-perplexity)); GLM's experts on
+the CPU added in the same order every run, so a prompt gives the same answer each time (with a card's tier, which experts
+the card holds depends on when its copies land, and that can still change the last bits); Qwen's experts on the CPU
+multiplied in integers (`experts_int8`), as GLM's already were; and for GLM an exclusive tier (`card_exclusive`), where
+what the card holds is not also kept in RAM ([`docs/models.md`](docs/models.md#the-cards-tier-of-experts)).
 
 ## Platforms
 
@@ -103,7 +83,7 @@ runtime/            the Python side: a model folder booted onto the machine, con
 silvann_core.py     download-model · list-models
 start_silvann_server.py, silvann_ui.py
 models/             where downloaded models go
-docs/               users.md — running it; results.md — every measurement;
+docs/               users.md — running it; models.md — every model and what it needs; results.md — every measurement;
                     developers.md — how it is built, adding a model or a silicon;
                     concepts.md — the ideas behind it; compression.md — how the weights are packed;
                     directions.md — where it could go

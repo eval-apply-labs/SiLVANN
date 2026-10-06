@@ -1,6 +1,6 @@
 # Running SiLVANN
 
-This is a **developer preview (v0.3.0)**. It is tested on Linux with AMD Instinct MI50 cards (gfx906, ROCm 6), and on
+This is a **developer preview (v0.3.1)**. It is tested on Linux with AMD Instinct MI50 cards (gfx906, ROCm 6), and on
 the CPU alone with AVX2;
 Windows and NVIDIA cards are untested, Apple silicon is not supported yet. If something does not build or does
 not run on your machine, you are expected to be able to read the error and the source.
@@ -77,6 +77,7 @@ The Qwen models' `options`:
 | `experts_on` | `"card"` (default), `"cpu"` | the routed experts on the card, or on the CPU — the setup for a card too small to hold them; the 122B's `default.json` starts with `"cpu"` |
 | `experts_from` | `"auto"`, `"ram"`, `"disk"`, `"mapped"` | with the experts on the CPU: copied into RAM, or read from a file on the disk as they are needed — `disk` keeps the ones used in the engine's own memory, as much of it as there is (`experts_ram_gb` to set it), `mapped` leaves that to the system's page cache and is slower; `auto` chooses by the memory there is |
 | `card_experts_gb` | gigabytes, default `0` | with the experts on the CPU: the card's own tier of them, below |
+| `experts_int8` | `false` (default), `true` | with the experts on the CPU: a generated token's experts multiplied in integers, faster on the CPU and slightly less exact — ▶ the quantisation table |
 
 GLM 5.3 Flash's `options`:
 
@@ -86,6 +87,7 @@ GLM 5.3 Flash's `options`:
 | `chunk` | positions, default 256 | how many positions of a prompt go through a layer at once; with the experts on the disk, 1024 reads a prompt faster |
 | `sockets` | `1`, `2` | the CPU sockets the experts are split over; by default, all of them |
 | `card_experts_gb` | gigabytes, default `0` | the card's own tier of experts, below |
+| `card_exclusive` | `false` (default), `true` | with `experts_from: "ram"`: what the card's tier holds is not also kept in RAM, below |
 
 ### The card's tier of experts
 
@@ -97,6 +99,13 @@ experts too few positions pick stay on the CPU; how many is worked out at boot f
 Give it the card's memory the model's dense part and its cache leave: on our MI50 GLM 5.3 Flash went from 6.8 to 7.5
 tokens a second with a 300,000-position cache and a 6 GB tier in 16 GB, and to 8.1 with 18 GB on a 32 GB card; the
 122B went from 10.9 to 19.9 with 24 GB. [`results.md`](results.md) has every run.
+
+With `card_exclusive: true` (GLM 5.3 Flash, experts in RAM), an expert is on the card or in RAM, never both: the card
+starts with its share of every layer, and each expert it takes in sends one back, written into the RAM the newcomer
+left. The memory the tier holds is RAM given back — about 18 GB for an 18 GB tier — so a box short of RAM by about the
+tier's size runs the model without the disk. It costs speed where a card cannot copy both ways at once: on our MI50 a
+token went from 107 to 138 ms. The engine measures that at boot and, on such a card, sends an expert back only after
+the one coming in has arrived.
 
 ## 5. The experts on the disk
 

@@ -227,6 +227,13 @@
     /* ⭐ MULTI-HEAD LATENT ATTENTION (GLM 5.3, DeepSeek): the query absorbed into the cached latent, the answer expanded  */ \
     /* by each head's value rows — so the cache holds the latent alone and `nn__attention__decode` attends over it.     */ \
     X(PKG, 59, "nn__attention__absorb", nn__attention__zzabi_adapter_absorb,       NN__ATTENTION__ABSORB) \
-    X(PKG, 60, "nn__attention__expand", nn__attention__zzabi_adapter_expand,       NN__ATTENTION__EXPAND)
+    X(PKG, 60, "nn__attention__expand", nn__attention__zzabi_adapter_expand,       NN__ATTENTION__EXPAND) \
+    /* A card's tier of experts given its share of a prompt chunk: the rows' picks it takes marked held, for the CPUs  */ \
+    /* to skip. ▶ `cpu/opcodes/expert__abi.cuh`.                                                                      */ \
+    X(PKG, 61, "nn__expert_tier__note", nn__expert_tier__zzabi_adapter_note,      NN__EXPERT_TIER__NOTE) \
+    /* Whether a copy to the card and one back run at once at full speed: their time together over one alone, × 1000.  */ \
+    X(PKG, 62, "nn__expert_tier__duplex", nn__expert_tier__zzabi_adapter_duplex,  NN__EXPERT_TIER__DUPLEX_PROBE) \
+    /* The CPUs done with a layer: an exclusive tier's writes back to RAM, held on half duplex, go now.               */ \
+    X(PKG, 63, "nn__expert_tier__written", nn__expert_tier__zzabi_adapter_written, NN__EXPERT_TIER__WRITTEN)
 
 #endif /* SILVANN__PACKAGES_NN_CONTRACTS_MACROS_LANGUAGE_CONTRACT__VERBS_CUH */

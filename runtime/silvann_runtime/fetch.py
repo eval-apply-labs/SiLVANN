@@ -20,8 +20,12 @@ KNOWN = {
     "Qwen3.6-35B-A3B_silvann_tq_D4E4": ("eval-apply/Qwen3.6-35B-A3B_silvann_tq_D4E4", "19 GB"),
     "Qwen3.5-122B-A10B_silvann_tq_D8E4": ("eval-apply/Qwen3.5-122B-A10B_silvann_tq_D8E4", "67 GB"),
     "Qwen3.5-122B-A10B_silvann_tq_D4E4": ("eval-apply/Qwen3.5-122B-A10B_silvann_tq_D4E4", "65 GB"),
+    "Qwen3.5-397B-A17B_silvann_tq_D4E4": ("eval-apply/Qwen3.5-397B-A17B_silvann_tq_D4E4", "207 GB"),
     "Qwen3.8-27B_silvann_tq_D4": ("eval-apply/Qwen3.8-27B_silvann_tq_D4", "16 GB"),
-    "GLM-5.3-Flash_silvann_tq_D4E4": ("eval-apply/GLM-5.3-Flash_silvann_tq_D4E4", "151 GB"),
+    "GLM-5.3-Flash_silvann_tq_D4E4": ("eval-apply/GLM-5.3-Flash_silvann_tq_D4E4", "162 GB"),
+    "GLM-5.3-Flash_silvann_tq_D8E4": ("eval-apply/GLM-5.3-Flash_silvann_tq_D8E4", "166 GB"),
+    "Ministral-3-14B_silvann_tq_D4": ("eval-apply/Ministral-3-14B_silvann_tq_D4", "7.4 GB"),
+    "Ministral-3-14B_silvann_tq_D8": ("eval-apply/Ministral-3-14B_silvann_tq_D8", "13.5 GB"),
 }
 
 

@@ -1295,6 +1295,26 @@ static __device__ inline void nn__expert__zzabi_body_rows_finish(uint16_t* out, 
     }
 }
 
+/* ⭐ AND THE ROUNDING WHERE EACH PICK KEPT ITS OWN SUM: `acc` holds `n` rows of `k` picks of `cols` floats, a pick's slot
+ *   written by its expert alone, and `out[t][c] = residual[t][c] + Σ_j acc[t][j][c]`, the picks added in their order, as a
+ *   half; `acc` back to zero. ⭐ WHICH EXPERT RAN FIRST CHANGES NOTHING — the experts of a chunk run in whatever order
+ *   suits the memory (the resident first), and a sum in that order would differ by an ulp from one run to the next. */
+static __device__ inline void nn__expert__zzabi_body_rows_reduce(uint16_t* out, float* acc, const uint16_t* residual, uint64_t n,
+                                                                 uint64_t k, uint64_t cols, unsigned int* over) {
+    for (uint64_t i = nn__kernels__zzprivate_first(); i < n * cols; i += nn__kernels__zzprivate_stride()) {
+        const uint64_t t = i / cols, c = i % cols;
+        float s = 0.0f;
+        for (uint64_t j = 0ull; j < k; ++j) {
+            float* a = acc + (t * k + j) * cols + c;
+            s += *a;
+            *a = 0.0f;
+        }
+        bool hit = false;
+        out[i] = nn__primitives__zzpackage_float_to_half(nn__silicon__half_to_float(residual[i]) + s, &hit);
+        if (hit) *over = NN__KERNELS__OVERFLOWED;
+    }
+}
+
 /* ══ ⭐⭐ A LAYER'S OTHER STEPS OVER `rows` POSITIONS AT ONCE — WHAT A PROMPT NEEDS BESIDE THE GEMM ══════════
  *
  * A prompt of `rows` positions goes through a layer as matrices, a row a position, and the steps that are not

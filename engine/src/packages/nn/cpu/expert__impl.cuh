@@ -884,6 +884,28 @@ static __device__ inline bool nn__expert__evict(uint64_t layer, uint64_t type, u
     return nn__expert__type_give(held, slot);
 }
 
+/* ⭐ A SLOT HANDED FROM ONE EXPERT TO ANOTHER, never through the free list — the exclusive tier's RAM side, where the
+ * expert leaving for the card gives its slot to the one arriving from it (`nn__expert_tier__commit`). `from` (of layer
+ * `lf`) must be resident and `to` (of `lt`) not; afterwards `to` holds the slot and is its band's most recent, `from`
+ * holds none. ⛔ THE SAME ORDER AS `evict`'s, FOR THE SAME REASON: `from` lets go first, `to` takes it second, so a
+ * failure between them leaves a slot nobody names — a leak — and never one slot named twice. */
+static __device__ inline bool nn__expert__hand_over(uint64_t lf, uint64_t from, uint64_t lt, uint64_t to, uint64_t type) {
+    sys__heap_node a, b;
+    if (!nn__expert__slot(lf, type, from, &a) || a.args[NN__EXPERT__SLOT_AT] == 0ull) return false;
+    if (!nn__expert__slot(lt, type, to, &b) || b.args[NN__EXPERT__SLOT_AT] != 0ull) return false;
+    const uint64_t at = a.args[NN__EXPERT__SLOT_AT], held = a.args[NN__EXPERT__SLOT_TYPE];
+    if (!nn__expert__zzprivate_unlink(lf, type, from)) return false;
+    if (!nn__expert__slot(lf, type, from, &a)) return false;
+    a.args[NN__EXPERT__SLOT_AT] = 0ull;
+    if (!nn__expert__zzprivate_slot_set(lf, type, from, &a)) return false;
+    if (!nn__expert__zzprivate_unlink(lt, type, to)) return false;
+    if (!nn__expert__slot(lt, type, to, &b)) return false;
+    b.args[NN__EXPERT__SLOT_AT] = at;
+    b.args[NN__EXPERT__SLOT_TYPE] = held;
+    if (!nn__expert__zzprivate_slot_set(lt, type, to, &b)) return false;
+    return nn__expert__zzprivate_push_front(lt, type, to);
+}
+
 /* ── FETCH — a request and its settling, for a caller that wants the expert now ─────────────────────── */
 static __device__ inline bool nn__expert__fetch(sys__silicon_family__id family, uint64_t layer, uint64_t type, uint64_t expert,
                                                 const nn__expert__backing* backing, uint64_t* at, bool* missed) {

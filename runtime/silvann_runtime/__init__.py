@@ -18,8 +18,9 @@ from .model_folder import ModelFolder, Refused
 from .machine import Machine, EngineError
 from .qwen3_5 import Qwen35
 from .glm5 import Glm5
+from .mistral3 import Ministral3
 
-ARCHITECTURES = {"qwen3_5_text": Qwen35, "qwen3_5_moe_text": Qwen35, "glm5_next_text": Glm5}
+ARCHITECTURES = {"qwen3_5_text": Qwen35, "qwen3_5_moe_text": Qwen35, "glm5_next_text": Glm5, "ministral3": Ministral3}
 
 
 def open_model(path, lora=None, max_context=4096, silicon=None, **options):
