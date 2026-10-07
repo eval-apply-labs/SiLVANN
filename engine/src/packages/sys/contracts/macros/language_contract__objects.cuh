@@ -10,14 +10,6 @@
  * package has written them — which no package can do, because each is read before some of the others.
  * The expansion that reads them all is `language_contract_verbs.cuh`, beside the roster, which is where
  * anything belonging to every package rather than to one of them lives. */
-/* ════════════════════════════════════════════════════════════════════════════════════════════════════
- * AI TEMPORARY COMMENT — FOR THE NEXT AGENT; DELETE WHOLE BEFORE RELEASE. Rules in `README.md`.
- *   · The provider was once an argument to `make`, and `make(SYS__KIND__STACK, ARRAYS)` really did put a
- *     stack in the churn chunk; two call sites held the design up by being written correctly.
- *   · The procedure row's note said `defun` never walked the parameters. It has walked them since
- * (`sys__opcodes__zzabi_defun` in `cpu/opcodes/opcodes_abi.cuh`).
- * ⛳ RETIREMENT: at release, with the rest.
- * ════════════════════════════════════════════════════════════════════════════════════════════════════ */
 /* ══ WHAT THIS PACKAGE CONTRIBUTES TO THE LANGUAGE ═══════════════════════════════════════════════════
  *
  * ⭐ WHY THE NAME IS `language` AND NOT `package`. The manifest is already the package↔machinery

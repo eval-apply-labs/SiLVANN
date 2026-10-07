@@ -1,14 +1,6 @@
 #ifndef SILVANN__PACKAGES_SYS_CONTRACTS_OBJECTS_COMPUTING_BASE_CUH
 #define SILVANN__PACKAGES_SYS_CONTRACTS_OBJECTS_COMPUTING_BASE_CUH
 
-/* ════════════════════════════════════════════════════════════════════════════════════════════════════
- * AI TEMPORARY COMMENT — FOR THE NEXT AGENT; DELETE WHOLE BEFORE RELEASE. Rules in `README.md`.
- * `RESULT_TRIES` was first priced on the device path: `MEASURED` there, one try cost **820 ns**, timing a
- * collection that finds nothing against a known try count — so 12 million was "about ten seconds". The
- * first figure written was 800 million, reasoned from a guess at the cost of a try; at the real cost that
- * was ELEVEN MINUTES, indistinguishable on a card pinned at 100% from the hang the bound exists to prevent.
- * ⛳ RETIREMENT: when the count is re-derived from a host timing of its own rather than the dispatch's.
- * ══════════════════════════════════════════════════════════════════════════════════════════════════ */
 /* What this file needs, named where a reader — and an editor — can follow it. */
 #include "../defaults.cuh"
 

@@ -4,31 +4,6 @@
 /* What this file needs, named where a reader — and an editor — can follow it. */
 #include <stdint.h>               /* the kind is a fixed four bytes, and the node's size rests on it */
 
-/* ════════════════════════════════════════════════════════════════════════════════════════════════════
- * AI TEMPORARY COMMENT — FOR THE NEXT AGENT; DELETE WHOLE BEFORE RELEASE. Rules in `README.md`.
- *
- * ⛳ THE ROWS USED TO BE HERE, AS A LIST CALLED `SYS__KIND__ROWS` FEEDING AN ENUM, AND BOTH ARE GONE.
- * The list is now this package's answer in `language_contract.cuh`, beside its verbs and its objects,
- * and the constants are generated for every package at once in `../language_contract_kinds.cuh`. What
- * forced it was a second package: a kind's name was published to a host from `sys`'s list alone, so
- * `nn`'s kinds would have dispatched correctly on the device and been unnameable from Python.
- *
- * ⛳ AND THE ENUM WENT WITH THEM, WHICH IS THE PART THAT LOOKS LIKE A LOSS AND IS NOT. It carried a
- * stated underlying type and a guard variable proving the type was stated, because an enum without one
- * has only the range its own members need — and a second package's kind, tagged at bit 24, falls outside
- * it. Clang refuses that outright and `g++` accepts it silently in a constant expression, and this
- * header is compiled by both — `g++` builds the evaluator, clang (under `hipcc`) builds a silicon family —
- * which made it the shape this tree is most exposed to: green under one compiler and refused by the other.
- * A `constexpr` has no range to fall outside of, so the hazard is gone rather than guarded, and the guard
- * went with it.
- * ⛳ NOTHING WAS GIVEN UP TO GET THAT. The three switches over a kind all carry a `default:` arm and
- * gather their case labels from the object rows through the roster, so exhaustiveness warnings were
- * never in play; the twenty-odd declarations that take a `sys__kind`, the node's own field and every
- * explicit cast read the same against a typedef.
- *
- * ⛳ RETIREMENT: this block goes when a second package has registered a kind and the host has named it.
- * ════════════════════════════════════════════════════════════════════════════════════════════════════ */
-
 /* ══ WHAT A THING IS ══════════════════════════════════════════════════════════════════════════════════
  *
  * Every value in this language is a node, and the first word of a node is its KIND. Everything that

@@ -24,13 +24,6 @@
  * CANNOT BE WRONG IN A TEST IS ALWAYS WRONG IN PRODUCTION. This file supplies only the KEYWORDS; every
  * operation comes from `cpu/silicon/{atomic,block,memory}.cuh`, which are the real thing.
  */
-/* ════════════════════════════════════════════════════════════════════════════════════════════════════
- * AI TEMPORARY COMMENT — FOR THE NEXT AGENT; DELETE WHOLE BEFORE RELEASE. Rules in `README.md`.
- *   · The `__noinline__` note below once cited *"`MEASURED` at −2.04% and 217 fewer spilled registers"*.
- *     Those are `k_eval` figures (S98, fib(15)); the evaluator has left the card and they do not
- *     transfer. The cold-path argument for keeping `raise` out of line stands on its own.
- * ⛳ RETIREMENT: at release, with the rest.
- * ════════════════════════════════════════════════════════════════════════════════════════════════════ */
 
 /* ── the keywords ────────────────────────────────────────────────────────────────────────────────── */
 #define __device__

@@ -2,16 +2,6 @@
 #define SILVANN__PACKAGES_SYS_CONTRACTS_OBJECTS_PACKAGE_CUH
 
 /* This file needs nothing: every name in it is its own. */
-/* ════════════════════════════════════════════════════════════════════════════════════════════════════
- * AI TEMPORARY COMMENT — FOR THE NEXT AGENT; DELETE WHOLE BEFORE RELEASE. Rules in `README.md`.
- *   · the engine SUMMED every package's compile-time figure, took ONE allocation and
- *     handed out slices; config-sized figures ended that. The room also once lived inline in the hatch
- *     entry node rather than as row 0 of the package's sub-array.
- *   · This file once said "only a kernel can put an address in a register" and that the package reads
- *     the slices "on the card". The register is host memory; runner zero of
- *     `eng__abi__k_stand_up_packages` (`engine/abi/machine.cuh`) writes and reads it.
- * ⛳ RETIREMENT: at release, with the rest.
- * ════════════════════════════════════════════════════════════════════════════════════════════════════ */
 
 /* ── HOW MUCH ROOM A PACKAGE OWNS, STATED BY THE PACKAGE ─────────────────────────────────────────────
  *

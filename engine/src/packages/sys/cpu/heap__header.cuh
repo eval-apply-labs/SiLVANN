@@ -5,46 +5,6 @@
 #include "../contracts/objects/kind.cuh"                /* what a thing IS — the first word of every node */
 #include "heap_node__header.cuh"   /* the node every value in this language is made of */
 #include "../contracts/objects/heap.cuh" /* its constants, fault words and layouts */
-/* ════════════════════════════════════════════════════════════════════════════════════════════════════
- * AI TEMPORARY COMMENT — FOR THE NEXT AGENT; DELETE WHOLE BEFORE RELEASE. Rules in `README.md`.
- * Nothing in it is needed to use the allocator. It holds what compares this file against the tree it grew
- * out of, so that everything below can be read by somebody who has never seen that tree.
- *
- * ⛳ THE PART OF THE SURFACE THIS BLOCK WATCHED IS SETTLED: `publish`, `zzpackage_computing_base` and
- * `start_block` all stand against the system register. The per-block table of bases is the register's own
- * allocation — `zzpackage_computing_base` reads the row that names it and adds the block id, `start_block`
- * writes a block's base into it, and `publish` is handed no bases table at all — so the retirement
- * condition below is met. The rest has been stable through the carousel, through the count moving into
- * the heap chunk, and through the object interface split.
- *
- * ⛳ WHY THE BLOCK ID IS NO LONGER THE ALLOCATOR'S. That field's comment said *"the allocator wants it:
- * it starts its scan here"* until the scan stopped existing. The allocator used to take a chunk by
- * walking the heap allocation pool from an origin fixed per block, and this was that origin — so the sentence was not
- * decoration, it was the whole justification for the field being reachable from the heap allocation pool at all. The
- * carousel hands out heap chunks in the order they were freed and asks nobody who is asking.
- * ⇒ ★ A COMMENT THAT NAMES ITS ONE READER IS THE FIRST THING A CHANGE OF MECHANISM FALSIFIES, and it is
- * worth more than a vaguer one for exactly that reason: it is checkable.
- *
- * ⛳ WHY THE WATERMARK IS AT `args[1]` AND NOT `args[0]`. It was at `args[0]`, until node 0 became an
- * object head and the lock took that word by the convention every kind follows; the watermark moved
- * along one. Nothing was given up — a node carries six arguments — but a reader wondering why the two are
- * not in the obvious order is owed the answer, and the answer is not a property of the layout.
- *
- * ⛳ THE CHUNK-COUNT PARAGRAPH IS DEVICE ARITHMETIC. With the evaluator on a host (⚖ *"sys and the
- * evaluator go host"*) there are no workgroups and no occupancy query; the count that matters is RUNNER
- * THREADS, one per card plus the orchestrator. What saves it is that `publish` is TOLD: `eng_abi_boot(4)`
- * stood up 256 chunks of 512 nodes on a CPU and 3000 programs ran through them without a refusal
- * (`MEASURED`). ⚠ The SIZING is still owed a re-derivation for the host — not refusing is all
- * that has been shown. The paragraph in `contracts/objects/heap.cuh` now names runner threads and says
- * the headroom is underived; the re-derivation itself is still owed.
- *
- * ⛳ WHAT `forget_base`'s NOTE MEASURED, MOVED HERE: arming only two of the kernels killed the DEVICE
- * suite with a page fault. That was `k_eval`-era, on a card; on the host the same stale-base hazard is
- * `REASONED`, not reproduced.
- *
- * ⛳ RETIREMENT: this block goes when the system register lands and the three names above stop moving,
- * and the chunk-count paragraph has been restated for the host. Everything else is already history.
- * ════════════════════════════════════════════════════════════════════════════════════════════════════ */
 /* ══ the heap chunk allocator, and the counting ═══════════════════════════════════════════════════════════
  *
  * This file holds three things. The heap allocation pool that hands out CHUNKS. The two halves of a reference count —

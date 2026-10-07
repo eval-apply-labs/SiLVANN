@@ -3,23 +3,6 @@
 #include "../contracts/objects/fault.cuh" /* the layouts it reads and writes */
 /* ══ THE FILLING — WHERE A FAULT LANDS IN A REAL BUILD ════════════════════════════════════════════════
  *
- * AI TEMPORARY COMMENT — FOR THE NEXT AGENT; DELETE WHOLE BEFORE RELEASE. Rules in `README.md`.
- * What the CPU evaluator changed here, so nobody restores the two-world reading.
- *   · The header said *"This is the device's, and it is the only one in the tree: a host build gets
- *     none, which is deliberate"*, and the guard read `HIP || CUDA`. The first CPU-evaluator build got
- *     no filling at all and failed with *"'sys__fault__publish' was not declared in this scope"*.
- *     `abi.cuh` hid 1,600 lines behind the same test and made a host-flip probe report zero errors:
- *     when a probe on a new arm comes back suspiciously clean, grep the file for `SILVANN_ARCH_`.
- *   · `raise`'s falsifier said *"there is none — every raise is a refusal and every refusal returns"*,
- *     true until `nn`'s fp16-overflow sites began raising and falling through.
- *   · `raise`'s out-of-line note carried a `k_eval` table (S98, paired, three runs of thirty each side,
- *     fib(15)): inlined 2254.7 ms / 219 spilled registers / 1020 B frame; out of line 2208.8 ms / 2 /
- *     576 B, −2.04%, against 888 B before the channel existed — and the same marker on
- *     `sys__stack__push`/`pop` cost 2.3% while on the carve's wait it saved 2.5 points. All are device
- *     register figures; the evaluator has left the card and none of them transfers to the host.
- * ⛳ RETIREMENT: when nobody remembers the two-arm guard — at release, with the rest.
- * ══════════════════════════════════════════════════════════════════════════════════════════════════
- *
  * `fault__header.cuh` declares the seam and defines nothing, so exactly one filling has to arrive or the
  * package links against nothing — the same arrangement the silicon seam has, for the same reason.
  * ⛳ A HARNESS AND THE REAL BUILD WANT OPPOSITE THINGS — a HARNESS fills the verb itself before

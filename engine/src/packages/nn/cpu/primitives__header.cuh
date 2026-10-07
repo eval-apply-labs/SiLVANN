@@ -5,12 +5,6 @@
 #include "../../sys/contracts/objects/kind.cuh"              /* what a thing IS — the first word of every node */
 #include "../../sys/cpu/heap_node__header.cuh" /* the node a form's arguments arrive in */
 #include "../contracts/objects/primitives.cuh" /* its constants and fault words */
-/* AI TEMPORARY COMMENT — FOR THE NEXT AGENT; DELETE WHOLE BEFORE RELEASE. Rules in `README.md`.
- * What the overflow ruling replaced, so it is not restored.
- *   · An fp16 overflow used to REFUSE: `if (over) { sys__opcodes__fails(form, …OVERFLOW); return; }`
- *     at 18 sites. They now raise and fall through with `inf` in the buffer.
- * ⛳ RETIREMENT: when no verb in the tree refuses on overflow and nobody remembers that one did.
- * ══════════════════════════════════════════════════════════════════════════════════════════════════ */
 /* ══ nn — THE ARITHMETIC PRIMITIVES, AND THE ONE RESOLUTION THEY ALL SHARE ═══════════════════════════
  *
  * ⚖ ARCHITECT: *"lets go ahead with the simple opcodes."* Three of them, and they are not

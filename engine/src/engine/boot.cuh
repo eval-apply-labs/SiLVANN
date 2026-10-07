@@ -2,17 +2,6 @@
 #define SILVANN__ENGINE_BOOT_CUH
 /* ══ STANDING THE MACHINE UP ═══════════════════════════════════════════════════════════════════════════
  *
- * AI TEMPORARY COMMENT — FOR THE NEXT AGENT; DELETE WHOLE BEFORE RELEASE. Rules in `README.md`.
- * One warning about `ENG_BOOT_BLOCK`, which the ruling ⚖ *"sys and the evaluator go host"* dates.
- *   · The macro used to carry a register-budget table measured on `k_eval`, the evaluator as a kernel
- *     ("21% of the evaluator's time"). The ruling took the evaluator off the card and no kernel named
- *     `k_eval` exists any more, so the table was dropped: on the host there is no occupancy to trade.
- *   · SO 512 MUST BE RE-DERIVED, NOT INHERITED, for what stays on the card: the compute kernels in
- *     `nn/gpu/doors.cuh`. Carrying an evaluator's answer onto a `vector__add` loop because the macro
- *     already said it would be cargo cult.
- * ⛳ RETIREMENT: when the compute kernels have a launch bound of their own, measured.
- * ══════════════════════════════════════════════════════════════════════════════════════════════════
- *
  * Everything below this line in the tree assumes an allocator that is already standing: a pool of memory,
  * a table with one computing base per block, and a block that has been started off. This file is what
  * makes those true, and it is the only place that talks to the outside world to do it.

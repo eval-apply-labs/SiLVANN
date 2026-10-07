@@ -22,59 +22,6 @@
 #include "string.cuh"                    /* and so does this one */
 #include "dictionary.cuh"                /* and these three */
 #include "opcodes/opcodes_abi__header.cuh"  /* the verb adapters the dispatch switch names */
-/* ════════════════════════════════════════════════════════════════════════════════════════════════════
- * AI TEMPORARY COMMENT — FOR THE NEXT AGENT; DELETE WHOLE BEFORE RELEASE. Rules in `README.md`.
- * WHERE THIS FILE'S SURFACE CAME FROM. Nothing in it is needed to read or use the object interface. It holds the two things in this file that
- * can only be understood by comparing it against an arrangement that no longer exists, so that nothing
- * below has to.
- *
- * ⛳ THE INTERFACE SPLIT USED TO BE DRAWN SOMEWHERE ELSE, AND THE OLD PLACE LOOKED PRINCIPLED. `retain`
- * and the lock lived with the allocator — legitimately, since everything they touch is the head layout
- * the allocator owns — while only the kind-dependent half was here. It was a real boundary, but it was a
- * MAINTAINER's boundary: it answered *"where can this live?"* and left a reader asking *"where is
- * retain?"* and finding the allocator. ⚖ The architect's rule replaced it: declared in one place,
- * defined in one place.
- * ⇒ ★ A BOUNDARY THAT IS EASY TO DEFEND IS NOT THE SAME AS ONE THAT IS EASY TO USE, and the first kind
- * survives review because the argument for it is sound.
- *
- * ⛳ AND THE STALE-HOLDER ARGUMENT WAS SAID THREE TIMES ACROSS TWO FILES. It is said once now, where
- * `release_from_reference` is defined; the header describes and points here, and `set` names it rather than
- * restating it.
- * ⇒ ★ THE THIRD COPY WAS WRITTEN WHILE SPLITTING THE INTERFACE OUT, which is when it is easiest to make
- * one: moving a declaration invites explaining it again, and the explanation is already somewhere.
- *
- * ⛳ AND THE THREE GATHERS DID NOT ALWAYS MATCH. The allocator's provider lookup named `sys` directly
- * while the two switches here pasted the package name, so a second package's kind would have been given a
- * release arm and a clone arm and no provider — and the refusal could not have been told from a correct
- * answer, because that lookup's fallthrough returned the very value a row is allowed to declare on
- * purpose. *"This kind is deliberately never made"* and *"I have never heard of this kind"* were one
- * number.
- * ⇒ ★ A MECHANISM THAT IS RIGHT IN TWO PLACES AND HAND-WRITTEN IN A THIRD FAILS ONLY IN THE THIRD, and
- * the two correct ones are what make it look finished.
- *
- * ⛳ THE 126-vs-234 REGISTER FIGURES in `release`'s cycle paragraph are `k_eval` figures, and
- * the evaluator has left the card (⚖ *"sys and the evaluator go host"*); the conclusion may survive on a
- * CPU, the numbers will not reproduce. MOVED HERE from that paragraph: *"the same evaluator emits a loop
- * at 126 registers where the graph is acyclic and 234 where it is not"*.
- *
- * ⛳ AND `release`'s OUT-OF-LINE PARAGRAPH CARRIED A DEVICE MEASUREMENT, MOVED HERE: the function needed
- * v63, every kernel that could reach it came out at exactly 64 VGPR with a frame of its own, and the one
- * kernel that could not sat at 48 with no frame; removing `__noinline__` left the emitted geometry
- * identical because the compiler declined the inline on its own cost model. All on `k_eval`, gfx906.
- *
- * ⛳ AND THE LOCK'S TWO DEVICE PARAGRAPHS, MOVED HERE: lanes of one wavefront run in lockstep, so two
- * lanes contending for this lock would hang rather than wait (a lane election was owed); and the bound
- * existed because the grid rendezvous was hand-rolled and never faulted. Neither exists on the host.
- *
- * ⛳ THE CLONE DEFAULT'S COMMENT ONCE SAID EVERY ROW REFUSED. SUBLIST's row names
- * `sys__list__zzpackage_clone_object`, so the comment now says so; do not restore the older wording.
- *
- * ⛳ AND THE ARM NOTE AT `PACKAGE_DTYPE`: the OBJECTS arms tagged the kind a second time until
- * which `sys` (package 0) could not show. The note now states the rule only.
- *
- * RETIREMENT: delete when the old tree is gone — the entries above compare against it and have no
- * subject without it. No triage required; nothing here is load-bearing.
- * ══════════════════════════════════════════════════════════════════════════════════════════════════ */
 /* ══ the object interface, implemented ═══════════════════════════════════════════════════════════════
  *
  * Every `sys__heap_object__` verb that DOES something is defined here, together with the private ones its

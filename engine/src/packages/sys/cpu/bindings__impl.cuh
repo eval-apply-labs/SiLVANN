@@ -1,29 +1,5 @@
 #ifndef SILVANN__PACKAGES_SYS_CPU_BINDINGS__IMPL_CUH
 #define SILVANN__PACKAGES_SYS_CPU_BINDINGS__IMPL_CUH
-/* ════════════════════════════════════════════════════════════════════════════════════════════════════
- * AI TEMPORARY COMMENT — FOR THE NEXT AGENT; DELETE WHOLE BEFORE RELEASE. Rules in `README.md`.
- * FOUR ARGUMENTS IN THIS FILE ARE PRICED IN `k_eval`'s REGISTERS — a device compiler's accounting — and
- * the evaluator runs on the host. RE-DERIVE them there rather than inherit them:
- *   · the reach cache's "block-local storage holds whatever the previous launch left": the hazard is a
- *     RUNNER THREAD's cached value outliving its computation. ▶ `heap__impl.cuh`'s base-cache note.
- *     The ordinary comment in `contracts/objects/bindings.cuh` now says so; nothing is left to move.
- *   · "spills from 2 to 18 ...", "passing the cell costs 1.28% ...", "`create` is inlined into every
- *     kernel ...": the NUMBERS will not survive on a CPU, and "pass the string not the cell" exists
- *     because a device compiler materialises an aggregate argument in memory. **UNMEASURED on a host.**
- *     The figures were taken out of the ordinary comments and LIVE HERE NOW, verbatim:
- *     ① `zzprivate_scope_in_place`: `MEASURED` on `k_eval`, with a number past the width as
- *       the test — the out-of-line calls in the engine's name read and in `add` take its register
- *       spills from 2 to 18, and with both removed they are 2 again, whatever shape the call has. Its
- *       private segment, 576 → 1,536 bytes, is not theirs: it moved with the old bindings files restored
- *       but the dictionary reachable, because a kernel's segment is sized for everything it can reach.
- *       Neither is a rate: that build was 0.50% FASTER on fib(15) — `ENG-9`'s finding again, register
- *       demand and throughput are not coupled on that kernel.
- *     ② `zzprivate_add_spelled`: `MEASURED` on fib(15), passing the cell instead of the
- *       string costs 1.28% (2,070.2 → 2,096.8 ms) and 64 bytes of `k_eval`'s private segment.
- *     ③ `zzprivate_base_fits`: out of line "because `create` is inlined into every kernel that begins a
- *       computation"; `REASONED` there that moving it moved neither the frame nor the spills of `k_eval`.
- * ⛳ RETIREMENT: when the four have been re-derived on the host.
- * ══════════════════════════════════════════════════════════════════════════════════════════════════ */
 /* What this file needs, named where a reader — and an editor — can follow it. */
 
 

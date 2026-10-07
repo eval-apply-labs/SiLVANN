@@ -9,24 +9,6 @@
 #include "node_array__header.cuh"  /* what a read-only picture of a list is */
 #include "stack__header.cuh"  /* where a dying object moves what it was holding, and a copy's work */
 #include "list__header.cuh"         /* the verbs it fills in, and the three fault words they raise */
-/* ════════════════════════════════════════════════════════════════════════════════════════════════════
- * AI TEMPORARY COMMENT — FOR THE NEXT AGENT; DELETE WHOLE BEFORE RELEASE. Rules in `README.md`.
- * The history behind the lazy thaw below, so nobody re-does it.
- *   · The first `sys__list__thaw_running` delegated to `zzprivate_thaw` and cost 11%; the next had
- *     `thaw_running_into` and `thaw_running` calling each other — mutual recursion, live in the shipping
- *     build, red in `list_call_graph_acyclic`. The work-stack-on-first-need loop replaced both.
- *   · The 11% is a `k_eval` figure, and the evaluator has left the card (⚖ *"sys and the
- *     evaluator go host"*). The shape of the argument — a stack per FORM against one on first need —
- *     survives any processor; the percentage does not. Its artifact:
- *     `measurements/2026-09-23_S107_pricing_the_list_cycle.md`.
- *   · The ordinary comments below carried that 11% as `MEASURED` (the lazy thaw's own paragraph and
- *     `thaw_running_into`'s), with "a 2x turns into a 0.9x"; it lives here now and nowhere else.
- *   · The walk census rewrote `nth`, `replace`, `append`, `room` and `freeze`'s two inner
- *     loops: each had re-walked the chunk chain for a fact it already held. `freeze`'s per-cell loop over
- *     `nth(source, k)` was half its cost, and its `seen` scan went CUBIC through `nth`. `MEASURED`
- *     building a list by appending was the quadratic in `freeze`.
- * ⛳ RETIREMENT: when the evaluator runs on the host and the lazy thaw has been re-priced there.
- * ══════════════════════════════════════════════════════════════════════════════════════════════════ */
 
 
 /* ⛳ Shipping default, outside any internal marker — a lever is an override, and deleting an override

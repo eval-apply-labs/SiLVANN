@@ -6,20 +6,6 @@
 #include "heap_node__header.cuh"   /* the node every value in this language is made of */
 #include "../contracts/defaults.cuh"
 #include "../contracts/objects/heap_object.cuh" /* its constants, fault words and layouts */
-/* ════════════════════════════════════════════════════════════════════════════════════════════════════
- * AI TEMPORARY COMMENT — FOR THE NEXT AGENT; DELETE WHOLE BEFORE RELEASE. Rules in `README.md`.
- * What the clone paragraphs below replaced, so nobody restores the older wording.
- *   · "WHAT IT DOES NOT DO" read *"It does not COPY anything today. Every clone row refuses"*, and the
- *     `clone` default was justified by *"nothing in this tree can be copied yet"*. Both went false when
- *     SUBLIST's row named its own clone. The prediction — one row edit — was right; "today" aged.
- *   · The lane-contention sentence in "WHAT IT DOES NOT DO" is a DEVICE sentence. With the evaluator on
- *     a host there are no lanes; the contention a caller owes exclusion against is between RUNNER
- *     THREADS. The lock is unchanged — the debt it names is what has to be restated.
- *     RESTATED: "WHAT IT DOES NOT DO" and "no vtable" now speak of runner threads and name no register
- *     budget; the device reasoning they carried (lanes in lockstep, a table costing kernel registers)
- *     is recorded here and nowhere else.
- * ⛳ RETIREMENT: when the evaluator has moved to the host and the lane sentence is restated.
- * ══════════════════════════════════════════════════════════════════════════════════════════════════ */
 /* ══ what you can do with an object, whatever kind it is ═════════════════════════════════════════════
  *
  * The verbs, and NO COUNT OF THEM HERE: the declarations below are the count, and a number written into

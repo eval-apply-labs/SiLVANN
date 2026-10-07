@@ -2,17 +2,7 @@
 #define SILVANN__PACKAGES_SYS_CPU_SILICON_SILICON__IMPL_CUH
 
 /* ══ THE SILICON BACKEND SELECTOR ════════════════════════════════════════════════════════════════════
- *
- * AI TEMPORARY COMMENT — FOR THE NEXT AGENT; DELETE WHOLE BEFORE RELEASE. Rules in `README.md`.
- * What changed in this selector when the CPU arm arrived, so nobody restores the two-backend reading.
- *   · The top of this file once read *"THE BACKEND, AND ONLY ON A DEVICE COMPILE"*, *"the selector is
- *     `src_old/`'s, unchanged"* and *"NEITHER ARM ARRIVES ON A HOST BUILD"* — true of two backends, false
- *     of three. A porter reading it would have concluded there is no host selection path and added a
- *     second one.
- *   · The CPU arm once included the vendor's `hip/host.cuh`, reasoning that "the doors to the card are
- *     still the card's". It cannot: see the note on that arm.
- * ⛳ RETIREMENT: when nobody remembers the two-backend selector — at release, with the rest.
- * ════════════════════════════════════════════════════════════════════════════════════════════════════ */
+ */
 
 /* ⛔ THE BACKEND. `silicon__header.cuh` DECLARES every seam verb and defines none of them — that is the
  * whole point of a seam — so the arm below has to arrive or the package links against nothing. It pulls

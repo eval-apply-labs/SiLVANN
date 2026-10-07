@@ -4,49 +4,6 @@
 /* What this file needs, named where a reader — and an editor — can follow it. */
 #include "heap_node__header.cuh"   /* the node every value in this language is made of */
 #include "../contracts/objects/list.cuh" /* its constants, fault words and layouts */
-/* ════════════════════════════════════════════════════════════════════════════════════════════════════
- * AI TEMPORARY COMMENT — FOR THE NEXT AGENT; DELETE WHOLE BEFORE RELEASE. Rules in `README.md`.
- * Nothing in it is needed to use a list. It holds what compares this file against the tree it grew out
- * of, so everything below can be read by somebody who has never seen that tree.
- *
- * WHAT IT CORRESPONDS TO THERE: a spine of small nodes, each naming a page of values it does not own,
- * with a caller-supplied page and a caller-supplied node handed to every mutator. The handle is three
- * loose words passed by value. Nothing counts anything. Four differences, each a decision:
- *   · THE HANDLE IS THE OBJECT. There, a view is three words a caller carries and the storage belongs to
- *     nobody. Here the view is the only thing that exists to be held, and the storage dies with the last
- *     one — which is what makes a list a thing you can put in a variable rather than a thing you have to
- *     remember to clean up.
- *   · THE SPINE NODE IS GONE. Its cursor and link live in the chunk's own allocation head, so a chunk is
- *     one object instead of two — the same arrangement the stack's chunks already have.
- *   · A PAGE MAY BE REWRITTEN. There, `page` carries "NEVER MOVES" because `car` hands out a pointer
- *     INTO it. Nothing here hands out an address, so a removal compacts and a position is arithmetic.
- *   · A POSITION IS MAINTAINED, NOT PINNED. Every insert and remove adjusts every live view, so a view
- *     keeps naming the elements it named. There, nothing had to, because nothing could move.
- *
- * WHAT CHANGED ON THIS BRANCH, AND WHY THE COMMENTS BELOW SAY WHAT THEY SAY:
- *   · THE CYCLE PARAGRAPH once read *"a cycle is 108 registers on this hardware"*. That was measured
- *     wrong, not merely stale: removing the one real cycle moved VGPR 128 -> 128, spill got WORSE
- *     (`k_eval` 96 -> 186, SGPR ~+300 on three kernels), rate +2.6%, `uses_dynamic_stack` true -> false
- *     everywhere. `claim_rules/list_call_graph_acyclic.py` keys on "NOTHING HERE CALLS ITSELF" — keep it.
- *     The spill figures are `k_eval`'s, and the evaluator has left the card.
- *   · THE CLONE ADAPTER exists because all 19 object rows in both packages named the refusing default
- *     while the deep copy sat here built and tested; `sys__clone` was also the one published verb no
- *     test had called. ⚖ *"wire deep_clone into the list row and test it."* Do not unwire it.
- *   · The picture paragraph's rate figures are `k_eval` figures; the conclusion may survive on a CPU,
- *     the number will not reproduce.
- *   · `deep_clone`'s paragraph carried the same removal as a `MEASURED` fact — VGPR unchanged, spill no
- *     better, 2.6% faster, `uses_dynamic_stack` false on every kernel. All `k_eval`; moved here.
- *   · `create_executable` once consumed its cells where `append` did not; the ruling made them agree.
- *   · `nth` was once advertised as what a walk should use; it re-walks from the head every call, which
- *     is why `sys__sublist__walk` exists.
- *   · `contracts/objects/list.cuh`: `TOTAL` and `TAIL` were derived (the sum was
- *     `MEASURED` at 78 call sites). The invariant census first said FIVE sites; the suite caught the
- *     sixth (the one-value removal) when NINE rows went red — *"expect 3, got 4"*.
- *
- * ⛳ THE ONE THING TO KNOW BEFORE EDITING: the adjust walk is not an optimisation and it is not optional.
- * A mutation that skips it leaves every view naming the wrong element, silently, and no counter moves.
- * ⛳ RETIREMENT: this block goes when nothing in `src` reaches into the old list.
- * ══════════════════════════════════════════════════════════════════════════════════════════════════ */
 /* ══ a list — the values, and the views that name where in them you are ══════════════════════════════
  *
  * A list holds values in order and lets you say where in it you are. Both halves are objects, and only

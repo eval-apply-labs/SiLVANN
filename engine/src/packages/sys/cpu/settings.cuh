@@ -10,17 +10,6 @@
 #include "system_register__header.cuh" /* and the row the boot leaves it in */
 #include "node_array__header.cuh"    /* one dictionary a worker, in an array */
 #include "../contracts/objects/settings.cuh" /* its constants and fault words */
-/* ════════════════════════════════════════════════════════════════════════════════════════════════════
- * AI TEMPORARY COMMENT — FOR THE NEXT AGENT; DELETE WHOLE BEFORE RELEASE. Rules in `README.md`.
- * ⚖ *"sys and the evaluator go host"* takes away the register argument for the host/card split below
- * (*"a parser on the card costs registers on the hot path's own kernel"*) without taking away the split:
- * on a CPU there is no such kernel. The split survives on ownership. Do not repeat the register
- * argument; it is false.
- * ⛳ the file's "on the card" became "inside the engine" — both readers run on the CPU — and
- *   no register sentence is left outside this block.
- * ⛳ RETIREMENT: when the evaluator runs on the host and the register sentence has been dropped — both
- *   true so this block is ready to go.
- * ══════════════════════════════════════════════════════════════════════════════════════════════════ */
 /* ══ the settings — a config file, read inside the engine, answered as a sealed dictionary ═══════════
  *
  * ⚖ ARCHITECT: *"the settings are a sealed dictionary of key-hash -> value string, not let bindings, so

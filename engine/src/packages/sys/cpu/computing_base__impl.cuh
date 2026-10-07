@@ -13,61 +13,6 @@
 #include "bindings__header.cuh"  /* an environment is built over a snapshot, and the reach is armed */
 #include "bindings__impl.cuh"    /* the bindings reach, and an environment over a snapshot */
 #include "node_array__header.cuh" /* a snapshot of an environment is one, and is told apart by kind */
-/* ════════════════════════════════════════════════════════════════════════════════════════════════════
- * AI TEMPORARY COMMENT — FOR THE NEXT AGENT; DELETE WHOLE BEFORE RELEASE. Rules in `README.md`.
- * THE LISP SURFACE THIS FILE OWES — and this one retires when it is BUILT, not when the port ends.
- *
- * The three verbs below are published: `language_contract.cuh` registers `sys__compute`, `sys__result`
- * and `sys__completed`, so a program calls them by name and the C below is what they land in. ⛳ RE-DERIVE
- * THE ROWS RATHER THAN TRUSTING THIS SENTENCE:
- *   grep -n 'sys__compute\|sys__result\|sys__completed' \
- *        packages/sys/contracts/macros/language_contract__verbs.cuh
- *   (`language_contract.cuh` only includes that file, so a grep of it finds nothing.)
- * ⇒ THE RETIREMENT CONDITION AT THE FOOT OF THIS BLOCK IS MET — every row it lists as owed is BUILT.
- * ⚖ ARCHITECT'S NOTATION: `(compute (cu) (bindings) (actions))`.
- *
- * ── WHAT IS OWED ────────────────────────────────────────────────────────────────────────────────────
- *   compute(cu, bindings, actions)   ✅ BUILT. `claim` and then `init`, composed — never either alone,
- *                                    because a claim without a fill leaves a base held by nobody and a
- *                                    fill without a claim is the race `init` refuses.
- *   completed?(cu)                   ✅ BUILT as `sys__completed`. The blocker this row named — *"there is
- *                                    no boolean object in `src`"* — stopped being true when the truth
- *                                    kinds landed, and the verb answers `sys__opcodes__truth` like every
- *                                    other predicate. ⛳ NAMED WITHOUT THE `?`, matching `sys__eq`.
- *   result(cu)                       ✅ BUILT. Once-only is part of the surface rather than an
- *                                    implementation detail: the second caller is handed nothing, and a
- *                                    program can see that. ⛳ IT STILL WAITS, BOUNDED, which is now a
- *                                    convenience rather than the only way to find out — `sys__completed`
- *                                    is what a program polls with.
- *
- * ── WHAT DOES NOT NEED ONE, AND WHY, SO IT IS NOT ADDED LATER OUT OF SYMMETRY ───────────────────────
- *   status      subsumed. `completed` says whether it is over, and an errored computation hands back an
- *               ERROR OBJECT — so a program asks the RESULT what happened, not the base. That is the
- *               whole payoff of an error being a value.
- *   begin       the block's own idle loop, below the language: `while (b == 0) b = begin(me);`. A program
- *               that could call it could start on somebody else's work.
- *   claim       never alone — see `compute`.
- *   finish      the runtime says how a computation went; a program saying so could lie about its own
- *               outcome.
- *   advance     private already, and the reason is written where it is defined.
- *
- * ⭐ AND ONE SHAPE DECISION THAT BELONGS HERE RATHER THAN IN THE OPCODES: A PROGRAM NAMES A CU, NEVER A
- * BASE. `(compute (cu) ...)` takes an index, and the base stays machinery the language cannot hold. That
- * is not squeamishness — a computing base is NEVER RELEASED, so handing one out as a value would put an
- * object into the language that every lifetime rule in this package has an exception for. An index has no
- * lifetime at all.
-
- * ── WHAT CHANGED, TAKEN OUT OF THE ORDINARY COMMENTS ────────────────────────────────────────────────
- *   · `begin` could not fail until the thaw moved into it; the ERROR arms at the thaw and the
- *     environment are what that move added.
- *   · `init` once copied both operands and rolled the first back when the second failed; it retains now.
- *   · `init` once blanked the providers too; that moved into `zzpackage_start`, the one caller that must.
- *   · the generic state store was once package-reachable; `zzpackage_start` is what let it go private.
- *   · the status was once the catch; an error VALUE now arrives at OK and the status only says "unsound".
- *
- * RETIREMENT: delete when the lisp surface below is built. Every line above names something this file
- * OWES rather than something it does, so the block empties as the debt is paid.
- * ════════════════════════════════════════════════════════════════════════════════════════════════════ */
 
 /* ⛔ THE ONE THING `init` PRODUCES THAT IT IS NOT HANDED IS A WORD, AND NOT AN OBJECT. A base that cannot
  * be filled parks the FAULT CODE `SYS__COMPUTING_BASE__FAULT_HALF` in the PROGRAM row and raises, and

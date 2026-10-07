@@ -5,44 +5,6 @@
 #include "../contracts/defaults.cuh"
 #include "heap_node__header.cuh"   /* the node every value in this language is made of */
 #include "../contracts/objects/computing_base.cuh" /* its constants and fault words */
-/* ════════════════════════════════════════════════════════════════════════════════════════════════════
- * AI TEMPORARY COMMENT — FOR THE NEXT AGENT; DELETE WHOLE BEFORE RELEASE. Rules in `README.md`.
- *
- * ⚖ ARCHITECT: *"i think we need to do the split with computing_base ... so for now just create the
- * computing_base__header without touching the base file"*, and *"if you can slice and mechanically copy
- * things i would prefer that, if you make changes let me know where."*
- *
- * ⛳ THE SPLIT IS COMPLETE AND THE TRANSITIONAL DUPLICATION IS GONE. For one commit this file carried a
- * second copy of the two blocks below while `computing_base.cuh` kept the originals; that is closed.
- *
- * ⛔⛔ AND THE TWO FILES COULD NEVER HAVE COEXISTED, WHICH IS WORTH KNOWING BEFORE THE NEXT SPLIT. `MEASURED`:
- * putting a copy of `computing_base.cuh` beside itself in `src/` makes rule ④ report **14 names defined
- * more than once** and the gate goes RED — correctly, because C has no overloading and two definitions of
- * one name do not survive translation. So "write the new file, bless it, then delete the old one" is not a
- * sequence this tree can hold: the middle state does not build and does not pass.
- * ⇒ ★ THE IMPLEMENTATION IS THEREFORE THE ORIGINAL, RENAMED AND CUT — not a copy. `git log --follow` runs
- * straight through it, and the commit that made it is 149 deletions and ZERO insertions, so "did anything
- * change on the way across" is answered by the diff rather than by reading.
- *
- * ── WHAT WAS COPIED AND WHAT WAS WRITTEN, so a reader knows which prose has been reviewed ────────────
- *   ⛔ NAMED, NOT NUMBERED   a line range here is a claim about the file this one was cut out of, and read
- *                     against this file it lands on the wrong block — the span it marks COPIED covers the
- *                     contract this same banner calls NEW. So the blocks are named instead.
- *   COPIED VERBATIM   `what a block is working with` — the slots, why one node, where it lives, and the
- *                     life of one.
- *   COPIED VERBATIM   the slot indices, NO_PROVIDER, the status values, and two of the fault words —
- *                     `FAULT_HALF` and `FAULT_BUSY` — each with the comment that stands over it.
- *   WRITTEN HERE      the other three fault words, `FAULT_NO_THAW`, `FAULT_NO_ENV` and `FAULT_NO_BLOCK`,
- *                     each with its own argument for why it is this file's and not the heap's.
- *   DERIVED           every declaration below, from the definition it stands for. Signatures only.
- *   NEW               the contract — the three lists. The file had none; nothing was displaced to make
- *                     room for it.
- *   NOT MOVED         the implementation's own AI banner, which is about the LISP SURFACE it owes and
- *                     belongs with the implementation until that surface exists.
-
- * RETIREMENT: delete when the old tree is gone. The split it describes has landed and been read; what
- * is left is a record of how it was done, which belongs to the port and not to the file.
- * ════════════════════════════════════════════════════════════════════════════════════════════════════ */
 /* ══ what a block is working with ════════════════════════════════════════════════════════════════════
  *
  * Everything a block needs to reach from anywhere, in one node accessible at the same address for the
