@@ -1,16 +1,7 @@
 #ifndef SILVANN__PACKAGES_NN_CPU_OPCODES_VECTOR__ABI__HEADER_CUH
 #define SILVANN__PACKAGES_NN_CPU_OPCODES_VECTOR__ABI__HEADER_CUH
 /* ══ THE ADAPTER — HOW A PROGRAM REACHES A NEW-ABI VERB THROUGH THE EVALUATOR ════════════════════════
- *
- * AI TEMPORARY COMMENT — FOR THE NEXT AGENT; DELETE WHOLE BEFORE RELEASE. Rules in `README.md`.
- * Where this adapter sits in the move from form-writing verbs to the ruled ABI.
- *   · This file once carried its own `sys__engine__ctx`; the compiler caught it the moment `sys`'s first verb
- *     converted ("typedef redefinition with different types"), and it moved to `sys/verb_abi.cuh`.
- *   · `nn__vector__zzabi_apply_add` against the form-writing add it replaced, now gone from the tree: the
- *     bounds checks and the `room()` calls were word for word the same. Line-by-line in
- *     `docs/cpu_evaluator_verb_abi.md` §③.
- * ⛳ RETIREMENT: with the file — when the last verb has moved and the dispatch calls the new shape.
- * ══════════════════════════════════════════════════════════════════════════════════════════════════ */
+ */
 
 /* The ruled ABI is
  *     sys__heap_node verb(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx);

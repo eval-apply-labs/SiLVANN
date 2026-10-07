@@ -5,31 +5,6 @@
 #include "../contracts/objects/kind.cuh"                /* what a thing IS — the first word of every node */
 #include "heap_node__header.cuh"   /* the node every value in this language is made of */
 #include "../contracts/objects/system_register.cuh" /* its constants and fault words */
-/* ════════════════════════════════════════════════════════════════════════════════════════════════════
- * AI TEMPORARY COMMENT — FOR THE NEXT AGENT; DELETE WHOLE BEFORE RELEASE. Rules in `README.md`.
- * Nothing in it is needed to use the register. It holds what compares this file against the tree it grew
- * out of, so that everything below can be read by somebody who has never seen that tree.
- *
- * WHAT IT CORRESPONDS TO THERE: a getter and a setter over one flat array of `uint64_t`, with a range of
- * rows packages may name and a range above it reserved to the engine. Three differences, each a decision
- * and not an accident:
- *   · A ROW IS A NODE AND NOT A WORD. There, whether a row held a number or an offset was a fact every
- *     caller carried; here the row states it, and a reader of one row needs no second document.
- *   · THERE IS NO RESERVED RANGE. That one had no tenants in it either, and a reserved range inside
- *     somebody else's array is a convention where a second array would be a boundary. Nothing has asked.
- *   · THERE IS NO HOST DOOR. That array is read from outside the device by asking the platform for a
- *     symbol's address. Nothing needs that here: the register is on the host with the rest of the machine.
- *
- * ⛳ AND NOTHING HERE REACHES BACK INTO THAT TREE. The fault channel is this package's own — three words
- * the host owns, handed over by the boot — rather than four rows of that array, and the only
- * include that leaves these files is the container's `manifest__header.cuh`. So this block is a
- * comparison and not a dependency.
- * ⛳ RETIREMENT: **the condition is MET, and that is a note rather than a trigger.** It was *"when the
- * fault channel lands and nothing in the package reaches out"* — the channel is this package's own and
- * the reaches are gone, which is what the paragraph above now says. ⛔ THE BLOCK STILL STANDS: these are
- * a SET and they go as a set, at release, in one act — see the rule in `README.md`. A block deleted
- * because its own condition fell due leaves the other twelve half-referring to it.
- * ════════════════════════════════════════════════════════════════════════════════════════════════════ */
 /* ══ the system register — the one thing a block can name without having been handed it ═══════════════
  *
  * ⚖ ARCHITECT: *"system register is a pure c array, with its getter setter methods and its enum for the

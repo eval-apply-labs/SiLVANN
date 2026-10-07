@@ -1,36 +1,5 @@
 #ifndef SILVANN__PACKAGES_SYS_CPU_STACK__HEADER_CUH
 #define SILVANN__PACKAGES_SYS_CPU_STACK__HEADER_CUH
-/* ════════════════════════════════════════════════════════════════════════════════════════════════════
- * AI TEMPORARY COMMENT — FOR THE NEXT AGENT; DELETE WHOLE BEFORE RELEASE. Rules in `README.md`.
- *
- * ⚖ ARCHITECT: *"look at the stack split"*, under the standing preference to *"slice and mechanically
- * copy things ... if you make changes let me know where."*
- *
- * WHAT WAS COPIED AND WHAT WAS WRITTEN:
- *   COPIED VERBATIM  `sys_stack — a chunked stack...` (:60-270) — the operations, the same four over a
- *                    chunk, why the cell tags matter, when a reference is given up, the chunk head
- *                    layout, `ALLOC`/`SLOTS`, the `sys__stack_chunk` struct, both static asserts, the
- *                    failure discussion and the two fault words.
- *   COPIED VERBATIM  `THE SURFACE — A STACK IS AN OBJECT...` (:643-666) — the holder's two nodes, the
- *                    granule it costs, where the lock lives, and `SYS__STACK__CURRENT_STACK_CHUNK`.
- *   DERIVED          the nineteen declarations, from the definitions they stand for.
- *   NEW              the contract. The file argued every clause of it somewhere and never as an
- *                    obligation; nothing was displaced to make room.
- *   NOT MOVED        the implementation's own AI banner, which is a to-do list about ITS code.
- *
- * ⛳ THE TWO COPIED BLOCKS ARE IN SOURCE ORDER — chunk tier first, surface second — because that is how
- * the file was written and reordering them would be a change rather than a slice. A reader meeting a
- * header usually wants the surface first, so this is worth flipping if you agree; it is one move and
- * nothing depends on the order.
- *
- * ⛔ AND THE SPLIT BUYS NO ORDERING HERE, UNLIKE THE OTHER TWO. Both halves must still come after
- * `heap__header.cuh`: the asserts name `SYS__HEAP__CHUNK_NODES` and the layout names `SYS__ALLOC__ARRAY_GRANULE`. The
- * split is for READING, which is the architect's own reason for wanting it, and it is worth saying that
- * the usual second reason does not apply — so nobody later "fixes" the include order expecting a gain.
-
- * RETIREMENT: delete when the old tree is gone — the block positions this file against the one it was
- * split out of, and neither half of that comparison outlives the port.
- * ════════════════════════════════════════════════════════════════════════════════════════════════════ */
 /* What this file needs, named where a reader — and an editor — can follow it. */
 
 /* ══ a stack — a chunked LIFO held in a flat array of AST nodes ══════════════════════════════════════

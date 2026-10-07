@@ -1,21 +1,7 @@
 #ifndef SILVANN__PACKAGES_NN_GPU_DOORS_CUH
 #define SILVANN__PACKAGES_NN_GPU_DOORS_CUH
 /* ══ ⭐⭐⭐ nn's DOORS — WHERE A VERB STOPS BEING CODE AND BECOMES A LAUNCH ════════════════════════════
- *
- * AI TEMPORARY COMMENT — FOR THE NEXT AGENT; DELETE WHOLE BEFORE RELEASE. Rules in `README.md`.
- * Where these doors came from, and what the move to a host evaluator costs.
- *   · The bodies behind these doors are the serial loops that ran inlined into `k_eval`.
- *   · The first generator wrote all 24 wrappers identically and was wrong on the five that return a
- *     value; they were found by extracting each body's RETURN TYPE rather than trusting the shape.
- *   · The host-TU vendor-freedom rule below was recorded in commit `8f9b0abb`.
- *   · The 1.654 µs / 28.816 µs figures: `measurements/2026-09-23_S107_how_an_overflow_gets_home.md`.
- *   · `vector__at` was left as a kernel so the wrapping commit stayed mechanical; it is flagged below
- *     rather than special-cased.
- *   · the 24 kernels and 24 doors were written out by hand (the generator that first
- *     wrote them is not in the tree) and the doors took `void*`; both became the list below in one
- *     rearrangement, with every kernel's instructions compared before and after.
- * ⛳ RETIREMENT: when the host evaluator is the only evaluator and these doors are its only callers.
- * ══════════════════════════════════════════════════════════════════════════════════════════════════ */
+ */
 
 /* ⚖ *"do the rearrangement, sys and the evaluator go host."*
  *

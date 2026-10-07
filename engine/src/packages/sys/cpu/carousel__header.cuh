@@ -4,45 +4,6 @@
 /* What this file needs, named where a reader — and an editor — can follow it. */
 #include "../contracts/defaults.cuh"
 #include "../contracts/objects/carousel.cuh" /* its constants, fault words and layouts */
-/* ════════════════════════════════════════════════════════════════════════════════════════════════════
- * AI TEMPORARY COMMENT — FOR THE NEXT AGENT; DELETE WHOLE BEFORE RELEASE. Rules in `README.md`.
- * Nothing in it is needed to USE a carousel or to change one; it is here because the three things below were each argued the wrong way
- * first, and the corrections are worth more to whoever writes the NEXT contract than to anyone reading
- * this one. ⚖ ARCHITECT: *"mostly i removed retractions or whatever a user looking for the contract
- * would not be interested in."* Right — so they live here instead of in the prose below.
- *
- * ① THE STALEST PART OF A CONTRACT IS THE PART THAT PROMISES ABSENCE.
- *   "WHAT IT DOES NOT DO" read *"it does not allocate, does not free, does not zero anything on the way
- *   out — there is no way out"* for two commits AFTER `create` and `dispose` landed and made every clause
- *   of it false. It survived because nothing rereads a negative claim: a list of what a thing does not do
- *   has no caller, no test and no compiler to notice it aged. Watch for this in the headers still to be
- *   split.
- *
- * ② THE CONTRACT WAS WORTH WRITING FOR WHAT IT REFUTED, NOT FOR WHAT IT RECORDED.
- *   The "loud refusal" clause claimed *"exactly one silent no"* and was FALSE of the code when written —
- *   `add` and `take` answered a null ring with a bare `false`. Writing the sentence is what found them.
- *   A contract is a claim ABOUT the code, so it can be wrong about it, and that is the whole value.
- *
- * ③ A JUSTIFICATION WRITTEN FOR A DECISION ALREADY TAKEN READS AS SETTLED BECAUSE THE DECISION WAS.
- *   The size argument first claimed that rounding STRICTLY past a power of two is what makes
- *   `head == tail` mean empty. It is not, and never was — `add`'s ceiling does that at any size. The
- *   correct reading is below: the power of two is the reason, and the surplus is headroom. Marking it
- *   `MEASURED` would not have caught this; it was reasoning, and reasoning is where this project slips.
- *
- * ⛳ AND ONE THING THAT IS NOT A RETRACTION, KEPT HERE SO IT IS NOT MISTAKEN FOR ONE: the width
- *   parameter's byte-saving argument was priced and REFUTED — 768 B against a 15 MB pool. That refutation
- *   IS live justification and stays in the prose below, because it is why the parameter is a CAPACITY
- *   rather than an optimisation.
-
- * ⛳ THE BITMASK THIS RING REPLACED, kept for the comparison. It walked the pool from an origin fixed per
- *   block, so "which chunk is free" answered "the first one after the same place, every time".
- *   `MEASURED` on the fixture: claim/free ten times gave index 1 ten times; ten claims without freeing
- *   gave 1..10. Finding a free chunk was O(n) in the BUSY ones. It had NO shared state — every chunk its
- *   own word — so two blocks contended only when reaching for the same chunk.
- *
- * RETIREMENT: delete when the old tree is gone. Everything above compares this ring against the
- * bitmask it replaced, and that comparison has no subject once the bitmask is not there to compare to.
- * ════════════════════════════════════════════════════════════════════════════════════════════════════ */
 /* ══ THE CAROUSEL — A RING OF NUMBERS, AND WHAT IS FREE IS ONE ══════════════════════════════════════
  *
  * A ring of numbers with two cursors. Things are added at the head and taken from the tail, both cursors

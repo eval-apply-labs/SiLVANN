@@ -7,29 +7,7 @@
 #include "../heap_object__header.cuh"                /* holds, and the release the bridge performs */
 #include "../error.cuh"                              /* the error value a refusal answers */
 /* ══ THE VERB BOUNDARY — ONE BRIDGE, USED BY EVERY VERB IN THE RULED SHAPE ══════════════════════════
- *
- * AI TEMPORARY COMMENT — FOR THE NEXT AGENT; DELETE WHOLE BEFORE RELEASE. Rules in `README.md`.
- * What positions this file in the move to the ruled verb shape, and the findings that shaped it.
- *   · THE BRIDGE EXISTS so verbs moved ONE AT A TIME while the rest kept working — changing the dispatch
- *     wholesale would have moved all 65 in one commit and a failure would have had 65 candidate causes.
- *   · THE FOUR VARIADIC VERBS (`begin` `prog1` `remove_bindings` `let`) STAY ON THE OLD SHAPE, BY
- *     RULING. Their converted bodies were written and correct; they are in this
- *     file's history, one `git show` away, and they went back because of the ceiling and nothing else.
- *     Neither suite caught the ceiling (host 1630/0 and device 445/0 both passed with the cap at 8,
- *     because neither builds a wide `begin`); only `test/src_host_eval_rate.cpp` did, because it needed
- *     400 forms for a RATE. A probe built to measure something else was the only thing that could see it.
- *   · `ctx.base` EXISTS BECAUSE A FIRST CENSUS SAID "ctx IS UNUSED BY EVERY sys VERB" AND WAS FALSE FOR
- *     THE TWO THAT MATTER: 29 of 31 bodies wrote `(void)base;`, and the 2 were the allocators (`clone`,
- *     `create`). A count that reads as a rounding error hid every verb in the tier that makes something.
- *     The old signature took `base` as a parameter; the ruled one does not, so the bridge supplies it.
- *   · THE CTX DEFAULT IS A DEFINITION, NOT AN `extern`. The first version declared it and defined it
- *     nowhere, which the compiler accepts and the LINKER refuses — `lld: error: undefined hidden symbol:
- *     sys__engine__ctx_current()`, ten minutes into a build.
- *   · THE OWNERSHIP RULE BELOW WAS WRITTEN AFTER A LEAK: before it, `sys__engine__abi__error` answered an OWNED
- *     hold and `return argv[2];` a BORROWED one, the bridge released neither, and every refusal orphaned
- *     one error object. The A/B table below is that measurement.
- * ⛳ RETIREMENT: at release, with the rest.
- * ══════════════════════════════════════════════════════════════════════════════════════════════════ */
+ */
 /* ══ WHAT A VERB IS ═══════════════════════════════════════════════════════════════════════════════════
  *
  * ⚖ *"the abi will want the proper parameters to be invoked and will return a value

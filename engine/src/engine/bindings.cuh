@@ -1,23 +1,5 @@
 #ifndef SILVANN__ENGINE_BINDINGS_CUH
 #define SILVANN__ENGINE_BINDINGS_CUH
-/* ════════════════════════════════════════════════════════════════════════════════════════════════════
- * AI TEMPORARY COMMENT — FOR THE NEXT AGENT; DELETE WHOLE BEFORE RELEASE. Rules in `README.md`.
- * The use-site and register counts below are `k_eval` figures, taken while the evaluator ran on the card
- * (⚖ *"sys and the evaluator go host"*): the conclusion may survive on a CPU, the numbers will not
- * reproduce. Kept because a measured number with a dead subject is still evidence of what was tried.
- *   · the old engine spread the interpreter's state across SIX locals with 352 use sites (`unev` 128,
- *     `frame_base` 81, `env_arm` 42, `unev_pos` 50, `unev_valid` 33, `frame_cursor` 18); `MEASURED`
- *     S74: 31 of its 51 real VALUE registers were the paged-list cursor plus the frame machine.
- *   · the argument-count dose curve, `MEASURED` on the old engine: 2 pointer args at 8 call sites
- *     126 -> 125 registers (free); 7 args at 4 call sites 126 -> 139 (+13). Three arguments sat at the
- *     flat end of it, `REASONED` from those two rows.
- *   · a return address would have reintroduced `frame_base`/`frame_cursor`, 13 of those 51 registers.
- *   · the struct below was the port's first scaffold: an opaque pointer at an environment not yet
- *     written, so the tree could build from commit one. `sys__bindings` replaced it.
- *     ITS `SysSpineBase base` FIELD IS GONE: the type was the old tree's, a borrow from `src_old/`, and
- *     nothing read it.
- * ⛳ RETIREMENT: MET — the evaluator runs on the host. Kept until release, when the whole block goes.
- * ══════════════════════════════════════════════════════════════════════════════════════════════════ */
 /* ══ THE BINDINGS OBJECT — "the environment becomes simply a pointer" (architect) ═══════════════════════
  * ⭐ THE ENVIRONMENT IS ONE OBJECT, NOT LOOSE LOCALS: it is `sys__bindings`, an object in the package with
  *   its own header, its own rows and its own verbs, and the evaluator is handed a reference to it.

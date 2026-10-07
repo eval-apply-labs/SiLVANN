@@ -5,32 +5,6 @@
 #include "../contracts/objects/kind.cuh"                /* what a thing IS — the first word of every node */
 #include "heap_node__header.cuh"   /* the node every value in this language is made of */
 #include "../contracts/objects/bindings.cuh" /* its constants and fault words */
-/* ════════════════════════════════════════════════════════════════════════════════════════════════════
- * AI TEMPORARY COMMENT — FOR THE NEXT AGENT; DELETE WHOLE BEFORE RELEASE. Rules in `README.md`.
- * Nothing in it is needed to use the bindings. It holds what compares this file against the tree it grew
- * out of, so everything below can be read by somebody who has never seen that tree.
- *
- * WHAT IT CORRESPONDS TO THERE: an array of keys, each key owning a paged list of the values bound to it,
- * plus a separate per-CU arrangement of three tables — one writable, one a read-only clone, one shared —
- * selected by a predicate re-derived at three call sites. Four differences, each a decision:
- *   · A SYMBOL'S SHADOW STACK IS A STACK. That tree reaches a symbol's current value by walking a paged
- *     list, which is a data-dependent walk on the hottest path in the interpreter. Shadowing is strictly
- *     last-in-first-out, so the walk buys nothing and the edge access is the whole access pattern.
- *   · THE SHARED TABLE IS NOT A BINDINGS. It is a plain array, passed in — so several readers name one
- *     table rather than each being handed a copy, and nothing is cloned per thread.
- *   · THE TIER IS NOT A PREDICATE. Which tier a read lands in is decided by what is in the scope table,
- *     once, at the place that reads it. That tree decided it three times from surrounding state, and the
- *     three disagreed when a binding form straddled a region boundary.
- *   · UNBOUND IS AN OBJECT, NOT A SENTINEL. There, a total miss publishes the same null a bound-to-
- *     nothing symbol has, so the environment cannot report its own failures. Here they are different
- *     values and the answer carries its own reason.
- *
- * ⛳ THE ONE THING TO KNOW BEFORE EDITING: nothing here fills a table with unbound markers on the way
- * in. A missing base is answered from the object's own error, and a snapshot writes the marker only
- * where the source had no value. If you find yourself adding a fill to `create`, that is the shape that
- * has broken — two bindings over one table would each overwrite what the other bound.
- * ⛳ RETIREMENT: this block goes when nothing in `src` reaches into the old environment.
- * ══════════════════════════════════════════════════════════════════════════════════════════════════ */
 /* ══ the bindings — what a name means right now, and what it meant before ═════════════════════════════
  *
  * A program binds names. Something gives a name a value, an inner scope may give the same name another,

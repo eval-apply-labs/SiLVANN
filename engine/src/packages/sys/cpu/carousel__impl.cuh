@@ -5,42 +5,6 @@
 #include "fault__header.cuh"
 #include "carousel__header.cuh"
 #include "silicon/silicon__header.cuh"
-/* ════════════════════════════════════════════════════════════════════════════════════════════════════
- * AI TEMPORARY COMMENT — FOR THE NEXT AGENT; DELETE WHOLE BEFORE RELEASE. Rules in `README.md`.
- * Nothing in it is needed to use a carousel or to change one. ⚖ ARCHITECT, naming two spans of this file: *"111 to 136 ... and also 140
- * to 155 are history for the ai not for a human reader."* Right on both, and one of them was worse than
- * history — it had gone FALSE, which is why the whole class is worth getting out of the prose.
- *
- * ① A SUPERSEDED SECTION HEADER SAT ABOVE CODE THAT CONTRADICTED IT, AND THE FILE READ AS IF BOTH WERE
- *   TRUE. `CREATE AND DISPOSE: THE PAIR, AND THE ROOM IS THE CAROUSEL'S OWN` described a STATIC POOL —
- *   *"the room is static"*, *"a fixed number of carousels"*, *"no dtype, no row in the kind list"* — and
- *   the next section, eight lines down, said the room comes from the platform and every compile-time
- *   limit is gone. Two adjacent headers, opposite claims, one commit apart.
- *   ⇒ ★ A SECTION HEADER IS THE LAST THING A REWRITE REVISITS, because the code under it changed and
- *     compiled and passed, and nothing reads the sign over the door. Deleted rather than corrected: the
- *     section it announced no longer exists.
- *
- * ② THE THREE RULINGS THAT GOT HERE, kept because each was wrong once in a way that would be re-made:
- *   · "beyond the heap" was read as "no allocator" and meant "not THIS engine's allocator".
- *     ⇒ ★ OWES NOTHING TO THE HEAP AND OWES NOTHING TO ANY ALLOCATOR ARE DIFFERENT CLAIMS, and the
- *       second costs a fixed count and a fixed size where the first costs nothing.
- *   · the static pool it produced had a `NO_ENTRY` fault, and that was the tell: *"the pool is full"* and
- *     *"the machine is out of memory"* are different news, and only one of them was ever true.
- *   · *"there is nothing to deallocate"* was a true answer to *"should dispose not deallocate memory?"*
- *     — of the pool, for one commit. It is a free now.
- *
- * ③ AND ONE ORDERING FACT THAT ALSO STOPPED BEING TRUE. The banner here said this file *"comes after"*
- *   `heap.cuh` *"because create allocates"*. It does not: `MEASURED` — this file names ZERO symbols from
- *   the heap, while `heap__impl.cuh` includes `carousel__header.cuh` and calls `create`, so the
- *   dependency runs the other way. ⛳ AND THERE IS NO ADJACENCY TO APPEAL TO EITHER: the declarations are
- *   rolled up by `manifest__header.cuh` and the definitions by `manifest.cuh`, two separate lists, and
- *   the second says of itself that it is a LIST AND NOT AN ORDER. The split into header and
- *   implementation survives ONLY as a reading preference, which is what the architect asked for; the
- *   ordering that forced it is gone.
-
- * RETIREMENT: delete when the old tree is gone — every item above is a claim this file USED to make,
- * kept only so that nobody restores one of them.
- * ════════════════════════════════════════════════════════════════════════════════════════════════════ */
 /* ══ THE CAROUSEL, DEFINED ═══════════════════════════════════════════════════════════════════════════
  * The contract, the arguments and the type are in `carousel__header.cuh`. This file owes nothing to
  * anything else in the package: a compare-and-swap and a wait from the silicon seam, room from the same

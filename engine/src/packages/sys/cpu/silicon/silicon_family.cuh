@@ -6,17 +6,6 @@
 #include "../../contracts/abi/gpu.cuh"       /* sys's doors, which every family carries first */
 #include "../../../manifest__header.cuh"     /* sys's package id, where its doors sit in a family */
 
-/* ════════════════════════════════════════════════════════════════════════════════════════════════════
- * AI TEMPORARY COMMENT — FOR THE NEXT AGENT; DELETE WHOLE BEFORE RELEASE. Rules in `README.md`.
- * What this replaced, so nobody restores a process-wide card.
- *   · It was `gpu/silicon/boundary/card.cuh`: a list of offered cards, ONE of which was "now" — the
- *     first offered, or whichever `card_select(name)` named — and every door went through "now". The
- *     family was a property of the PROCESS and no caller could say which silicon it meant.
- *   · Now the table has a slot per family and every door takes the family. The engine records the family it
- *     stood up on and passes it; nothing global decides for a caller.
- * ⛳ RETIREMENT: at release, with the rest.
- * ════════════════════════════════════════════════════════════════════════════════════════════════════ */
-
 
 /* ══ ⭐⭐⭐ WHICH SILICON, NAMED BY THE CALLER ═══════════════════════════════════════════════════════════
  *

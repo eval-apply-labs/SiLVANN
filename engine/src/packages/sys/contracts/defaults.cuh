@@ -2,14 +2,6 @@
 #define SILVANN__PACKAGES_SYS_CONTRACTS_DEFAULTS_CUH
 
 /* Nothing in this package has to come first: this file names none of it. */
-/* ════════════════════════════════════════════════════════════════════════════════════════════════════
- * AI TEMPORARY COMMENT — FOR THE NEXT AGENT; DELETE WHOLE BEFORE RELEASE. Rules in `README.md`.
- *   · `POLL_CYCLES`' note priced a try at 820 ns — the card's figure, from when the evaluator ran there.
- *   · `LOCK_BACKOFF_CYCLES`' note reasoned about a HIP arm of `wait_cycles` (`s_sleep` in ~64-cycle units,
- *     every block id below fifty-four flattened to one unit) and a CUDA `__nanosleep` arm. Neither arm
- *     exists in this tree; the host's pause loop is the only backend.
- * ⛳ RETIREMENT: at release, with the rest.
- * ════════════════════════════════════════════════════════════════════════════════════════════════════ */
 /* ══ the numbers you can turn, and what they are when nobody turns them ══════════════════════════════
  *
  * Values that are a CHOICE rather than a consequence. Everything here could be different without anything

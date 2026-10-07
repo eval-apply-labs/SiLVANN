@@ -8,26 +8,6 @@
 #include "heap__header.cuh"
 #include "stack__header.cuh"
 /* ════════════════════════════════════════════════════════════════════════════════════════════════════
- * AI TEMPORARY COMMENT — FOR THE NEXT AGENT; DELETE WHOLE BEFORE RELEASE. Rules in `README.md`.
- * Nothing in it is needed to read, use, or maintain the code below; every entry is either a comparison against code that will not
- * exist by then, or a restatement of something the prose below already says. It is here only so an
- * agent working during the port does not re-derive a settled decision or re-propose a refused one.
- *
- * THE UNLOCKED PUSH ON A HOST. Its reachability argument costs the move to runner threads nothing, but
- *   there will be more callers that could break it, so the falsifier is easier to trip, not different.
- *   The lock figure that stood beside it — `MEASURED` 2,255 cycles a take-and-release, twice per drained
- *   object, 13.1% of everything a teardown spent — is a `k_eval` figure and will not reproduce on a CPU.
- *   It is kept here and nowhere else.
- * THE FAULT CODES. `transfer` checked the heap's launch conditions on every push until those were split
- *   into HPNP and HPNB; `sys__heap__make` names the cause since, so the per-push check went.
- * PEEK'S LOCK. Readers did not lock at first; the lock was added for the three-step race described
- *   over `sys__stack__peek`.
- *
- * RETIREMENT: delete when the port is complete and the old tree is gone. No triage required — if an
- * entry below ever becomes load-bearing for a reader, move it into the prose instead of keeping it
- * here, because this block is deleted wholesale and without being read.
- * ════════════════════════════════════════════════════════════════════════════════════════════════════
- *
  * WHY A NEW TYPE RATHER THAN THE EXISTING PAGED LIST.
  *   Architect: "the paged list earns its keep when it can have adds in the middle; since this one is
  *   strictly accessed from the edge a simple array is cheaper." The list's normalize loop was measured

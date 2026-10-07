@@ -5,35 +5,7 @@
 #include "../../contracts/abi/gpu.cuh"   /* the arithmetic it asks a family for */
 
 /* ══ ⭐⭐⭐ THE COMPUTE, WITHOUT THE LANGUAGE — WHAT BECOMES A KERNEL ══════════════════════════════════
- *
- * AI TEMPORARY COMMENT — FOR THE NEXT AGENT; DELETE WHOLE BEFORE RELEASE. Rules in `README.md`.
- * How these bodies came out of the verbs, and what the extraction did and did not change.
- *   · THE MOVE IS ATOMIC, which is why every body was extracted before anything flipped: `nn`'s verb
- *     bodies call `sys`, so `sys` cannot go host while a body is still device code, and a device body
- *     cannot launch a kernel. Half a port does not run.
- *   · At extraction each body stayed `__device__ inline`, called in place, so the extracting commit
- *     changed no behaviour and the 1630 host and 445 device checks were its oracle. The `__global__`
- *     wrappers and `extern "C"` doors in `../doors.cuh` are the second, riskier step.
- *   · Every body is the serial loop that sat in its verb, moved as it was — not parallelised. The
- *     DeltaNet three were flagged as the port's risk from the start.
- *   · `over` was a `bool` in the verbs; it is an `unsigned int` here because that is what `atomicOr`
- *     takes, and the verb reads `!= 0` exactly as it read the bool.
- *   · TurboQuant's two bodies were the last to split: their row loop called `sys__opcodes__fails` mid-
- *     compute, which is why they answer a bool now.
- *   · The census that counted 24 buffer verbs keyed on a direct `nn__primitives__room()` call and missed
- *     `rotate`, which was already factored into pointer-only blocks. The count is 25.
- *   · HELPERS, moved here. The first extraction left behind every function the loops call —
- *     pure compute sitting in `*__impl.cuh`. The first draft of the helpers banner said five; the closure
- *     needed three more, then two more. Nothing noticed because `kernels.cuh` shares a translation unit
- *     with the verbs, so the split existed in the FILING and not in the BUILD. Compiling the device TU by
- *     itself and reading the LINKER found them; `-fsyntax-only` on the same TU reported ZERO errors
- *     (0 against 5 on identical input) — a declaration is all a syntax pass needs. The device TU now
- *     compiles and links with no `sys` in it, which is what proves "② reaches for nothing in `sys`".
- *   · The three private TurboQuant helpers were first appended after `zzprivate_weight`, which calls
- *     them, and the device TU failed on exactly those three names.
- *   · `hadamard__header.cuh`, `turboquant__header.cuh` carry forward declarations for this file.
- * ⛳ RETIREMENT: when the host evaluator is the only evaluator.
- * ══════════════════════════════════════════════════════════════════════════════════════════════════ */
+ */
 
 /* ⚖ *"do the rearrangement, sys and the evaluator go host."*
  *

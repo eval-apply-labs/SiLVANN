@@ -8,16 +8,6 @@
 #include "../bindings__header.cuh"     /* the scope verbs are one line over an environment */
 #include "../list__header.cuh"         /* every one of them is handed a form and rewrites it */
 #include "../../contracts/objects/opcodes.cuh" /* its constants and fault words */
-/* ════════════════════════════════════════════════════════════════════════════════════════════════════
- * AI TEMPORARY COMMENT — FOR THE NEXT AGENT; DELETE WHOLE BEFORE RELEASE. Rules in `README.md`.
- *   · The one-read PoC's note cited *"`MEASURED`: a cell costs 8.26 FLAT accesses and a form
- *     450.3"* (`scripts/src_apply_width_census.py`). That is a rocprof count on `eng__abi__k_eval`; the
- *     evaluator has left the card and the figure does not transfer.
- *   · `sys__opcodes__fails` was `zzpackage_` when `nn`'s `getnew` became the first
- *     verb outside `sys` and the `c_subset` gate flagged the call. The float bit move lived here as a
- *     `zzprivate_` pair before it went to `heap_node__header.cuh`.
- * ⛳ RETIREMENT: at release, with the rest.
- * ════════════════════════════════════════════════════════════════════════════════════════════════════ */
 /* ══ the opcodes a first program needs ═══════════════════════════════════════════════════════════════
  *
  * The verbs here and in `opcodes_abi.cuh` are a whole small language between them: names can be given

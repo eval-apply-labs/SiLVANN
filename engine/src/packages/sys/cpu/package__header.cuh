@@ -4,14 +4,6 @@
 /* What this file needs, named where a reader — and an editor — can follow it. */
 #include "heap_node__header.cuh"   /* a handler is handed a base, and a base is a node */
 #include "../contracts/objects/package.cuh" /* its constants, fault words and layouts */
-/* ════════════════════════════════════════════════════════════════════════════════════════════════════
- * AI TEMPORARY COMMENT — FOR THE NEXT AGENT; DELETE WHOLE BEFORE RELEASE. Rules in `README.md`.
- *   · `hatch_stands` and `entry_stands` exist because a package could first ask for no
- *     room; until then an empty entry meant "missing", nn's init refused on it, and the no-config suite
- *     boots then refused too — the third instance in two days, after `host_section` and `host_value`.
- *   · The hatch fill once looped inside a `__global__` and could not be tested without a boot.
- * ⛳ RETIREMENT: at release, with the rest.
- * ════════════════════════════════════════════════════════════════════════════════════════════════════ */
 /* ══ STANDING THE PACKAGES UP, AS A PROGRAM ══════════════════════════════════════════════════════════
  *
  * The language and the evaluator are stood up in C, by the boot, because nothing can run before they

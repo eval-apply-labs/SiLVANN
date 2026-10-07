@@ -1,19 +1,5 @@
 #ifndef SILVANN__ENGINE_EVAL_CUH
 #define SILVANN__ENGINE_EVAL_CUH
-/* ════════════════════════════════════════════════════════════════════════════════════════════════════
- * AI TEMPORARY COMMENT — FOR THE NEXT AGENT; DELETE WHOLE BEFORE RELEASE. Rules in `README.md`.
- * The rates this file's decisions were taken on were measured on the card evaluator (`k_eval`), and none
- * has been re-run on the host runners. Kept as what was tried, not as what this build does:
- *   · the list pool with the lazy thaw: 1.48x off the whole dispatch at every granularity, the lazy half
- *     alone cost-neutral (commit 15018c7e has the table).
- *   · a FROZEN_LIST tag rather than an `(unthaw arr)` verb: the verb would be a whole apply, ~420 memory
- *     accesses, to save the ~240 a form's birth and death cost.
- *   · the narrow tag read in `resolve_bindings`: the sweep cost 29.0 accesses per apply on a form with no
- *     names, the narrow read recovered 3.8 of them (13%, 0.9% of the rate), because LLVM already
- *     dead-coded seven of the eight `flat_load_dwordx2` a whole-node read looks like.
- *   · the stack of places over recursion: on gfx906 a cycle in the call graph cost 108 registers.
- * ⛳ RETIREMENT: when the pool and the lazy thaw are re-measured on the host runners, or at release.
- * ══════════════════════════════════════════════════════════════════════════════════════════════════ */
 
 /* What this file needs: the package contract. Every name the evaluator calls is a `sys__` one, and they
  * reach it through `engine/manifest.cuh`, which includes the packages before any engine file; the

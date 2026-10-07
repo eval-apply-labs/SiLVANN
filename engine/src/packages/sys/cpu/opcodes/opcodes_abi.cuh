@@ -1,46 +1,7 @@
 #ifndef SILVANN__PACKAGES_SYS_CPU_OPCODES_OPCODES_ABI_CUH
 #define SILVANN__PACKAGES_SYS_CPU_OPCODES_OPCODES_ABI_CUH
 /* ══ `sys` VERBS IN THE RULED SHAPE — the bodies. ▶ `verb_abi.cuh` for the bridge and who owns what. ══
- *
- * AI TEMPORARY COMMENT — FOR THE NEXT AGENT; DELETE WHOLE BEFORE RELEASE. Rules in `README.md`.
- * Nothing in it is needed to read the verbs below. It holds what compares them against the form-writing
- * bodies they replaced, deleted — `git log -S` on a body's name finds the last version.
- *
- * THE TRANSLATION, applied to each old body and nothing else:
- *     sys__sublist__length(form) != N    ->  argc != N-1
- *     sys__sublist__nth(form, i)         ->  argv[i-1]
- *     sys__opcodes__fails(form, CODE)    ->  return sys__engine__abi__error(CODE);
- *     sys__opcodes__becomes(form, &x)    ->  return x;
- * The oracle is the host suite, which drives these verbs through `eng__eval`; a conversion that altered
- * behaviour would move it. No arithmetic was retyped: the `which` switch, the int/int rule, the widening
- * rule and the `truth()` calls moved as they were.
- *
- * WHERE THE TABLE IS NOT THE WHOLE CHANGE:
- *   · ARITY. The object verbs never checked it — they relied on `nth` refusing an index past the end,
- *     which raised a range fault and answered nothing. `argv` has no such backstop, so every verb now
- *     states its arity and a short call answers an ARITY error value instead. `bindings__set` had only a
- *     `form == 0` guard and took three range faults on a short call. A safety property can live in the
- *     thing being replaced rather than in the code being read, and the table cannot see it.
- *   · THE `form == 0` GUARDS ARE GONE: the bridge refuses a zero-length form first, so the declared
- *     exemption in `verb_never_abandons_form` has nothing left to guard.
- *   · `if`, `begin` and `prog1` wrote the ownership rule out by hand (`retain` · `becomes` · `release`).
- *     Only the `retain` survives here; the bridge does the rest. All three did it identically, which is
- *     why the rule could be stated once in `verb_abi.cuh`.
- *   · `clone`'s QUOTED_LIST tag was found by the verb starting to work. While every kind's clone column
- *     was the universal refusal the line was unreachable; the first list cloned, `(7 9)`, came back a
- *     bare OBJECT_REFERENCE, the scan descended into it and tried to apply `7` (NOT_A_VERB). Its trailing
- *     `release` of the maker's hold is now the hold it answers with.
- *   · `create`'s bound moved from `i + 2 < length(form)` to `i + 1 < argc` — the same bound. It reads only
- *     what is there because asking for all five raised five times for one `(sys__create ERROR <code>)`.
- *   · `package__init`: `sys__package__list_of` takes a form, so its two checks are inlined here rather
- *     than the helper being converted.
- *   · `SYS__OPCODES__ZZPRIVATE_ARITY3` pasted three statements; here the test is one expression. The nine
- *     arithmetic verbs once began as one macro expanded three times, and `verb_never_abandons_form` went
- *     red with "examined nothing for 9 of 51 verbs" — a macro-pasted name is not in the text.
- *   · `register_set` answered its borrowed operand without a hold of its own, one short once the bridge
- *     released it. Fixed with a test in the host suite's register section.
- * ⛳ RETIREMENT: at release, with the rest — the form-writing bodies it compares against are deleted.
- * ══════════════════════════════════════════════════════════════════════════════════════════════════ */
+ */
 
 /* What this file needs, named where a reader — and an editor — can follow it. */
 #include "../../contracts/defaults.cuh"      /* the dials the verbs read */

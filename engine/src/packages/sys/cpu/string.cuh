@@ -7,18 +7,6 @@
 #include "heap_object__header.cuh" /* the head every allocation begins with, and what it records */
 #include "heap__header.cuh"        /* where the room comes from, and how wide a chunk is */
 #include "../contracts/objects/string.cuh" /* its constants and fault words */
-/* ════════════════════════════════════════════════════════════════════════════════════════════════════
- * AI TEMPORARY COMMENT — FOR THE NEXT AGENT; DELETE WHOLE BEFORE RELEASE. Rules in `README.md`.
- * The inlined-against-out-of-line timing on `zzprivate_compress` is a `k_eval` figure, and the
- * evaluator has left the card (⚖ *"sys and the evaluator go host"*): the conclusion may survive on a CPU,
- * the number will not reproduce.
- * The figure itself was taken out of the ordinary comment and LIVES HERE: `MEASURED`, fib(15),
- * three interleaved rounds of twenty — 2084.5 ms inlined against 2084.0 out of line, inside the spread,
- * with the bundle 16 KB smaller.
- * The file header also said, of names: "Until now a name was a number the composer dealt on the host, and
- * the text it stood for never reached the card" — the comparison, kept here and out of the header.
- * ⛳ RETIREMENT: when the evaluator runs on the host.
- * ══════════════════════════════════════════════════════════════════════════════════════════════════ */
 /* ══ a string — text the machine holds, rather than a number somebody made up for it ══════════════════
  *
  * ⚖ ARCHITECT: *"the dictionary was a detour because we wanted the init opcode of nn to reference let

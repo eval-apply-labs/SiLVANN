@@ -1,17 +1,6 @@
 #ifndef SILVANN__PACKAGES_SYS_CONTRACTS_MACROS_LANGUAGE_CONTRACT__VERBS_CUH
 #define SILVANN__PACKAGES_SYS_CONTRACTS_MACROS_LANGUAGE_CONTRACT__VERBS_CUH
 
-/* ════════════════════════════════════════════════════════════════════════════════════════════════════
- * AI TEMPORARY COMMENT — FOR THE NEXT AGENT; DELETE WHOLE BEFORE RELEASE. Rules in `README.md`.
- * The `SILVANN_ONE_READ` indirection on the `sys__int__add` row, and why it is not simply repointed.
- *   · The PoC's first A/B was destroyed, not run and found null: the selftest suite rebuilt the engine
- *     underneath the arm and disarmed the lever, so the "PoC changes nothing" result was about a
- *     default build.
- *   · The comments below once said kinds were published from `SYS__KIND__ROWS` in `kind.cuh` and that a
- *     second package's kinds were not published; both went with the kinds' move to per-package lists,
- *     and the dictionary's two rows arrived long after the structure itself.
- * ⛳ RETIREMENT: when the PoC has a valid A/B and the row is repointed or the PoC is deleted.
- * ══════════════════════════════════════════════════════════════════════════════════════════════════ */
 /* This file needs nothing: a macro body names nothing until something expands it. */
 /* ── THE WORDS THIS PACKAGE PUBLISHES INTO THE LANGUAGE ──────────────────────────────────────────────
  * One row per verb a program may call, and the same arrangement as the kinds: the package numbers them

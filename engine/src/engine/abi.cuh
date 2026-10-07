@@ -2,27 +2,6 @@
 #define SILVANN__ENGINE_ABI_CUH
 /* ══ THE C INTERFACE ═══════════════════════════════════════════════════════════════════════════════════
  *
- * AI TEMPORARY COMMENT — FOR THE NEXT AGENT; DELETE WHOLE BEFORE RELEASE. Rules in `README.md`.
- * What the ruling ⚖ *"sys and the evaluator go host"* does to the arguments below, which were written for
- * a DEVICE evaluator. Read them as dated, not wrong.
- *   · "IT IS WHAT FORCES A KERNEL TO EXIST" holds only while `sys` is device code. Once `sys` and
- *     `eng__eval` are host functions nothing forces a kernel; the narrow C door survives intact and is the
- *     half worth keeping. The doors stay; what they open onto moves.
- *   · The first claim that this file built on the host was FALSE when written: its probe TU reported 0
- *     errors while the whole file sat behind `HIP || CUDA` — it had compiled an empty region. The wheel
- *     then failed with 50 `'eng_abi_*' was not declared`. A clean probe on a new arm means checking what
- *     the guard selects before believing it.
- *   · THE "TAPE" UNDER "WHAT A PROGRAM COSTS TO BUILD" answers a launch-per-cell cost that a host
- *     evaluator does not pay (a cell is a plain call — no launch, no settle, no copy back). Do not build
- *     the tape without re-measuring the cost it is against.
- *   · THE `__noinline__` A/B ON THE STATE-MACHINE HALVES measures `k_eval`, which is gone from the tree. The
- *     split may still be right on a CPU for a different reason (icache, a cold path out of a hot one), and
- *     3.5% will not reproduce; re-derive it against the host build's hot loop instead.
- *   · THE DISPATCH BOUND'S HOST CHECK was prompted by an audit that predicted a silent ~100x SHRINK; the
- *     probe found it GROWS by half. Both the magnitude and the direction of the guess were wrong.
- * ⛳ RETIREMENT: when the evaluator runs on the host and the device-evaluator kernels are gone.
- * ══════════════════════════════════════════════════════════════════════════════════════════════════
- *
  * The outermost point of the engine: what a caller outside this language can name.
  *
  * ⭐⭐ WHY THERE IS A TIER HERE AT ALL, AND NOT JUST A BINDING. Something has to stand between a
