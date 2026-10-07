@@ -33,9 +33,9 @@ From a machine with no graphics card to a model near the frontier on salvaged se
 |---|---|---|
 | No graphics card, 12 GB of RAM, an NVMe disk (2.5 GB/s) | Qwen 3.6 35B-A3B (`D4E4`) on the CPU alone, its experts read from the disk, 8 GB of them kept in memory | 11.7 tokens/s |
 | An 8 GB card | Ministral 3 14B (`D4`) entirely on the card, at a 4,096-token context | 52 tokens/s ◦ |
-| A 16 GB card | Qwen 3.8 27B entirely on the card, at a 32,000-token context (14 GB) | 17.4 tokens/s (18.5 on a short prompt) |
+| A 16 GB card | Qwen 3.8 27B entirely on the card, at a 32,000-token context (14 GB) | 20.3 tokens/s (22.1 on a short prompt) |
 | A 16 GB card | Ministral 3 14B (`D8`) entirely on the card, at an 8,192-token context | 26 tokens/s ◦ |
-| A 24 GB card | Qwen 3.6 35B-A3B entirely on the card (17 GB at a 32,000-token context) | 37 tokens/s (40 on a short prompt) |
+| A 24 GB card | Qwen 3.6 35B-A3B entirely on the card (17 GB at a 32,000-token context) | 38 tokens/s (42 on a short prompt) |
 | A 4 GB card, 8 GB of RAM, an NVMe disk | Qwen 3.6 35B-A3B — the dense part on the card, the experts on the CPU, read from the disk as they are needed | 11.9 tokens/s ◦ |
 | An 8 GB card, 32 GB of RAM, an NVMe disk | Qwen 3.5 122B-A10B (`D4E4`) — the same split | 4.7 tokens/s ◦ |
 | A 16 GB card, 64 GB of RAM, an NVMe disk reading 5 GB/s | GLM 5.3 Flash — the same split | about 2.5 tokens/s, projected |
