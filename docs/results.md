@@ -48,7 +48,7 @@ scores 8.962 exact and 8.963 with `experts_int8`.
 
 | Where it runs | Prompt | Answer |
 |---|---|---|
-| one MI50 | 153 positions/s | 37 tokens/s (40 on a short prompt) |
+| one MI50 | 156 positions/s | 38 tokens/s (42 on a short prompt) |
 | one MI50 for the dense part, the experts on the CPU, all in RAM | 77 positions/s | 23 tokens/s |
 | the same, the experts read from the disk, 8 GB of RAM | 32 positions/s† | 11.9 tokens/s — 90% of expert reads from memory |
 | the same, 6 GB of RAM | 31 positions/s† | 10.2 tokens/s — 83% from memory |
@@ -59,7 +59,7 @@ scores 8.962 exact and 8.963 with `experts_int8`.
 
 | Where it runs | Prompt | Answer |
 |---|---|---|
-| one MI50 | 95 positions/s | 17.4 tokens/s (18.5 on a short prompt) |
+| one MI50 | 95 positions/s | 20.3 tokens/s (22.1 on a short prompt) |
 | one MI50 through OpenCL | 48.7 positions/s | 9.3 tokens/s (11.2 on a short prompt) |
 | three stages over machines (pipeline parallel) | — | 6.8 tokens/s, the same tokens |
 

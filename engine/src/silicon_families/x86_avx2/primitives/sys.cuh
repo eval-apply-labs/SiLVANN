@@ -38,7 +38,10 @@ static inline bool x86_avx2__memory_allocate(void** at, size_t bytes) {
     if (node < 0 && bytes < X86_AVX2__ZZPRIVATE_LARGE) {
         void* base = 0;
         if (posix_memalign(&base, 64u, bytes + 64u) != 0 || base == 0) return false;
-        ((x86_avx2__held*)base)->mapped = 0u; ((x86_avx2__held*)base)->bytes = bytes;
+        /* the header just before the address, where `x86_avx2__memory_free` reads it — not at `base`, where free would
+         *   read 16 bytes nobody wrote and, unless they were zero, unmap a garbage length of the process's heap */
+        x86_avx2__held* h = (x86_avx2__held*)((uint8_t*)base + 64u - sizeof *h);
+        h->mapped = 0u; h->bytes = bytes;
         *at = (uint8_t*)base + 64u;
         return true;
     }
