@@ -40,6 +40,7 @@ import re
 SURFACE = {
     "+": "sys__add",
     "-": "sys__sub",
+    "*": "sys__mul",
     "<": "sys__less",
     "eq?": "sys__eq",
     "if": "sys__if",
@@ -53,6 +54,7 @@ SURFACE = {
     "add-bindings": "sys__add_bindings",
     "remove-bindings": "sys__remove_bindings",
     "unquote": "sys__unquote", "while": "sys__while",
+    "nth": "sys__node_array__get",
 }
 
 # What the composer lowers itself rather than passing through. Three of them take the environment as their
@@ -111,6 +113,35 @@ def read(text):
     if pos[0] != len(tokens):
         raise ComposerError("there is more text after the program")
     return form
+
+
+def read_all(text):
+    """A source file -> its top-level forms, in order. A `;` starts a comment that runs to the end of its line."""
+    lines = [line.split(";", 1)[0] for line in text.split("\n")]
+    tokens = _TOKENS.findall("\n".join(lines))
+    forms, depth, start = [], 0, 0
+    for i, tok in enumerate(tokens):
+        if tok == "(":
+            depth += 1
+        elif tok == ")":
+            depth -= 1
+            if depth < 0:
+                raise ComposerError("a form is closed that was never opened")
+        if depth == 0 and tok != "'":
+            forms.append(read(" ".join(tokens[start:i + 1]).replace("' ", "'")))
+            start = i + 1
+    if depth != 0:
+        raise ComposerError("the source ends inside a form")
+    return forms
+
+
+def to_text(node):
+    """A read form back into text, one line — what `read` would read again."""
+    if isinstance(node, tuple) and node and node[0] == "quote":
+        return "'" + to_text(node[1])
+    if isinstance(node, list):
+        return "(" + " ".join(to_text(n) for n in node) + ")"
+    return repr(node) if isinstance(node, float) else str(node)
 
 
 class Composer:
@@ -233,11 +264,13 @@ class Composer:
         return self._form(read(text) if isinstance(text, str) else text)
 
     def _body(self, forms):
-        """One form, or several wrapped in a `begin` — the verbs that take a body take exactly one."""
+        """One form, or several wrapped in a `begin` — the verbs that take a body take exactly one.
+        ⛔ A BODY THAT IS ONE BARE VALUE IS WRAPPED TOO, for `if`'s reason below: the body is quoted, and a quoted
+        name or number is not a list — `(let ((e EPS)) e)` answered nothing and raised a fault."""
         if not forms:
             raise ComposerError("a body with nothing in it")
         if len(forms) == 1:
-            return self._form(forms[0])
+            return self._form(forms[0] if isinstance(forms[0], list) else ["begin", forms[0]])
         return self._emit([self._cell_verb("begin")] + [self._form(f) for f in forms])
 
     def _form(self, node):

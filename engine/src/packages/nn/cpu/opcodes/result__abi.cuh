@@ -95,6 +95,31 @@ static sys__heap_node nn__vector__zzabi_apply_at(const sys__heap_node* argv, uns
     return nn__doors_answer(&argv[2]);
 }
 
+/* ── a draw from a distribution ───────────────────────────────────────────────────────────────────── */
+/* `(nn__vector__draw w k top_p seed pos out)` — one of `k` weights (halves, largest first, as `nn__vector__top_k` leaves
+ * them) drawn after the top-p cut, as an integer in `out`: its place in `w`, which `sys__node_array__get` turns into the
+ * pick. The random number is `seed` and `pos` hashed, so a seed replays its draws. */
+static sys__heap_node nn__vector__zzabi_apply_draw(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx) {
+    if (argc != 6u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
+    uint64_t w_at = 0, w_room = 0, o_at = 0; uint64_t* slot = 0;
+    if (argv[1].dtype != SYS__KIND__VALUE_INT || argv[2].dtype != SYS__KIND__VALUE_FLOAT || argv[3].dtype != SYS__KIND__VALUE_INT
+     || argv[4].dtype != SYS__KIND__VALUE_INT || !nn__primitives__room(&argv[0], &w_at, &w_room))
+        return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
+    if (!nn__result__zzprivate_out(&argv[5], &o_at, &slot)) return sys__engine__abi__error(NN__PRIMITIVES__FAULT_BOUNDS);
+    const uint64_t k = argv[1].args[0];
+    const float top_p = (float)sys__heap_node__real(argv[2].args[0]);
+    if (k == 0ull || k > NN__VECTOR__TOP_K_MAX || !nn__primitives__fits(k, w_room) || !(top_p <= 1.0f))
+        return sys__engine__abi__error(NN__PRIMITIVES__FAULT_BOUNDS);
+
+    const nn__doors* doors = nn__doors_for(ctx);
+    if (doors == 0) return sys__engine__abi__error(NN__PRIMITIVES__FAULT_NO_DEVICE);
+    const uint64_t stamp = nn__result__zzprivate_stamp(NN__RESULT__INT);
+    *slot = stamp;
+    doors->vector_draw((uint64_t*)(uintptr_t)o_at, stamp, (const uint16_t*)(uintptr_t)w_at, k, top_p, argv[3].args[0],
+                       argv[4].args[0]);
+    return nn__doors_answer(&argv[5]);
+}
+
 /* `(nn__buffer__read b)` — the value the last value verb wrote into b, as an INT or a FLOAT.
  * In mapped RAM the word is watched until it carries b's stamp; the watch is bounded, and past it the
  * card is waited for once, so a kernel that has not started yet is still answered and a buffer nothing was
@@ -145,6 +170,7 @@ SYS__ENGINE__ABI__BRIDGE(nn__argmax__zzabi_adapter_find,        nn__argmax__zzab
 SYS__ENGINE__ABI__BRIDGE(nn__vector__zzabi_adapter_dot_product, nn__vector__zzabi_apply_dot_product)
 SYS__ENGINE__ABI__BRIDGE(nn__vector__zzabi_adapter_at,          nn__vector__zzabi_apply_at)
 SYS__ENGINE__ABI__BRIDGE(nn__buffer__zzabi_adapter_read,        nn__buffer__zzabi_apply_read)
+SYS__ENGINE__ABI__BRIDGE(nn__vector__zzabi_adapter_draw,        nn__vector__zzabi_apply_draw)
 
 /* ⭐⭐ `(nn__buffer__copy from worker to bytes)` -> `to`: `bytes` of `from`, a buffer of the worker named, into `to`,
  * one of this verb's own worker. ⚖ *"so in case of a single card or a single card type the buffer remains on gpu,

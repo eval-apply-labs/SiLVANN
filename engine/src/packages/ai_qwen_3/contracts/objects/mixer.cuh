@@ -34,7 +34,8 @@
 #define AI_QWEN_3__DN__STATE        15u   /* the recurrent state S, fp32 — written in place */
 #define AI_QWEN_3__DN__WINDOW       16u   /* the conv window — written in place */
 #define AI_QWEN_3__DN__SIGNS        17u
-#define AI_QWEN_3__DN__MINUS1       18u   /* a buffer whose element 0 is -1: the decay's sign */
+#define AI_QWEN_3__DN__MINUS1       18u   /* a buffer whose element 0 is -1; no verb reads it — the gates' door signs the
+                                             * decay itself — and the slot keeps the table's order, which the runtime writes */
 #define AI_QWEN_3__DN__SCRATCH      19u
 #define AI_QWEN_3__DN__HIDDEN       20u   /* integers from here on */
 #define AI_QWEN_3__DN__K_HEADS      21u
@@ -125,29 +126,5 @@
  * is padded with zeros up to it. */
 #define AI_QWEN_3__DN__MASK         30u
 #define AI_QWEN_3__AT__MASK         48u
-
-/* ══ THE DENSE MLP'S PLANE TABLE — the half of a layer after the mixer, in a model without experts ══════════════
- * `(ai_qwen_3__mlp h1 planes out [residual])` -> `out = residual + down(swiglu(gate, up)(rmsnorm(h1)))`, the residual
- * `h1` when none is named. ⭐ UNDER TENSOR PARALLELISM a card holds INTER of the whole: its gate and up rows and the same
- * columns of down — the activation is rotated in whole blocks of 512 and every part's slice is whole blocks, so each
- * part's product is exact — and every part but one sums onto a zero residual, so the parts' outputs add up to the
- * layer's. */
-#define AI_QWEN_3__MLP__NORM         0u
-#define AI_QWEN_3__MLP__GATE         1u
-#define AI_QWEN_3__MLP__GATE_LUT     2u
-#define AI_QWEN_3__MLP__UP           3u
-#define AI_QWEN_3__MLP__UP_LUT       4u
-#define AI_QWEN_3__MLP__DOWN         5u
-#define AI_QWEN_3__MLP__DOWN_LUT     6u
-#define AI_QWEN_3__MLP__SIGNS        7u
-#define AI_QWEN_3__MLP__ONE          8u    /* a buffer whose element 0 is 1: the down's one weight */
-#define AI_QWEN_3__MLP__SCRATCH      9u
-#define AI_QWEN_3__MLP__HIDDEN       10u   /* integers from here on */
-#define AI_QWEN_3__MLP__INTER        11u   /* this card's part of the intermediate width */
-#define AI_QWEN_3__MLP__D_GATE       12u
-#define AI_QWEN_3__MLP__D_UP         13u
-#define AI_QWEN_3__MLP__D_DOWN       14u
-#define AI_QWEN_3__MLP__TABLE        15u
-#define AI_QWEN_3__MLP__RESIDUAL_ROTATED 15u   /* ⭐ optional, as the DeltaNet's */
 
 #endif /* SILVANN__PACKAGES_AI_QWEN_3_CONTRACTS_OBJECTS_MIXER_CUH */

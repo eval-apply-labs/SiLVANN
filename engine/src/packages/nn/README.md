@@ -67,6 +67,7 @@ vector arithmetic   nn__vector__add  nn__vector__pointwise_mul  nn__vector__scal
 matrix arithmetic   nn__expert__multiply_fp16  nn__matrix__matvec_transposed  nn__matrix__transpose
 norms               nn__rmsnorm__apply  nn__vector__l2norm
 activations         nn__softmax__apply  nn__sigmoid__apply  nn__swiglu__combine
+a layer's MLP       nn__mlp__apply  nn__mlp__rows — a dense SwiGLU MLP, its norm and its residual, over a plane table
 attention           nn__rope__angles  nn__rope__apply  nn__attention__decode
                     nn__attention__residual  nn__attention__merge  nn__attention__finish
 deltanet            nn__deltanet__rank_1_update  nn__deltanet__readout  nn__deltanet__conv_step

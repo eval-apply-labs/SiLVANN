@@ -30,13 +30,12 @@ static sys__heap_node ai_qwen_3__deltanet__zzabi_apply(const sys__heap_node* arg
      || !nn__primitives__fits(H, x_room) || !nn__primitives__fits(H, h1_room) || !nn__primitives__fits(H, res_room))
         return sys__engine__abi__error(AI_QWEN_3__MIXER__FAULT_TABLE);
     const uint64_t vdim = vh * hd, ch = 2u * kh * hd + vdim;
-    /* scratch, in halves: h · hrot · [mixed · z · a · b] · beta · sumb · spb · eab · prodb · gb · conved · core · crot · ao */
+    /* scratch, in halves: h · hrot · [mixed · z · a · b] · beta · gb · conved · core · crot · ao */
     const uint64_t proj = ch + vdim + 2u * vh;
-    const uint64_t need = 2u * H + proj + 6u * vh + ch + 2u * vdim + H;
+    const uint64_t need = 2u * H + proj + 2u * vh + ch + 2u * vdim + H;
     if (!nn__primitives__fits(need, room[AI_QWEN_3__DN__SCRATCH])) return sys__engine__abi__error(AI_QWEN_3__MIXER__FAULT_ROOM);
     const uint64_t h = at[AI_QWEN_3__DN__SCRATCH], hrot = h + 2u * H, mixed = hrot + 2u * H, z = mixed + 2u * ch;
-    const uint64_t av = z + 2u * vdim, bv = av + 2u * vh, beta = bv + 2u * vh, sumb = beta + 2u * vh, spb = sumb + 2u * vh;
-    const uint64_t eab = spb + 2u * vh, prodb = eab + 2u * vh, gb = prodb + 2u * vh, conved = gb + 2u * vh;
+    const uint64_t av = z + 2u * vdim, bv = av + 2u * vh, beta = bv + 2u * vh, gb = beta + 2u * vh, conved = gb + 2u * vh;
     const uint64_t core = conved + 2u * ch, crot = core + 2u * vdim, ao = crot + 2u * vdim;
     const uint64_t signs = at[AI_QWEN_3__DN__SIGNS];
     const nn__doors* doors = nn__doors_for(ctx);
@@ -58,13 +57,13 @@ static sys__heap_node ai_qwen_3__deltanet__zzabi_apply(const sys__heap_node* arg
     }
     g.count = 4u;
     doors->turboquant_gemv_groups((uint16_t*)(uintptr_t)mixed, g, (const uint16_t*)(uintptr_t)in, H, over);
-    /* the gates: β = σ(b) · g = −e^{A_log} · softplus(a + dt_bias) — the step takes e^g itself */
-    doors->sigmoid((uint16_t*)(uintptr_t)beta, (const uint16_t*)(uintptr_t)bv, vh, over);
-    doors->vector_add((uint16_t*)(uintptr_t)sumb, (const uint16_t*)(uintptr_t)av, (const uint16_t*)(uintptr_t)at[AI_QWEN_3__DN__DT_BIAS], vh, over);
-    doors->vector_softplus((uint16_t*)(uintptr_t)spb, (const uint16_t*)(uintptr_t)sumb, vh, over);
-    doors->vector_exp((uint16_t*)(uintptr_t)eab, (const uint16_t*)(uintptr_t)at[AI_QWEN_3__DN__A_LOG], vh, over);
-    doors->vector_pointwise_mul((uint16_t*)(uintptr_t)prodb, (const uint16_t*)(uintptr_t)spb, (const uint16_t*)(uintptr_t)eab, vh, over);
-    doors->vector_scale_at((uint16_t*)(uintptr_t)gb, (const uint16_t*)(uintptr_t)prodb, (const uint16_t*)(uintptr_t)at[AI_QWEN_3__DN__MINUS1], 0u, vh, over);
+    /* the gates: β = σ(b) · g = −e^{A_log} · softplus(a + dt_bias) — the step takes e^g itself. The prompt's door at one
+     * row: it rounds each intermediate to a half where the one-element verbs (sigmoid, add, softplus, exp, multiply, scale)
+     * round theirs, so a position decoded takes the gates the same position read as a prompt row takes, to the bit, in one
+     * launch rather than six. */
+    doors->deltanet_gates_rows((uint16_t*)(uintptr_t)beta, (uint16_t*)(uintptr_t)gb, (const uint16_t*)(uintptr_t)av,
+                               (const uint16_t*)(uintptr_t)bv, (const uint16_t*)(uintptr_t)at[AI_QWEN_3__DN__A_LOG],
+                               (const uint16_t*)(uintptr_t)at[AI_QWEN_3__DN__DT_BIAS], vh, 1u, over);
     doors->deltanet_conv_step((uint16_t*)(uintptr_t)conved, (uint16_t*)(uintptr_t)at[AI_QWEN_3__DN__WINDOW],
                               (const uint16_t*)(uintptr_t)at[AI_QWEN_3__DN__CONV_W], (const uint16_t*)(uintptr_t)mixed, ch, over);
     doors->deltanet_step((float*)(uintptr_t)at[AI_QWEN_3__DN__STATE], (const uint16_t*)(uintptr_t)conved, (const uint16_t*)(uintptr_t)z,
@@ -153,49 +152,6 @@ static sys__heap_node ai_qwen_3__attention__zzabi_apply(const sys__heap_node* ar
     if (masked != 0u) return sys__engine__abi__error(masked);
     doors->vector_add((uint16_t*)(uintptr_t)h1, (const uint16_t*)(uintptr_t)res, (const uint16_t*)(uintptr_t)ao, H, over);
     return nn__doors_answer(&argv[3]);
-}
-
-/* `(ai_qwen_3__mlp h1 planes out [residual])` -> `out`: the dense MLP, its norm and its residual — two launches for the
- * three projections, the swiglu, and the activation's rotation between them. ▶ `contracts/objects/mixer.cuh`. */
-static sys__heap_node ai_qwen_3__mlp__zzabi_apply(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx) {
-    if (argc != 3u && argc != 4u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
-    uint64_t h1 = 0, h1_room = 0, out = 0, out_room = 0, res = 0, res_room = 0;
-    if (!sys__heap_node__carries_reference(argv[1].dtype) || !sys__node_array__is(argv[1].args[0])
-     || !nn__primitives__room(&argv[0], &h1, &h1_room) || !nn__primitives__room(&argv[2], &out, &out_room)
-     || !nn__primitives__room(&argv[argc == 4u ? 3u : 0u], &res, &res_room))
-        return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
-    uint64_t at[AI_QWEN_3__MLP__TABLE], room[AI_QWEN_3__MLP__TABLE], v[AI_QWEN_3__MLP__TABLE];
-    if (!ai_qwen_3__table__zzpackage_read(argv[1].args[0], AI_QWEN_3__MLP__HIDDEN, AI_QWEN_3__MLP__TABLE, at, room, v))
-        return sys__engine__abi__error(AI_QWEN_3__MIXER__FAULT_TABLE);
-    const uint64_t H = v[AI_QWEN_3__MLP__HIDDEN], I = v[AI_QWEN_3__MLP__INTER];
-    if (H == 0u || I == 0u || H > (1ull << 24) || I > (1ull << 24)
-     || !nn__primitives__fits(H, h1_room) || !nn__primitives__fits(H, out_room) || !nn__primitives__fits(H, res_room)
-     || !nn__primitives__fits(H, room[AI_QWEN_3__MLP__NORM]) || !nn__primitives__fits(1u, room[AI_QWEN_3__MLP__ONE]))
-        return sys__engine__abi__error(AI_QWEN_3__MIXER__FAULT_TABLE);
-    /* scratch, in halves: h · hrot · [gate · up] · act · actr */
-    if (!nn__primitives__fits(2u * H + 4u * I, room[AI_QWEN_3__MLP__SCRATCH])) return sys__engine__abi__error(AI_QWEN_3__MIXER__FAULT_ROOM);
-    const uint64_t h = at[AI_QWEN_3__MLP__SCRATCH], hrot = h + 2u * H, gu = hrot + 2u * H, act = gu + 2u * 2u * I, actr = act + 2u * I;
-    const uint64_t signs = at[AI_QWEN_3__MLP__SIGNS];
-    const nn__doors* doors = nn__doors_for(ctx);
-    if (doors == 0) return sys__engine__abi__error(NN__PRIMITIVES__FAULT_NO_DEVICE);
-    unsigned int* over = ctx->fault_word;
-
-    const bool rotated = ai_qwen_3__table__zzpackage_flag(argv[1].args[0], AI_QWEN_3__MLP__RESIDUAL_ROTATED);
-    doors->rmsnorm((uint16_t*)(uintptr_t)h, (const uint16_t*)(uintptr_t)h1, (const uint16_t*)(uintptr_t)at[AI_QWEN_3__MLP__NORM], H, AI_QWEN_3__RMS_NORM_EPS, over);
-    if (!rotated) doors->hadamard_rotate((uint16_t*)(uintptr_t)hrot, (const uint16_t*)(uintptr_t)h, (const uint16_t*)(uintptr_t)signs, H, over);
-    nn__turboquant__groups g = {};
-    g.codes[0] = at[AI_QWEN_3__MLP__GATE]; g.luts[0] = at[AI_QWEN_3__MLP__GATE_LUT]; g.rows[0] = I; g.d[0] = v[AI_QWEN_3__MLP__D_GATE]; g.out_at[0] = 0u;
-    g.codes[1] = at[AI_QWEN_3__MLP__UP];   g.luts[1] = at[AI_QWEN_3__MLP__UP_LUT];   g.rows[1] = I; g.d[1] = v[AI_QWEN_3__MLP__D_UP];   g.out_at[1] = I;
-    g.count = 2u;
-    doors->turboquant_gemv_groups((uint16_t*)(uintptr_t)gu, g, (const uint16_t*)(uintptr_t)(rotated ? h : hrot), H, over);
-    doors->swiglu_pairs((uint16_t*)(uintptr_t)act, (const uint16_t*)(uintptr_t)gu, 1u, I, over);
-    doors->hadamard_rotate((uint16_t*)(uintptr_t)actr, (const uint16_t*)(uintptr_t)act, (const uint16_t*)(uintptr_t)signs, I, over);
-    nn__turboquant__groups dn = {};
-    dn.codes[0] = at[AI_QWEN_3__MLP__DOWN]; dn.luts[0] = at[AI_QWEN_3__MLP__DOWN_LUT]; dn.rows[0] = H; dn.d[0] = v[AI_QWEN_3__MLP__D_DOWN];
-    dn.out_at[0] = 0u; dn.count = 1u;
-    doors->turboquant_gemv_groups_sum((uint16_t*)(uintptr_t)out, dn, (const uint16_t*)(uintptr_t)actr,
-                                      (const uint16_t*)(uintptr_t)at[AI_QWEN_3__MLP__ONE], (const uint16_t*)(uintptr_t)res, H, I, over);
-    return nn__doors_answer(&argv[2]);
 }
 
 /* `(ai_qwen_3__attention_tiered x planes pos h1 [residual])` -> `h1`: the attention of `ai_qwen_3__attention` over a cache in
@@ -363,7 +319,6 @@ static sys__heap_node ai_qwen_3__attention_tiered__zzabi_apply(const sys__heap_n
 
 SYS__ENGINE__ABI__BRIDGE(ai_qwen_3__attention_tiered__zzabi_adapter, ai_qwen_3__attention_tiered__zzabi_apply)
 SYS__ENGINE__ABI__BRIDGE(ai_qwen_3__deltanet__zzabi_adapter,  ai_qwen_3__deltanet__zzabi_apply)
-SYS__ENGINE__ABI__BRIDGE(ai_qwen_3__mlp__zzabi_adapter,       ai_qwen_3__mlp__zzabi_apply)
 SYS__ENGINE__ABI__BRIDGE(ai_qwen_3__attention__zzabi_adapter, ai_qwen_3__attention__zzabi_apply)
 
 #endif /* SILVANN__PACKAGES_AI_QWEN_3_CPU_OPCODES_MIXER__ABI_CUH */

@@ -32,16 +32,13 @@
     /* ▶ `cpu/opcodes/moe__abi.cuh`.                                                                          */ \
     X(PKG, 11, "ai_qwen_3__experts_up",   ai_qwen_3__experts_up__zzabi_adapter,      AI_QWEN_3__EXPERTS_UP) \
     X(PKG, 12, "ai_qwen_3__experts_down", ai_qwen_3__experts_down__zzabi_adapter,    AI_QWEN_3__EXPERTS_DOWN) \
-    /* ⭐ THE DENSE MLP, ITS NORM AND ITS RESIDUAL — a model without experts. ▶ `cpu/opcodes/mixer__abi.cuh`.       */ \
-    X(PKG, 13, "ai_qwen_3__mlp",          ai_qwen_3__mlp__zzabi_adapter,             AI_QWEN_3__MLP) \
+    /* 13 and 16 are retired numbers: a dense model's MLP is nn's (`nn__mlp__apply`, `nn__mlp__rows`).               */ \
     /* ⭐⭐ THE ATTENTION OVER A CACHE IN TIERS — sink and hot fp16, warm TurboQuant 8, cold 4, every row rotated a head  */ \
     /* at a time; a position cooled as it ages. ▶ `contracts/objects/mixer.cuh`.                                     */ \
     X(PKG, 14, "ai_qwen_3__attention_tiered", ai_qwen_3__attention_tiered__zzabi_adapter, AI_QWEN_3__ATTENTION_TIERED) \
     /* ⭐⭐ A PROMPT'S ROWS THROUGH THE TIERED CACHE — the chunk into the hot ring, what it displaces cooled, then each row     */ \
     /* attending the cache's fp16 positions in order up to its own, and the warm and cold tiers. ▶ `prefill__abi.cuh`.    */ \
     X(PKG, 15, "ai_qwen_3__attention_tiered_rows", ai_qwen_3__attention_tiered_rows__zzabi_adapter, AI_QWEN_3__ATTENTION_TIERED_ROWS) \
-    /* ⭐ THE DENSE MLP OVER A PROMPT'S ROWS, ITS NORM AND ITS RESIDUAL — the 27B's prompts as rows. ▶ `prefill__abi.cuh`. */ \
-    X(PKG, 16, "ai_qwen_3__mlp_rows",       ai_qwen_3__mlp_rows__zzabi_adapter,        AI_QWEN_3__MLP_ROWS) \
     /* ⭐ A PROMPT AS ROWS WITH THE EXPERTS ON THE CPU: the MoE's three words over a chunk — the card's route, the CPU's  */ \
     /* experts expert-major, the card's close                                                                        */ \
     X(PKG, 17, "ai_qwen_3__pre_expert_rows",  ai_qwen_3__pre_expert_rows__zzabi_adapter,  AI_QWEN_3__PRE_EXPERT_ROWS) \

@@ -10,6 +10,7 @@
 #include <math.h>
 #include <stdlib.h>                       /* a chunk's picks, inverted on the host: malloc, free */
 #include "../table.cuh"
+#include "../../../nn/cpu/routed__header.cuh"   /* the routed experts, as nn runs them */
 
 
 /* The operands every site verb starts with: the streams, and its table read. */
@@ -324,9 +325,9 @@ static sys__heap_node ai_glm_5_3__route__zzabi_apply(const sys__heap_node* argv,
                                           r[AI_GLM_5_3__MOE__EPS], r[AI_GLM_5_3__MOE__HC_EPS]);
     doors->hadamard_rotate((uint16_t*)(uintptr_t)(hand), (const uint16_t*)(uintptr_t)(h), (const uint16_t*)(uintptr_t)(at[AI_GLM_5_3__MOE__SIGNS]), H, over);
     doors->expert_multiply_fp16((uint16_t*)(uintptr_t)(logits), (const uint16_t*)(uintptr_t)(at[AI_GLM_5_3__MOE__ROUTER]), (const uint16_t*)(uintptr_t)(h), E, H, over);
-    if (!ai_glm_5_3__table__zzpackage_top_k(ctx, doors, argv[3].args[0], hand + 2u * H, logits, at[AI_GLM_5_3__MOE__BIAS], E, K,
-                                            r[AI_GLM_5_3__MOE__SCALE]))
-        return sys__engine__abi__error(NN__PRIMITIVES__FAULT_NO_DEVICE);
+    const uint64_t landed = nn__routed__top_k(ctx, doors, argv[3].args[0], hand + 2u * H, logits, at[AI_GLM_5_3__MOE__BIAS],
+                                              r[AI_GLM_5_3__MOE__SCALE], E, K, 0);
+    if (landed != 0u) return sys__engine__abi__error(landed);
     return nn__doors_answer(&argv[2]);
 }
 
@@ -393,49 +394,31 @@ static bool ai_glm_5_3__experts__zzprivate_backing(uint64_t table, nn__expert__b
     return sys__heap_node__carries_reference(n.dtype) && nn__expert__backing_of(n.args[0], backing);
 }
 
-/* The gate-and-up rows of `n` of a hand's picks — the one in the slot at `slot[i]` into place `at[i]` of `gu` — in the
- * arithmetic the table names. */
-static inline void ai_glm_5_3__experts__zzprivate_up(const nn__doors* doors, unsigned int* over, const uint64_t* v, uint64_t hand,
-                                                     uint64_t gu, const uint64_t* slot, const uint64_t* at, uint64_t n) {
-    const uint64_t H = v[AI_GLM_5_3__EXP__HIDDEN], I = v[AI_GLM_5_3__EXP__INTER];
-    nn__turboquant__groups up = {};
-    for (uint64_t i = 0u; i < n; ++i) {
-        up.codes[i] = slot[i]; up.luts[i] = slot[i] + v[AI_GLM_5_3__EXP__UP_LUT];
-        up.rows[i] = 2u * I; up.d[i] = v[AI_GLM_5_3__EXP__D]; up.out_at[i] = at[i] * 2u * I;
-    }
-    up.count = n;
+/* The routed experts as nn runs them (▶ nn's `nn__routed`), out of an experts table: its shape, its planes' places in a
+ * slot, the experts this worker holds, its arithmetic, the clamped SwiGLU's limit, its scratch and its backing. False when
+ * the backing cell is not one. */
+static bool ai_glm_5_3__experts__zzprivate_routed(uint64_t table, const uint64_t* at, const uint64_t* room, const uint64_t* v,
+                                                  const float* r, nn__routed* out) {
+    const nn__routed none = {};
+    *out = none;
+    const uint64_t H = v[AI_GLM_5_3__EXP__HIDDEN], K = v[AI_GLM_5_3__EXP__TOP_K];
+    out->layer = v[AI_GLM_5_3__EXP__LAYER]; out->type = v[AI_GLM_5_3__EXP__TYPE];
+    out->hidden = H; out->inter = v[AI_GLM_5_3__EXP__INTER]; out->experts = v[AI_GLM_5_3__EXP__EXPERTS]; out->top_k = K;
+    out->bits = v[AI_GLM_5_3__EXP__D];
+    out->up_lut = v[AI_GLM_5_3__EXP__UP_LUT]; out->down = v[AI_GLM_5_3__EXP__DOWN]; out->down_lut = v[AI_GLM_5_3__EXP__DOWN_LUT];
+    out->first = v[AI_GLM_5_3__EXP__FIRST]; out->count = v[AI_GLM_5_3__EXP__COUNT];
     /* ⚖ *"two different instructions so at boot time the lisp can decide"*: the table says which arithmetic */
-    if (v[AI_GLM_5_3__EXP__INT8] == 1u) doors->turboquant_gemv_groups_int8((uint16_t*)(uintptr_t)(gu), up, (const uint16_t*)(uintptr_t)(hand), H, over);
-    else                                doors->turboquant_gemv_groups((uint16_t*)(uintptr_t)(gu), up, (const uint16_t*)(uintptr_t)(hand), H, over);
+    out->int8 = v[AI_GLM_5_3__EXP__INT8] == 1u; out->limit = r[AI_GLM_5_3__EXP__LIMIT];
+    out->signs = at[AI_GLM_5_3__EXP__SIGNS]; out->zero = at[AI_GLM_5_3__EXP__ZERO];
+    out->scratch = at[AI_GLM_5_3__EXP__SCRATCH]; out->scratch_room = room[AI_GLM_5_3__EXP__SCRATCH];
+    out->hand_bytes = AI_GLM_5_3__HAND(H, K); out->picks_at = AI_GLM_5_3__HAND_PICKS(H, K); out->batch = AI_GLM_5_3__EXP__BATCH;
+    return ai_glm_5_3__experts__zzprivate_backing(table, &out->backing);
 }
 
-/* `routed = residual + Σ w_j · down_j(swiglu(gate_up_j))` over the `n` picks whose gate-and-up rows are `gu`'s first `n`,
- * pick `which[i]` in the slot at `slot[i]`, summed in that order. */
-static inline void ai_glm_5_3__experts__zzprivate_down(const nn__doors* doors, unsigned int* over, const uint64_t* v, const float* r,
-                                                       uint64_t hand, uint64_t routed, uint64_t residual, uint64_t gu, uint64_t act,
-                                                       uint64_t actr, uint64_t signs, const uint64_t* slot, const uint64_t* which,
-                                                       uint64_t n) {
-    const uint64_t H = v[AI_GLM_5_3__EXP__HIDDEN], I = v[AI_GLM_5_3__EXP__INTER];
-    nn__turboquant__groups down = {};
-    for (uint64_t i = 0u; i < n; ++i) {
-        down.codes[i] = slot[i] + v[AI_GLM_5_3__EXP__DOWN]; down.luts[i] = slot[i] + v[AI_GLM_5_3__EXP__DOWN_LUT];
-        down.rows[i] = H; down.d[i] = v[AI_GLM_5_3__EXP__D]; down.out_at[i] = which[i];   /* its pick's weight */
-    }
-    down.count = n;
-    doors->swiglu_clamped((uint16_t*)(uintptr_t)(act), (const uint16_t*)(uintptr_t)(gu), n, I, r[AI_GLM_5_3__EXP__LIMIT], over);
-    doors->hadamard_rotate((uint16_t*)(uintptr_t)(actr), (const uint16_t*)(uintptr_t)(act), (const uint16_t*)(uintptr_t)(signs), n * I, over);
-    if (v[AI_GLM_5_3__EXP__INT8] == 1u)
-        doors->turboquant_gemv_groups_sum_int8((uint16_t*)(uintptr_t)(routed), down, (const uint16_t*)(uintptr_t)(actr),
-                                               (const uint16_t*)(uintptr_t)(hand + 2u * H), (const uint16_t*)(uintptr_t)(residual), H, I, over);
-    else
-        doors->turboquant_gemv_groups_sum((uint16_t*)(uintptr_t)(routed), down, (const uint16_t*)(uintptr_t)(actr),
-                                          (const uint16_t*)(uintptr_t)(hand + 2u * H), (const uint16_t*)(uintptr_t)(residual), H, I, over);
-}
-
-/* `(ai_glm_5_3__experts hand picks table routed [nn__expert_tier])` -> `routed`: Σ w_j · down_j(swiglu(gate_up_j(x))) over the picks this
- * worker holds — the hand's input and weights, each held pick's slot found in this worker's collection — and zero when
- * it holds none. Four launches: the held picks' gate-and-up rows as one group, their clamped swiglu, the rotation, and
- * their down rows as one group summed by the weights. */
+/* `(ai_glm_5_3__experts hand picks table routed [nn__expert_tier])` -> `routed`: Σ w_j · down_j(swiglu(gate_up_j(x))) over the
+ * picks this worker holds, the SwiGLU clamped — as nn runs a position's routed experts (▶ nn's `nn__routed__position`):
+ * the ones in memory computed while the rest arrive, a card's tier's picks computed and marked held, and zero where this
+ * worker holds none. */
 static sys__heap_node ai_glm_5_3__experts__zzabi_apply(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx) {
     if (argc != 4u && argc != 5u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
     uint64_t hand = 0, h_room = 0, routed = 0, r_room = 0;
@@ -448,108 +431,20 @@ static sys__heap_node ai_glm_5_3__experts__zzabi_apply(const sys__heap_node* arg
     if (!ai_glm_5_3__table__zzpackage_read(argv[2].args[0], AI_GLM_5_3__EXP__PLANES, AI_GLM_5_3__EXP__LIMIT, AI_GLM_5_3__EXP__TABLE,
                                            at, room, v, r))
         return sys__engine__abi__error(AI_GLM_5_3__LAYER__FAULT_TABLE);
-    const uint64_t H = v[AI_GLM_5_3__EXP__HIDDEN], I = v[AI_GLM_5_3__EXP__INTER], E = v[AI_GLM_5_3__EXP__EXPERTS];
-    const uint64_t K = v[AI_GLM_5_3__EXP__TOP_K], layer = v[AI_GLM_5_3__EXP__LAYER], type = v[AI_GLM_5_3__EXP__TYPE];
-    const uint64_t first = v[AI_GLM_5_3__EXP__FIRST], count = v[AI_GLM_5_3__EXP__COUNT], picks = argv[1].args[0];
-    if (H == 0u || I == 0u || K == 0u || K > E || K > AI_GLM_5_3__TOP_K_MAX || H > (1ull << 24) || I > (1ull << 24)
-     || count == 0u || first >= E || count > E - first || v[AI_GLM_5_3__EXP__INT8] > 1u
-     || sys__node_array__length(picks) < K || !nn__primitives__fits(H + K, h_room) || !nn__primitives__fits(H, r_room)
+    const uint64_t H = v[AI_GLM_5_3__EXP__HIDDEN], K = v[AI_GLM_5_3__EXP__TOP_K];
+    if (K > AI_GLM_5_3__TOP_K_MAX || v[AI_GLM_5_3__EXP__INT8] > 1u || !nn__primitives__fits(H + K, h_room) || !nn__primitives__fits(H, r_room)
      || !nn__primitives__fits(H, room[AI_GLM_5_3__EXP__ZERO]))
         return sys__engine__abi__error(AI_GLM_5_3__LAYER__FAULT_TABLE);
-    if (!nn__primitives__fits(4u * K * I, room[AI_GLM_5_3__EXP__SCRATCH])) return sys__engine__abi__error(AI_GLM_5_3__LAYER__FAULT_ROOM);
-    nn__expert__backing backing = {};
-    if (!ai_glm_5_3__experts__zzprivate_backing(argv[2].args[0], &backing)) return sys__engine__abi__error(AI_GLM_5_3__LAYER__FAULT_TABLE);
+    nn__routed rt;
+    if (!ai_glm_5_3__experts__zzprivate_routed(argv[2].args[0], at, room, v, r, &rt)) return sys__engine__abi__error(AI_GLM_5_3__LAYER__FAULT_TABLE);
     nn__expert_tier tier;
     bool tier_ok = true;
-    const bool holds = ai_glm_5_3__experts__zzprivate_tier(argv, argc, 4u, layer, &tier, &tier_ok);
-    if (!tier_ok || (holds && (backing.file != 0ull || tier.top_k != K))) return sys__engine__abi__error(AI_GLM_5_3__LAYER__FAULT_TABLE);
-    /* ① the picks this worker holds: the ones in memory first — and the others on their way, read into a slot where the
-     *   slots are a cache (a backing), their pages started where the slots are a mapped file */
-    uint64_t slot[AI_GLM_5_3__TOP_K_MAX], which[AI_GLM_5_3__TOP_K_MAX], away_slot[AI_GLM_5_3__TOP_K_MAX], away[AI_GLM_5_3__TOP_K_MAX];
-    uint64_t held[AI_GLM_5_3__TOP_K_MAX], away_id[AI_GLM_5_3__TOP_K_MAX];
-    uint64_t ready = 0u, n_away = 0u, n_held = 0u;
-    /* Every pick read once, here; the loop after works from the ids this keeps. */
-    uint64_t ids[AI_GLM_5_3__TOP_K_MAX];
-    sys__node_array_walk pw;
-    if (!sys__node_array__walk(picks, 0ull, &pw)) return sys__engine__abi__error(AI_GLM_5_3__LAYER__FAULT_EXPERT);
-    for (uint64_t j = 0u; j < K; ++j, sys__node_array__next(&pw)) {
-        const sys__heap_node* p = sys__node_array__walk_cell(&pw);
-        /* a pick numbered `experts` or past it is one a card already holds (▶ nn's `nn__expert_tier`) */
-        if (p == 0 || p->dtype != SYS__KIND__VALUE_INT || p->args[0] >= 2u * E) return sys__engine__abi__error(AI_GLM_5_3__LAYER__FAULT_EXPERT);
-        ids[j] = p->args[0];
-        if (p->args[0] >= first && p->args[0] < first + count) held[n_held++] = p->args[0] - first;
-    }
-    /* a tier's visit (▶ nn's `nn__expert_tier__visit`): which picks it holds, and the promotions of those it does not */
-    bool on_card[AI_GLM_5_3__TOP_K_MAX] = {};
-    if (holds && !nn__expert_tier__visit(ctx->family, &tier, ids, on_card))
-        return sys__engine__abi__error(AI_GLM_5_3__LAYER__FAULT_EXPERT);
-    for (uint64_t j = 0u; j < K; ++j) {
-        const uint64_t id = ids[j];
-        if (id < first || id >= first + count) continue;                            /* another worker's, or held already */
-        uint64_t at_ = 0u;
-        if (backing.file != 0ull) {
-            const int got = nn__expert__request(ctx->family, layer, type, id - first, &backing, false, held, (unsigned)n_held, &at_);
-            if (got == NN__EXPERT__REFUSED) return sys__engine__abi__error(AI_GLM_5_3__LAYER__FAULT_EXPERT);
-            if (got == NN__EXPERT__RESIDENT) { slot[ready] = at_; which[ready] = j; ++ready; }
-            else { away_id[n_away] = id - first; away[n_away] = j; ++n_away; }
-            continue;
-        }
-        sys__heap_node me;
-        if (!nn__expert__slot(layer, type, id - first, &me)) return sys__engine__abi__error(AI_GLM_5_3__LAYER__FAULT_EXPERT);
-        if (holds) {
-            /* a tier: the picks it holds are this worker's, marked held for the others; the rest are left to them */
-            if (!on_card[j]) continue;
-            sys__heap_node mark;
-            mark.dtype = SYS__KIND__VALUE_INT; mark.num_args = 0u; mark.op_code = 0ull; mark.args[0] = id + E;
-            if (!sys__node_array__set(picks, j, &mark)) return sys__engine__abi__error(AI_GLM_5_3__LAYER__FAULT_EXPERT);
-            slot[ready] = me.args[NN__EXPERT__SLOT_AT]; which[ready] = j; ++ready;
-            continue;
-        }
-        /* an expert an exclusive tier just sent back from the card is in its slot once its write has landed */
-        nn__expert__wait_written(layer, type, id - first);
-        if (!nn__expert__slot(layer, type, id - first, &me) || me.args[NN__EXPERT__SLOT_AT] == 0ull)
-            return sys__engine__abi__error(AI_GLM_5_3__LAYER__FAULT_EXPERT);
-        at_ = me.args[NN__EXPERT__SLOT_AT];
-        if (nn__expert__in_memory(ctx->family, type, at_)) { slot[ready] = at_; which[ready] = j; ++ready; }
-        else { away_slot[n_away] = at_; away_id[n_away] = id - first; away[n_away] = j; ++n_away; }
-    }
-    const uint64_t n = ready + n_away;
-    const uint64_t zero = at[AI_GLM_5_3__EXP__ZERO], signs = at[AI_GLM_5_3__EXP__SIGNS];
-    const uint64_t gu = at[AI_GLM_5_3__EXP__SCRATCH], act = gu + 2u * 2u * K * I, actr = act + 2u * K * I;
+    const bool holds = ai_glm_5_3__experts__zzprivate_tier(argv, argc, 4u, rt.layer, &tier, &tier_ok);
+    if (!tier_ok) return sys__engine__abi__error(AI_GLM_5_3__LAYER__FAULT_TABLE);
     const nn__doors* doors = nn__doors_for(ctx);
     if (doors == 0) return sys__engine__abi__error(NN__PRIMITIVES__FAULT_NO_DEVICE);
-    unsigned int* over = ctx->fault_word;
-    if (n == 0u) {
-        doors->vector_add((uint16_t*)(uintptr_t)(routed), (const uint16_t*)(uintptr_t)(zero), (const uint16_t*)(uintptr_t)(zero), H, over);
-        return nn__doors_answer(&argv[3]);
-    }
-    /* ② the gate-and-up of the ones in memory while the rest arrive, ③ the rest's, then every pick's down summed in pick
-     *   order — ⭐ the order in which the experts arrived changes nothing in the sum, so a run gives the same answer
-     *   whichever of its experts the system had in memory. A pick's place is its rank among this worker's picks. */
-    uint64_t at_ready[AI_GLM_5_3__TOP_K_MAX], at_away[AI_GLM_5_3__TOP_K_MAX];
-    for (uint64_t a = 0u, b = 0u; a < ready || b < n_away; ) {
-        if (b == n_away || (a < ready && which[a] < away[b])) { at_ready[a] = a + b; ++a; }
-        else { at_away[b] = a + b; ++b; }
-    }
-    if (ready != 0u) ai_glm_5_3__experts__zzprivate_up(doors, over, v, hand, gu, slot, at_ready, ready);
-    uint64_t all_slot[AI_GLM_5_3__TOP_K_MAX], all_which[AI_GLM_5_3__TOP_K_MAX];
-    for (uint64_t k = 0u; k < ready; ++k) { all_slot[at_ready[k]] = slot[k]; all_which[at_ready[k]] = which[k]; }
-    if (n_away != 0u) {
-        /* the reads settled, where they were reads into slots, and their slots found */
-        if (backing.file != 0ull && !nn__expert__settle(layer, type)) return sys__engine__abi__error(AI_GLM_5_3__LAYER__FAULT_EXPERT);
-        for (uint64_t k = 0u; k < n_away; ++k) {
-            if (backing.file != 0ull) {
-                sys__heap_node me;
-                if (!nn__expert__slot(layer, type, away_id[k], &me) || me.args[NN__EXPERT__SLOT_AT] == 0ull)
-                    return sys__engine__abi__error(AI_GLM_5_3__LAYER__FAULT_EXPERT);
-                away_slot[k] = me.args[NN__EXPERT__SLOT_AT];
-            }
-            all_slot[at_away[k]] = away_slot[k]; all_which[at_away[k]] = away[k];
-        }
-        ai_glm_5_3__experts__zzprivate_up(doors, over, v, hand, gu, away_slot, at_away, n_away);
-    }
-    ai_glm_5_3__experts__zzprivate_down(doors, over, v, r, hand, routed, zero, gu, act, actr, signs, all_slot, all_which, n);
-    return nn__doors_answer(&argv[3]);
+    const uint64_t f = nn__routed__position(ctx, doors, &rt, hand, argv[1].args[0], holds ? &tier : 0, routed, 0);
+    return f != 0u ? sys__engine__abi__error(f) : nn__doors_answer(&argv[3]);
 }
 
 /* ══ THE SITES AT ONE POSITION, AND AS ROWS ═════════════════════════════════════════════════════════════════════════
@@ -1063,12 +958,9 @@ static sys__heap_node ai_glm_5_3__close_rows__zzabi_apply(const sys__heap_node* 
 }
 
 /* `(ai_glm_5_3__experts_rows hands table routed n [nn__expert_tier])` -> `routed`: for each of `n` hand rows, Σ w_j · down_j(swiglu(
- * gate_up_j(x))) over its picks this worker holds, a row of `routed` each — EXPERT-MAJOR: the picks inverted, so each
- * held expert used by the chunk runs once over every row that picked it, reading its weights once. The rows' inputs are
- * gathered first (a hand row is wider than its input), the gate-and-up rows a round of twelve experts at a time, the
- * swiglus and rotations over every pick at once, each expert's down weighted into one fp32 sum, rounded once.
- * ⛳ SCRATCH, in bytes: xs (n·H halves) · pairs (2·P) · wj (P halves) · gu (P·2I) · act · actr (P·I each) · the sum (n·K·H
- * floats), P the picks this worker holds. */
+ * gate_up_j(x))) over its picks this worker holds, a row of `routed` each — as nn runs a chunk's routed experts (▶ nn's
+ * `nn__routed__rows`): EXPERT-MAJOR, each held expert the chunk used run once over every row that picked it, each pick's
+ * down in a sum of its own and the rows added in pick order, whatever order the experts ran in. */
 static sys__heap_node ai_glm_5_3__experts_rows__zzabi_apply(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx) {
     if (argc != 4u && argc != 5u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
     uint64_t hands = 0, h_room = 0, routed = 0, r_room = 0, n = 0u;
@@ -1081,176 +973,20 @@ static sys__heap_node ai_glm_5_3__experts_rows__zzabi_apply(const sys__heap_node
     if (!ai_glm_5_3__table__zzpackage_read(argv[1].args[0], AI_GLM_5_3__EXP__PLANES, AI_GLM_5_3__EXP__LIMIT, AI_GLM_5_3__EXP__TABLE,
                                            at, room, v, r))
         return sys__engine__abi__error(AI_GLM_5_3__LAYER__FAULT_TABLE);
-    const uint64_t H = v[AI_GLM_5_3__EXP__HIDDEN], I = v[AI_GLM_5_3__EXP__INTER], E = v[AI_GLM_5_3__EXP__EXPERTS];
-    const uint64_t K = v[AI_GLM_5_3__EXP__TOP_K], layer = v[AI_GLM_5_3__EXP__LAYER], type = v[AI_GLM_5_3__EXP__TYPE];
-    const uint64_t first = v[AI_GLM_5_3__EXP__FIRST], count = v[AI_GLM_5_3__EXP__COUNT], D = v[AI_GLM_5_3__EXP__D];
-    const uint64_t hand_bytes = AI_GLM_5_3__HAND(H, K);
-    /* ⚖ *"two different instructions so at boot time the lisp can decide"*: the table says which arithmetic */
-    const bool int8 = v[AI_GLM_5_3__EXP__INT8] == 1u;
-    /* a card's tier (▶ nn's `nn__expert_tier__note`): only the picks marked held are this worker's, computed from the fewest
-     * picks to the most, each waited for only while its copy is still on its way; a worker that holds every one skips them */
-    nn__expert_tier tier;
-    bool tier_ok = true;
-    const bool holds = ai_glm_5_3__experts__zzprivate_tier(argv, argc, 4u, layer, &tier, &tier_ok);
-    if (!tier_ok) return sys__engine__abi__error(AI_GLM_5_3__LAYER__FAULT_TABLE);
-    if (H == 0u || I == 0u || K == 0u || K > E || K > AI_GLM_5_3__TOP_K_MAX || H > (1ull << 24) || I > (1ull << 24)
-     || count == 0u || first >= E || count > E - first || v[AI_GLM_5_3__EXP__INT8] > 1u || h_room / hand_bytes < n
+    const uint64_t H = v[AI_GLM_5_3__EXP__HIDDEN], K = v[AI_GLM_5_3__EXP__TOP_K];
+    if (K > AI_GLM_5_3__TOP_K_MAX || v[AI_GLM_5_3__EXP__INT8] > 1u || h_room / AI_GLM_5_3__HAND(H, K) < n
      || !nn__primitives__fits(n * H, r_room))
         return sys__engine__abi__error(AI_GLM_5_3__LAYER__FAULT_TABLE);
+    nn__routed rt;
+    if (!ai_glm_5_3__experts__zzprivate_routed(argv[1].args[0], at, room, v, r, &rt)) return sys__engine__abi__error(AI_GLM_5_3__LAYER__FAULT_TABLE);
+    nn__expert_tier tier;
+    bool tier_ok = true;
+    const bool holds = ai_glm_5_3__experts__zzprivate_tier(argv, argc, 4u, rt.layer, &tier, &tier_ok);
+    if (!tier_ok) return sys__engine__abi__error(AI_GLM_5_3__LAYER__FAULT_TABLE);
     const nn__doors* doors = nn__doors_for(ctx);
     if (doors == 0) return sys__engine__abi__error(NN__PRIMITIVES__FAULT_NO_DEVICE);
-    unsigned int* over = ctx->fault_word;
-    /* ① every row's picks, read; the held ones inverted — each expert used, in order of first use, and its picks */
-    uint64_t chosen[AI_GLM_5_3__TOP_K_MAX];
-    uint16_t weight[AI_GLM_5_3__TOP_K_MAX];
-    /* ⚖ *"fine with malloc"*: the inverted picks are the host's, sized by the chunk (a megabyte at the most rows), so
-     *   they are allocated for the call and freed at its end — the one verb here that allocates on the host */
-    uint32_t* rows_of = (uint32_t*)malloc(sizeof(uint32_t) * n * K);       /* a held pick's row, in listing order */
-    uint32_t* slot_of = (uint32_t*)malloc(sizeof(uint32_t) * n * K);       /* its row's pick: row · K + j, its sum's slot */
-    uint16_t* w_of = (uint16_t*)malloc(sizeof(uint16_t) * n * K);          /* its weight */
-    uint32_t* expert_of = (uint32_t*)malloc(sizeof(uint32_t) * n * K);     /* its expert, less `first` */
-    uint32_t* picked = (uint32_t*)calloc(count, sizeof(uint32_t));        /* each expert's picks */
-    uint32_t* begin = (uint32_t*)calloc(count, sizeof(uint32_t));         /* where they begin, in `order` */
-    uint32_t* fill = (uint32_t*)calloc(count, sizeof(uint32_t));
-    uint32_t* order = (uint32_t*)malloc(sizeof(uint32_t) * 2u * count);    /* the used ones, those in memory first */
-    uint32_t* pairs = 0;
-    uint16_t* wj = 0;
-    uint64_t fault = 0u, P = 0u;
-    if (rows_of == 0 || slot_of == 0 || w_of == 0 || expert_of == 0 || picked == 0 || begin == 0 || fill == 0 || order == 0)
-        fault = SYS__OPCODES__FAULT_TYPE;
-    for (uint64_t t = 0u; t < n && fault == 0u; ++t) {
-        const uint64_t hand = hands + t * hand_bytes;
-        if (!sys__gpu__memory_read(ctx->family, chosen, (const void*)(uintptr_t)(hand + AI_GLM_5_3__HAND_PICKS(H, K)), 8u * K)
-         || !sys__gpu__memory_read(ctx->family, weight, (const void*)(uintptr_t)(hand + 2u * H), 2u * K)) { fault = NN__PRIMITIVES__FAULT_NO_DEVICE; break; }
-        for (uint64_t j = 0u; j < K; ++j) {
-            if (chosen[j] >= 2u * E) { fault = AI_GLM_5_3__LAYER__FAULT_EXPERT; break; }
-            const bool marked = chosen[j] >= E;                                    /* held by a card's tier */
-            if (marked != holds) continue;
-            const uint64_t id = marked ? chosen[j] - E : chosen[j];
-            if (id < first || id >= first + count) continue;                       /* another worker's */
-            rows_of[P] = (uint32_t)t; slot_of[P] = (uint32_t)(t * K + j); w_of[P] = weight[j]; expert_of[P] = (uint32_t)(id - first);
-            ++picked[expert_of[P]];
-            ++P;
-        }
-    }
-    /* the used experts in the order they run, their picks laid out in that order. Where the slots are a cache (a backing),
-     * a batch at a time, the next batch's reads on their way while one computes — from the least picked to the most, so
-     * the ones this chunk used most are its most recent when it ends, the ones a token will want next (`MEASURED` on the
-     * 35B's same verb: in number order the answer after a prompt of rows hit 83%, where a prompt read a position at a
-     * time left 94%). Where they are a mapped file, all at once, the ones in memory first and the others' pages started
-     * on their way — so the chunk computes with what is here while the rest arrive */
-    nn__expert__backing backing = {};
-    if (fault == 0u && !ai_glm_5_3__experts__zzprivate_backing(argv[1].args[0], &backing)) fault = AI_GLM_5_3__LAYER__FAULT_TABLE;
-    uint64_t used = 0u, away = 0u;
-    for (uint64_t e = 0u; e < count && fault == 0u; ++e) {
-        if (picked[e] == 0u) continue;
-        if (backing.file != 0ull || holds) {
-            uint64_t k = used++;
-            while (k > 0u && picked[order[k - 1u]] > picked[e]) { order[k] = order[k - 1u]; --k; }
-            order[k] = (uint32_t)e;
-            continue;
-        }
-        sys__heap_node me;
-        if (!nn__expert__slot(layer, type, e, &me) || me.args[NN__EXPERT__SLOT_AT] == 0ull) { fault = AI_GLM_5_3__LAYER__FAULT_EXPERT; break; }
-        if (nn__expert__in_memory(ctx->family, type, me.args[NN__EXPERT__SLOT_AT])) order[used++] = (uint32_t)e;
-        else order[count + away++] = (uint32_t)e;
-    }
-    for (uint64_t k = 0u; k < away; ++k) order[used++] = order[count + k];
-    for (uint64_t o = 0u, at_ = 0u; o < used; ++o) { begin[order[o]] = (uint32_t)at_; at_ += picked[order[o]]; }
-    /* scratch */
-    const uint64_t xs = at[AI_GLM_5_3__EXP__SCRATCH], pairs_at = xs + ((2u * n * H + 7u) & ~7ull), wj_at = pairs_at + 16u * P;
-    const uint64_t gu = (wj_at + 2u * P + 7u) & ~7ull, act = gu + 4u * P * I, actr = act + 2u * P * I, acc = (actr + 2u * P * I + 7u) & ~7ull;
-    /* ⛳ THE SUM KEEPS A SLOT FOR EVERY PICK OF EVERY ROW, `n · K · H` floats, so each pick's down lands in its own and the
-     *   rows are added in pick order at the end (▶ nn's `expert_rows_reduce`) — whatever order the experts ran in */
-    if (fault == 0u && acc + 4u * n * K * H - xs > room[AI_GLM_5_3__EXP__SCRATCH]) fault = AI_GLM_5_3__LAYER__FAULT_ROOM;
-    if (fault == 0u) {
-        pairs = (uint32_t*)malloc(sizeof(uint32_t) * 4u * (P + 1u));
-        wj = (uint16_t*)malloc(sizeof(uint16_t) * (P + 1u));
-        if (pairs == 0 || wj == 0) fault = SYS__OPCODES__FAULT_TYPE;
-    }
-    if (fault == 0u) {
-        /* the picks in expert order: up pairs (row -> j), then down pairs (j -> row), and the weights in that order */
-        uint32_t* up = pairs;
-        uint32_t* down = pairs + 2u * P;
-        for (uint64_t p = 0u; p < P; ++p) {
-            const uint64_t j = begin[expert_of[p]] + fill[expert_of[p]]++;
-            up[2u * j] = rows_of[p];   up[2u * j + 1u] = (uint32_t)j;
-            down[2u * j] = (uint32_t)j; down[2u * j + 1u] = slot_of[p];
-            wj[j] = w_of[p];
-        }
-        for (uint64_t t = 0u; t < n; ++t)                    /* the rows' inputs, contiguous */
-            doors->vector_copy((uint16_t*)(uintptr_t)(xs + 2u * t * H), (const uint16_t*)(uintptr_t)(hands + t * hand_bytes), H);
-        if (!sys__gpu__memory_write(ctx->family, (void*)(uintptr_t)pairs_at, pairs, 16u * P)
-         || !sys__gpu__memory_write(ctx->family, (void*)(uintptr_t)wj_at, wj, 2u * P)
-         || !sys__gpu__memory_zerofill(ctx->family, (void*)(uintptr_t)acc, 4u * n * K * H))
-            fault = NN__PRIMITIVES__FAULT_NO_DEVICE;
-    }
-    /* ② batch by batch: each expert's gate-and-up over its rows, twelve experts a launch; the swiglus and rotations over
-     * the batch's picks; each expert's down weighted into the sum */
-    /* a tier computes four experts a batch, so a batch runs while the next one's copies land */
-    const uint64_t batch = backing.file != 0ull ? AI_GLM_5_3__EXP__BATCH : holds ? 4u : used;
-    uint64_t pinned[2u * AI_GLM_5_3__EXP__BATCH];
-    /* and its first launch is one expert, so the card begins after one copy has landed */
-    for (uint64_t b0 = 0u, b_end = holds ? 1u : batch; b0 < used && fault == 0u && P > 0u; b0 = b_end, b_end = b0 + batch) {
-        const uint64_t b1 = b_end < used ? b_end : used;
-        if (holds)                                                   /* a copy still on its way, waited for here */
-            for (uint64_t o = b0; o < b1 && fault == 0u; ++o)
-                if (!nn__expert__settle_one(layer, type, order[o])) fault = AI_GLM_5_3__LAYER__FAULT_EXPERT;
-        if (backing.file != 0ull) {
-            /* this batch's reads, if not asked for already, and the next batch's, both kept from being given up */
-            const uint64_t n1 = b1 + batch < used ? b1 + batch : used;
-            unsigned np = 0u;
-            for (uint64_t o = b0; o < n1; ++o) pinned[np++] = order[o];
-            for (uint64_t o = b0; o < n1 && fault == 0u; ++o)
-                if (nn__expert__request(ctx->family, layer, type, order[o], &backing, false, pinned, np, 0) == NN__EXPERT__REFUSED)
-                    fault = AI_GLM_5_3__LAYER__FAULT_EXPERT;
-            for (uint64_t o = b0; o < b1 && fault == 0u; ++o)
-                if (!nn__expert__settle_one(layer, type, order[o])) fault = AI_GLM_5_3__LAYER__FAULT_EXPERT;
-        }
-        for (uint64_t o = b0; o < b1 && fault == 0u; ) {
-            nn__expert__groups g = {};
-            uint64_t k = 0u;
-            for (; o < b1 && k < NN__EXPERT__GROUPS_MAX; ++o) {
-                const uint64_t e0 = order[o];
-                sys__heap_node me;
-                if (!holds) nn__expert__wait_written(layer, type, e0);    /* ▶ the decode verb: a write still landing */
-                if (!nn__expert__slot(layer, type, e0, &me) || me.args[NN__EXPERT__SLOT_AT] == 0ull) { fault = AI_GLM_5_3__LAYER__FAULT_EXPERT; break; }
-                const uint64_t slot = me.args[NN__EXPERT__SLOT_AT];
-                g.codes[k] = slot; g.luts[k] = slot + v[AI_GLM_5_3__EXP__UP_LUT]; g.out_rows[k] = 2u * I; g.d[k] = D;
-                g.out_at[k] = 0u; g.pairs_at[k] = begin[e0]; g.pairs[k] = picked[e0];
-                ++k;
-            }
-            g.count = k;
-            if (k > 0u && fault == 0u) {
-                if (int8) doors->expert_groups_int8((uint16_t*)(uintptr_t)gu, g, (const uint16_t*)(uintptr_t)xs, (const uint32_t*)(uintptr_t)pairs_at, H, over);
-                else      doors->expert_groups((uint16_t*)(uintptr_t)gu, g, (const uint16_t*)(uintptr_t)xs, (const uint32_t*)(uintptr_t)pairs_at, H, over);
-            }
-        }
-        if (fault != 0u) break;
-        /* the batch's picks: every pick where it is one batch of all, else its experts' run of them, in order */
-        const uint64_t p0 = begin[order[b0]], p1 = begin[order[b1 - 1u]] + picked[order[b1 - 1u]];
-        doors->swiglu_clamped((uint16_t*)(uintptr_t)(act + 2u * p0 * I), (const uint16_t*)(uintptr_t)(gu + 4u * p0 * I), p1 - p0, I,
-                              r[AI_GLM_5_3__EXP__LIMIT], over);
-        doors->hadamard_rotate((uint16_t*)(uintptr_t)(actr + 2u * p0 * I), (const uint16_t*)(uintptr_t)(act + 2u * p0 * I),
-                               (const uint16_t*)(uintptr_t)at[AI_GLM_5_3__EXP__SIGNS], (p1 - p0) * I, over);
-        for (uint64_t o = b0; o < b1 && fault == 0u; ++o) {
-            const uint64_t e = order[o];
-            sys__heap_node me;
-            if (!nn__expert__slot(layer, type, e, &me) || me.args[NN__EXPERT__SLOT_AT] == 0ull) { fault = AI_GLM_5_3__LAYER__FAULT_EXPERT; break; }
-            const uint64_t slot = me.args[NN__EXPERT__SLOT_AT];
-            (int8 ? doors->expert_rows_sum_int8 : doors->expert_rows_sum)((float*)(uintptr_t)acc, (const uint8_t*)(uintptr_t)(slot + v[AI_GLM_5_3__EXP__DOWN]),
-                                   v[AI_GLM_5_3__EXP__DOWN_LUT] - v[AI_GLM_5_3__EXP__DOWN],
-                                   (const uint8_t*)(uintptr_t)(slot + v[AI_GLM_5_3__EXP__DOWN_LUT]), 2u * H,
-                                   (const uint16_t*)(uintptr_t)actr, (const uint32_t*)(uintptr_t)(pairs_at + 8u * (P + begin[e])),
-                                   (const uint16_t*)(uintptr_t)wj_at, picked[e], D, H, I);
-        }
-    }
-    if (fault == 0u) {
-        if (!sys__gpu__memory_zerofill(ctx->family, (void*)(uintptr_t)routed, 2u * n * H)) fault = NN__PRIMITIVES__FAULT_NO_DEVICE;
-        else doors->expert_rows_reduce((uint16_t*)(uintptr_t)routed, (float*)(uintptr_t)acc, (const uint16_t*)(uintptr_t)routed, n, K, H, over);
-    }
-    free(rows_of); free(slot_of); free(w_of); free(expert_of); free(picked); free(begin); free(fill); free(order); free(pairs); free(wj);
-    return fault != 0u ? sys__engine__abi__error(fault) : nn__doors_answer(&argv[2]);
+    const uint64_t f = nn__routed__rows(ctx, doors, &rt, hands, n, holds ? &tier : 0, routed, 0, 0);
+    return f != 0u ? sys__engine__abi__error(f) : nn__doors_answer(&argv[2]);
 }
 
 SYS__ENGINE__ABI__BRIDGE(ai_glm_5_3__kda__zzabi_adapter,     ai_glm_5_3__kda__zzabi_apply)

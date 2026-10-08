@@ -16,6 +16,7 @@
 #include "cpu/buffer__impl.cuh"
 #include "cpu/expert__impl.cuh"
 #include "cpu/loader__impl.cuh"
+#include "cpu/routed__impl.cuh"
 #include "cpu/cartridge__impl.cuh"
 #include "cpu/primitives__impl.cuh"
 #include "cpu/deltanet__impl.cuh"
@@ -34,6 +35,7 @@
 #include "cpu/opcodes/result__abi.cuh"
 #include "cpu/opcodes/attention__abi.cuh"
 #include "cpu/opcodes/hyper__abi.cuh"
+#include "cpu/opcodes/mlp__abi.cuh"
 #include "cpu/abi_surface__impl.cuh"    /* its C interface, as data for a host language to bind */
 
 /* The second half of the roll call. */

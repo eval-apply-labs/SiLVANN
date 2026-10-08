@@ -33,10 +33,10 @@ static __device__ sys__heap_node sys__opcodes__zzabi_eq(const sys__heap_node* ar
 }
 SYS__ENGINE__ABI__BRIDGE(sys__opcodes__zzabi_adapter_eq, sys__opcodes__zzabi_eq)
 
-/* ══ ⭐⭐ THE ARITHMETIC — TWO BODIES, NINE VERBS ══════════════════════════════════════════════════════
+/* ══ ⭐⭐ THE ARITHMETIC — TWO BODIES, TWELVE VERBS ═══════════════════════════════════════════════════
  *
- * Six typed verbs choose their domain by name; three dispatchers choose it from the first operand's kind.
- * All nine share the two bodies below, so the arithmetic has one definition.
+ * Eight typed verbs choose their domain by name; four dispatchers choose it from the first operand's kind.
+ * All twelve share the two bodies below, so the arithmetic has one definition.
  *
  * ⛳ `sys__opcodes__zzpackage_as_real` IS SHARED AS IT STANDS: it already takes a node rather than a
  * form. `zzprivate_operands3` reads a form, and its one caller is the `SILVANN_ONE_READ` arm of
@@ -44,13 +44,13 @@ SYS__ENGINE__ABI__BRIDGE(sys__opcodes__zzabi_adapter_eq, sys__opcodes__zzabi_eq)
  * (`SYS__OPCODES__ZZABI_INT_ADD_APPLY`, in `language_contract.cuh`) rather than its adapter.
  */
 
-/* Two operands, for all nine. Local to this section; undefined after the last of them. */
+/* Two operands, for all twelve. Local to this section; undefined after the last of them. */
 #define SYS__OPCODES__ZZABI_ARITY2 \
     if (argc != 2u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
 
-/* The two bodies the nine verbs share. ⛳ Each answers `false` for operands outside its domain and fills
+/* The two bodies the twelve verbs share. ⛳ Each answers `false` for operands outside its domain and fills
  * `out` otherwise; the verb turns that into an error value or an answer. `which` picks the operation:
- * 0 adds, 1 subtracts, 2 compares. */
+ * 0 adds, 1 subtracts, 2 compares, 3 multiplies. */
 static __device__ inline bool sys__opcodes__zzabi_int_pair(const sys__heap_node* argv, int which,
                                                             sys__heap_node* out) {
     const sys__heap_node a = argv[0];
@@ -62,7 +62,7 @@ static __device__ inline bool sys__opcodes__zzabi_int_pair(const sys__heap_node*
      * same bits either way, so only the comparison has to say which it means. */
     if (which == 2) { *out = sys__opcodes__truth((int64_t)a.args[0] < (int64_t)b.args[0]); return true; }
     out->dtype = SYS__KIND__VALUE_INT; out->num_args = 0u; out->op_code = 0ull;
-    out->args[0] = (which == 0) ? (a.args[0] + b.args[0]) : (a.args[0] - b.args[0]);
+    out->args[0] = (which == 0) ? (a.args[0] + b.args[0]) : (which == 1) ? (a.args[0] - b.args[0]) : (a.args[0] * b.args[0]);
     return true;
 }
 
@@ -77,7 +77,7 @@ static __device__ inline bool sys__opcodes__zzabi_real_pair(const sys__heap_node
         || !sys__opcodes__zzpackage_as_real(&b, &bv)) return false;
     if (which == 2) { *out = sys__opcodes__truth(av < bv); return true; }
     out->dtype = SYS__KIND__VALUE_FLOAT; out->num_args = 0u; out->op_code = 0ull;
-    out->args[0] = sys__heap_node__real_bits((which == 0) ? (av + bv) : (av - bv));
+    out->args[0] = sys__heap_node__real_bits((which == 0) ? (av + bv) : (which == 1) ? (av - bv) : (av * bv));
     return true;
 }
 
@@ -133,7 +133,25 @@ static __device__ sys__heap_node sys__opcodes__zzabi_float_less(const sys__heap_
     return out;
 }
 
-/* ── THE THREE DISPATCHERS ───────────────────────────────────────────────────────────────────────────
+/* An offset is a product — a row of a table is `row · width` in — and the two-arithmetic rule holds for it as for a sum:
+ * the low 64 bits of an int's, wrapping as its sum does. */
+static __device__ sys__heap_node sys__opcodes__zzabi_int_mul(const sys__heap_node* argv, unsigned argc,
+                                                              sys__engine__ctx* ctx) {
+    (void)ctx; SYS__OPCODES__ZZABI_ARITY2
+    sys__heap_node out;
+    if (!sys__opcodes__zzabi_int_pair(argv, 3, &out)) return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
+    return out;
+}
+
+static __device__ sys__heap_node sys__opcodes__zzabi_float_mul(const sys__heap_node* argv, unsigned argc,
+                                                                sys__engine__ctx* ctx) {
+    (void)ctx; SYS__OPCODES__ZZABI_ARITY2
+    sys__heap_node out;
+    if (!sys__opcodes__zzabi_real_pair(argv, 3, &out)) return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
+    return out;
+}
+
+/* ── THE FOUR DISPATCHERS ────────────────────────────────────────────────────────────────────────────
  * ⚖ *"add will take the first element, check its type and run the add for that type."* They choose a
  * domain and then answer; every int program ever frozen reduces exactly as it did before. */
 
@@ -170,6 +188,17 @@ static __device__ sys__heap_node sys__opcodes__zzabi_less(const sys__heap_node* 
     return out;
 }
 
+static __device__ sys__heap_node sys__opcodes__zzabi_mul(const sys__heap_node* argv, unsigned argc,
+                                                          sys__engine__ctx* ctx) {
+    (void)ctx; SYS__OPCODES__ZZABI_ARITY2
+    sys__heap_node out;
+    bool mine = false;
+    if (argv[0].dtype == SYS__KIND__VALUE_FLOAT)    mine = sys__opcodes__zzabi_real_pair(argv, 3, &out);
+    else if (argv[0].dtype == SYS__KIND__VALUE_INT) mine = sys__opcodes__zzabi_int_pair(argv, 3, &out);
+    if (!mine) return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
+    return out;
+}
+
 #undef SYS__OPCODES__ZZABI_ARITY2
 
 SYS__ENGINE__ABI__BRIDGE(sys__opcodes__zzabi_adapter_int_add,    sys__opcodes__zzabi_int_add)
@@ -181,6 +210,9 @@ SYS__ENGINE__ABI__BRIDGE(sys__opcodes__zzabi_adapter_float_less, sys__opcodes__z
 SYS__ENGINE__ABI__BRIDGE(sys__opcodes__zzabi_adapter_add,        sys__opcodes__zzabi_add)
 SYS__ENGINE__ABI__BRIDGE(sys__opcodes__zzabi_adapter_sub,        sys__opcodes__zzabi_sub)
 SYS__ENGINE__ABI__BRIDGE(sys__opcodes__zzabi_adapter_less,       sys__opcodes__zzabi_less)
+SYS__ENGINE__ABI__BRIDGE(sys__opcodes__zzabi_adapter_int_mul,    sys__opcodes__zzabi_int_mul)
+SYS__ENGINE__ABI__BRIDGE(sys__opcodes__zzabi_adapter_float_mul,  sys__opcodes__zzabi_float_mul)
+SYS__ENGINE__ABI__BRIDGE(sys__opcodes__zzabi_adapter_mul,        sys__opcodes__zzabi_mul)
 
 /* ══ ⭐⭐ THE OBJECT VERBS AND THE REGISTER'S TWO DOORS ═══════════════════════════════════════════════
  *

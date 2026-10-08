@@ -46,5 +46,7 @@ static sys__heap_node nn__vector__zzabi_apply_top_k(const sys__heap_node* argv, 
 static __device__ __noinline__ void nn__vector__zzabi_adapter_top_k(sys__heap_node* base, uint64_t form);
 static sys__heap_node nn__vector__zzabi_apply_top_k_biased(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx);
 static __device__ __noinline__ void nn__vector__zzabi_adapter_top_k_biased(sys__heap_node* base, uint64_t form);
+static sys__heap_node nn__vector__zzabi_apply_penalize(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx);
+static __device__ __noinline__ void nn__vector__zzabi_adapter_penalize(sys__heap_node* base, uint64_t form);
 
 #endif /* SILVANN__PACKAGES_NN_CPU_OPCODES_VECTOR__ABI__HEADER_CUH */

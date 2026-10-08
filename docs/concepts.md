@@ -62,7 +62,7 @@ primitive procedures it does not look inside.
 | the environment, frames of bindings | the bindings a program runs in: tables, buffers, procedures, pictures |
 | primitive procedures | the verbs of `nn` and of a model's package — each launches its arithmetic on a card or on the CPU's cores |
 | special forms (`if`, `define`, `let`, `lambda`) | `if`, `defun`, `let`, `while` |
-| a program is data | a model is text its runtime writes at boot (`models/<name>/programs.lisp`), a list the evaluator walks |
+| a program is data | a model is a Lisp file it carries (`models/<name>/lisp/`), read at boot into lists the evaluator walks |
 
 Three things follow that a fixed inference graph does not have:
 

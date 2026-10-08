@@ -1,6 +1,6 @@
 # Running SiLVANN
 
-This is a **developer preview (v0.3.3)**. It is tested on Linux with AMD Instinct MI50 cards (gfx906, ROCm 6), and on
+This is a **developer preview (v0.4.0)**. It is tested on Linux with AMD Instinct MI50 cards (gfx906, ROCm 6), and on
 the CPU alone with AVX2;
 Windows and NVIDIA cards are untested, Apple silicon is not supported yet. If something does not build or does
 not run on your machine, you are expected to be able to read the error and the source.
@@ -26,8 +26,8 @@ venv/bin/python silvann_core.py list-models
 venv/bin/python silvann_core.py download-model Qwen3.6-35B-A3B_silvann_tq_D8E4
 ```
 
-A model lands in `models/<name>/` with a `configs/default.json`. The server refuses a model that is not there and
-tells you this command.
+A model lands in `models/<name>/` with a `configs/default.json` and its program in `lisp/` — the Lisp the evaluator
+runs it with, yours to read and change. The server refuses a model that is not there and tells you this command.
 
 ## 3. Serve it, and chat
 
@@ -65,6 +65,7 @@ first argument.
 | `max_context` | the longest conversation, in positions, 32,768 by default; the cache is sized for it at boot, and the `_note` beside it says how many positions 100 MB of the card holds for this model — lower it if the model does not fit on your card, raise it if there is room |
 | `thinking` | whether the model reasons before it answers, by default |
 | `lora` | an adapter from the model's folder to load at boot, or `null` |
+| `sampler` | how the next token is chosen: `"generation"` (the model's own `generation_config.json`), `null` (the most likely, greedy), or `{"temperature", "top_k", "top_p", "repetition_penalty"}`. It is drawn on the card — only the token comes back — when `temperature` is above 0 and `top_k` 1 to 64, and on the host over the logits otherwise |
 | `options` | handed to the model's runtime, below |
 
 The Qwen models' `options`:

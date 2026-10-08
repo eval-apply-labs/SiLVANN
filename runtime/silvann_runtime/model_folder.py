@@ -47,6 +47,16 @@ class ModelFolder:
     def architecture(self):
         return self.config.get("model_type", "")
 
+    def program(self, name):
+        """`lisp/<name>.lisp` in this folder — a file of the model's program, which travels with the model: the boot
+        reads it and the evaluator runs it. Refused when the folder has none."""
+        path = os.path.join(self.path, "lisp", name + ".lisp")
+        if not os.path.isfile(path):
+            raise Refused("%s has no lisp/%s.lisp — a file of the model's program. `silvann_core.py download-model %s` "
+                          "fetches it into the folder; a folder of your own takes its family's files from the release's lisp/"
+                          % (self.path, name, os.path.basename(self.path.rstrip(os.sep))))
+        return path
+
     def loras(self):
         d = os.path.join(self.path, "loras")
         return sorted(n for n in os.listdir(d)

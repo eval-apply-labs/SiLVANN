@@ -7,7 +7,7 @@
  * identifier" at a line in another file. Every verb in this tree is declared for the same reason. */
 static __device__ __noinline__ void sys__opcodes__zzabi_adapter_eq(sys__heap_node* base, uint64_t form);
 
-/* The nine arithmetic adapters. `sys__int__add`'s contract row reaches its adapter through a macro,
+/* The twelve arithmetic adapters. `sys__int__add`'s contract row reaches its adapter through a macro,
  * `SYS__OPCODES__ZZABI_INT_ADD_APPLY`, so the `SILVANN_ONE_READ` experiment can put its own body there. */
 static __device__ __noinline__ void sys__opcodes__zzabi_adapter_int_add(sys__heap_node* base, uint64_t form);
 static __device__ __noinline__ void sys__opcodes__zzabi_adapter_float_add(sys__heap_node* base, uint64_t form);
@@ -18,6 +18,9 @@ static __device__ __noinline__ void sys__opcodes__zzabi_adapter_float_less(sys__
 static __device__ __noinline__ void sys__opcodes__zzabi_adapter_add(sys__heap_node* base, uint64_t form);
 static __device__ __noinline__ void sys__opcodes__zzabi_adapter_sub(sys__heap_node* base, uint64_t form);
 static __device__ __noinline__ void sys__opcodes__zzabi_adapter_less(sys__heap_node* base, uint64_t form);
+static __device__ __noinline__ void sys__opcodes__zzabi_adapter_int_mul(sys__heap_node* base, uint64_t form);
+static __device__ __noinline__ void sys__opcodes__zzabi_adapter_float_mul(sys__heap_node* base, uint64_t form);
+static __device__ __noinline__ void sys__opcodes__zzabi_adapter_mul(sys__heap_node* base, uint64_t form);
 
 /* The object verbs and the register's two doors. */
 static __device__ __noinline__ void sys__opcodes__zzabi_adapter_clone(sys__heap_node* base, uint64_t form);

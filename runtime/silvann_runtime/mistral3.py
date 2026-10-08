@@ -7,7 +7,9 @@ gate on the attention, no norm on its queries and keys. So no package of its own
   every position so far · rotate · o · residual · rmsnorm · rotate · gate up · swiglu · rotate · down · residual
 ```
 — each matrix packed and read through `nn__turboquant__gemv`, whose input is rotated as the pack rotated its columns.
-A token is one short program, `(begin (embed 0 0) (layers at len) (head))`, its embedding row written by the host.
+The PROGRAM is Lisp, written by hand — `lisp/mistral3.lisp`, which the model folder carries and the boot reads — `layers`
+a loop over the layers; a token is one short program, `(begin (position at len qs) (head))`, its embedding row written
+by the host.
 
 ⭐ YaRN, IN THE HOST: the rotary's frequencies are YaRN's (the 14B: factor 16 over an original 16,384, θ 10⁹), which
 `nn__rope__angles` does not compute — so the host writes each position's 64 cosines and 64 sines into the angles buffer
@@ -22,6 +24,7 @@ import pickle
 
 import numpy as np
 
+from . import sampling
 from .model_folder import NL, Refused
 
 ARCHITECTURES = ("ministral3",)
@@ -61,6 +64,9 @@ def yarn_inv_freq(head_dim, rope):
 
 
 class Ministral3:
+    PROGRAM = ("mistral3", "sampling")                    # the model folder's lisp/ files (▶ `ModelFolder.program`)
+    SAMPLES_ON_CARD = True          # `head_sample` — ▶ `sampling`
+
     def __init__(self, folder, machine, max_context=8192, layers=None):
         if folder.architecture not in ARCHITECTURES:
             raise Refused("%s is a %r model, not one of %s" % (folder.path, folder.architecture, ARCHITECTURES))
@@ -170,6 +176,7 @@ class Ministral3:
         if loader.handed() != 0:
             raise Refused("%d slots were reserved and never published" % loader.handed())
         self._buffers()
+        self._bindings()
         m.define_programs(self._procedures)
 
     def _buffers(self):
@@ -183,8 +190,10 @@ class Ministral3:
         m.buffer(H * 2, "signs_row", _half(np.tile(signs[:512], H // 512)))
         m.buffer(H * 2, "fnw", _half(final_w))                  # Mistral's norm is a plain gain
         m.buffer(H * 2, "zero_h", _half(np.zeros(H)))
+        m.buffer(64, "one", _half(np.ones(32)))                 # the MLP's down's one weight (▶ nn's mlp.cuh)
+        m.buffer(2 * (2 * H + 4 * self.INTER), "mlp_scratch")
         self.X_AT = m.buffer(H * 2, "x")
-        for nm, n in (("u", H), ("hu", H), ("h", H), ("hr", H), ("y", H), ("hn", H), ("hnr", H),
+        for nm, n in (("h1", H), ("u", H), ("hu", H), ("h", H), ("hr", H), ("y", H), ("hn", H), ("hnr", H),
                       ("qq", self.QW), ("kk", self.KVW), ("att", self.QW), ("attr", self.QW),
                       ("g", self.INTER), ("up", self.INTER), ("gr", self.INTER)):
             m.buffer(n * 2, nm)
@@ -195,64 +204,56 @@ class Ministral3:
         self.EMB_SCALE_AT = m.buffer(64, "emb_scales")
         self.LOGITS_AT = m.buffer(self.VOCAB * 2, "logits_h")
         m.buffer(64, "res")
+        sampling.buffers(m)
 
-    # ── ③ the procedures ─────────────────────────────────────────────────────────────────────────────────────
+    # ── ③ the names the program is written against, and the program ──────────────────────────────────────────
     def plane(self, l, n, which):
         p = self.PLAN[n]
         at, size = (p.at_up_data, p.up_data) if which == "data" else (p.at_down_lut, p.down_lut)
         return "(nn__expert__plane %d %d %d %d %d)" % (l, self.TYPE[n], self.WHICH[n], at, size)
 
-    def gemv(self, l, n, x, out):
-        """`out = W x` for a layer's matrix — its input rotated unless the matrix is lossless."""
-        r = self.b.record(l, n)
-        if r.d == 16:
-            return "(nn__expert__multiply_fp16 %s %s %s %d %d)" % (self.plane(l, n, "data"), x, out, r.rows, r.cols)
-        return ("(nn__turboquant__gemv %s %s %s %s %d %d %d)"
-                % (self.plane(l, n, "data"), self.plane(l, n, "lut"), x, out, r.rows, r.cols, r.d))
+    MATRICES = (("Q", "self_attn.q_proj.weight"), ("K", "self_attn.k_proj.weight"), ("V", "self_attn.v_proj.weight"),
+                ("O", "self_attn.o_proj.weight"), ("GATE", "mlp.gate_proj.weight"), ("UP", "mlp.up_proj.weight"),
+                ("DOWN", "mlp.down_proj.weight"))
 
-    def cache(self, l, half, at=None):
-        """Layer `l`'s keys (`up`) or values (`down`): all of them, or the row at `at` (an expression, in bytes)."""
-        p = self.KVPLAN
-        base = p.at_up_data if half == "up" else p.at_down_data
-        if at is None:
-            return "(nn__expert__plane %d %d 0 %d %d)" % (l, self.T_KV, base, self.max_context * self.KVW * 2)
-        return "(nn__expert__plane %d %d 0 (sys__add %d %s) %d)" % (l, self.T_KV, base, at, self.KVW * 2)
-
-    def _layer(self, l):
-        H, s = self.H, "self_attn."
-        norm = lambda n: self.plane(l, n, "data")
-        return ("(nn__rmsnorm__apply x %s h %d %r) (nn__hadamard__rotate h signs hr %d) " % (norm("input_layernorm.weight"), H, self.EPS, H)
-                + self.gemv(l, s + "q_proj.weight", "hr", "qq") + " (nn__vector__scale qq qs qq %d) " % self.QW
-                + self.gemv(l, s + "k_proj.weight", "hr", "kk") + " "
-                + self.gemv(l, s + "v_proj.weight", "hr", self.cache(l, "down", "at")) + " "
-                + "(nn__rope__apply qq cs qq %d %d) (nn__rope__apply kk cs %s %d %d) "
-                % (self.QH, self.AH, self.cache(l, "up", "at"), self.KVH, self.AH)
-                + "(nn__attention__decode qq %s %s scores att %d %d %d 0 len) "
-                % (self.cache(l, "up"), self.cache(l, "down"), self.QH, self.KVH, self.AH)
-                + "(nn__hadamard__rotate att signs attr %d) " % self.QW
-                + self.gemv(l, s + "o_proj.weight", "attr", "y") + " (nn__vector__add x y x %d) " % H
-                + "(nn__rmsnorm__apply x %s h %d %r) (nn__hadamard__rotate h signs hr %d) "
-                % (norm("post_attention_layernorm.weight"), H, self.EPS, H)
-                + self.gemv(l, "mlp.gate_proj.weight", "hr", "g") + " " + self.gemv(l, "mlp.up_proj.weight", "hr", "up")
-                + " (nn__swiglu__combine g up g %d) (nn__hadamard__rotate g signs gr %d) " % (self.INTER, self.INTER)
-                + self.gemv(l, "mlp.down_proj.weight", "gr", "y") + " (nn__vector__add x y x %d)" % H)
+    def _bindings(self):
+        """What `lisp/mistral3.lisp` reads: the shape, each matrix's width, and a layer's planes gathered into arrays
+        indexed by its place in the layers this machine runs."""
+        m, H, run, b = self.m, self.H, self.run_layers, self.b
+        head = lambda at, size: "(nn__expert__plane 0 %d 0 %d %d)" % (self.T_HEAD, at, size)
+        values = dict(HIDDEN=H, INTER=self.INTER, EPS=self.EPS, VOCAB=self.VOCAB, RUN=len(run), Q_HEADS=self.QH,
+                      KV_HEADS=self.KVH, HEAD_DIM=self.AH, Q_WIDTH=self.QW, KV_WIDTH=self.KVW,
+                      EMB_HALVES=int(self.emb_rec["row_bytes"]) // 2, EMB_BITS=int(self.emb_rec["d"]),
+                      HEAD_CODES=head(self.HPLAN.at_up_data, self.HPLAN.up_data),
+                      HEAD_SCALES=head(self.HPLAN.at_down_lut, self.HPLAN.down_lut), HEAD_BITS=int(self.head_rec["d"]),
+                      KV_TYPE=self.T_KV, KEYS_AT=self.KVPLAN.at_up_data, VALUES_AT=self.KVPLAN.at_down_data,
+                      KV_ROW_BYTES=self.KVW * 2, CACHE_BYTES=self.max_context * self.KVW * 2)
+        for short, n in self.MATRICES:
+            bits = {int(b.record(l, n).d) for l in run}
+            if len(bits) != 1:
+                raise Refused("%s is packed at %s bits across the layers; the program takes one width" % (n, sorted(bits)))
+            values[short + "_BITS"] = bits.pop()
+        values["MLP_WORDS"] = 16 in (values["GATE_BITS"], values["UP_BITS"], values["DOWN_BITS"])
+        m.bind_values(values)
+        m.array("LAYER", list(run))
+        m.array("INPUT_NORM", [self.plane(l, "input_layernorm.weight", "data") for l in run])
+        m.array("POST_NORM", [self.plane(l, "post_attention_layernorm.weight", "data") for l in run])
+        for short, n in self.MATRICES:
+            m.array(short + "_CODES", [self.plane(l, n, "data") for l in run])
+            m.array(short + "_SCALES", [self.plane(l, n, "lut") for l in run])
+        # each layer's MLP as nn's table (▶ nn's `contracts/objects/mlp.cuh`)
+        ms = [n for short, n in self.MATRICES if short in ("GATE", "UP", "DOWN")]
+        for l in run:
+            m.table("ml%d" % l, [self.plane(l, "post_attention_layernorm.weight", "data")]
+                    + [c for n in ms for c in (self.plane(l, n, "data"), self.plane(l, n, "lut"))]
+                    + ["signs", "one", "mlp_scratch", H, self.INTER] + [values[s + "_BITS"] for s in ("GATE", "UP", "DOWN")]
+                    + [self.EPS])
+        m.array("MLP", ["ml%d" % l for l in run])
 
     def _procedures(self):
-        m, H = self.m, self.H
-        row = int(self.emb_rec["row_bytes"])
-        # the token's row, un-rotated (Rᵀu = S ⊙ H·u), into the residual
-        m.defun("(defun (embed codes scale) (begin (nn__turboquant__decode (nn__vector__range emb_codes codes %d) "
-                "(nn__vector__range emb_scales scale 1) u 1 %d %d) (nn__hadamard__rotate u ones512 hu %d) "
-                "(nn__vector__pointwise_mul hu signs_row x %d) (type x)))" % (row // 2, H, int(self.emb_rec["d"]), H, H))
-        logits = ("(nn__rmsnorm__apply x fnw hn %d %r) (nn__hadamard__rotate hn signs hnr %d) " % (H, self.EPS, H)
-                  + "(nn__turboquant__gemv (nn__expert__plane 0 %d 0 %d %d) (nn__expert__plane 0 %d 0 %d %d) hnr logits_h %d %d %d)"
-                  % (self.T_HEAD, self.HPLAN.at_up_data, self.HPLAN.up_data, self.T_HEAD, self.HPLAN.at_down_lut,
-                     self.HPLAN.down_lut, self.VOCAB, H, int(self.head_rec["d"])))
-        m.defun("(defun (head) (begin %s (nn__argmax__find logits_h res %d) (nn__buffer__read res)))" % (logits, self.VOCAB))
-        m.defun("(defun (head_logits) (begin %s (type x)))" % logits)
-        for l in self.run_layers:
-            m.defun("(defun (layer%d at len qs) (begin %s (type x)))" % (l, self._layer(l)))
-        m.defun("(defun (layers at len qs) (begin %s (type x)))" % " ".join("(layer%d at len qs)" % l for l in self.run_layers))
+        """The program: `lisp/mistral3.lisp` and the sampler's."""
+        self.m.load_source(self.folder.program("mistral3"))
+        self.m.load_source(self.folder.program("sampling"))
 
     # ── ④ running ─────────────────────────────────────────────────────────────────────────────────────────────
     def reset(self):
@@ -272,25 +273,26 @@ class Ministral3:
         self.m.write(self.EMB_AT, self.emb_data[token * row:(token + 1) * row])
         self.m.write(self.EMB_SCALE_AT, self.emb_lut[token * 2:token * 2 + 2])
 
-    def step(self, token, pos, greedy=True):
-        """One position: the token in, the next token out (greedy), or the logits left for a sampler (answers None)."""
+    def step(self, token, pos, greedy=True, sample=None, head=None):
+        """One position: the token in, the next token out — greedy, or drawn on the card by `sample` (a `sampling.head`)
+        — or the logits left for a sampler on the host (answers None). `head` replaces all three."""
         if pos >= self.max_context:
             raise Refused("position %d is past the context of %d" % (pos, self.max_context))
         self._stage(token)
         self._angles(pos)
-        got = self.m.must("(begin (embed 0 0) (layers %d %d %r) %s)" % (pos * self.KVW * 2, pos + 1, self.query_scale(pos),
-                                                                        "(head)" if greedy else "(head_logits)"),
+        head = head or sample or ("(head)" if greedy else "(head_logits)")
+        got = self.m.must("(begin (position %d %d %r) %s)" % (pos * self.KVW * 2, pos + 1, self.query_scale(pos), head),
                           "position %d" % pos)
-        return got if greedy else None
+        return got if greedy or sample else None
 
-    def prefill(self, tokens, first, greedy=True):
-        """Positions `first ..` for `tokens`, a position at a time; then the next token (greedy) or the logits left."""
+    def prefill(self, tokens, first, greedy=True, sample=None):
+        """Positions `first ..` for `tokens`, a position at a time — the head only at the last, the others' logits never
+        made; then the next token (greedy, or drawn by `sample`) or the logits left."""
         if first + len(tokens) > self.max_context:
             raise Refused("positions to %d are past the context of %d" % (first + len(tokens), self.max_context))
-        out = None
-        for i, t in enumerate(tokens):
-            out = self.step(t, first + i, greedy)
-        return out
+        for i, t in enumerate(tokens[:-1]):
+            self.step(t, first + i, head="(type x)")
+        return self.step(tokens[-1], first + len(tokens) - 1, greedy, sample)
 
     def logits(self):
         return np.frombuffer(self.m.read(self.LOGITS_AT, self.VOCAB * 2), dtype="<f2").astype(np.float32)

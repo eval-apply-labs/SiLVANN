@@ -8,11 +8,15 @@
 #include "../../packages/sys/cpu/silicon/file.cuh"   /* opening and reading a file, written once for every family */
 #include <hip/hip_runtime.h>
 #include <stddef.h>
+#include <stdlib.h>
 #include <stdint.h>
 #include "includes.cuh"   /* which cards are this family's */
 
 
-static inline bool amd_rocm6_wave64__memory_allocate(void** at, size_t bytes) { return hipMalloc(at, bytes) == hipSuccess; }
+static inline bool amd_rocm6_wave64__memory_allocate(void** at, size_t bytes) {
+    if (hipMalloc(at, bytes) != hipSuccess) return false;
+    return true;
+}
 static inline void amd_rocm6_wave64__memory_free(void* at)           { if (at) (void)hipFree(at); }
 static inline bool amd_rocm6_wave64__memory_zerofill(void* at, size_t bytes) { return hipMemset(at, 0, bytes) == hipSuccess; }
 

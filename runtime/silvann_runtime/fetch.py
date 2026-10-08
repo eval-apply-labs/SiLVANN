@@ -35,11 +35,14 @@ def present(path):
 
 def ensure_model(path, repo=None, ask=input, yes=False):
     """The model folder at `path`, downloaded first if it is not there and the answer is yes — or at once when `yes`,
-    which is what `silvann_core.py download-model` is: the asking already done."""
+    which is what `silvann_core.py download-model` is: the asking already done. A folder that is there without its
+    program, `lisp/`, is asked the same about that alone."""
     path = os.path.abspath(path)
-    if present(path):
-        return path
     name = os.path.basename(path.rstrip(os.sep))
+    if present(path):
+        if not os.path.isdir(os.path.join(path, "lisp")):
+            _program(path, repo or KNOWN.get(name, (None, None))[0], ask, yes)
+        return path
     repo, size = (repo, "several GB") if repo else KNOWN.get(name, (None, None))
     if repo is None:
         raise Refused("%s is not a model folder, and %r is not a model this release knows how to fetch — known: %s"
@@ -53,6 +56,22 @@ def ensure_model(path, repo=None, ask=input, yes=False):
     if ask("Download it now from huggingface.co/%s (%s)? [y/N] " % (repo, size)).strip().lower() not in ("y", "yes"):
         raise Refused("not downloaded — run `%s` when you want it" % command)
     return _download(repo, path)
+
+
+def _program(path, repo, ask, yes):
+    """A folder with its weights and without `lisp/` — the model's program — gets it from the folder's repository, a few
+    files of text. Nothing is fetched without a yes; a folder no repository is known for is left as it is, and the boot
+    names what it lacks."""
+    if repo is None:
+        return
+    if not yes:
+        if not sys.stdin.isatty():
+            return
+        if ask("%s has no lisp/ — the model's program. Fetch it from huggingface.co/%s? [Y/n] " % (path, repo)
+               ).strip().lower() in ("n", "no"):
+            return
+    from huggingface_hub import snapshot_download
+    snapshot_download(repo_id=repo, local_dir=path, allow_patterns=["lisp/*"])
 
 
 def _download(repo, path):

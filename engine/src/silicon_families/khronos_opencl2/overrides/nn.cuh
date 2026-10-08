@@ -16,7 +16,7 @@
 
 /* ⭐ THE WORK-GROUPS THE DEVICE RUNS AT ONCE — its compute units, a few each. A work-group stages `x` in local memory
  *   before its first row, so a grid larger than the device holds paid that again for every group that followed, for a
- *   row or two each (▶ the ROCm family's `zzprivate_resident`, where it measured 158 -> 73 us). Kept per thread. */
+ *   row or two each (▶ the ROCm family's `zzpackage_resident`, where it measured 158 -> 73 us). Kept per thread. */
 /* `MEASURED` on the MI50 (test/src_gemv_27b_bench.cpp, 1/2/3/4/8 a unit): three is the best for every 27B shape — the
  * out-projection 114/88/84/97/97 us. `ASSUMED` for other devices, an Intel iGPU's units among them: what would change it
  * is a device whose work-groups a unit differ, and a run of the bench there settles it. */

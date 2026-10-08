@@ -22,6 +22,7 @@
  *   not pinned. On the whole machine it is the process's memory, as it always was, unless it is large.
  * A header just before the address says which of the two it was, and how much was mapped. */
 typedef struct x86_avx2__held {
+    uint64_t offset;                           /* a guarded allocation's: its mapping starts this far before the address */
     uint64_t mapped;                           /* the bytes mapped for it, or 0: it came from the process's heap */
     uint64_t bytes;                            /* the bytes asked for */
 } x86_avx2__held;
@@ -30,6 +31,7 @@ typedef struct x86_avx2__held {
  *   than the machine's memory when a file is mapped over it (`memory_map_file`), and the system refuses such a
  *   mapping outright unless it is told nothing is reserved. Its pages are page-aligned, which the file needs. */
 #define X86_AVX2__ZZPRIVATE_LARGE (1ull << 30)
+#define X86_AVX2__ZZPRIVATE_GUARDED (1ull << 63)   /* in `mapped`: the allocation sits between two guard pages */
 static inline bool x86_avx2__memory_allocate(void** at, size_t bytes) {
     if (at == 0) return false;
     *at = 0;
@@ -38,8 +40,10 @@ static inline bool x86_avx2__memory_allocate(void** at, size_t bytes) {
     if (node < 0 && bytes < X86_AVX2__ZZPRIVATE_LARGE) {
         void* base = 0;
         if (posix_memalign(&base, 64u, bytes + 64u) != 0 || base == 0) return false;
-        /* the header just before the address, where `x86_avx2__memory_free` reads it — not at `base`, where free would
-         *   read 16 bytes nobody wrote and, unless they were zero, unmap a garbage length of the process's heap */
+        /* ⛔ the header just before the address, where `x86_avx2__memory_free` reads it — not at `base`. Written at `base`
+         *   (until 2026-10-07), free read 16 bytes nobody wrote: zero by luck freed it right, anything else munmapped a
+         *   garbage length of the process's heap at `at - 4096` — a later large allocation then mapped into the hole,
+         *   overlapping live heap, and glibc aborted on a buffer nobody had overrun (`free(): invalid pointer`). */
         x86_avx2__held* h = (x86_avx2__held*)((uint8_t*)base + 64u - sizeof *h);
         h->mapped = 0u; h->bytes = bytes;
         *at = (uint8_t*)base + 64u;
@@ -83,7 +87,8 @@ static inline bool x86_avx2__memory_allocate(void** at, size_t bytes) {
 static inline void x86_avx2__memory_free(void* at) {
     if (at == 0) return;
     const x86_avx2__held* h = (const x86_avx2__held*)((uint8_t*)at - sizeof(x86_avx2__held));
-    if (h->mapped != 0u) munmap((uint8_t*)at - X86_AVX2__ZZPRIVATE_PAGE, h->mapped);
+    if (h->mapped & X86_AVX2__ZZPRIVATE_GUARDED) munmap((uint8_t*)at - h->offset, h->mapped & ~X86_AVX2__ZZPRIVATE_GUARDED);
+    else if (h->mapped != 0u) munmap((uint8_t*)at - X86_AVX2__ZZPRIVATE_PAGE, h->mapped);
     else free((uint8_t*)at - 64u);
 }
 static inline bool x86_avx2__memory_zerofill(void* at, size_t bytes) {

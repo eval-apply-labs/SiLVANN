@@ -147,6 +147,8 @@
 #define nn__attention__zzabi_launch_softmax_rows__RUNS   NN__GPU__ZZPRIVATE_WIDE,     nn__attention__zzabi_body_softmax_rows,   NN__GPU__ZZPRIVATE_UP_TO(rows, NN__KERNELS__BLOCKS_MAX), 256u, (p, rows, length)
 #define nn__attention__zzabi_launch_causal_scores_grouped__RUNS NN__GPU__ZZPRIVATE_WIDE, nn__attention__zzabi_body_causal_scores_grouped, NN__GPU__ZZPRIVATE_EACH(rows * q_heads * ((first + rows + NN__ATTENTION__GROUP_SPAN - 1u) / NN__ATTENTION__GROUP_SPAN)), 256u, (p, q, k, q_heads, kv_heads, head_dim, first, rows)
 #define nn__attention__zzabi_launch_causal_softmax__RUNS NN__GPU__ZZPRIVATE_WIDE,     nn__attention__zzabi_body_causal_softmax, NN__GPU__ZZPRIVATE_UP_TO(rows * q_heads, NN__KERNELS__BLOCKS_MAX), 256u, (p, q_heads, first, rows)
+#define nn__vector__zzabi_launch_penalize__RUNS          NN__GPU__ZZPRIVATE_WIDE,     nn__vector__zzabi_body_penalize,          NN__GPU__ZZPRIVATE_EACH(count), 256u, (x, n, ids, stride, count, penalty, over)
+#define nn__vector__zzabi_launch_draw__RUNS              NN__GPU__ZZPRIVATE_AS_INT,   nn__vector__zzabi_body_draw,              1u, 1u, (out, stamp, w, k, top_p, seed, pos)
 
 /* ── EVERY ROW BECOMES A KERNEL AND A DOOR ─────────────────────────────────────────────────────────────── */
 /* ⛳ A SERIAL BODY RUNS ON ONE LANE OF ONE BLOCK, so PLAIN sends every other lane home first; a WIDE body

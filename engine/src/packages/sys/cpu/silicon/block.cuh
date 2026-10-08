@@ -68,5 +68,7 @@ static inline void sys__silicon__host_set_worker_count(unsigned int n) {
     sys__silicon__zzprivate_worker_count = (n == 0u) ? 1u : (n > SYS__SILICON__WORKERS_MAX ? SYS__SILICON__WORKERS_MAX : n);
 }
 static inline void sys__silicon__host_act_as(int worker) { sys__silicon__zzprivate_acting_as = worker; }
+/* whom this runner acts as now, `-1` for its block's own worker — so a caller that acts as another can put it back */
+static inline int sys__silicon__host_acting_as(void) { return sys__silicon__zzprivate_acting_as; }
 
 #endif /* SILVANN__PACKAGES_SYS_CPU_SILICON_BLOCK_CUH */

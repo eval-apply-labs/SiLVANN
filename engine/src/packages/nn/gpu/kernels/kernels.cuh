@@ -289,14 +289,18 @@ static __device__ inline uint64_t nn__argmax__zzabi_body(const uint16_t* x, uint
     return first == -NN__KERNELS__INFINITY ? 0ull : (uint64_t)(-first);
 }
 
-/* ⭐⭐ THE `k` LARGEST, AND THEIR SOFTMAX — the router's choice. ⚖ *"we need to have a list of some sort,
- *   which can give us the top k"*. One block: `k` rounds, each the largest value not yet taken, found the
- *   way `argmax` finds it (the first index of the largest; a NaN never chosen). The weights are the
+/* ⭐⭐ THE `k` LARGEST, AND THEIR SOFTMAX — the router's choice, and a sampler's. ⚖ *"we need to have a list of
+ *   some sort, which can give us the top k"*. One block: `k` rounds, each the largest value not yet taken, found
+ *   the way `argmax` finds it (the first index of the largest; a NaN never chosen). The weights are the
  *   softmax over the `k` values alone, which is exactly HF's router: its softmax over every expert,
- *   top `k`, divided by their sum — the other experts' terms cancel in that division.
+ *   top `k`, divided by their sum — the other experts' terms cancel in that division — and a sampler's
+ *   top-k distribution before its top-p cut.
  * ⛳ THE INDICES GO WHERE `values` POINTS, `stride` words apart — into the value words of nodes a program
- *   made, eight words to a node — and the weights into `weights` as halves, for `scale_at` to read. */
-#define NN__VECTOR__TOP_K_MAX 16u
+ *   made, eight words to a node — and the weights into `weights` as halves, for `scale_at` to read.
+ * ⛳ SIXTY-FOUR PICKS AT MOST: a router takes eight or ten, a sampler's top-k is 20 to 50. The biased router below keeps
+ *   sixteen, as its only callers are routers. */
+#define NN__VECTOR__TOP_K_MAX 64u
+#define NN__VECTOR__ROUTER_K_MAX 16u
 static __device__ inline void nn__vector__zzabi_body_top_k(uint64_t* values, uint64_t stride, uint16_t* weights,
                                                             const uint16_t* x, uint64_t n, uint64_t k) {
     const uint64_t lane = nn__silicon__lane(), lanes = nn__silicon__lanes();
@@ -326,6 +330,59 @@ static __device__ inline void nn__vector__zzabi_body_top_k(uint64_t* values, uin
         bool hit = false;
         weights[r] = nn__primitives__zzpackage_float_to_half(nn__silicon__expf(chosen_v[r] - chosen_v[0]) / sum, &hit);
     }
+}
+
+/* ⭐ THE REPETITION PENALTY — each token id among the first `count` of `ids` (`stride` words apart, as `top_k` writes
+ *   them) has its logit divided by `penalty` when positive and multiplied by it otherwise, once however often it
+ *   appears: HF's rule. A lane an id, and an id an earlier lane holds is left to that lane, so no logit is penalised
+ *   twice and no two lanes write one element. Ids past `n` are skipped. */
+static __device__ inline void nn__vector__zzabi_body_penalize(uint16_t* x, uint64_t n, const uint64_t* ids, uint64_t stride,
+                                                               uint64_t count, float penalty, unsigned int* over) {
+    for (uint64_t j = nn__kernels__zzprivate_first(); j < count; j += nn__kernels__zzprivate_stride()) {
+        const uint64_t id = ids[j * stride];
+        bool again = id >= n;
+        for (uint64_t q = 0ull; q < j; ++q) again |= ids[q * stride] == id;    /* no early exit: the reads are independent */
+        if (again) continue;
+        const float v = nn__silicon__half_to_float(x[id]);
+        bool hit = false;
+        x[id] = nn__primitives__zzpackage_float_to_half(v > 0.0f ? v / penalty : v * penalty, &hit);
+        if (hit) *over = NN__KERNELS__OVERFLOWED;
+    }
+}
+
+/* splitmix64's finaliser: 64 bits from 64, every input bit reaching every output bit. */
+static __device__ inline uint64_t nn__vector__zzprivate_mix(uint64_t z) {
+    z += 0x9E3779B97F4A7C15ull;
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+    return z ^ (z >> 31);
+}
+
+/* ⭐ ONE DRAW FROM `k` WEIGHTS, LARGEST FIRST — `top_k`'s — after the top-p cut: the fewest leading weights whose share
+ *   of the whole reaches `top_p` are kept, and one is drawn in proportion among them. Answers its place in `w`.
+ * ⛳ THE RANDOM NUMBER IS A FUNCTION OF `seed` AND `pos` ALONE — a counter hashed, not a generator's state — so a seed
+ *   replays a conversation's draws exactly, on any family, and nothing is carried from one call to the next. Its 24
+ *   bits make a float in [0, 1) exactly. */
+static __device__ inline uint64_t nn__vector__zzabi_body_draw(const uint16_t* w, uint64_t k, float top_p, uint64_t seed,
+                                                               uint64_t pos) {
+    float all = 0.0f;
+    for (uint64_t j = 0ull; j < k; ++j) all += nn__silicon__half_to_float(w[j]);
+    uint64_t keep = k;
+    float run = 0.0f;
+    for (uint64_t j = 0ull; j < k; ++j) {
+        run += nn__silicon__half_to_float(w[j]);
+        if (run >= top_p * all) { keep = j + 1ull; break; }
+    }
+    float kept = 0.0f;
+    for (uint64_t j = 0ull; j < keep; ++j) kept += nn__silicon__half_to_float(w[j]);
+    const float u = (float)(nn__vector__zzprivate_mix(seed ^ nn__vector__zzprivate_mix(pos)) >> 40) * (1.0f / 16777216.0f);
+    const float target = u * kept;
+    float at = 0.0f;
+    for (uint64_t j = 0ull; j < keep; ++j) {
+        at += nn__silicon__half_to_float(w[j]);
+        if (target < at) return j;
+    }
+    return keep - 1ull;
 }
 
 static __device__ inline float nn__vector__zzabi_body_dot_product(const uint16_t* a,
@@ -2527,7 +2584,7 @@ static __device__ inline void nn__vector__zzabi_body_top_k_biased(uint64_t* valu
                                                                    const uint16_t* x, const uint16_t* bias, uint64_t n,
                                                                    uint64_t k, float scale) {
     const uint64_t lane = nn__silicon__lane(), lanes = nn__silicon__lanes();
-    uint64_t chosen[NN__VECTOR__TOP_K_MAX];
+    uint64_t chosen[NN__VECTOR__ROUTER_K_MAX];
     for (uint64_t r = 0ull; r < k; ++r) {
         uint64_t best_i = n;
         float    best_v = -NN__KERNELS__INFINITY;
@@ -2544,7 +2601,7 @@ static __device__ inline void nn__vector__zzabi_body_top_k_biased(uint64_t* valu
         chosen[r] = first == -NN__KERNELS__INFINITY ? n : (uint64_t)(-first);
     }
     if (lane != 0ull || nn__silicon__block() != 0u) return;
-    float s[NN__VECTOR__TOP_K_MAX], sum = 0.0f;
+    float s[NN__VECTOR__ROUTER_K_MAX], sum = 0.0f;
     for (uint64_t r = 0ull; r < k; ++r) {
         s[r] = chosen[r] < n ? 1.0f / (1.0f + nn__silicon__expf(-nn__silicon__half_to_float(x[chosen[r]]))) : 0.0f;
         sum += s[r];

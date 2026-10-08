@@ -14,6 +14,7 @@
 
 #include "cpu/buffer__header.cuh"
 #include "cpu/expert__header.cuh"
+#include "cpu/routed__header.cuh"
 #include "cpu/cartridge__header.cuh"
 #include "cpu/primitives__header.cuh"
 #include "cpu/deltanet__header.cuh"
@@ -32,6 +33,7 @@
 #include "cpu/opcodes/result__abi__header.cuh"
 #include "cpu/opcodes/attention__abi__header.cuh"
 #include "cpu/opcodes/hyper__abi__header.cuh"
+#include "cpu/opcodes/mlp__abi__header.cuh"
 
 /* The package answering the roll call the registry takes after this phase. A row with no include says so
  * at the registry, naming this package, instead of somewhere further down. */

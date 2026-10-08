@@ -1,6 +1,6 @@
 # SiLVANN
 
-> **Developer preview, v0.3.3.** It runs the models below well on the hardware it was tested on, and it is shared
+> **Developer preview, v0.4.0.** It runs the models below well on the hardware it was tested on, and it is shared
 > for people who can find their way around a build and a stack trace. The NVIDIA and Apple paths, and tensor
 > cores, are not tested yet.
 
@@ -21,10 +21,10 @@ One model a kind of machine — the one that suits it best, measured:
 | Your machine | Model | Answer |
 |---|---|---|
 | No graphics card, 12 GB of RAM, an NVMe disk | [Qwen 3.6 35B-A3B](https://huggingface.co/eval-apply/Qwen3.6-35B-A3B_silvann_tq_D4E4) (`D4E4`) on the CPU alone, its experts read from the disk | 11.7 tokens/s |
-| An 8 GB card | [Ministral 3 14B](https://huggingface.co/eval-apply/Ministral-3-14B_silvann_tq_D4) (`D4`) on the card, at a 4,096-token context | 52 tokens/s ◦ |
-| A 16 GB card | [Qwen 3.8 27B](https://huggingface.co/eval-apply/Qwen3.8-27B_silvann_tq_D4) on the card | 20.3 tokens/s |
-| A 16 GB card — alt | [Ministral 3 14B](https://huggingface.co/eval-apply/Ministral-3-14B_silvann_tq_D8) (`D8`) on the card, at an 8,192-token context | 26 tokens/s ◦ |
-| A 24 GB card | [Qwen 3.6 35B-A3B](https://huggingface.co/eval-apply/Qwen3.6-35B-A3B_silvann_tq_D8E4) on the card | 38 tokens/s |
+| An 8 GB card | [Ministral 3 14B](https://huggingface.co/eval-apply/Ministral-3-14B_silvann_tq_D4) (`D4`) on the card, at a 4,096-token context | 42 tokens/s ◦ |
+| A 16 GB card | [Qwen 3.8 27B](https://huggingface.co/eval-apply/Qwen3.8-27B_silvann_tq_D4) on the card | 30.5 tokens/s |
+| A 16 GB card — alt | [Ministral 3 14B](https://huggingface.co/eval-apply/Ministral-3-14B_silvann_tq_D8) (`D8`) on the card, at an 8,192-token context | 30 tokens/s ◦ |
+| A 24 GB card | [Qwen 3.6 35B-A3B](https://huggingface.co/eval-apply/Qwen3.6-35B-A3B_silvann_tq_D8E4) on the card | 87 tokens/s |
 | An 8 GB card, 32 GB of RAM, an NVMe disk | [Qwen 3.5 122B-A10B](https://huggingface.co/eval-apply/Qwen3.5-122B-A10B_silvann_tq_D4E4) (`D4E4`) — the dense part on the card, the experts on the CPU | 4.7 tokens/s ◦ |
 | A 32 GB card, 80 GB of RAM | Qwen 3.5 122B-A10B, its experts in RAM and 24 GB of them on the card | 19.9 tokens/s |
 | A 16 GB card, 150 GB of RAM | [GLM 5.3 Flash](https://huggingface.co/eval-apply/GLM-5.3-Flash_silvann_tq_D4E4), its experts in RAM and 6 GB of them on the card | 7.5 tokens/s |
@@ -32,19 +32,29 @@ One model a kind of machine — the one that suits it best, measured:
 
 On AMD Instinct MI50 cards in a Dell R730, each process held to the memory its row names — except the rows with experts
 on the card, which ran on the machine's 256 GB and name what the model needs. ◦ Ran on a 32 GB card: the model fits the
-smaller one, which has not been measured. **Every model and pack, the other machines (down to a 4 GB card
-reading its experts from the disk), and how long a conversation fits: [`docs/models.md`](docs/models.md)**; every
-measurement: [`docs/results.md`](docs/results.md).
+smaller one, which has not been measured. The rows with a model entirely on the card are v0.4.0's; the others were
+measured with v0.3, and where a card does part of the work they are a floor. **Every model and pack, the other
+machines (down to a 4 GB card reading its experts from the disk), and how long a conversation fits:
+[`docs/models.md`](docs/models.md)**; every measurement: [`docs/results.md`](docs/results.md).
 
-**New in v0.3.3:** a fix — on the CPU, a small buffer's header was written where its release did not read it, and
-releasing it could unmap part of the process's memory; it showed as `free(): invalid pointer` at the end of a run, or
-not at all. And the 27B and the 35B on one card, measured again with the test machine's cooling working (it had been
-throttling the card): 20.3 and 38 tokens/s, from 17.4 and 37.
+**New in v0.4.0:** a model's program travels with the model. A model folder carries it in `lisp/` — the Lisp the
+evaluator runs the model with, which the boot reads from there: read it, change it, and the next boot runs what you
+wrote. The packs on Hugging Face carry it, and for a model downloaded before, `silvann_core.py download-model <name>`
+fetches `lisp/` alone. Sampling runs on the card, so a sampled answer comes about as fast as a greedy one (the 35B on
+one card, answering a chat: from 75 to 101 tokens/s), and Qwen's answers are made on the card eight tokens at a time.
+And the card's kernels are faster: on one MI50, at about 2,000 positions, the 35B answers at 87 tokens/s (from 38), the
+27B at 30.5 (from 20.3), and Ministral 3 14B at 42 (`D4`) and 30 (`D8`) — measured now at a long prompt as the other
+rows are; on a short prompt, 56 and 37 tokens/s, where v0.3 measured 52 and 26.
 
 **Known issue:** a kernel update can leave the AMD driver unbuilt for the new kernel, and the machine then boots on the
 kernel's own `amdgpu`, where ROCm runs but card-to-host copies corrupt memory (`free(): invalid pointer`, at random).
 After a kernel update, `modinfo -n amdgpu` should name a file under `updates/dkms/`; if it does not, boot the previous
 kernel, or install an `amdgpu-dkms` that builds for the new one.
+
+**New in v0.3.3:** a fix — on the CPU, a small buffer's header was written where its release did not read it, and
+releasing it could unmap part of the process's memory; it showed as `free(): invalid pointer` at the end of a run, or
+not at all. And the 27B and the 35B on one card, measured again with the test machine's cooling working (it had been
+throttling the card): 20.3 and 38 tokens/s, from 17.4 and 37.
 
 **New in v0.3.2:** a fix — on a machine busy when the engine starts, the CPU's pool of threads could be sized to none,
 and the experts on the CPU were then skipped without an error, so the answers were wrong. Upgrade if your experts run
@@ -94,6 +104,7 @@ build.sh            builds the engine into lib/
 engine/src/         the interpreter (engine, sys), the library (nn), the models (ai_qwen_3, ai_glm_5_3), and
                     silicon_families/ — one folder a kind of silicon, what it answers for the library
 runtime/            the Python side: a model folder booted onto the machine, conversations, the chat framing
+lisp/               each model family's program, in Lisp — a model folder carries its family's in its own lisp/
 silvann_core.py     download-model · list-models
 start_silvann_server.py, silvann_ui.py
 models/             where downloaded models go
