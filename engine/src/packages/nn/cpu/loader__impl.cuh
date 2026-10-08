@@ -63,6 +63,8 @@ static unsigned         nn__loader__zzprivate_started = 0u;
 static bool             nn__loader__zzprivate_stopping = false;
 static uint64_t         nn__loader__zzprivate_count[NN__EXPERT__COUNTS];
 static uint64_t         nn__loader__zzprivate_seq = 0ull;             /* the queue's clock, under the lock */
+/* writes to RAM queued or in flight — an exclusive tier's demotions — so a wait for one costs nothing where there are none */
+static uint64_t         nn__loader__zzprivate_writes_out = 0ull;
 /* The evacuation channels (▶ the exclusive tier, below): pinned memory an expert's bytes wait in, between the card and the
  * RAM slots they are written into. `held` from the evacuation until the commit hands the bytes on; `pending` the writes
  * still reading it — a channel is reused only when both are clear, and its next user waits while it is pending. */
@@ -155,6 +157,7 @@ static void* nn__loader__zzprivate_run(void* unused) {
                 --nn__loader__zzprivate_channels[r.channel].pending;
             if (!ok) ++nn__loader__zzprivate_count[NN__EXPERT__COUNT_WRITE_FAILED];
             job->state = NN__LOADER__FREE;
+            __atomic_sub_fetch(&nn__loader__zzprivate_writes_out, 1ull, __ATOMIC_RELEASE);
         } else {
             job->state = ok ? NN__LOADER__DONE : NN__LOADER__FAILED;
         }
@@ -776,7 +779,7 @@ static bool nn__expert_tier__zzprivate_source(const nn__expert_tier* t, uint64_t
  * whose gather failed is undone: the outgoing expert stays on the card. False on a step that could not be done. */
 static __device__ inline bool nn__expert_tier__commit(sys__silicon_family__id family, const nn__expert_tier* t) {
     const uint64_t owner = nn__expert__zzpackage_owner(), type = t->type, P = t->parts;
-    const int acting = sys__silicon__zzprivate_acting_as;
+    const int acting = sys__silicon__host_acting_as();
     bool ok = true;
     pthread_mutex_lock(&nn__loader__zzprivate_lock);
     /* ⛳ writes still held from an earlier commit go now — a program that never says its CPUs are done must not leave
@@ -850,6 +853,7 @@ static __device__ inline bool nn__expert_tier__commit(sys__silicon_family__id fa
             rw->layer = o->lv; rw->type = t->part_type; rw->expert = o->v; rw->slot = 0ull; rw->room = at;
             rw->gather = false; rw->bytes = 0ull; rw->runs = w; rw->job = NN__LOADER__JOB_WRITE; rw->channel = o->channel;
             rw->seq = ++nn__loader__zzprivate_seq;
+            __atomic_add_fetch(&nn__loader__zzprivate_writes_out, 1ull, __ATOMIC_RELEASE);
             ++ch->pending;
             ok = nn__expert_tier__zzprivate_source(t, o->lx, o->x, p, 0ull) && ok;
             ok = nn__expert_tier__zzprivate_source(t, o->lv, o->v, p, at) && ok;
@@ -867,6 +871,9 @@ static __device__ inline bool nn__expert_tier__commit(sys__silicon_family__id fa
  * ⛳ A WRITE STILL HELD IS LET GO HERE: it is held until the CPUs are done, so a CPU that needs it now would otherwise wait
  *   for a release that comes only after it. */
 static __device__ inline void nn__expert__wait_written(uint64_t layer, uint64_t type, uint64_t e) {
+    /* ⛳ NO WRITE ON ITS WAY, NO LOCK: a verb asks this once a pick, and the lock is the loader threads' too, busy with a
+     *   tier's promotions */
+    if (__atomic_load_n(&nn__loader__zzprivate_writes_out, __ATOMIC_ACQUIRE) == 0ull) return;
     const uint64_t owner = nn__expert__zzpackage_owner();
     pthread_mutex_lock(&nn__loader__zzprivate_lock);
     for (;;) {
@@ -937,7 +944,7 @@ static __device__ inline bool nn__expert_tier__visit(sys__silicon_family__id fam
     for (unsigned j = 0u; j < k && fed && land > 0u; ++j) {
         if (held[j] || !nn__expert__qualifies(layer, type, ids[j])) continue;
         uint64_t s = 0ull;
-        (void)nn__expert__zzprivate_older(layer, type, ids[j], &s);    /* 0 while the tier fills first-come */
+        (void)nn__expert__zzpackage_older(layer, type, ids[j], &s);    /* 0 while the tier fills first-come */
         unsigned at = n_cand++;
         while (at > 0u && score[at - 1u] < s) { cand[at] = cand[at - 1u]; score[at] = score[at - 1u]; --at; }
         cand[at] = j; score[at] = s;

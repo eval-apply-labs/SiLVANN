@@ -54,7 +54,9 @@ NN__BUFFER_CLASS_LIST(NN__BUFFER__ZZPRIVATE_DENSE_ROW)
 #define NN__BUFFER_RAM_CLASS_LIST(X)                                                                    \
     X(5, result,    NN__BUFFER__RESULT)         /* where a value verb's answer lands — ▶ `result.cuh`  */ \
     X(6, experts,   NN__BUFFER__EXPERTS)        /* a layer's routed experts, the store a prompt streams */ \
-                                                /* to the card from — ▶ ai_qwen_3's `moe_rows`          */
+                                                /* to the card from — ▶ ai_qwen_3's `moe_rows`          */ \
+    X(7, table,     NN__BUFFER__TABLE)          /* a table the card reads in place, a row at a time —   */ \
+                                                /* a model's embedding, so a program embeds a token     */
 
 #define NN__BUFFER__ZZPRIVATE_RAM_ENUM_ROW(id, name, konst)   konst = (id),
 #define NN__BUFFER__ZZPRIVATE_RAM_TALLY_ROW(id, name, konst)  + 1u

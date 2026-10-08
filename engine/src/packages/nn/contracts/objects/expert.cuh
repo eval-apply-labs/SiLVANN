@@ -248,7 +248,7 @@ typedef struct nn__expert__backing {
 #define NN__EXPERT__BACKING__INTO(i)   (3u + 3u * (i))
 #define NN__EXPERT__BACKING__LENGTH    13u
 #define NN__EXPERT__FAULT_BACKING      0x4E45424Bull   /* "NEBK" — a backing that is not 13 integers */
-#define NN__EXPERT_TIER__FAULT        0x4E455452ull   /* "NETR" — no tier for this worker, or not a tier's cells */
+#define NN__EXPERT__FAULT_TIER       0x4E455452ull   /* "NETR" — no tier for this worker, or not a tier's cells */
 
 /* ⭐ THE LOADER — reads in flight at once, the threads that do them, and what it counts. ▶ `cpu/loader__impl.cuh`. */
 #define NN__EXPERT__FLIGHT_MAX        64u   /* reads queued or in flight at once, over every layer */

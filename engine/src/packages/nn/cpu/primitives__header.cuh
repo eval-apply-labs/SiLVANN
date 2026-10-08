@@ -54,6 +54,15 @@ static __device__ inline uint64_t nn__primitives__owner(const sys__heap_node* re
  * else's — the DeltaNet state is fp32 and carries its own, for exactly this reason. */
 static __device__ inline bool nn__primitives__fits(uint64_t n, uint64_t room);
 
+/* ⭐ A VERB'S PLANE TABLE — the node array a model's site reads its weights and widths from: its first `planes` cells
+ * buffers (each an address and its room into `at` and `room`), then integers up to `reals` (into `v`), then floats up to
+ * `length` (into `r`, which may be 0 when there are none), each at its own index. False on any cell that is not what
+ * its place says, or a table shorter than `length`. nn's own sites read theirs through it, and a model package's. */
+static bool nn__primitives__table(uint64_t table, unsigned planes, unsigned reals, unsigned length,
+                                  uint64_t* at, uint64_t* room, uint64_t* v, float* r);
+/* An optional integer cell past a table's fixed length: true when the table has it and it is 1. */
+static bool nn__primitives__table_flag(uint64_t table, unsigned index);
+
 /* ══ ⭐⭐ THE STORAGE TYPE, AND THE TWO CONVERSIONS EVERY VERB IN THE PACKAGE GOES THROUGH ════════════
  * ⚖ RULED: *"lets move to a fp16 setup"* … *"b, but keep the fp32 accumulator"*.
  * **The array is half; the register is float.** Every compute verb loads through `half_to_float`,

@@ -32,10 +32,10 @@ From a machine with no graphics card to a model near the frontier on salvaged se
 | Your machine | Model, and how it runs | Answer |
 |---|---|---|
 | No graphics card, 12 GB of RAM, an NVMe disk (2.5 GB/s) | Qwen 3.6 35B-A3B (`D4E4`) on the CPU alone, its experts read from the disk, 8 GB of them kept in memory | 11.7 tokens/s |
-| An 8 GB card | Ministral 3 14B (`D4`) entirely on the card, at a 4,096-token context | 52 tokens/s ◦ |
-| A 16 GB card | Qwen 3.8 27B entirely on the card, at a 32,000-token context (14 GB) | 20.3 tokens/s (22.1 on a short prompt) |
-| A 16 GB card | Ministral 3 14B (`D8`) entirely on the card, at an 8,192-token context | 26 tokens/s ◦ |
-| A 24 GB card | Qwen 3.6 35B-A3B entirely on the card (17 GB at a 32,000-token context) | 38 tokens/s (42 on a short prompt) |
+| An 8 GB card | Ministral 3 14B (`D4`) entirely on the card, at a 4,096-token context | 42 tokens/s (56 on a short prompt) ◦ |
+| A 16 GB card | Qwen 3.8 27B entirely on the card, at a 32,000-token context (14 GB) | 30.5 tokens/s (34 on a short prompt) |
+| A 16 GB card | Ministral 3 14B (`D8`) entirely on the card, at an 8,192-token context | 30 tokens/s (37 on a short prompt) ◦ |
+| A 24 GB card | Qwen 3.6 35B-A3B entirely on the card (17 GB at a 32,000-token context) | 87 tokens/s (102 on a short prompt) |
 | A 4 GB card, 8 GB of RAM, an NVMe disk | Qwen 3.6 35B-A3B — the dense part on the card, the experts on the CPU, read from the disk as they are needed | 11.9 tokens/s ◦ |
 | An 8 GB card, 32 GB of RAM, an NVMe disk | Qwen 3.5 122B-A10B (`D4E4`) — the same split | 4.7 tokens/s ◦ |
 | A 16 GB card, 64 GB of RAM, an NVMe disk reading 5 GB/s | GLM 5.3 Flash — the same split | about 2.5 tokens/s, projected |
@@ -48,7 +48,9 @@ From a machine with no graphics card to a model near the frontier on salvaged se
 Measured on a Dell R730 (two Xeon E5-2680 v4, AMD Instinct MI50 cards; disk speed 5 GB/s, RAM speed 126 GB/s), each
 row with its process held to the memory it names — leave room beside it for the operating system — and from a cold
 start where the experts come from the disk. ◦ Ran on a 32 GB MI50: the model fits the smaller card, but a card that size
-has not been measured. The projected row is worked out from GLM's measured rows at 64 GB and 128 GB. Every measurement,
+has not been measured. The rows with a model entirely on the card are v0.4.0's; the others were measured with v0.3's
+card kernels, and where a card does part of the work they are a floor. The projected row is worked out from GLM's
+measured rows at 64 GB and 128 GB. Every measurement,
 the prompt rates, and what limits a model reading its experts from the disk: [`results.md`](results.md).
 
 ## The card's tier of experts

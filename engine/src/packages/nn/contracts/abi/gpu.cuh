@@ -151,7 +151,9 @@ typedef struct nn__gemm__tile {
     X(PKG, void, attention_scores_grouped, nn__attention__zzabi_launch_scores_grouped, (float* p, const uint16_t* q, const uint16_t* k, uint64_t q_heads, uint64_t kv_heads, uint64_t head_dim, uint64_t length)) \
     X(PKG, void, attention_softmax_rows,   nn__attention__zzabi_launch_softmax_rows,   (float* p, uint64_t rows, uint64_t length)) \
     X(PKG, void, attention_causal_scores_grouped, nn__attention__zzabi_launch_causal_scores_grouped, (float* p, const uint16_t* q, const uint16_t* k, uint64_t q_heads, uint64_t kv_heads, uint64_t head_dim, uint64_t first, uint64_t rows)) \
-    X(PKG, void, attention_causal_softmax, nn__attention__zzabi_launch_causal_softmax, (float* p, uint64_t q_heads, uint64_t first, uint64_t rows))
+    X(PKG, void, attention_causal_softmax, nn__attention__zzabi_launch_causal_softmax, (float* p, uint64_t q_heads, uint64_t first, uint64_t rows)) \
+    X(PKG, void, vector_penalize,          nn__vector__zzabi_launch_penalize,          (uint16_t* x, uint64_t n, const uint64_t* ids, uint64_t stride, uint64_t count, float penalty, unsigned int* over)) \
+    X(PKG, void, vector_draw,              nn__vector__zzabi_launch_draw,              (uint64_t* out, uint64_t stamp, const uint16_t* w, uint64_t k, float top_p, uint64_t seed, uint64_t pos))
 
 /* ⛳ THE TABLE AND THE LAUNCH ARE THE HOST'S SIDE OF A FAMILY, so a family whose kernels are compiled as
  * OpenCL C does not see them there: that language has no function pointers, and `kernel` is a keyword. */

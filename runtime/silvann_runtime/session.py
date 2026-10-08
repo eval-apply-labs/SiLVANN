@@ -26,7 +26,10 @@ import uuid
 
 import numpy as np
 
+from . import sampling
 from .model_folder import Refused
+
+GENERATE_CALL = 8            # the tokens of an answer one `generate` makes, where the model generates on the card
 
 
 class Busy(Exception):
@@ -166,24 +169,45 @@ class Runtime:
         if c.length + len(pending) + t.max_new > m.max_context:
             raise Refused("the conversation would pass the context of %d" % m.max_context)
         c.tokens += t.new_tokens
-        greedy = t.sampler is None
+        greedy = t.sampler is None or (t.sampler.temperature <= 0 and t.sampler.repetition_penalty == 1.0)
+        # ⭐ DRAWN ON THE CARD where the model has the procedure and the sampler fits it — only the token comes back
+        card = not greedy and t.sampler.card(m)
+        if card and t.sampler.repetition_penalty != 1.0:
+            sampling.remember(m.m, c.tokens)
         if len(pending) > 1:                          # a prompt: its rows at once, where the model has the words
-            out = m.prefill(pending, c.length, greedy=greedy)
+            last = c.length + len(pending) - 1
+            out = m.prefill(pending, c.length, greedy=greedy, sample=sampling.head(t.sampler, last) if card else None)
             c.length += len(pending)
         else:
-            out = m.step(pending[0], c.length, greedy=greedy)
+            out = m.step(pending[0], c.length, greedy=greedy,
+                         sample=sampling.head(t.sampler, c.length, pending[0]) if card else None)
             c.length += 1
+        # ⭐ THE ANSWER GENERATED ON THE CARD where the model has the loop and the token is chosen there — `GENERATE_CALL`
+        #   tokens a call, so a stream sees them in that many at a time and a cancel waits for at most that many
+        on_card = getattr(m, "GENERATES", False) and (greedy or card)
         answer = []
+        tok = out if greedy or card else t.sampler(m.logits(), c.tokens)
         while True:
-            tok = out if greedy else t.sampler(m.logits(), c.tokens)
             answer.append(tok)
             c.tokens.append(tok)
             if t.on_token:
                 t.on_token(tok)
             if tok in t.stop or len(answer) >= t.max_new or t.cancelled:
                 return answer
-            out = m.step(tok, c.length, greedy=greedy)
+            if on_card:
+                made = m.generate(tok, c.length, min(GENERATE_CALL, t.max_new - len(answer)), t.stop,
+                                  t.sampler if card else None)
+                c.length += len(made)                 # each made token's input was run: `tok`, then all but the last
+                for x in made[:-1]:                   # ⛳ none of them an end token — the loop ends at one
+                    answer.append(x)
+                    c.tokens.append(x)
+                    if t.on_token:
+                        t.on_token(x)
+                tok = made[-1]
+                continue
+            out = m.step(tok, c.length, greedy=greedy, sample=sampling.head(t.sampler, c.length, tok) if card else None)
             c.length += 1
+            tok = out if greedy or card else t.sampler(m.logits(), c.tokens)
 
     def save(self, c, path, with_state=True):
         """A cartridge to disk; the one on the card has its state read first, and stays on the card."""
@@ -212,23 +236,41 @@ class _Turn:
         return self.result
 
 
-def sampler(temperature=1.0, top_k=20, top_p=0.95, repetition_penalty=1.0, seed=None):
-    """A host sampler over the logits the card left: repetition penalty, temperature, top-k, then top-p."""
-    rng = np.random.default_rng(seed)
+class Sampler:
+    """Repetition penalty, temperature, top-k, then top-p. Drawn on the card when the model has `head_sample` and the
+    sampler fits it — a temperature above 0, a top-k of 1 to `sampling.K_MOST` (▶ `sampling`) — and on the host over
+    the logits the card left otherwise, or with `on_card=False`. `seed` replays the card's draws exactly; the host's
+    are numpy's, so the two agree in distribution and not token for token."""
 
-    def draw(logits, seen):
+    def __init__(self, temperature=1.0, top_k=20, top_p=0.95, repetition_penalty=1.0, seed=None, on_card=True):
+        self.temperature, self.top_k, self.top_p = float(temperature), int(top_k), float(top_p)
+        self.repetition_penalty, self.on_card = float(repetition_penalty), on_card
+        self.seed = int(seed) % (1 << 63) if seed is not None else int(np.random.SeedSequence().entropy) % (1 << 63)
+        self.rng = np.random.default_rng(seed)
+
+    def card(self, model):
+        return (self.on_card and getattr(model, "SAMPLES_ON_CARD", False) and self.temperature > 0
+                and 0 < self.top_k <= sampling.K_MOST and self.repetition_penalty > 0)
+
+    def __call__(self, logits, seen):
+        """The host's draw, over the logits read back."""
         lg = logits.astype(np.float64).copy()
-        if repetition_penalty != 1.0 and seen:
-            ids = np.unique(np.asarray(seen[-256:]))
-            lg[ids] = np.where(lg[ids] > 0, lg[ids] / repetition_penalty, lg[ids] * repetition_penalty)
-        if temperature <= 0:
+        if self.repetition_penalty != 1.0 and seen:
+            ids = np.unique(np.asarray(seen[-sampling.SEEN:]))
+            lg[ids] = np.where(lg[ids] > 0, lg[ids] / self.repetition_penalty, lg[ids] * self.repetition_penalty)
+        if self.temperature <= 0:
             return int(np.argmax(lg))
-        lg /= temperature
-        top = np.argpartition(-lg, top_k)[:top_k] if 0 < top_k < lg.size else np.arange(lg.size)
+        lg /= self.temperature
+        k = self.top_k
+        top = np.argpartition(-lg, k)[:k] if 0 < k < lg.size else np.arange(lg.size)
         p = np.exp(lg[top] - lg[top].max())
         order = np.argsort(-p)
         top, p = top[order], p[order] / p.sum()
-        keep = int(np.searchsorted(np.cumsum(p), top_p) + 1)
+        keep = int(np.searchsorted(np.cumsum(p), self.top_p) + 1)
         top, p = top[:keep], p[:keep] / p[:keep].sum()
-        return int(rng.choice(top, p=p))
-    return draw
+        return int(self.rng.choice(top, p=p))
+
+
+def sampler(temperature=1.0, top_k=20, top_p=0.95, repetition_penalty=1.0, seed=None, on_card=True):
+    """A sampler: ▶ `Sampler`."""
+    return Sampler(temperature, top_k, top_p, repetition_penalty, seed, on_card)

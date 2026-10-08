@@ -129,6 +129,11 @@
     X(PKG, 28, "sys__float__sub",     sys__opcodes__zzabi_adapter_float_sub,         SYS__OPCODES__FLOAT_SUB)     \
     X(PKG, 29, "sys__int__less",      sys__opcodes__zzabi_adapter_int_less,          SYS__OPCODES__INT_LESS)      \
     X(PKG, 30, "sys__float__less",    sys__opcodes__zzabi_adapter_float_less,        SYS__OPCODES__FLOAT_LESS)    \
+    /* The product, as the sum: typed by name, or by the first operand's kind. An offset into a table — a row `i` of  */ \
+    /* `width` — is a product, which a program walking rows has to write.                                         */ \
+    X(PKG, 38, "sys__int__mul",       sys__opcodes__zzabi_adapter_int_mul,           SYS__OPCODES__INT_MUL)       \
+    X(PKG, 39, "sys__float__mul",     sys__opcodes__zzabi_adapter_float_mul,         SYS__OPCODES__FLOAT_MUL)     \
+    X(PKG, 40, "sys__mul",            sys__opcodes__zzabi_adapter_mul,               SYS__OPCODES__MUL)           \
     X(PKG, 16, "sys__defun",          sys__opcodes__zzabi_adapter_defun,             SYS__OPCODES__DEFUN)         \
     /* A scope, as one word rather than three forms a program has to place in the right order. It is the   */ \
     /* environment's, beside `set!`, because binding and unbinding is what it does.                        */ \

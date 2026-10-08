@@ -811,7 +811,7 @@ static __device__ inline uint64_t nn__expert__tick(void) {
     static uint64_t clock = 0ull;
     return __atomic_add_fetch(&clock, 1ull, __ATOMIC_RELAXED) & 0xFFFFFFFFull;
 }
-static __device__ inline bool nn__expert__zzprivate_older(uint64_t layer, uint64_t type, uint64_t expert, uint64_t* older) {
+static __device__ inline bool nn__expert__zzpackage_older(uint64_t layer, uint64_t type, uint64_t expert, uint64_t* older) {
     sys__heap_node me;
     if (!nn__expert__slot(layer, type, expert, &me)) return false;
     *older = me.args[NN__EXPERT__ZZPRIVATE_CALLS] & 0xFFFFFFFFull;
@@ -835,9 +835,9 @@ static __device__ inline bool nn__expert__qualifies(uint64_t layer, uint64_t typ
         for (uint64_t l = 0ull; l < layers; ++l) banded += nn__expert__layer_experts(l, type) != 0ull ? 1ull : 0ull;
         if (banded != 0ull && nn__expert__layer_resident(layer, type) < nn__expert__type_slots(type) / banded) return true;
     }
-    if (!nn__expert__zzprivate_older(layer, type, expert, &score) || score == 0ull) return false;   /* fewer than three calls */
+    if (!nn__expert__zzpackage_older(layer, type, expert, &score) || score == 0ull) return false;   /* fewer than three calls */
     if (!nn__expert__oldest(layer, type, &tail)) return false;           /* nothing of this band to give its slot up */
-    return nn__expert__zzprivate_older(layer, type, tail, &tail_score) && score > tail_score;
+    return nn__expert__zzpackage_older(layer, type, tail, &tail_score) && score > tail_score;
 }
 
 /* ⚖ *"an evicted expert gets an offset of 0 and no previous/next."* ⛳ THE TYPE SURVIVES

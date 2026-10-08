@@ -8,9 +8,8 @@ is drawn from this page.
 CPU: about 1,000 positions, then 128 tokens (32 in GLM's earlier rows). "All in RAM" means every expert is already in
 memory; the other rows start cold, under the memory limit shown, with the expert files dropped from the operating
 system's cache first. The answer's rate is measured after the prompt, from its 10th token on. The rows with a model
-entirely on one MI50, the 35B's and the 122B D4E4's all in RAM, and GLM's rows with 128 GB and all in RAM, are on this
-release's card kernels; the others were
-measured before them, and where a card does part of the work they are a floor.
+entirely on one MI50, and the 35B's and the 122B D4E4's with the experts on the CPU all in RAM, are v0.4.0's; the others
+were measured with v0.3's card kernels, and where a card does part of the work they are a floor.
 
 ## How good each pack is: perplexity
 
@@ -48,8 +47,8 @@ scores 8.962 exact and 8.963 with `experts_int8`.
 
 | Where it runs | Prompt | Answer |
 |---|---|---|
-| one MI50 | 156 positions/s | 38 tokens/s (42 on a short prompt) |
-| one MI50 for the dense part, the experts on the CPU, all in RAM | 77 positions/s | 23 tokens/s |
+| one MI50 | 193 positions/s | 87 tokens/s (102 on a short prompt) |
+| one MI50 for the dense part, the experts on the CPU, all in RAM | 83 positions/s | 27 tokens/s |
 | the same, the experts read from the disk, 8 GB of RAM | 32 positions/s† | 11.9 tokens/s — 90% of expert reads from memory |
 | the same, 6 GB of RAM | 31 positions/s† | 10.2 tokens/s — 83% from memory |
 | `D4E4`, the CPU alone, no card, all in RAM | — | 15.4 tokens/s on a short prompt |
@@ -59,7 +58,7 @@ scores 8.962 exact and 8.963 with `experts_int8`.
 
 | Where it runs | Prompt | Answer |
 |---|---|---|
-| one MI50 | 95 positions/s | 20.3 tokens/s (22.1 on a short prompt) |
+| one MI50 | 96 positions/s | 30.5 tokens/s (34 on a short prompt) |
 | one MI50 through OpenCL | 48.7 positions/s | 9.3 tokens/s (11.2 on a short prompt) |
 | three stages over machines (pipeline parallel) | — | 6.8 tokens/s, the same tokens |
 
@@ -67,18 +66,18 @@ scores 8.962 exact and 8.963 with `experts_int8`.
 
 | Pack | Where it runs | Prompt | Answer |
 |---|---|---|---|
-| D4 | one MI50 | 36 positions/s | 52 tokens/s |
-| D8 | one MI50 | 15 positions/s | 26 tokens/s |
+| D4 | one MI50 | 53 positions/s | 42 tokens/s (56 on a short prompt) |
+| D8 | one MI50 | 36 positions/s | 30 tokens/s (37 on a short prompt) |
 
-Its first runtime reads a prompt a position at a time, so its prompt rate is close to its answer rate; reading a prompt
-as rows, as the Qwen and GLM runtimes do, is the next step for it. The prompt rates are the perplexity runs', which also
-read every position's logits back.
+Its runtime reads a prompt a position at a time, so its prompt rate is close to its answer rate; reading a prompt as
+rows, as the Qwen and GLM runtimes do, is the next step for it. Its chat template adds about 560 positions, so its rows
+read about 2,600.
 
 ## Qwen 3.5 122B-A10B
 
 | Pack | Where it runs | Prompt | Answer |
 |---|---|---|---|
-| `D4E4` | one MI50 for the dense part, the experts on the CPU, all in RAM | 38 positions/s | 12.0 tokens/s |
+| `D4E4` | one MI50 for the dense part, the experts on the CPU, all in RAM | 41 positions/s | 12.9 tokens/s |
 | `D4E4` | the same, the experts read from the disk, 32 GB of RAM | 11 positions/s† | 4.7 tokens/s — 87% from memory |
 | `D4E4` | the same, 16 GB of RAM | 10 positions/s† | 3.2 tokens/s — 73% from memory |
 | `D8E4` | one MI50 for the dense part, the experts on the CPU, all in RAM | 25 positions/s | 6.1 tokens/s |

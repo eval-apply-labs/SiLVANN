@@ -55,6 +55,9 @@
 /* The hand-off buffer, in halves: [ hm rotated · H ][ weights · 16 ][ the shared activation, rotated · I ]. The
  * weights are the router's K and, at K, the shared expert's sigmoid gate. */
 #define AI_QWEN_3__HAND__WEIGHTS       16u
+/* The most experts a position picks — the router's `k`: the 35B and the 122B pick eight, the 397B ten. Under nn's own
+ * top-k bound, which a sampler's longer lists set. */
+#define AI_QWEN_3__TOP_K_MAX           16u
 #define AI_QWEN_3__HAND__HALVES(H, I)  ((H) + AI_QWEN_3__HAND__WEIGHTS + (I))
 /* ⭐ A PROMPT'S HAND ROWS — a row a position, each the hand above and then its `k` picks as words, so the CPU is handed
  * a chunk's rows in one copy (`pre_expert_rows` · `experts_rows` · `post_expert_rows`). */

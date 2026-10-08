@@ -234,6 +234,14 @@
     /* Whether a copy to the card and one back run at once at full speed: their time together over one alone, × 1000.  */ \
     X(PKG, 62, "nn__expert_tier__duplex", nn__expert_tier__zzabi_adapter_duplex,  NN__EXPERT_TIER__DUPLEX_PROBE) \
     /* The CPUs done with a layer: an exclusive tier's writes back to RAM, held on half duplex, go now.               */ \
-    X(PKG, 63, "nn__expert_tier__written", nn__expert_tier__zzabi_adapter_written, NN__EXPERT_TIER__WRITTEN)
+    X(PKG, 63, "nn__expert_tier__written", nn__expert_tier__zzabi_adapter_written, NN__EXPERT_TIER__WRITTEN) \
+    /* ⭐ A SAMPLER'S TWO WORDS — the repetition penalty over the logits, in place, and one draw from `top_k`'s weights     */ \
+    /* after the top-p cut, its place among them answered as an integer: with `scale` and `top_k` between, a program.  */ \
+    X(PKG, 64, "nn__vector__penalize", nn__vector__zzabi_adapter_penalize,         NN__VECTOR__PENALIZE) \
+    X(PKG, 65, "nn__vector__draw",    nn__vector__zzabi_adapter_draw,              NN__VECTOR__DRAW) \
+    /* ⭐ A DENSE MLP, ITS NORM AND ITS RESIDUAL, OVER A PLANE TABLE — a position, and a prompt's rows. A model's MLP     */ \
+    /* site when it is SwiGLU behind an RMS norm: Qwen's dense models and Ministral. ▶ `cpu/opcodes/mlp__abi.cuh`.     */ \
+    X(PKG, 66, "nn__mlp__apply",      nn__mlp__zzabi_adapter,                      NN__MLP__APPLY) \
+    X(PKG, 67, "nn__mlp__rows",       nn__mlp__zzabi_adapter_rows,                 NN__MLP__ROWS)
 
 #endif /* SILVANN__PACKAGES_NN_CONTRACTS_MACROS_LANGUAGE_CONTRACT__VERBS_CUH */

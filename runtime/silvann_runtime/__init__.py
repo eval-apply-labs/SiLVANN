@@ -58,15 +58,17 @@ def open_model(path, lora=None, max_context=4096, silicon=None, **options):
 
 
 def programs_key(folder, architecture, max_context, options):
-    """What a model's programs are composed from, as one digest: the pack, the settings, and the source of the code that
-    composes them — this package and the bundle loader whose type ids and plane offsets they carry. ⛳ The silicon is not
-    in it: no composer reads it (`REASONED` from qwen3_5.py and glm5.py, where it only names the card's worker)."""
+    """What a model's programs are composed from, as one digest: the pack, the settings, the model's Lisp files, and the
+    source of the code that binds what they read — this package and the bundle loader whose type ids and plane offsets
+    they carry. ⛳ The silicon is not in it: no composer reads it (`REASONED` from qwen3_5.py and glm5.py, where it only
+    names the card's worker)."""
     from .model_folder import NL
     h = hashlib.sha256()
     with open(os.path.join(folder.path, "pack.json"), "rb") as f:
         h.update(f.read())
     h.update(json.dumps([architecture, max_context, folder.lora, options], sort_keys=True, default=str).encode())
-    for src in sorted(glob.glob(os.path.join(os.path.dirname(os.path.abspath(__file__)), "*.py"))) + [NL.__file__]:
+    here = os.path.dirname(os.path.abspath(__file__))
+    for src in sorted(glob.glob(os.path.join(here, "*.py")) + glob.glob(os.path.join(folder.path, "lisp", "*.lisp"))) + [NL.__file__]:
         with open(src, "rb") as f:
             h.update(f.read())
     return h.hexdigest()[:32]

@@ -119,7 +119,7 @@ static sys__heap_node nn__expert_tier__zzabi_apply_note(const sys__heap_node* ar
      || argv[5].dtype != SYS__KIND__VALUE_INT || argv[6].dtype != SYS__KIND__VALUE_INT)
         return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
     nn__expert_tier tier;
-    if (!nn__expert_tier__of(argv[1].args[0], argv[2].args[0], &tier)) return sys__engine__abi__error(NN__EXPERT_TIER__FAULT);
+    if (!nn__expert_tier__of(argv[1].args[0], argv[2].args[0], &tier)) return sys__engine__abi__error(NN__EXPERT__FAULT_TIER);
     const uint64_t n = argv[3].args[0], row = argv[4].args[0], picks = argv[5].args[0], K = tier.top_k;
     if (n == 0u || row == 0u || picks > row || 8u * K > row - picks || n > h_room / row)
         return sys__engine__abi__error(NN__EXPERT__FAULT_SPAN);

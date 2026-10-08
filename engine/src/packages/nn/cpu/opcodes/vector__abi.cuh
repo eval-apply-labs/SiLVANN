@@ -207,54 +207,14 @@ static sys__heap_node nn__vector__zzprivate_top_k(const sys__heap_node* argv, sy
     const uint64_t n = argv[1].args[0], k = argv[2].args[0], picks = argv[3].args[0];
     /* ⛳ `n` STOPS AT 2^24 because the lowest index of a tie is found as the largest of negated indices in a
      *   float, which holds an integer exactly up to there. */
-    if (n == 0ull || n > (1ull << 24) || k == 0ull || k > NN__VECTOR__TOP_K_MAX || k > n
+    if (n == 0ull || n > (1ull << 24) || k == 0ull || k > NN__VECTOR__TOP_K_MAX || k > n || (bias != 0ull && k > NN__VECTOR__ROUTER_K_MAX)
      || sys__node_array__length(picks) < k
      || !nn__primitives__fits(n, x_room) || !nn__primitives__fits(k, w_room))
         return sys__engine__abi__error(NN__PRIMITIVES__FAULT_BOUNDS);
-    sys__node_array_walk pw;
-    if (!sys__node_array__walk(picks, 0ull, &pw)) return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
-    for (uint64_t j = 0ull; j < k; ++j, sys__node_array__next(&pw)) {
-        const sys__heap_node* cell = sys__node_array__walk_cell(&pw);
-        const sys__kind kind = cell != 0 ? cell->dtype : SYS__KIND__INVALID;
-        if (kind == SYS__KIND__VALUE_NULL) {
-            sys__heap_node zero = sys__heap_node__nothing();
-            zero.dtype = SYS__KIND__VALUE_INT; zero.args[0] = 0ull;
-            if (!sys__node_array__walk_set(&pw, &zero)) return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
-        } else if (kind != SYS__KIND__VALUE_INT) {
-            return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
-        }
-    }
-    sys__heap_node* cells = sys__node_array__cells(picks, k);
     const nn__doors* doors = nn__doors_for(ctx);
-    if (cells == 0) return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
     if (doors == 0) return sys__engine__abi__error(NN__PRIMITIVES__FAULT_NO_DEVICE);
-
-    /* the words from one element's value to the next, taken from two elements rather than from a width */
-    const uint64_t words = (uint64_t)(&cells[1].args[0] - &cells[0].args[0]);
-    if (ctx->heap_card != 0 && cells >= ctx->heap_host && (uint64_t)(cells - ctx->heap_host) + k <= ctx->heap_nodes) {
-        sys__heap_node* card = ctx->heap_card + (cells - ctx->heap_host);
-        if (bias != 0ull)
-            doors->vector_top_k_biased(&card[0].args[0], words, (uint16_t*)(uintptr_t)w_at, (const uint16_t*)(uintptr_t)x_at,
-                                       (const uint16_t*)(uintptr_t)bias, n, k, scale);
-        else
-            doors->vector_top_k(&card[0].args[0], words,
-                                (uint16_t*)(uintptr_t)w_at, (const uint16_t*)(uintptr_t)x_at, n, k);
-        if (!sys__gpu__compute_completed(ctx->family)) return sys__engine__abi__error(NN__PRIMITIVES__FAULT_NO_DEVICE);
-    } else {
-        void* landing = 0;
-        uint64_t got[NN__VECTOR__TOP_K_MAX];
-        if (!sys__gpu__memory_allocate(ctx->family, &landing, k * sizeof(uint64_t)))
-            return sys__engine__abi__error(NN__PRIMITIVES__FAULT_NO_DEVICE);
-        if (bias != 0ull)
-            doors->vector_top_k_biased((uint64_t*)landing, 1ull, (uint16_t*)(uintptr_t)w_at, (const uint16_t*)(uintptr_t)x_at,
-                                       (const uint16_t*)(uintptr_t)bias, n, k, scale);
-        else
-            doors->vector_top_k((uint64_t*)landing, 1ull, (uint16_t*)(uintptr_t)w_at, (const uint16_t*)(uintptr_t)x_at, n, k);
-        const bool read = sys__gpu__memory_read(ctx->family, got, landing, k * sizeof(uint64_t));
-        sys__gpu__memory_free(ctx->family, landing);
-        if (!read) return sys__engine__abi__error(NN__PRIMITIVES__FAULT_NO_DEVICE);
-        for (uint64_t j = 0ull; j < k; ++j) cells[j].args[0] = got[j];
-    }
+    const uint64_t fault = nn__routed__top_k(ctx, doors, picks, w_at, x_at, bias, scale, n, k, 0);
+    if (fault != 0u) return sys__engine__abi__error(fault);
     return nn__doors_answer(&argv[3]);
 }
 
@@ -275,8 +235,57 @@ static sys__heap_node nn__vector__zzabi_apply_top_k_biased(const sys__heap_node*
     return nn__vector__zzprivate_top_k(argv, ctx, b_at, (float)sys__heap_node__real(argv[6].args[0]));
 }
 
+/* `(nn__vector__penalize x n ids count penalty)` — the repetition penalty over the `n` logits of `x`, in place: each token
+ * among the first `count` elements of `ids`, a node array of integers, has its logit divided by `penalty` when positive
+ * and multiplied by it otherwise, once however often it appears. Answers `x`; a `count` of 0 runs nothing.
+ * ⛳ THE CARD READS THE IDS FROM THE NODES THEMSELVES where the heap is registered with it, as `top_k` writes them, and
+ *   from a copy in a card buffer otherwise — whose release waits for the kernel. */
+static sys__heap_node nn__vector__zzabi_apply_penalize(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx) {
+    if (argc != 5u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
+    uint64_t x_at = 0, x_room = 0;
+    if (argv[1].dtype != SYS__KIND__VALUE_INT || argv[3].dtype != SYS__KIND__VALUE_INT || argv[4].dtype != SYS__KIND__VALUE_FLOAT
+     || !sys__heap_node__carries_reference(argv[2].dtype) || !sys__node_array__is(argv[2].args[0])
+     || !nn__primitives__room(&argv[0], &x_at, &x_room)) return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
+    const uint64_t n = argv[1].args[0], ids = argv[2].args[0], count = argv[3].args[0];
+    const float penalty = (float)sys__heap_node__real(argv[4].args[0]);
+    if (n == 0ull || !nn__primitives__fits(n, x_room) || sys__node_array__length(ids) < count || !(penalty > 0.0f))
+        return sys__engine__abi__error(NN__PRIMITIVES__FAULT_BOUNDS);
+    if (count == 0ull) return nn__doors_answer(&argv[0]);
+    sys__node_array_walk walk;
+    if (!sys__node_array__walk(ids, 0ull, &walk)) return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
+    for (uint64_t j = 0ull; j < count; ++j, sys__node_array__next(&walk)) {
+        const sys__heap_node* cell = sys__node_array__walk_cell(&walk);
+        if (cell == 0 || cell->dtype != SYS__KIND__VALUE_INT) return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
+    }
+    const sys__heap_node* cells = sys__node_array__cells(ids, count);
+    const nn__doors* doors = nn__doors_for(ctx);
+    if (cells == 0) return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
+    if (doors == 0) return sys__engine__abi__error(NN__PRIMITIVES__FAULT_NO_DEVICE);
+    const uint64_t words = count > 1ull ? (uint64_t)(&cells[1].args[0] - &cells[0].args[0]) : 1ull;
+    if (ctx->heap_card != 0 && cells >= ctx->heap_host && (uint64_t)(cells - ctx->heap_host) + count <= ctx->heap_nodes) {
+        const sys__heap_node* card = ctx->heap_card + (cells - ctx->heap_host);
+        doors->vector_penalize((uint16_t*)(uintptr_t)x_at, n, &card[0].args[0], words, count, penalty, ctx->fault_word);
+        return nn__doors_answer(&argv[0]);
+    }
+    uint64_t* held = (uint64_t*)malloc((size_t)(count * sizeof(uint64_t)));
+    void* landing = 0;
+    if (held == 0 || !sys__gpu__memory_allocate(ctx->family, &landing, count * sizeof(uint64_t))) {
+        free(held);
+        return sys__engine__abi__error(NN__PRIMITIVES__FAULT_NO_DEVICE);
+    }
+    for (uint64_t j = 0ull; j < count; ++j) held[j] = cells[j].args[0];
+    bool ok = sys__gpu__memory_write(ctx->family, landing, held, count * sizeof(uint64_t));
+    if (ok) doors->vector_penalize((uint16_t*)(uintptr_t)x_at, n, (const uint64_t*)landing, 1ull, count, penalty, ctx->fault_word);
+    ok = ok && sys__gpu__compute_completed(ctx->family);
+    sys__gpu__memory_free(ctx->family, landing);
+    free(held);
+    if (!ok) return sys__engine__abi__error(NN__PRIMITIVES__FAULT_NO_DEVICE);
+    return nn__doors_answer(&argv[0]);
+}
+
 SYS__ENGINE__ABI__BRIDGE(nn__vector__zzabi_adapter_top_k,         nn__vector__zzabi_apply_top_k)
 SYS__ENGINE__ABI__BRIDGE(nn__vector__zzabi_adapter_top_k_biased,  nn__vector__zzabi_apply_top_k_biased)
+SYS__ENGINE__ABI__BRIDGE(nn__vector__zzabi_adapter_penalize,      nn__vector__zzabi_apply_penalize)
 SYS__ENGINE__ABI__BRIDGE(nn__vector__zzabi_adapter_pointwise_mul, nn__vector__zzabi_apply_pointwise_mul)
 SYS__ENGINE__ABI__BRIDGE(nn__vector__zzabi_adapter_scale,         nn__vector__zzabi_apply_scale)
 SYS__ENGINE__ABI__BRIDGE(nn__vector__zzabi_adapter_scale_at,      nn__vector__zzabi_apply_scale_at)

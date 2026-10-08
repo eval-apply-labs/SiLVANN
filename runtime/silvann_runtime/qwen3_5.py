@@ -1,15 +1,18 @@
 """QWEN 3.5 — the DeltaNet-and-attention family, dense (the 27B) or with routed experts (the 35B-A3B), on one card.
 
-Every size comes from the model folder's `config.json`. A layer is `ai_qwen_3`'s words over plane tables the boot
-fills: the mixer — `ai_qwen_3__deltanet` or `ai_qwen_3__attention`, its residual included — then the dense MLP
-(`ai_qwen_3__mlp`) or the MoE in three (`pre_expert` · `experts` · `post_expert`). Each layer is a procedure,
-defined once at boot, and a token is one short program:
+Every size comes from the model folder's `config.json`. The PROGRAM is Lisp, written by hand — `lisp/qwen3_5.lisp`,
+which the model folder carries and the boot reads: a layer is `ai_qwen_3`'s words over plane tables the boot fills —
+the mixer, `ai_qwen_3__deltanet` or `ai_qwen_3__attention`, its residual included, then the dense MLP (nn's
+`nn__mlp__apply`) or the MoE — and `layers` is a loop over them. This class makes what the program reads — the
+collections, the load, the buffers, the tables, and the names the source is written against (`_bindings`) — and a token
+is one short program:
 ```
-  (begin (embed codes scale) (nn__rope__angles cs pos theta rot) (layers pos) (head))
+  (begin (position tok pos) (head))
 ```
-— the token's embedding row written to the card by the host first: the embedding stays in RAM.
-The residual stream `x` never leaves the card; `head` answers the greedy token, or `head_logits` leaves the logits
-for a sampler on the host.
+— the embedding a table in RAM the card reads a row of: only a row crosses. An answer is `generate`, the same a token at
+a time on the card until an end token, up to `GENERATE_MOST` a call.
+The residual stream `x` never leaves the card; `head` answers the greedy token, `head_sample` one drawn there
+(▶ `sampling`), or `head_logits` leaves the logits for a sampler on the host.
 
 A conversation's STATE is the DeltaNet layers' recurrent state and conv window and the attention layers' keys and
 values up to its length — `state_regions` says where, so a conversation can be put away and brought back.
@@ -19,11 +22,13 @@ import pickle
 
 import numpy as np
 
-from . import experts_file, expert_tier
+from . import experts_file, expert_tier, sampling
 from .model_folder import NL, Refused
 
 GU, DN = NL.GATE_UP, NL.DOWN
 CARD, CPU = 0, 1                  # the workers: the card, and — with the experts there — the CPU
+GENERATE_MOST = 64                # the most tokens one `generate` makes — OUT's length
+STOPS_MOST = 8                    # the most end tokens it watches for
 ARCHITECTURES = ("qwen3_5_text", "qwen3_5_moe_text")
 
 
@@ -32,6 +37,10 @@ def _half(a):
 
 
 class Qwen35:
+    PROGRAM = ("qwen3_5", "qwen3_5_cpu", "sampling")      # the model folder's lisp/ files (▶ `ModelFolder.program`)
+    SAMPLES_ON_CARD = True          # `head_sample` — ▶ `sampling`
+    GENERATES = True                # `generate` — an answer's tokens on the card (▶ lisp/qwen3_5.lisp)
+
     def __init__(self, folder, machine, max_context=4096, fused_moe=True, kv="tiered", tiers=None, experts_on="card",
                  experts_from="auto", experts_dir=None, layers=None, chunk=256, experts_ram_gb=None, card_experts_gb=0,
                  card_landing=1, card_line=None, experts_int8=False):
@@ -153,6 +162,8 @@ class Qwen35:
             return data, lut, NL.SlotPlan(len(data), 0, 0, len(lut))
         self.head_data, self.head_lut, self.HPLAN = plan_of(self.head_rec)
         self.emb_data, self.emb_lut, self.BPLAN = plan_of(self.emb_rec)
+        # ⭐ THE EMBEDDING, A TABLE IN RAM THE CARD READS IN PLACE: the rows, then the scales — a RAM buffer of its own class
+        self.TABLE_BYTES = (len(self.emb_data) + len(self.emb_lut) + 255) // 256 * 256
         self.S_BYTES, self.W_BYTES = self.VH * self.LH * self.LH * 4, self.CONV_CH * 3 * 2
         self.SPLAN = NL.SlotPlan(self.S_BYTES, 0, 0, self.W_BYTES)
         if self.TIERED:
@@ -214,7 +225,7 @@ class Qwen35:
         tier = 0
         if self.CPLAN is not None:
             P, n = self.CHUNK * self.TOPK, self.CHUNK
-            self.KRSCRATCH = 2 * n * self.H + 16 * P + 2 * P + 8 * P * self.INTER + 4 * n * self.H + 4096
+            self.KRSCRATCH = 2 * n * self.H + 16 * P + 2 * P + 8 * P * self.INTER + 4 * n * self.TOPK * self.H + 4096
             big, tier = max(big, self.KRSCRATCH), 2
         types = "".join("nn__expert__type%d__up_bytes:%d\nnn__expert__type%d__down_bytes:%d\nnn__expert__type%d__slots:%d\n"
                         % (t, p.up_bytes, t, p.down_bytes, t, n) for t, p, n in self.collections)
@@ -233,15 +244,18 @@ class Qwen35:
                 "nn__model__kv_cache_layers_fullattn:%d\nnn__model__kv_cache_layers_deltanet:%d\n"
                 "nn__conversation__text_size_kb:4\nnn__deltanet_state__bytes_per_layer:64\n"
                 "nn__model__layer_types:%s\nnn__expert__types:%d\n%s"
+                "nn__ram_buffer_result__size_bytes:64\nnn__ram_buffer_result__qty:1\n"
+                "nn__ram_buffer_experts__size_bytes:64\nnn__ram_buffer_experts__qty:1\n"
+                "nn__ram_buffer_table__size_bytes:%d\nnn__ram_buffer_table__qty:1\n"
                 % (big, 6 + (self.MASK_BYTES[CARD] > 0) + tier, (self.arena + (256 << 20)) >> 20, self.LAYERS - n_d, n_d,
-                   "".join(self.kinds[l] for l in range(self.LAYERS)), len(self.collections), types))
+                   "".join(self.kinds[l] for l in range(self.LAYERS)), len(self.collections), types, self.TABLE_BYTES))
         if not self.CPU_EXPERTS:
             return card
         # the CPU worker's section: its one collection, the experts, and small pools for the hand-off's buffers — and a
         # prompt's: its hand rows, its routed rows and `experts_rows`' scratch (▶ ai_qwen_3's `experts_rows`)
         p = self.EPLAN
         P, I = self.CHUNK * self.TOPK, self.INTER
-        self.RSCRATCH = 2 * self.CHUNK * self.H + 16 * P + 2 * P + 8 * P * I + 4 * self.CHUNK * self.H + 64
+        self.RSCRATCH = 2 * self.CHUNK * self.H + 16 * P + 2 * P + 8 * P * I + 4 * self.CHUNK * self.TOPK * self.H + 64
         cbig = max(1 << 20, self.RSCRATCH, self.CHUNK * self.HAND_ROW, self.MASK_BYTES[CPU])
         cpu = ("nn__buffer_resid__size_bytes:2097152\nnn__buffer_resid__qty:8\n"
                "nn__buffer_main__size_bytes:4194304\nnn__buffer_main__qty:1\n"
@@ -303,6 +317,7 @@ class Qwen35:
             self._cpu_experts(progress)
         if self.CPLAN is not None:
             self._tier_tables()
+        self._bindings()
         m.define_programs(self._procedures)
         if self.CPLAN is not None:
             self.CALIBRATION = expert_tier.calibrate(
@@ -365,6 +380,8 @@ class Qwen35:
             m.table("exrc%d" % l, ["c_signs", "c_rscratch", "c_zero", l, 0, e.at_up_lut, e.at_down_data, e.at_down_lut,
                                    H, self.INTER, self.EXPERTS, self.TOPK, int(self.b.record(l, GU).d),
                                    backing.get((CPU, l), 0)] + self._masked(l, "moe", 16, 14))
+        m.array("EXPERTS_CPU", ["exc%d" % l for l in layers])
+        m.array("EXPERTS_CPU_ROWS", ["exrc%d" % l for l in layers])
         m.act_as(CARD)
 
     def _buffers(self):
@@ -389,11 +406,16 @@ class Qwen35:
             rw = 4 * self.QH * (self.AH + 2)
             m.buffer(4 * rw + 2 * (2 * self.QH * self.AH + 3 * self.KV_WIDE), "tier_scratch")
         m.buffer(262144, "mix_scratch")
-        row = int(self.emb_rec["row_bytes"])
-        self.EMB_AT = m.buffer(self.CHUNK * row, "emb_codes")               # the rows the host writes, a step's or a chunk's
-        self.EMB_SCALE_AT = m.buffer(max(64, self.CHUNK * 2), "emb_scales")
+        self.EMB_AT = m.buffer(self.TABLE_BYTES, "EMBEDDING", ram=True)
+        m.write(self.EMB_AT, self.emb_data)
+        m.write(self.EMB_AT + len(self.emb_data), self.emb_lut)
+        m.node_array("PROMPT", self.CHUNK)          # a prompt chunk's tokens
+        m.node_array("OUT", GENERATE_MOST)          # what `generate` made
+        m.node_array("STOP", STOPS_MOST)            # the end tokens it watches for
+        self._stops = None
         self.LOGITS_AT = m.buffer(self.VOCAB * 2, "logits_h")
         m.buffer(64, "res")
+        sampling.buffers(m)
         # ⭐ A PROMPT'S ROWS — every model reads its prompt as rows: the scratch, the angles, the rows and their h1s, and
         #   the tiered cache's window, or the one-cache rows' scores
         m.buffer(self.ROWS_SCRATCH, "pf_scratch")
@@ -408,16 +430,17 @@ class Qwen35:
         self.XS_AT = m.buffer(self.CHUNK * H * 2, "xs")
         m.buffer(self.CHUNK * H * 2, "h1s")
         if self.MOE:
-            # the router's hand, its picks and its scratch
+            # the router's hand, its picks and its scratch, and the experts verb's — the MoE in three reads them on the
+            # card as the CPU's experts read the hand and the picks
             m.buffer(2 * (H + 16 + self.INTER), "hand")
             m.buffer(65536, "pre_scratch")
+            m.node_array("picks", self.TOPK)
+            m.buffer(131072, "exp_scratch")
         if self.CPU_EXPERTS:
             # a prompt's hand rows and the routed rows the CPU hands back
             m.buffer(self.CHUNK * self.HAND_ROW, "hands")
             m.buffer(self.CHUNK * H * 2, "rrows")
             m.node_array("nrows", 1)
-            m.buffer(131072, "exp_scratch")
-            m.node_array("picks", self.TOPK)
         if self.CPLAN is not None:
             # the card's tier: a position's share and scratch, a chunk's rows' share and `experts_rows`' scratch
             m.buffer(H * 2, "routed_k")
@@ -552,7 +575,7 @@ class Qwen35:
                 for name, scratch in (("ml%d", "mix_scratch"), ("mlr%d", "pf_scratch")):     # a position's, and the rows'
                     m.table(name % l, [pl(l, "post_attention_layernorm.weight", "data")]
                             + [c for n in ms for c in (pl(l, n, "data"), pl(l, n, "lut"))]
-                            + ["signs", "one", scratch, self.H, self.INTER] + [d(l, n) for n in ms]
+                            + ["signs", "one", scratch, self.H, self.INTER] + [d(l, n) for n in ms] + [self.EPS]
                             + ([1] if self.ROTATED else []))
                 continue
             sh = ["mlp.shared_expert.gate_proj.weight", "mlp.shared_expert.up_proj.weight",
@@ -609,98 +632,51 @@ class Qwen35:
                                                      for i, v in enumerate(values[at:at + 100], at)),
                    "the array %s" % name, "sys__value_true")
 
-    # ── ③ the procedures, defined once ────────────────────────────────────────────────────────────────────────
-    def _procedures(self):
-        """Every procedure and picture this model runs — composed here once, then read from `programs.lisp` by the boots
-        that have the same key (▶ `Machine.define_programs`). Nothing but programs: the tables are `load`'s."""
-        m, H = self.m, self.H
+    # ── ③ the names the program is written against, and the program ──────────────────────────────────────────
+    def _bindings(self):
+        """What `lisp/qwen3_5.lisp` reads: the shape, the settings, and a layer's tables gathered into arrays indexed by its
+        place in the layers this machine runs."""
+        m, H, run = self.m, self.H, self.run_layers
         row = int(self.emb_rec["row_bytes"])
+        plane = lambda at, size: "(nn__expert__plane 0 %d 0 %d %d)" % (self.T_HEAD, at, size)
+        values = dict(HIDDEN=H, HIDDEN_BYTES=2 * H, VOCAB=self.VOCAB, EPS=self.EPS, THETA=self.THETA, ROTARY=self.ROT,
+                      RUN=len(run), EMB_HALVES=row // 2, EMB_SCALES=len(self.emb_data) // 2, EMB_BITS=int(self.emb_rec["d"]),
+                      HEAD_BITS=int(self.head_rec["d"]), STOPS=0, SEEN=sampling.SEEN,
+                      HEAD_CODES=plane(self.HPLAN.at_up_data, self.HPLAN.up_data),
+                      HEAD_SCALES=plane(self.HPLAN.at_down_lut, self.HPLAN.down_lut),
+                      ROTATED=bool(self.ROTATED), TIERED=bool(self.TIERED), ROUTED=bool(self.MOE),
+                      FUSED=bool(self.MOE and self.FUSED), EXPERTS_ON_CPU=bool(self.CPU_EXPERTS),
+                      CARD_TIER=self.CPLAN is not None, CARD=CARD, CPU=CPU)
         if self.CPU_EXPERTS:
-            # the pictures the card hands the CPU worker: a chunk's experts and a position's
-            m.act_as(CPU)
-            for l in self.run_layers:
-                m.picture("xr%d" % l, "(begin (nn__buffer__copy hands %d c_hands %d) "
-                          "(ai_qwen_3__experts_rows c_hands exrc%d c_rrows (sys__node_array__get nrows 0)))"
-                          % (CARD, self.CHUNK * self.HAND_ROW, l))
-                m.picture("xq%d" % l, "(begin (nn__buffer__copy hand %d c_hand %d) (ai_qwen_3__experts c_hand picks exc%d c_routed))"
-                          % (CARD, 2 * (H + 16), l))
-            m.act_as(CARD)
-        if self.ROTATED:        # the decoded row IS R·e — the residual's own basis
-            m.defun("(defun (embed codes scale) (begin (nn__turboquant__decode (nn__vector__range emb_codes codes %d) "
-                    "(nn__vector__range emb_scales scale 1) x 1 %d %d) (type x)))"
-                    % (row // 2, H, int(self.emb_rec["d"])))
-        else:                   # un-rotated: Rᵀu = S ⊙ H·u
-            m.defun("(defun (embed codes scale) (let ((u (nn__buffer__getnew %d)) (hu (nn__buffer__getnew %d))) "
-                    "(nn__turboquant__decode (nn__vector__range emb_codes codes %d) (nn__vector__range emb_scales scale 1) u 1 %d %d) "
-                    "(nn__hadamard__rotate u ones512 hu %d) (nn__vector__pointwise_mul hu signs_row x %d) (type x)))"
-                    % (H * 2, H * 2, row // 2, H, int(self.emb_rec["d"]), H, H))
-        normed = ("(nn__rmsnorm__apply x fnw h %d %r) " % (H, self.EPS)) if self.ROTATED else \
-                 ("(nn__rmsnorm__apply x fnw h %d %r) (nn__hadamard__rotate h signs h1 %d) " % (H, self.EPS, H))
-        logits = (normed + "(nn__turboquant__gemv (nn__expert__plane 0 %d 0 %d %d) (nn__expert__plane 0 %d 0 %d %d) %s logits_h %d %d %d)"
-                  % (self.T_HEAD, self.HPLAN.at_up_data, self.HPLAN.up_data, self.T_HEAD, self.HPLAN.at_down_lut,
-                     self.HPLAN.down_lut, "h" if self.ROTATED else "h1", self.VOCAB, H, int(self.head_rec["d"])))
-        # a prompt's rows — every model has them
-        into = "(nn__vector__range xs at %d)" % H
-        if self.ROTATED:
-            m.defun("(defun (embed_row codes scale at) (begin (nn__turboquant__decode (nn__vector__range emb_codes codes %d) "
-                    "(nn__vector__range emb_scales scale 1) %s 1 %d %d) (type xs)))"
-                    % (row // 2, into, H, int(self.emb_rec["d"])))
+            values.update(HAND_BYTES=2 * (H + 16), HANDS_BYTES=self.CHUNK * self.HAND_ROW, ROWS_BYTES=self.CHUNK * H * 2,
+                          ROWS_HALVES=self.CHUNK * H, HAND_ROW=self.HAND_ROW, HAND_PICKS_AT=self.HAND_ROW - 8 * self.TOPK)
+        m.bind_values(values)
+        m.array("DELTANET", [self.kinds[l] == "d" for l in run])
+        m.array("LAYER", list(run))
+        m.array("MIXER", ["mx%d" % l for l in run])
+        m.array("MIXER_ROWS", [("dr%d" if self.kinds[l] == "d" else "atr%d" if self.TIERED else "ar%d") % l for l in run])
+        if not self.MOE:
+            m.array("MLP", ["ml%d" % l for l in run])
+            m.array("MLP_ROWS", ["mlr%d" % l for l in run])
+            return
+        m.array("PRE", ["pre%d" % l for l in run])
+        m.array("POST", ["post%d" % l for l in run])
+        if not self.CPU_EXPERTS:
+            m.array("MOE", ["mr%d" % l for l in run])
+            m.array("EXPERTS", ["ex%d" % l for l in run])
         else:
-            m.defun("(defun (embed_row codes scale at) (let ((u (nn__buffer__getnew %d)) (hu (nn__buffer__getnew %d))) "
-                    "(nn__turboquant__decode (nn__vector__range emb_codes codes %d) (nn__vector__range emb_scales scale 1) u 1 %d %d) "
-                    "(nn__hadamard__rotate u ones512 hu %d) (nn__vector__pointwise_mul hu signs_row %s %d) (type xs)))"
-                    % (H * 2, H * 2, row // 2, H, int(self.emb_rec["d"]), H, into, H))
-        for l in self.run_layers:
-            mixer = ("(ai_qwen_3__deltanet_rows xs dr%d h1s n)" % l if self.kinds[l] == "d"
-                     else ("(ai_qwen_3__attention_tiered_rows xs atr%d first h1s n)" if self.TIERED
-                           else "(ai_qwen_3__attention_rows xs ar%d first h1s n)") % l)
-            if self.CPU_EXPERTS:
-                # ⭐ THE EXPERTS ON THE CPU, A CHUNK AT A TIME: the card routes every row into its hand row, the CPU runs each
-                #   expert once over the rows that picked it, the card closes every row. ⛳ Waited for without a bound, as
-                #   GLM's: a chunk's experts read from the disk can outlast `sys__result`'s wait
-                # ⭐ AND A CARD'S TIER (NN-48): its share of the chunk taken and marked before the CPU is handed the rows,
-                #   computed while the CPU computes the rest, the two sums added
-                tier = self.CPLAN is not None
-                mlp = ("(ai_qwen_3__pre_expert_rows h1s pre%d hands n) " % l
-                       + ("(nn__expert_tier__note hands %s %d n %d %d %s) " % (expert_tier.BINDING, l, self.HAND_ROW,
-                                                                          self.HAND_ROW - 8 * self.TOPK, expert_tier.THRESHOLD)
-                          if tier else "")
-                       + "(sys__compute %d names xr%d) " % (CPU, l)
-                       + ("(ai_qwen_3__experts_rows hands exkr%d rrows_k n %s) " % (l, expert_tier.BINDING) if tier else "")
-                       + "(while '(sys__eq (sys__completed %d) (< 1 0)) '(< 0 1)) (sys__result %d) "
-                         "(nn__buffer__copy c_rrows %d rrows %d) " % (CPU, CPU, CPU, self.CHUNK * H * 2)
-                       + ("(nn__vector__add rrows rrows_k rrows %d) " % (self.CHUNK * H) if tier else "")
-                       + "(ai_qwen_3__post_expert_rows h1s hands rrows post%d xs n)" % l)
-            else:
-                mlp = ("(ai_qwen_3__moe_rows h1s mr%d xs n)" if self.MOE else "(ai_qwen_3__mlp_rows h1s mlr%d xs n)") % l
-            m.defun("(defun (rows%d first n) (begin %s %s (type xs)))" % (l, mixer, mlp))
-        m.defun("(defun (rows first n) (begin %s (type xs)))"
-                % " ".join("(rows%d first n)" % l for l in self.run_layers))
-        m.defun("(defun (head) (begin %s (nn__argmax__find logits_h res %d) (nn__buffer__read res)))" % (logits, self.VOCAB))
-        m.defun("(defun (head_logits) (begin %s (type x)))" % logits)
-        for l in self.run_layers:
-            attention = "ai_qwen_3__attention_tiered" if self.TIERED else "ai_qwen_3__attention"
-            mixer = ("(ai_qwen_3__deltanet x mx%d %s)" if self.kinds[l] == "d" else "(" + attention + " x mx%d pos %s)")
-            if self.MOE and self.FUSED:
-                body = mixer % (l, "h1") + " (ai_qwen_3__moe h1 mr%d x)" % l
-            elif self.CPU_EXPERTS:
-                tier = self.CPLAN is not None
-                body = (mixer % (l, "h1") + " (ai_qwen_3__pre_expert h1 pre%d hand picks) " % l
-                        + ("(ai_qwen_3__experts hand picks exk%d routed_k %s) " % (l, expert_tier.BINDING) if tier else "")
-                        + "(sys__compute %d names xq%d) (sys__result %d) (nn__buffer__copy c_routed %d routed %d) "
-                          % (CPU, l, CPU, CPU, 2 * self.H)
-                        + ("(nn__vector__add routed routed_k routed %d) " % self.H if tier else "")
-                        + "(ai_qwen_3__post_expert h1 hand routed post%d x)" % l)
-            elif self.MOE:
-                body = (mixer % (l, "h1") + " (ai_qwen_3__pre_expert h1 pre%d hand picks) "
-                        "(ai_qwen_3__experts hand picks ex%d routed) (ai_qwen_3__post_expert h1 hand routed post%d x)"
-                        % (l, l, l))
-            else:
-                body = mixer % (l, "h") + " (ai_qwen_3__mlp h ml%d x)" % l
-            m.defun("(defun (layer%d pos) (begin %s (type x)))" % (l, body))
-        m.defun("(defun (layers pos) (begin %s (type x)))" % " ".join("(layer%d pos)" % l for l in self.run_layers))
+            m.node_array("HERE", 1)             # the layer a CPU picture runs (▶ lisp/qwen3_5_cpu.lisp)
+        if self.CPLAN is not None:
+            m.array("EXPERTS_TIER", ["exk%d" % l for l in run])
+            m.array("EXPERTS_TIER_ROWS", ["exkr%d" % l for l in run])
+
+    def _procedures(self):
+        """The program: `lisp/qwen3_5.lisp`, the sampler's, and — the experts on the CPU — the pictures the card hands it.
+        Read from `programs.lisp` instead by the boots that have the same key (▶ `Machine.define_programs`)."""
+        self.m.load_source(self.folder.program("qwen3_5"))
+        self.m.load_source(self.folder.program("sampling"))
         if self.CPU_EXPERTS:
-            m.view("names")             # what a CPU block sees: the pictures, the tables, the card's hand and picks
+            self.m.load_source(self.folder.program("qwen3_5_cpu"))
 
     # ── ④ running ─────────────────────────────────────────────────────────────────────────────────────────────
     def reset(self):
@@ -713,14 +689,40 @@ class Qwen35:
                           "(nn__vector__zero %s %d)" % (self.state(l, "down"), self.W_BYTES // 2)]
         self.m.must("(begin %s (type x))" % " ".join(zeros), "the reset")
 
-    def step(self, token, pos, greedy=True):
-        """One position: the token in, the next token out (greedy), or the logits left for a sampler (answers None)."""
+    def step(self, token, pos, greedy=True, sample=None):
+        """One position: the token in, the next token out — greedy, or drawn on the card by `sample` (a
+        `sampling.head`) — or the logits left for a sampler on the host."""
         if pos >= self.max_context:
             raise Refused("position %d is past the context of %d" % (pos, self.max_context))
-        self._stage([token])
-        head = "(head)" if greedy else "(head_logits)"
-        return self._run("(begin (embed 0 0) (nn__rope__angles cs %d %d %d) (layers %d) %s)"
-                         % (pos, self.THETA, self.ROT, pos, head), "position %d" % pos)
+        head = sample or ("(head)" if greedy else "(head_logits)")
+        return self._run("(begin (position %d %d) %s)" % (token, pos, head), "position %d" % pos)
+
+    def generate(self, token, pos, n, stop=(), sampler=None):
+        """Up to `n` tokens from `token` at `pos`, each the next one's input, in one program on the card — ending early
+        after one of `stop`. Greedy, or drawn by the card's sampler `sampler` (a `session.Sampler`). Answers the tokens."""
+        n = min(n, GENERATE_MOST, self.max_context - pos)
+        if n <= 0:
+            raise Refused("position %d is past the context of %d" % (pos, self.max_context))
+        self._watch(stop)
+        if sampler is None:
+            call = "(generate %d %d %d (< 1 0) 0 0 0 1.0 1.0 1 1.0 0)" % (token, pos, n)
+        else:
+            reads = sampler.repetition_penalty != 1.0
+            call = "(generate %d %d %d (< 0 1) %d %d %d %r %r %d %r %d)" % (
+                token, pos, n, 1 if reads else 0, min(pos, sampling.SEEN) if reads else 0, pos % sampling.SEEN,
+                float(sampler.repetition_penalty), 1.0 / sampler.temperature, sampler.top_k, min(1.0, float(sampler.top_p)),
+                sampler.seed)
+        made = self._run(call, "the answer from %d" % pos)
+        return [self.m.must("(nth OUT %d)" % j, "a token made") for j in range(made)]
+
+    def _watch(self, stop):
+        """The end tokens `generate` watches for, into STOP — when they are not the ones there already."""
+        stop = tuple(sorted(stop))[:STOPS_MOST]
+        if stop == self._stops:
+            return
+        self.m.must("(begin %s (set! STOPS %d) 0)" % (" ".join("(sys__node_array__set STOP %d %d)" % (j, t)
+                                                              for j, t in enumerate(stop)), len(stop)), "the end tokens")
+        self._stops = stop
 
     def _run(self, text, what):
         """A program's answer. ⛳ With the experts on the CPU it runs with every block standing — it hands them work
@@ -729,27 +731,26 @@ class Qwen35:
             return self.m.grid(text)[1]
         return self.m.must(text, what)
 
-    def _stage(self, tokens):
-        """The tokens' packed rows and scales from the host's embedding into the card's staging buffers, in order."""
-        row = int(self.emb_rec["row_bytes"])
-        self.m.write(self.EMB_AT, b"".join(self.emb_data[t * row:(t + 1) * row] for t in tokens))
-        self.m.write(self.EMB_SCALE_AT, b"".join(self.emb_lut[t * 2:t * 2 + 2] for t in tokens))
+    def _prompt(self, tokens):
+        """A prompt chunk's tokens into PROMPT, which `embed_rows` reads — sixty-four to a program, as a program is one
+        form and a form must fit one of the heap's chunks."""
+        for at in range(0, len(tokens), 64):
+            self.m.must("(begin %s 0)" % " ".join("(sys__node_array__set PROMPT %d %d)" % (i, t)
+                                                  for i, t in enumerate(tokens[at:at + 64], at)), "the prompt's tokens")
 
-    def prefill(self, tokens, first, greedy=True):
+    def prefill(self, tokens, first, greedy=True, sample=None):
         """Positions `first ..` for `tokens` in chunks of rows — each layer one call a chunk — then the next token from
-        the last row (greedy), or its logits left for a sampler."""
+        the last row (greedy, or drawn by `sample`), or its logits left for a sampler."""
         if first + len(tokens) > self.max_context:
             raise Refused("positions to %d are past the context of %d" % (first + len(tokens), self.max_context))
-        row = int(self.emb_rec["row_bytes"])
         step = min(self.CHUNK, self.HOT) if self.TIERED else self.CHUNK      # a chunk never outgrows the hot ring
         for at in range(0, len(tokens), step):
             chunk = tokens[at:at + step]
-            self._stage(chunk)
-            embeds = " ".join("(embed_row %d %d %d)" % (i * row // 2, i, i * self.H) for i in range(len(chunk)))
-            count = "(sys__node_array__set nrows 0 %d) " % len(chunk) if self.CPU_EXPERTS else ""
-            self._run("(begin %s%s (rows %d %d) (type xs))" % (count, embeds, first + at, len(chunk)), "the rows from %d" % (first + at))
+            self._prompt(chunk)
+            self._run("(begin (embed_rows %d) (rows %d %d) (type xs))" % (len(chunk), first + at, len(chunk)),
+                      "the rows from %d" % (first + at))
             last = len(chunk) - 1
-        head = "(head)" if greedy else "(head_logits)"
+        head = sample or ("(head)" if greedy else "(head_logits)")
         return self._run("(begin (nn__vector__add (nn__vector__range xs %d %d) zero_h x %d) %s)"
                          % (last * self.H, self.H, self.H, head), "the prompt's last row")
 
@@ -760,27 +761,36 @@ class Qwen35:
         """Position `pos` through this machine's layers, from `token` (the first machine) or the residual row `x` (the
         bytes the machine before answered). Answers the next token when `head`, else this machine's residual row."""
         if token is not None:
-            self._stage([token])
-            start = "(embed 0 0)"
+            start = "(embed %d)" % token
         else:
             self.m.write(self.X_AT, x)
             start = ""
         end = "(head)" if head else "(type x)"
-        got = self._run("(begin %s (nn__rope__angles cs %d %d %d) (layers %d) %s)"
-                        % (start, pos, self.THETA, self.ROT, pos, end), "position %d" % pos)
+        got = self._run("(begin %s (nn__rope__angles cs %d THETA ROTARY) (layers %d) %s)" % (start, pos, pos, end),
+                        "position %d" % pos)
         return got if head else self.m.read(self.X_AT, self.H * 2)
 
     def forward_rows(self, first, tokens=None, xs=None, n=None, head=False):
         """A chunk of positions `first ..` as rows through this machine's layers, from `tokens` or from the rows `xs`.
         Answers the next token from the last row when `head`, else this machine's rows."""
         if self.CPU_EXPERTS:
-            raise Refused("a stage with its experts on the CPU reads a prompt a position at a time")
+            # ⛳ the experts on the CPU read a prompt a position at a time (no rows words for them here): the chunk's
+            #   positions through `forward` in turn — the same tokens, a pipeline's coordinator none the wiser
+            H = self.H
+            n = len(tokens) if tokens is not None else n
+            rows, got = [], None
+            for i in range(n):
+                last = head and i == n - 1
+                got = self.forward(first + i, token=tokens[i] if tokens is not None else None,
+                                   x=None if tokens is not None else xs[i * H * 2:(i + 1) * H * 2], head=last)
+                if not last:
+                    rows.append(got)
+            return got if head else b"".join(rows)
         m, H = self.m, self.H
         if tokens is not None:
             n = len(tokens)
-            row = int(self.emb_rec["row_bytes"])
-            self._stage(tokens)
-            start = " ".join("(embed_row %d %d %d)" % (i * row // 2, i, i * H) for i in range(n))
+            self._prompt(tokens)
+            start = "(embed_rows %d)" % n
         else:
             m.write(self.XS_AT, xs)
             start = ""

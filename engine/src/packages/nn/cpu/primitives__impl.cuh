@@ -9,6 +9,7 @@
 #include "../../sys/cpu/heap_object__header.cuh" /* asking what kind a reference names */
 #include "../../sys/cpu/silicon/silicon__header.cuh"    /* the two arithmetic verbs the seam publishes */
 #include "../../sys/cpu/opcodes/opcodes.cuh"            /* how a verb answers, and how it refuses */
+#include "../../sys/cpu/node_array__header.cuh"         /* a plane table is a node array */
 #include "../contracts/objects/primitives.cuh" /* its constants and fault words */
 /* ══ nn — THE PRIMITIVES ═════════════════════════════════════════════════════════════════════════════
  * ▶ `primitives__header.cuh` for why these three, and why the resolver is shared.
@@ -88,6 +89,28 @@ static __device__ inline uint64_t* nn__primitives__result_slot(const sys__heap_n
 static __device__ inline bool nn__primitives__fits(uint64_t n, uint64_t room) {
     if (n != 0ull && n > 0xFFFFFFFFFFFFFFFFull / NN__PRIMITIVES__ELEMENT_BYTES) return false;
     return n * NN__PRIMITIVES__ELEMENT_BYTES <= room;
+}
+
+static bool nn__primitives__table(uint64_t table, unsigned planes, unsigned reals, unsigned length,
+                                  uint64_t* at, uint64_t* room, uint64_t* v, float* r) {
+    if (sys__node_array__length(table) < length) return false;
+    sys__node_array_walk w;
+    if (!sys__node_array__walk(table, 0ull, &w)) return false;
+    for (unsigned i = 0u; i < length; ++i, sys__node_array__next(&w)) {
+        const sys__heap_node* n = sys__node_array__walk_cell(&w);
+        if (n == 0) return false;
+        if (i < planes) { if (!nn__primitives__room(n, &at[i], &room[i])) return false; }
+        else if (i < reals) { if (n->dtype != SYS__KIND__VALUE_INT) return false; v[i] = n->args[0]; }
+        else if (n->dtype != SYS__KIND__VALUE_FLOAT) return false;
+        else r[i] = (float)sys__heap_node__real(n->args[0]);
+    }
+    return true;
+}
+
+static bool nn__primitives__table_flag(uint64_t table, unsigned index) {
+    if (sys__node_array__length(table) <= index) return false;
+    const sys__heap_node n = sys__node_array__borrow(table, index);
+    return n.dtype == SYS__KIND__VALUE_INT && n.args[0] == 1ull;
 }
 
 

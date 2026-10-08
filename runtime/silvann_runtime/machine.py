@@ -10,7 +10,7 @@ import os
 import re
 import sys
 
-from .composer import Composer
+from .composer import Composer, read_all, to_text
 
 
 class EngineError(Exception):
@@ -50,6 +50,13 @@ class Machine:
         for at in (os.path.join(root, "lib"), root):
             if os.path.isdir(at) and at not in sys.path:
                 sys.path.insert(0, at)
+        # ⭐ HIP's kernel arguments in the card's memory rather than the host's: a decode is ~800-1,100 small launches a
+        #   token, and each reads its arguments. `MEASURED` (node03, one MI50, test/src_runtime_bench.py, `=0` and `=1`
+        #   interleaved): the 35B D8E4 at 71 positions 79.4-82.1 tok/s against 84.2-86.7 (four each), at 2,035 72.2-72.4
+        #   against 73.3-76.6 (three each) — every run with it above every run without, ~3-5%, and the runs themselves
+        #   swing ~5% between two levels either way; the 27B D4 0-2%. Set before the engine loads, as HIP reads it when it
+        #   starts; a value the user set stays.
+        os.environ.setdefault("HIP_FORCE_DEV_KERNARG", "1")
         self.e = importlib.import_module("silvann_engine_" + engine)
         # a card if any family drives one — its vendor's own first, then OpenCL — else the CPU's own cores. x86_avx2
         # counts no devices on a CPU without AVX2, which leaves the portable host family
@@ -156,6 +163,56 @@ class Machine:
         self.programs.append(("defun", self.worker, None, text))
         if not self.recording:
             self.must(text, "the procedure %r" % text[:60], "sys__value_true")
+
+    # ── ⭐ A PROGRAM WRITTEN AS A FILE ──────────────────────────────────────────────────────────────────────
+    def load_source(self, path):
+        """A model's Lisp file — `lisp/<name>.lisp` in its folder (▶ `ModelFolder.program`) — every top-level form in
+        order, handed to the evaluator as a REPL hands it a line. A `defun` — or an `if` choosing between defuns by a
+        setting the boot bound — is defined as it is; three forms are the machine's rather than the language's:
+            (worker N form ...)     the forms inside defined as worker N (▶ `act_as`)
+            (picture name form)     the form frozen and bound by name, for `sys__compute` to hand another block
+            (view name)             the bindings as they stand, bound by name — what a computed block sees"""
+        with open(path) as f:
+            self._source_forms(read_all(f.read()), os.path.basename(path))
+
+    def _source_forms(self, forms, name):
+        for form in forms:
+            head = form[0] if isinstance(form, list) and form else None
+            if head == "worker":
+                before = self.worker
+                self.act_as(form[1])
+                self._source_forms(form[2:], name)
+                self.act_as(before)
+            elif head == "picture":
+                self.picture(form[1], to_text(form[2]))
+            elif head == "view":
+                self.view(form[1])
+            elif head in ("defun", "if"):
+                self.defun(to_text(form))
+            else:
+                raise EngineError("%s: a top-level form is a defun, an if, worker, picture or view — not %r"
+                                  % (name, to_text(form)[:60]))
+
+    def bind_values(self, values):
+        """Names bound to values, `{name: value}`: an int, a float, True or False, or a form's text (a plane, say),
+        evaluated once. What a model's source reads as its shape and its settings."""
+        def text(v):
+            if isinstance(v, bool):
+                return "(< 0 1)" if v else "(< 1 0)"
+            return repr(float(v)) if isinstance(v, float) else str(v)
+        items = sorted(values.items())
+        for at in range(0, len(items), 32):
+            self.must("(begin %s (< 0 1))" % " ".join("(sys__add_bindings %d '%s %s)" % (self.env, k, text(v))
+                                                       for k, v in items[at:at + 32]), "the values", "sys__value_true")
+
+    def array(self, name, items):
+        """A node array of `items` — names, ints, True or False — bound by name, filled 32 at a time."""
+        self.node_array(name, len(items))
+        cell = lambda v: ("(< 0 1)" if v else "(< 1 0)") if isinstance(v, bool) else str(v)
+        for at in range(0, len(items), 32):
+            self.must("(begin %s (< 0 1))" % " ".join("(sys__node_array__set %s %d %s)" % (name, i, cell(v))
+                                                       for i, v in enumerate(items[at:at + 32], at)),
+                      "the array %r" % name, "sys__value_true")
 
     # ── ⭐ THE PROGRAMS AS A FILE: written once, read at every boot after ────────────────────────────────
     # A model composes its procedures in Python once; the file holds them with the key of what they were composed

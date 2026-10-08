@@ -11,6 +11,10 @@ programs:
   CPU    x{l}   the input and the weights copied over, the eight picked experts, their weighted sum
   card   c{l}   the sum copied back, added to the shared expert's, hc post
 ```
+That is the unfused layer, nn's words a layer. The fused one, the default, is the program in `lisp/glm5.lisp` — the
+model folder's — a loop over
+the layers, each ai_glm_5_3's sites over its tables, every CPU socket handed its share of a layer's picks.
+
 The mixer is the model's: KDA (`nn__kda__step` over a conv window and a state a layer) or MLA — the query absorbed into
 a cache of rotated 512-wide latents, one kv head for 64 query heads (`nn__attention__absorb` · `decode` · `expand`).
 Past 2048 positions the DSA indexer chooses which of them a query attends, as the model's does.
@@ -29,7 +33,7 @@ import pickle
 
 import numpy as np
 
-from . import experts_file, expert_tier
+from . import experts_file, expert_tier, sampling
 from .model_folder import NL, Refused
 
 ARCHITECTURES = ("glm5_next_text",)
@@ -42,6 +46,9 @@ def _half(a):
 
 
 class Glm5:
+    PROGRAM = ("glm5", "glm5_cpu", "sampling")            # the model folder's lisp/ files (▶ `ModelFolder.program`)
+    SAMPLES_ON_CARD = True          # `head_sample` — ▶ `sampling`
+
     def __init__(self, folder, machine, max_context=2048, layers=None, grid=True, fused=True, sockets=None, experts_int8=True,
                  experts_from="auto", experts_dir=None, chunk=256, experts_ram_gb=None, card_experts_gb=0, card_hot=None,
                  card_landing=1, card_line=None, card_exclusive=False, card_free=16, card_duplex_line=1200, card_duplex=None, card_landing_line=3,
@@ -115,6 +122,9 @@ class Glm5:
             raise Refused("an exclusive tier needs a card tier — card_experts_gb")
         if self.CARD_GB and not fused:
             raise Refused("the card's tier of experts runs in the fused layer — fused=True")
+        # ⭐ THE PROGRAM IS lisp/glm5.lisp — the fused layer's: a loop over the layers, each its sites over its tables. The
+        #   unfused layer, nn's words a layer, is composed here (`_composed_procedures`), for the router's log
+        self.SOURCE = fused
         self.CPUS = [dict(w=CPU + i, dev=(1 + i) if sockets > 1 else 0, part=i) for i in range(sockets)]
         self._plan()
         self.EXPERTS_FROM = experts_file.choose(experts_from, self.cpu_arena)
@@ -350,6 +360,10 @@ class Glm5:
                 self._cpu_buffers(i)
         m.act_as(CARD)
         self._tables()
+        if self.SOURCE:
+            self._bindings()
+        else:
+            m.bind_values(dict(VOCAB=self.VOCAB))
         m.define_programs(self._procedures)
         if self.CPLAN is not None and self.CH and self.EPLAN is not None:
             self._calibrate_line()
@@ -490,6 +504,7 @@ class Glm5:
         m.buffer(256, "mix")
         m.buffer(64, "weights")
         m.buffer(64, "res")
+        sampling.buffers(m)
         for i in range(1, len(self.CPUS)):
             m.buffer(2 * H, "routed%d" % i)                    # another socket's share of the routed sum
         if self.CPLAN is not None:
@@ -766,9 +781,61 @@ class Glm5:
                 layers.append("(ai_glm_5_3__mlp streams ml%d)" % l)
         return " ".join(x for x in layers if x)
 
+    # ── ③ the names the program is written against, and the program ──────────────────────────────────────────
+    def _bindings(self):
+        """What `lisp/glm5.lisp` reads: the shape, whether the card holds a tier, a layer's tables gathered into arrays
+        indexed by its place in the layers this machine runs, and each socket's worker, buffers and experts tables."""
+        m, H, run, K = self.m, self.H, self.run_layers, self.TOPK
+        head = lambda at, size: "(nn__expert__plane 0 %d 0 %d %d)" % (self.T_HEAD, at, size)
+        tier = self.CPLAN is not None
+        m.bind_values(dict(HIDDEN=H, HIDDEN_BYTES=2 * H, MULT=self.MULT, MEAN=1.0 / self.MULT, VOCAB=self.VOCAB, EPS=self.EPS,
+                           RUN=len(run), EMB_HALVES=int(self.emb_rec["row_bytes"]) // 2, EMB_BITS=int(self.emb_rec["d"]),
+                           HEAD_CODES=head(self.HPLAN.at_up_data, self.HPLAN.up_data),
+                           HEAD_SCALES=head(self.HPLAN.at_down_lut, self.HPLAN.down_lut), HEAD_BITS=int(self.head_rec["d"]),
+                           HAND=self.HAND, HAND_PICKS_AT=self.HAND - 8 * K, HAND_BYTES=2 * (H + K),
+                           ROWS_HANDS_BYTES=self.CH * self.HAND, ROWS_BYTES=2 * H * self.CH, ROWS_HALVES=H * self.CH,
+                           CARD_TIER=tier, CARD=CARD, SOCKETS=len(self.CPUS)))
+        moe = lambda name: [name % l if self.moe[l] else 0 for l in run]
+        m.array("KDA", [self.kinds[l] == "d" for l in run])
+        m.array("MOE", [bool(self.moe[l]) for l in run])
+        m.array("LAYER", list(run))
+        m.array("AT", ["at%d" % l for l in run])
+        m.array("MO", moe("mo%d"))
+        m.array("ML", [0 if self.moe[l] else "ml%d" % l for l in run])
+        if tier:
+            m.array("EXK", moe("exk%d"))
+            if self.CH:
+                m.array("EXKR", moe("exkr%d"))
+        socket = range(len(self.CPUS))
+        m.array("SOCKET", [c["w"] for c in self.CPUS])
+        m.array("ROUTED_INTO", ["routed" if i == 0 else "routed%d" % i for i in socket])
+        m.array("C_HAND", [self.cn(i, "hand") for i in socket])
+        m.array("C_ROUTED", [self.cn(i, "routed") for i in socket])
+        for i in socket:
+            m.array("EX_%d" % i, [("ex%d_" + str(i)) % l if self.moe[l] else 0 for l in run])
+        m.array("EX", ["EX_%d" % i for i in socket])
+        if self.CH:
+            m.array("RROWS_INTO", ["rrows" if i == 0 else "rrows%d" % i for i in socket])
+            m.array("C_HANDS", [self.cn(i, "hands") for i in socket])
+            m.array("C_RROWS", [self.cn(i, "rrows") for i in socket])
+            for i in socket:
+                m.array("EXR_%d" % i, [("exr%d_" + str(i)) % l if self.moe[l] else 0 for l in run])
+            m.array("EXR", ["EXR_%d" % i for i in socket])
+        m.node_array("HERE", 1)             # the layer a socket's picture runs (▶ lisp/glm5_cpu.lisp)
+
     def _procedures(self):
-        """Every procedure and picture GLM runs — composed here once, then read from `programs.lisp` by the boots that have
-        the same key (▶ `Machine.define_programs`). Nothing but programs: the tables are `_tables`'."""
+        """The program: `lisp/glm5.lisp`, the sampler's and the sockets' pictures — or, unfused, `_composed_procedures`.
+        Read from `programs.lisp` instead by the boots that have the same key (▶ `Machine.define_programs`)."""
+        if not self.SOURCE:
+            return self._composed_procedures()
+        self.m.load_source(self.folder.program("glm5"))
+        self.m.load_source(self.folder.program("sampling"))
+        if self.EPLAN is not None:
+            self.m.load_source(self.folder.program("glm5_cpu"))
+
+    def _composed_procedures(self):
+        """The unfused layer's procedures, nn's words a layer — and the fused layer's for a run that takes directions out
+        or captures the streams — composed here."""
         m, H = self.m, self.H
         row = int(self.emb_rec["row_bytes"])
         # the token's row, un-rotated (Rᵀu = S ⊙ H·u), into every stream
@@ -787,6 +854,8 @@ class Glm5:
                      self.HPLAN.down_lut, self.VOCAB, H, int(self.head_rec["d"])))
         m.defun("(defun (head) (begin %s (nn__argmax__find logits_h res %d) (nn__buffer__read res)))" % (logits, self.VOCAB))
         m.defun("(defun (head_logits) (begin %s (type hm)))" % logits)
+        m.defun("(defun (logits) (begin %s))" % logits)      # what `head_sample` reads (▶ lisp/sampling.lisp)
+        m.load_source(self.folder.program("sampling"))
         for l in self.run_layers:
             mixer = self._kda(l) if self.kinds[l] == "d" else self._mla(l)
             body = (self._hc(l, "attn") + " (nn__rmsnorm__apply xin %s h %d %r) (nn__hadamard__rotate h signs hr %d) "
@@ -834,15 +903,17 @@ class Glm5:
             self._rows_procedures()
         if self.EPLAN is not None:
             m.view("names")
+        # ⭐ A POSITION, AND THEN ITS HEAD — the step runs `(begin (position_f codes scale pos) <head>)`, the head greedy,
+        #   drawn on the card or the logits left (▶ `step`); `token_f` is the greedy one, named
         if fused is not None:
-            m.defun("(defun (token_f codes scale pos) (begin (embed codes scale) %s (head)))" % fused_tok)
+            m.defun("(defun (position_f codes scale pos) (begin (embed codes scale) %s (type streams)))" % fused_tok)
+            m.defun("(defun (token_f codes scale pos) (begin (position_f codes scale pos) (head)))")
             # a pipeline stage's own layers, the streams in and out (▶ `forward`)
             m.defun("(defun (layers_f pos) (begin %s (type streams)))" % fused)
-            m.defun("(defun (token_f_logits codes scale pos) (begin (embed codes scale) %s (head_logits)))" % fused_tok)
         layers = " ".join(("(a%d at len) (sys__compute %d names xw%d) (s%d) (sys__result %d) (c%d)" % (l, CPU, l, l, CPU, l))
                           if self.moe[l] else "(a%d at len)" % l for l in self.run_layers)
-        m.defun("(defun (token codes scale at len) (begin (embed codes scale) %s (head)))" % layers)
-        m.defun("(defun (token_logits codes scale at len) (begin (embed codes scale) %s (head_logits)))" % layers)
+        m.defun("(defun (position codes scale at len) (begin (embed codes scale) %s (type streams)))" % layers)
+        m.defun("(defun (token codes scale at len) (begin (position codes scale at len) (head)))")
 
     def _rows_tables(self):
         """Each CPU's experts table over a prompt's chunk."""
@@ -928,42 +999,44 @@ class Glm5:
             m.act_as(CARD)
             m.must("(c%d)" % l, "layer %d's close at %d" % (l, pos))
 
-    def step(self, token, pos, greedy=True):
-        """One position: the token in, the next token out (greedy), or the logits left for a sampler (answers None)."""
+    def step(self, token, pos, greedy=True, sample=None):
+        """One position: the token in, the next token out — greedy, or drawn on the card by `sample` (a `sampling.head`)
+        — or the logits left for a sampler on the host (answers None)."""
         if pos >= self.max_context:
             raise Refused("position %d is past the context of %d" % (pos, self.max_context))
         row = int(self.emb_rec["row_bytes"])
         self.m.write(self.EMB_AT, self.emb_data[token * row:(token + 1) * row])     # the embedding lives in RAM
         self.m.write(self.EMB_SCALE_AT, self.emb_lut[token * 2:token * 2 + 2])
         codes, scale = 0, 0
+        head = sample or ("(head)" if greedy else "(head_logits)")
         if self.FUSED:
-            kind, value = self.m.grid("(%s %d %d %d)" % ("token_f" if greedy else "token_f_logits", codes, scale, pos))
-            return value if greedy else None
+            kind, value = self.m.grid("(begin (position_f %d %d %d) %s)" % (codes, scale, pos, head))
+            return value if greedy or sample else None
         if self.GRID:
-            kind, value = self.m.grid("(%s %d %d %d %d)" % ("token" if greedy else "token_logits", codes, scale,
-                                                           pos * self.LAT * 2, pos + 1))
-            return value if greedy else None
+            kind, value = self.m.grid("(begin (position %d %d %d %d) %s)" % (codes, scale, pos * self.LAT * 2, pos + 1, head))
+            return value if greedy or sample else None
         m = self.m
         m.must("(embed %d %d)" % (codes, scale), "the embedding at %d" % pos)
         for l in self.run_layers:
             self.layer(l, pos)
-        return m.must("(head)" if greedy else "(head_logits)", "the head at %d" % pos)
+        got = m.must(head, "the head at %d" % pos)
+        return got if greedy or sample else None
 
-    def prefill(self, tokens, first, greedy=True):
+    def prefill(self, tokens, first, greedy=True, sample=None):
         """Positions `first ..` for `tokens`: as rows, a chunk at a time, when the experts are the CPU's and there is more
         than one; then the next token from the last row (greedy), or its logits left for a sampler."""
         rows = bool(self.CH) and self.EPLAN is not None and len(tokens) >= 2
         if not rows:
             out = None
             for i, tok in enumerate(tokens):
-                out = self.step(tok, first + i, greedy)
+                out = self.step(tok, first + i, greedy, sample if i == len(tokens) - 1 else None)
             return out
         if first + len(tokens) > self.max_context:
             raise Refused("positions to %d are past the context of %d" % (first + len(tokens), self.max_context))
         out = None
         for at in range(0, len(tokens), self.CH):
             chunk = tokens[at:at + self.CH]
-            out = self.forward_rows(first + at, tokens=chunk, head=at + self.CH >= len(tokens), greedy=greedy)
+            out = self.forward_rows(first + at, tokens=chunk, head=at + self.CH >= len(tokens), greedy=greedy, sample=sample)
         return out
 
     # ── a pipeline stage (▶ `pipeline.py`): this machine's layers, the streams crossing between stages ─────────────
@@ -983,7 +1056,7 @@ class Glm5:
             return m.must("(head)", "the head at %d" % pos)
         return m.read(self.STREAMS_AT, self.MULT * self.H * 2)
 
-    def forward_rows(self, first, tokens=None, xs=None, n=None, head=False, greedy=True):
+    def forward_rows(self, first, tokens=None, xs=None, n=None, head=False, greedy=True, sample=None):
         """A chunk of rows through this stage's layers: its tokens embedded (the first stage) or its rows' streams that came
         across (`xs`, `n` rows of MULT·H halves) written; then the next token from its last row (the last stage), or the
         rows' streams to hand on."""
@@ -995,23 +1068,29 @@ class Glm5:
             row = int(self.emb_rec["row_bytes"])
             m.write(self.EMB_ROWS_AT, b"".join(self.emb_data[t * row:(t + 1) * row] for t in tokens))
             m.write(self.EMB_RSCALES_AT, b"".join(self.emb_lut[t * 2:t * 2 + 2] for t in tokens))
-            # ⛳ the embeddings in programs of their own, a hundred rows each: one program is one form, and a form
-            #   must fit in one of the heap's chunks
-            for e0 in range(0, n, 128):
-                m.must("(begin %s (type srows))" % " ".join(
-                    "(embed_row %d %d %s)" % (i * row // 2, i, " ".join(str((i * M + j) * H) for j in range(M)))
-                    for i in range(e0, min(n, e0 + 128))), "the chunk's embeddings")
+            if self.SOURCE:
+                m.must("(embed_rows %d)" % n, "the chunk's embeddings")
+            else:
+                # ⛳ the embeddings in programs of their own, a hundred rows each: one program is one form, and a form
+                #   must fit in one of the heap's chunks
+                for e0 in range(0, n, 128):
+                    m.must("(begin %s (type srows))" % " ".join(
+                        "(embed_row %d %d %s)" % (i * row // 2, i, " ".join(str((i * M + j) * H) for j in range(M)))
+                        for i in range(e0, min(n, e0 + 128))), "the chunk's embeddings")
         else:
             m.write(self.SROWS_AT, xs)
-        layers = " ".join("(r%d %d %d)" % (l, first, n) for l in self.run_layers)
-        m.grid("(begin (sys__node_array__set nrows 0 %d) %s (type srows))" % (n, layers))
+        if self.SOURCE:
+            m.grid("(begin (rows %d %d) (type srows))" % (first, n))
+        else:
+            layers = " ".join("(r%d %d %d)" % (l, first, n) for l in self.run_layers)
+            m.grid("(begin (sys__node_array__set nrows 0 %d) %s (type srows))" % (n, layers))
         if not head:
             return m.read(self.SROWS_AT, n * M * H * 2)
         # the last row's streams, then the head
         last = (n - 1) * M * H
         m.must("(begin %s (type streams))" % " ".join("(nn__vector__add %s zero_h %s %d)" % (
             self.rng("srows", last + j * H, H), self.rng("streams", j * H, H), H) for j in range(M)), "the prompt's last row")
-        return m.must("(head)", "the head") if greedy else m.must("(head_logits)", "the head")
+        return m.must(sample or ("(head)" if greedy else "(head_logits)"), "the head")
 
     def logits(self):
         return np.frombuffer(self.m.read(self.LOGITS_AT, self.VOCAB * 2), dtype="<f2").astype(np.float32)
