@@ -21,6 +21,7 @@
  *       merged — ▶ RESIDUALS below. */
 
 #include "../doors.cuh"
+#include "../../contracts/objects/attention.cuh"
 
 /* The most a head count, a head width or a length may be. Past it a product of three could wrap, and
  * no model has a dimension near it. */
@@ -289,5 +290,94 @@ static sys__heap_node nn__attention__zzabi_apply_expand(const sys__heap_node* ar
 
 SYS__ENGINE__ABI__BRIDGE(nn__attention__zzabi_adapter_absorb, nn__attention__zzabi_apply_absorb)
 SYS__ENGINE__ABI__BRIDGE(nn__attention__zzabi_adapter_expand, nn__attention__zzabi_apply_expand)
+
+/* ══ ⭐ A PROMPT'S ROWS THROUGH A GROUPED-QUERY ATTENTION — nn's word over a plane table (▶ `contracts/objects/attention.cuh`) ══
+ * `(nn__attention__rows xs table first h1s rows)` -> `h1s`: positions `first .. first + rows`, a row of `xs` each — the
+ * norm, the queries and keys in one grouped launch and the values straight into their cache rows, RoPE on the queries and
+ * on the keys into theirs, every key and value of the chunk written before any query reads them, row `r` attending the
+ * cache's rows `0 .. first + r` — as many rows at a time as the scores' room holds — the answers rotated and through the
+ * out projection, the residual added. Each step is
+ * the many-row form of the one a model's one-position program takes (Ministral's), so the two agree as those doors do.
+ * The scratch starts with the two lists of pairs (each row onto itself; each row onto its position), then in halves
+ * h · hrot · [q · k] · att · attr · ao. */
+static sys__heap_node nn__attention__zzabi_apply_rows(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx) {
+    if (argc != 5u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
+    uint64_t x = 0, x_room = 0, h1 = 0, h1_room = 0;
+    if (!sys__heap_node__carries_reference(argv[1].dtype) || !sys__node_array__is(argv[1].args[0])
+     || argv[2].dtype != SYS__KIND__VALUE_INT || argv[4].dtype != SYS__KIND__VALUE_INT
+     || !nn__primitives__room(&argv[0], &x, &x_room) || !nn__primitives__room(&argv[3], &h1, &h1_room))
+        return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
+    uint64_t at[NN__ATTENTION__TABLE], room[NN__ATTENTION__TABLE], v[NN__ATTENTION__TABLE];
+    float r[NN__ATTENTION__TABLE];
+    if (!nn__primitives__table(argv[1].args[0], NN__ATTENTION__HIDDEN, NN__ATTENTION__EPS, NN__ATTENTION__TABLE, at, room, v, r))
+        return sys__engine__abi__error(NN__ATTENTION__FAULT_TABLE);
+    const uint64_t H = v[NN__ATTENTION__HIDDEN], qh = v[NN__ATTENTION__Q_HEADS], kvh = v[NN__ATTENTION__KV_HEADS];
+    const uint64_t hd = v[NN__ATTENTION__HEAD_DIM], first = argv[2].args[0], T = argv[4].args[0];
+    const uint64_t qw = qh * hd, kvw = kvh * hd, to = first + T;
+    /* the residual and the heads' widths whole blocks of 512, so a rotation over the rows is each row's */
+    if (H == 0u || qh == 0u || kvh == 0u || hd == 0u || hd % 2u != 0u || qh % kvh != 0u || H > (1ull << 24)
+     || qh > (1ull << 12) || hd > (1ull << 12) || H % 512u != 0u || qw % 512u != 0u || first >= (1ull << 32)
+     || T == 0u || T > NN__ATTENTION__ROWS_MAX || !nn__primitives__fits(T * H, x_room) || !nn__primitives__fits(T * H, h1_room))
+        return sys__engine__abi__error(NN__ATTENTION__FAULT_TABLE);
+    if (!nn__primitives__fits(H, room[NN__ATTENTION__NORM]) || !nn__primitives__fits(to * kvw, room[NN__ATTENTION__KEYS])
+     || !nn__primitives__fits(to * kvw, room[NN__ATTENTION__VALUES]) || room[NN__ATTENTION__ANGLES_Q] / 4u < to * hd
+     || room[NN__ATTENTION__ANGLES_K] / 4u < to * hd || room[NN__ATTENTION__SCORES] / 4u < qh * to
+     || !nn__primitives__fits(512u, room[NN__ATTENTION__SIGNS]))
+        return sys__engine__abi__error(NN__ATTENTION__FAULT_ROOM);
+    /* the rows attend as many at a time as the scores' room holds — the last of them spans the most — at least one */
+    const uint64_t pass = room[NN__ATTENTION__SCORES] / 4u / (qh * to) < T ? room[NN__ATTENTION__SCORES] / 4u / (qh * to) : T;
+    const uint64_t pairs = at[NN__ATTENTION__SCRATCH], vpairs = pairs + 8u * NN__ATTENTION__ROWS_MAX, h = vpairs + 8u * NN__ATTENTION__ROWS_MAX;
+    const uint64_t hrot = h + 2u * T * H, q = hrot + 2u * T * H, k = q + 2u * T * qw, att = k + 2u * T * kvw;
+    const uint64_t attr = att + 2u * T * qw, ao = attr + 2u * T * qw;
+    if (room[NN__ATTENTION__SCRATCH] < ao + 2u * T * H - pairs) return sys__engine__abi__error(NN__ATTENTION__FAULT_ROOM);
+    const nn__doors* doors = nn__doors_for(ctx);
+    if (doors == 0) return sys__engine__abi__error(NN__PRIMITIVES__FAULT_NO_DEVICE);
+    /* row j's input and output both row j; and row j's value onto the cache's row `first + j` */
+    uint32_t each[2u * NN__ATTENTION__ROWS_MAX], onto[2u * NN__ATTENTION__ROWS_MAX];
+    for (uint64_t j = 0u; j < T; ++j) {
+        each[2u * j] = (uint32_t)j; each[2u * j + 1u] = (uint32_t)j;
+        onto[2u * j] = (uint32_t)j; onto[2u * j + 1u] = (uint32_t)(first + j);
+    }
+    if (!sys__gpu__memory_write(ctx->family, (void*)(uintptr_t)pairs, each, (size_t)(8u * T))
+     || !sys__gpu__memory_write(ctx->family, (void*)(uintptr_t)vpairs, onto, (size_t)(8u * T)))
+        return sys__engine__abi__error(NN__PRIMITIVES__FAULT_NO_DEVICE);
+    unsigned int* over = ctx->fault_word;
+    const uint64_t signs = at[NN__ATTENTION__SIGNS], keys = at[NN__ATTENTION__KEYS], values = at[NN__ATTENTION__VALUES];
+    const uint64_t kfirst = keys + 2u * first * kvw;
+
+    doors->rmsnorm_rows((uint16_t*)(uintptr_t)h, (const uint16_t*)(uintptr_t)x, (const uint16_t*)(uintptr_t)at[NN__ATTENTION__NORM],
+                        H, T, H, H, r[NN__ATTENTION__EPS], over);
+    doors->hadamard_rotate((uint16_t*)(uintptr_t)hrot, (const uint16_t*)(uintptr_t)h, (const uint16_t*)(uintptr_t)signs, T * H, over);
+    nn__expert__groups gr = {};
+    gr.codes[0] = at[NN__ATTENTION__Q]; gr.luts[0] = at[NN__ATTENTION__Q_SCALES]; gr.out_rows[0] = qw;  gr.d[0] = v[NN__ATTENTION__D_Q];
+    gr.codes[1] = at[NN__ATTENTION__K]; gr.luts[1] = at[NN__ATTENTION__K_SCALES]; gr.out_rows[1] = kvw; gr.d[1] = v[NN__ATTENTION__D_K];
+    gr.out_at[0] = 0u; gr.out_at[1] = T * qw;
+    gr.pairs[0] = gr.pairs[1] = T;
+    gr.count = 2u;
+    doors->expert_groups((uint16_t*)(uintptr_t)q, gr, (const uint16_t*)(uintptr_t)hrot, (const uint32_t*)(uintptr_t)pairs, H, over);
+    doors->expert_rows((uint16_t*)(uintptr_t)values, (const uint8_t*)(uintptr_t)at[NN__ATTENTION__V], room[NN__ATTENTION__V],
+                       (const uint8_t*)(uintptr_t)at[NN__ATTENTION__V_SCALES], room[NN__ATTENTION__V_SCALES], (const uint16_t*)(uintptr_t)hrot,
+                       (const uint32_t*)(uintptr_t)vpairs, T, v[NN__ATTENTION__D_V], kvw, H, over);
+    doors->rope_rows((uint16_t*)(uintptr_t)q, (const uint16_t*)(uintptr_t)q, (const float*)(uintptr_t)(at[NN__ATTENTION__ANGLES_Q] + 4u * first * hd),
+                     T, qh, hd, qw, hd, over);
+    doors->rope_rows((uint16_t*)(uintptr_t)kfirst, (const uint16_t*)(uintptr_t)k, (const float*)(uintptr_t)(at[NN__ATTENTION__ANGLES_K] + 4u * first * hd),
+                     T, kvh, hd, kvw, hd, over);
+    for (uint64_t r0 = 0u; r0 < T; r0 += pass) {
+        const uint64_t n = T - r0 < pass ? T - r0 : pass;
+        doors->attention_causal_scores_grouped((float*)(uintptr_t)at[NN__ATTENTION__SCORES], (const uint16_t*)(uintptr_t)(q + 2u * r0 * qw),
+                                               (const uint16_t*)(uintptr_t)keys, qh, kvh, hd, first + r0, n);
+        doors->attention_causal_softmax((float*)(uintptr_t)at[NN__ATTENTION__SCORES], qh, first + r0, n);
+        doors->attention_causal_mix((uint16_t*)(uintptr_t)(att + 2u * r0 * qw), (const float*)(uintptr_t)at[NN__ATTENTION__SCORES],
+                                    (const uint16_t*)(uintptr_t)values, qh, kvh, hd, first + r0, n, over);
+    }
+    doors->hadamard_rotate((uint16_t*)(uintptr_t)attr, (const uint16_t*)(uintptr_t)att, (const uint16_t*)(uintptr_t)signs, T * qw, over);
+    doors->expert_rows((uint16_t*)(uintptr_t)ao, (const uint8_t*)(uintptr_t)at[NN__ATTENTION__O], room[NN__ATTENTION__O],
+                       (const uint8_t*)(uintptr_t)at[NN__ATTENTION__O_SCALES], room[NN__ATTENTION__O_SCALES], (const uint16_t*)(uintptr_t)attr,
+                       (const uint32_t*)(uintptr_t)pairs, T, v[NN__ATTENTION__D_O], H, qw, over);
+    doors->vector_add((uint16_t*)(uintptr_t)h1, (const uint16_t*)(uintptr_t)x, (const uint16_t*)(uintptr_t)ao, T * H, over);
+    return nn__doors_answer(&argv[3]);
+}
+
+SYS__ENGINE__ABI__BRIDGE(nn__attention__zzabi_adapter_rows, nn__attention__zzabi_apply_rows)
 
 #endif /* SILVANN__PACKAGES_NN_CPU_OPCODES_ATTENTION__ABI_CUH */

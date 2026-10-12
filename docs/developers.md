@@ -26,7 +26,8 @@ A model's program is Lisp, written by hand, and it travels with the model: a mod
 its pack on Hugging Face with it. The boot reads the folder's files and hands every form to the evaluator, as a REPL
 would; a procedure is then a binding like any other, which a program can call or define again. The files are one a
 family — `qwen3_5.lisp`, `glm5.lisp`, `mistral3.lisp`, with `qwen3_5_cpu.lisp` and `glm5_cpu.lisp` for what a CPU worker
-runs, and `sampling.lisp` for the sampler every model shares — written in the release's `lisp/`, and a model folder
+runs, `sampling.lisp` for the sampler every model shares, and `generate.lisp` for an answer made on the card a token
+after another, which every family shares — written in the release's `lisp/`, and a model folder
 holds its family's copy. A program names the words of the engine it was written for: one an engine
 does not have is an error when the program reaches it, and a `defun` of that name in the program — the old word
 written as the new one — answers it. A token's layers are a loop:
@@ -85,6 +86,13 @@ SwiGLU, GLM's clamped one), a mask.
 gate and up in one grouped launch, the SwiGLU, the rotation, the down with the residual added in the same launch. It is
 the MLP site of Qwen's dense models and of Ministral.
 
+**So is a plain grouped-query attention over a prompt chunk** — `nn__attention__rows` (`cpu/opcodes/attention__abi.cuh`,
+its table's cells in `contracts/objects/attention.cuh`): the RMS norm, the queries and keys in one grouped launch and the
+values straight into their cache rows, RoPE from tables of angles a position a row, the causal attention as many rows at
+a time as the scores' buffer holds, the out projection with the residual added. It is the many-row form of the
+one-position words Ministral's program takes, so Ministral reads a prompt as rows; a model whose attention normalizes its
+queries and keys or gates its answer has its own package's verb (Qwen's).
+
 **The experts' sums do not depend on which expert was ready first.** A verb computes the experts that are in memory while
 the rest arrive, but each pick's output is kept apart and the picks are added in their own order — a token's downs in
 one launch, a prompt chunk's in a slot each, added by `expert_rows_reduce` — so the same prompt gives the same answer
@@ -92,7 +100,7 @@ bit for bit, whatever the system had paged in — except with a card's tier of e
 follows its promotions' timing: the card's sum and the CPUs' then split differently run to run, and round
 differently. Over a prompt, an expert fewer positions pick than `nn__expert_major__vram_promotion_threshold_picks`
 stays on the CPU: a variable bound at boot (`runtime/silvann_runtime/expert_tier.py`) by timing an expert's copy to the
-card against the CPU computing one — 15 for GLM and 4 for the 35B on the test machine — and read by the prompt's
+card against the CPU computing one, the medians of five readings — 15 for GLM and 4 for the 35B on the test machine — and read by the prompt's
 program.
 
 ## Adding a model
@@ -112,12 +120,18 @@ program.
 
 ## Adding a silicon
 
-`engine/src/silicon_families/add_a_family.md`. A family answers a small contract: memory and copies, a launch,
-and a handful of arithmetic primitives (the lanes' sums, a half to a float, the tile it likes its GEMM in). The
-library's kernels are written once against those answers; a family may also override a door with its own code,
-as `x86_avx2` and `amd_rocm6_wave64` do for the hottest ones. `khronos_opencl2` runs on the MI50 through ROCm's OpenCL
-(nn's verbs, the 27B and the 35B against HF); `nvidia_cuda12` builds and passes the family checks, and has not been run on
-a real card.
+`engine/src/silicon_families/add_a_family.md`. A family answers a small contract: memory and copies, a launch, and a
+handful of arithmetic primitives (the lanes' sums, a half to a float, the tile it likes its GEMM in). The library's
+kernels are written once against those answers; a family may also override a door with its own code, as
+`amd_rocm6_wave64`, `nvidia_cuda12` and `x86_avx2` do for the hottest ones — `nvidia_cuda12` runs the GEMMs, the gemvs
+and the attention's scores on the tensor cores (`mma.sync`), and `x86_avx2` its matrix products with AVX-512 where the
+processor has it, chosen when the library loads (`SILVANN_CPU_AVX512=0` keeps AVX2). Where nn gives a door a one-row
+and a many-row form that agree to the bit — the mix of an attention and its causal form, a residual and its form over a
+prompt's rows, a norm and its rows — a family that answers one with its own arithmetic answers the other with the same.
+A prompt read as rows is checked against the same prompt read a position at a time by the tokens that follow: the two
+are not the same bits everywhere (the grouped scores add in pairs, a card's GEMM in its own order). `khronos_opencl2`
+runs on the MI50 through ROCm's OpenCL (nn's verbs, the 27B and the 35B against HF); `nvidia_cuda12` on an RTX 5060 Ti
+(nn's verbs, every pack but GLM's against HF).
 
 ## When a card faults
 

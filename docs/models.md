@@ -50,8 +50,9 @@ row with its process held to the memory it names — leave room beside it for th
 start where the experts come from the disk. ◦ Ran on a 32 GB MI50: the model fits the smaller card, but a card that size
 has not been measured. The rows with a model entirely on the card are v0.4.0's; the others were measured with v0.3's
 card kernels, and where a card does part of the work they are a floor. The projected row is worked out from GLM's
-measured rows at 64 GB and 128 GB. Every measurement,
-the prompt rates, and what limits a model reading its experts from the disk: [`results.md`](results.md).
+measured rows at 64 GB and 128 GB. On an NVIDIA RTX 5060 Ti 16 GB, Ministral `D4` answers at 39 tokens/s, the 27B at
+23.6, and the 35B with its experts on a four-core Xeon and 8 GB of tier at 52 ([`results.md`](results.md#on-an-nvidia-card-the-rtx-5060-ti)).
+Every measurement, the prompt rates, and what limits a model reading its experts from the disk: [`results.md`](results.md).
 
 ## The card's tier of experts
 

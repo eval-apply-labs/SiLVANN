@@ -1,8 +1,8 @@
 # SiLVANN
 
-> **Developer preview, v0.4.0.** It runs the models below well on the hardware it was tested on, and it is shared
-> for people who can find their way around a build and a stack trace. The NVIDIA and Apple paths, and tensor
-> cores, are not tested yet.
+> **Developer preview, v0.5.0.** It runs the models below well on the hardware it was tested on, and it is shared
+> for people who can find their way around a build and a stack trace. NVIDIA cards are tested on one, a GeForce
+> RTX 5060 Ti; Apple silicon is not tested yet.
 
 **Silicon Linked Virtualized Architecture for Neural Networks** — a from-scratch inference engine for large language
 models, and the two things it is made of:
@@ -36,6 +36,40 @@ smaller one, which has not been measured. The rows with a model entirely on the 
 measured with v0.3, and where a card does part of the work they are a floor. **Every model and pack, the other
 machines (down to a 4 GB card reading its experts from the disk), and how long a conversation fits:
 [`docs/models.md`](docs/models.md)**; every measurement: [`docs/results.md`](docs/results.md).
+
+On an NVIDIA card — a GeForce RTX 5060 Ti 16 GB in a desktop with a four-core Xeon W-2123 and two DDR4-2400 sticks
+(62 GB), about what a local-model enthusiast's machine has — measured with v0.5.0 the same way, a prompt of about 2,000
+positions and then the answer:
+
+| Model | How it runs | Prompt | Answer |
+|---|---|---|---|
+| [Ministral 3 14B](https://huggingface.co/eval-apply/Ministral-3-14B_silvann_tq_D4) (`D4`) | on the card | 958 positions/s | 39 tokens/s (46 on a short prompt) |
+| [Ministral 3 14B](https://huggingface.co/eval-apply/Ministral-3-14B_silvann_tq_D8) (`D8`) | on the card | 873 positions/s | 25 tokens/s (27 on a short prompt) |
+| [Qwen 3.8 27B](https://huggingface.co/eval-apply/Qwen3.8-27B_silvann_tq_D4) | on the card | 549 positions/s | 23.6 tokens/s (24.4 on a short prompt) |
+| [Qwen 3.6 35B-A3B](https://huggingface.co/eval-apply/Qwen3.6-35B-A3B_silvann_tq_D8E4) (`D8E4`) | the dense part on the card, the experts on the CPU, and 8 GB of the card the tier of experts used most | 117 positions/s | 52 tokens/s |
+| the same | without the tier | 55 positions/s | 28 tokens/s |
+| the same | on the CPU alone | 21 positions/s | 8.6 tokens/s |
+
+**New in v0.5.0:** NVIDIA cards. The CUDA family ran on a card for the first time, an RTX 5060 Ti, and runs the matrix
+products of a prompt, its attention and the experts on the card's tensor cores, and a token's matrix products through
+them too: the 27B reads a prompt at 549 positions a second, from 19 with the library's generic kernels, and answers at
+24 tokens a second, from 7.8 — past the 4,352 positions the cache keeps at full precision a chunk of the prompt attends
+in a launch, not a row at a time (the 27B over 6,033 positions, 370 to 472 a second); every pack but GLM's is checked
+against Hugging Face on it. Ministral reads a prompt as rows on every card, through the library's own attention over
+many rows (958 positions a second on the 5060 Ti, from 34 a position at a time). On the CPU, a processor with AVX-512
+runs the matrix products with it, and the CPU family has its own attention and DeltaNet convolution: beside the 5060 Ti
+the 35B with its experts on the CPU answers at 28 tokens a second, from 15-17, and on the four-core Xeon alone at 9.0
+on a short prompt, from 1.7, reading a prompt at 21 positions a second. And a fix: the CPU's pool of threads left out
+the CPU the caller ran on rather than its core, so in about half of all runs the caller shared a core with a worker
+(7.6 tokens a second against 9.0, the 35B on the CPU alone).
+
+And on AMD cards, past the 4,352 positions the cache keeps at full precision, the attention over its 8-bit and 4-bit
+tiers runs the family's own kernels: on one MI50 the 35B answers after a 6,033-position prompt at 59-63 tokens a
+second, from 26, and reads that prompt at 144 positions a second, from 94. GLM and Ministral now make their answers on
+the card as Qwen does, eight tokens a call (`lisp/generate.lisp`, which every family shares). The line between the
+experts the card copies and those the CPUs compute over a prompt is set from the medians of five readings rather than
+one, which once sent every expert a prompt picked to the card. A model folder downloaded before a file of its program
+existed is offered `lisp/` again.
 
 **New in v0.4.0:** a model's program travels with the model. A model folder carries it in `lisp/` — the Lisp the
 evaluator runs the model with, which the boot reads from there: read it, change it, and the next boot runs what you
@@ -72,17 +106,26 @@ what the card holds is not also kept in RAM ([`docs/models.md`](docs/models.md#t
 
 | | |
 |---|---|
-| **Tested** | Linux with AMD Instinct MI50 (gfx906), ROCm 6; the CPU alone with AVX2 (Xeon E5-2680 v4); OpenCL 2.0 with sub-groups, on the MI50 — the 27B and the 35B checked against Hugging Face, the 27B answering at 9-11 tokens a second and reading a prompt at 49 positions a second; the 122B's tier of experts, 11.7 tokens a second with 18 GB of the card (9.7 without) |
-| **Untested** | Windows; NVIDIA cards (the CUDA family builds, but has not been run); other AMD generations; OpenCL on other devices (an Intel iGPU among them) |
-| **Not yet** | Apple silicon; AVX-512 CPU paths |
+| **Tested** | Linux with AMD Instinct MI50 (gfx906), ROCm 6; Linux with an NVIDIA GeForce RTX 5060 Ti (sm_120), CUDA 12.9, driver 595 — every pack but GLM's checked against Hugging Face, the 35B's tier of experts included; the CPU alone with AVX2 (Xeon E5-2680 v4) and with AVX-512 (Xeon W-2123); OpenCL 2.0 with sub-groups, on the MI50 — the 27B and the 35B checked against Hugging Face, the 27B answering at 9-11 tokens a second and reading a prompt at 49 positions a second; the 122B's tier of experts, 11.7 tokens a second with 18 GB of the card (9.7 without) |
+| **Untested** | Windows itself — on a Windows PC, boot Linux from a USB SSD; WSL2 may work ([`docs/users.md`](docs/users.md#on-windows-linux-on-a-usb-ssd)); other NVIDIA generations (the CUDA family is built for sm_75 to sm_120: Turing to Blackwell); GLM 5.3 Flash on an NVIDIA card; other AMD generations; OpenCL on other devices (an Intel iGPU among them; NVIDIA's OpenCL is 1.2, without the sub-groups the OpenCL family needs); AVX-512 on processors other than Skylake (AMD's Zen 4 and 5, later Xeons) |
+| **Not yet** | Apple silicon |
 
 Images are not accepted yet: the server answers an image with 501.
 
 ## Quick start
 
 ```bash
+curl -fsSL https://raw.githubusercontent.com/eval-apply-labs/SiLVANN/HEAD/install.sh | bash   # into ./silvann, and a `silvann` command
+silvann download Qwen3.6-35B-A3B_silvann_tq_D8E4
+silvann serve Qwen3.6-35B-A3B_silvann_tq_D8E4                       # on port 8765
+silvann ui                                                          # a chat in the browser, at http://localhost:8090
+```
+
+Or by hand, from this folder:
+
+```bash
 python3 -m venv venv && venv/bin/pip install -r requirements.txt
-SILVANN_PYTHON=venv/bin/python ./build.sh                        # needs g++, and ROCm's hipcc for AMD cards
+SILVANN_PYTHON=venv/bin/python ./build.sh                        # needs g++; ROCm's hipcc for AMD cards, CUDA's nvcc for NVIDIA
 venv/bin/python silvann_core.py download-model Qwen3.6-35B-A3B_silvann_tq_D8E4
 venv/bin/python start_silvann_server.py --model models/Qwen3.6-35B-A3B_silvann_tq_D8E4   # on port 8765
 venv/bin/python silvann_ui.py --port 8090                          # a chat in the browser, on the server above
@@ -100,6 +143,7 @@ end of a sentence, layers replaced by simpler programs, multi-token prediction a
 ## What is here
 
 ```
+install.sh          fetches, builds and installs the `silvann` command — the one-line install
 build.sh            builds the engine into lib/
 engine/src/         the interpreter (engine, sys), the library (nn), the models (ai_qwen_3, ai_glm_5_3), and
                     silicon_families/ — one folder a kind of silicon, what it answers for the library

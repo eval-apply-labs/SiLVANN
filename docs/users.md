@@ -1,13 +1,28 @@
 # Running SiLVANN
 
-This is a **developer preview (v0.4.0)**. It is tested on Linux with AMD Instinct MI50 cards (gfx906, ROCm 6), and on
-the CPU alone with AVX2;
-Windows and NVIDIA cards are untested, Apple silicon is not supported yet. If something does not build or does
-not run on your machine, you are expected to be able to read the error and the source.
+This is a **developer preview (v0.5.0)**. It is tested on Linux with AMD Instinct MI50 cards (gfx906, ROCm 6), with an
+NVIDIA GeForce RTX 5060 Ti (sm_120, CUDA 12.9), and on the CPU alone with AVX2 and with AVX-512 — on Ubuntu 22.04. On a
+Windows PC, boot Linux from a USB SSD (below); WSL2 and other NVIDIA generations are untested, Apple silicon is not
+supported yet. If something does not build or does not run on your
+machine, you are expected to be able to read the error and the source.
 
 ## 1. Build
 
-You need Python 3.10 or newer, `g++`, and for AMD cards ROCm's `hipcc` (`/opt/rocm/bin/hipcc`).
+**The quickest way** — in a terminal, in the folder you want SiLVANN under:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/eval-apply-labs/SiLVANN/HEAD/install.sh | bash
+```
+
+It fetches the release into `./silvann`, makes its Python environment, finds the card and its compiler, builds the
+engine and the families this machine needs (the whole build's output in `silvann/build.log`), and puts a `silvann`
+command in `~/.local/bin`: `silvann list`, `silvann download <model>`, `silvann serve <model>`, `silvann ui`, and
+`silvann update` for the next release (stop the server first). It installs nothing system-wide and asks for no
+password: a tool it needs and does not find — Python's `venv`, `g++`, `git` — it names, with the `apt` line that installs
+it. A card whose compiler is missing (CUDA's `nvcc`, ROCm's `hipcc`) is named too; install it, then `silvann build`.
+
+**By hand:** you need Python 3.10 or newer, `g++`, for AMD cards ROCm's `hipcc` (`/opt/rocm/bin/hipcc`), and for NVIDIA cards CUDA
+12's `nvcc` — found on the `PATH`, or named by `SILVANN_NVCC=/usr/local/cuda-12.9/bin/nvcc`.
 
 ```bash
 python3 -m venv venv
@@ -17,7 +32,32 @@ SILVANN_PYTHON=venv/bin/python ./build.sh
 
 `build.sh` compiles the evaluator and one library per silicon family whose toolchain it finds, into `lib/`. A
 family whose toolchain is missing is skipped and named. `SILVANN_HIP_ARCHES=gfx906` builds for one AMD card
-generation only, which is much faster than building for every one.
+generation only, which is much faster than building for every one, and `SILVANN_CUDA_ARCHES=120` the same for NVIDIA
+(the number is the card's compute capability: 120 for the RTX 50 series, 89 for the 40, 86 for the 30). A card is given
+to the family that includes it when the server starts — nothing in a model's config names the card.
+
+### On Windows: Linux on a USB SSD
+
+SiLVANN runs on Linux: it loads its libraries, pins its threads and reads the experts from the disk through Linux's own
+calls, so it does not run as a Windows program or in PowerShell. **The path we support is Linux installed on a USB SSD**
+— a real installation, not a live session, which forgets the card's driver and the build at every shutdown — booted
+from the PC's boot menu, the Windows disk untouched:
+
+1. **A drive:** an NVMe SSD in a USB-C enclosure (a USB stick is too slow to load models from), large enough for the
+   models you want — 7 GB to 200 GB each — and about 40 GB for the system.
+2. **Ubuntu 22.04 LTS**, the system SiLVANN is tested on: write its installer to a second USB stick (balenaEtcher or
+   Rufus), boot from it, and install onto the SSD — choosing the SSD as the installation disk, and its boot loader.
+3. **The card's driver:** NVIDIA's from Ubuntu's *Additional Drivers* (570 or newer for an RTX 50 card), then CUDA 12's
+   toolkit from developer.nvidia.com/cuda-downloads; for an MI50, ROCm 6.1.3 with `amdgpu-dkms` (and the README's note
+   on kernel updates). The CPU alone needs neither.
+4. **SiLVANN:** the one line above.
+
+**WSL2 — possible, and untested.** WSL2, the Linux that runs inside Windows 10 (21H2 or later) and 11, should run it on
+an NVIDIA card or the CPU alone: `wsl --install` in PowerShell as administrator; NVIDIA's Windows driver (no Linux
+driver inside WSL) and CUDA's toolkit from NVIDIA's WSL-Ubuntu page; the installer, run in WSL's own files (`~`, not
+`/mnt/c`, which is many times slower to read models from); `.wslconfig`'s `memory=` raised past the default half of the
+machine's RAM for a model with its experts in RAM; the UI at `http://localhost:8090` in a Windows browser. Nobody has
+tried it yet: tell us in Discussions if you do. ROCm inside WSL supports recent Radeon cards only, not the MI50.
 
 ## 2. Get a model
 
@@ -40,9 +80,11 @@ The UI is a web page on port 8090 that talks to the server on port 8765; it can 
 can be exported and imported. One conversation runs at a time; a second request while one is running is
 answered `503` with `Retry-After: 5`, and the UI retries.
 
-On a machine with no AMD card the model runs on the CPU's own cores (the `x86_avx2` family). The pack made for
+On a machine with no card the model runs on the CPU's own cores (the `x86_avx2` family). The pack made for
 that is `Qwen3.6-35B-A3B_silvann_tq_D4E4`: its dense part at 4 bits, about 15 tokens a second on the test machine's
-two Xeons.
+two Xeons. On a processor with AVX-512 (F, BW, VL and DQ) the family's matrix products use it: on a four-core Xeon
+W-2123 with two DDR4-2400 sticks the 35B D8E4 alone ran at 9.0 tokens a second against 1.7 with AVX2, and with its
+experts on the CPU beside a card at 27-29 against 15-17. `SILVANN_CPU_AVX512=0` keeps the AVX2 code.
 
 ## 4. The model's settings
 

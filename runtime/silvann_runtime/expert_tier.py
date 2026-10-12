@@ -10,6 +10,7 @@ import time
 import numpy as np
 
 THRESHOLD = "nn__expert_major__vram_promotion_threshold_picks"
+READINGS = 5
 
 
 def _timed(fn):
@@ -22,38 +23,51 @@ def _half(a):
     return np.asarray(a, dtype=np.float64).astype("<f2").tobytes()
 
 
+def _line(copy, weights, per_row, most_rows):
+    """The fewest rows past which an expert costs the CPUs more than its copy: 1 where the copy is no slower than the
+    expert's weights alone, `most_rows` at most."""
+    return max(1, min(most_rows, int(np.ceil((copy - weights) / per_row)) if copy > weights else 1))
+
+
 def calibrate(m, card, cpu, copy_to, slot_bytes, hands_at, hand_bytes, weights_at, picks_at, top_k, experts, rows_text,
-              most_rows, fixed=None, pool=None):
-    """The threshold, bound, and what it was measured from. The copy: one expert's bytes written to the card at `copy_to`
-    (a scratch nothing else holds), best of three. The CPU: its experts verb over a chunk of `rows_text(n)` — `top_k`
-    experts each picked by every one of `n` hand rows written at `hands_at` (input zeros, weights at `weights_at`, picks
-    at `picks_at` of a `hand_bytes` row) — for one row and for 64, best of three on experts not used before, so their
-    weights come from RAM as a prompt's do — out of `pool`, the experts the CPU holds, where it does not hold every one
-    (an exclusive tier). `fixed` binds a number instead."""
+              most_rows, fixed=None, pool=None, readings=READINGS):
+    """The threshold, bound, and what it was measured from. A reading is the copy — one expert's bytes written to the
+    card at `copy_to` (a scratch nothing else holds), best of three — and the CPU: its experts verb over a chunk of
+    `rows_text(n)` — `top_k` experts each picked by every one of `n` hand rows written at `hands_at` (input zeros,
+    weights at `weights_at`, picks at `picks_at` of a `hand_bytes` row) — for one row and for 64, best of three on
+    experts not used before, so their weights come from RAM as a prompt's do — out of `pool`, the experts the CPU holds,
+    where it does not hold every one (an exclusive tier). The line comes from the medians of `readings` readings, so no
+    one reading sets it: a single reading's copy can measure no slower than an expert's weights, and its line of 1 sends
+    every expert a prompt picks to the card (`MEASURED` once in a GLM boot, 186.7 promotions a token against ~45 —
+    measurements/2026-10-07_S115_glm_on_its_lisp.md). `fixed` binds a number instead."""
     line, measured = fixed, {}
     if line is None:
         blank = np.zeros(slot_bytes, np.uint8)
-        m.act_as(card)
-        copy = min(_timed(lambda: m.write_from(copy_to, blank.ctypes.data, slot_bytes)) for _ in range(3))
         pool = list(range(experts)) if pool is None else list(pool)
-        costs, x0 = {}, 0
-        m.act_as(cpu)
-        for rows in (1, 64):
-            best = None
-            for _ in range(3):
-                hand = np.zeros(hand_bytes, np.uint8)
-                hand[weights_at:weights_at + 2 * top_k] = np.frombuffer(_half(np.full(top_k, 0.1)), np.uint8)
-                hand[picks_at:picks_at + 8 * top_k] = np.frombuffer(np.asarray(pool[x0:x0 + top_k], dtype="<u8").tobytes(), np.uint8)
-                x0 = (x0 + top_k) % (len(pool) - top_k)
-                m.write(hands_at, np.tile(hand, rows).tobytes())
-                t = _timed(lambda: m.run(rows_text(rows)))
-                best = t if best is None else min(best, t)
-            costs[rows] = best / top_k
+        taken, x0 = [], 0
+        for _ in range(readings):
+            m.act_as(card)
+            copy = min(_timed(lambda: m.write_from(copy_to, blank.ctypes.data, slot_bytes)) for _ in range(3))
+            costs = {}
+            m.act_as(cpu)
+            for rows in (1, 64):
+                best = None
+                for _ in range(3):
+                    hand = np.zeros(hand_bytes, np.uint8)
+                    hand[weights_at:weights_at + 2 * top_k] = np.frombuffer(_half(np.full(top_k, 0.1)), np.uint8)
+                    hand[picks_at:picks_at + 8 * top_k] = np.frombuffer(np.asarray(pool[x0:x0 + top_k], dtype="<u8").tobytes(), np.uint8)
+                    x0 = (x0 + top_k) % (len(pool) - top_k)
+                    m.write(hands_at, np.tile(hand, rows).tobytes())
+                    t = _timed(lambda: m.run(rows_text(rows)))
+                    best = t if best is None else min(best, t)
+                costs[rows] = best / top_k
+            per_row = max((costs[64] - costs[1]) / 63, 1e-9)
+            taken.append((copy, max(costs[1] - per_row, 0.0), per_row))
         m.act_as(card)
-        per_row = max((costs[64] - costs[1]) / 63, 1e-9)
-        weights = max(costs[1] - per_row, 0.0)
-        line = max(1, min(most_rows, int(np.ceil((copy - weights) / per_row)) if copy > weights else 1))
-        measured = dict(copy_ms=copy * 1e3, weights_ms=weights * 1e3, row_ms=per_row * 1e3)
+        copy, weights, per_row = (float(np.median([t[k] for t in taken])) for k in range(3))
+        line = _line(copy, weights, per_row, most_rows)
+        measured = dict(copy_ms=copy * 1e3, weights_ms=weights * 1e3, row_ms=per_row * 1e3,
+                        lines=[_line(*t, most_rows) for t in taken])
     m.must("(sys__add_bindings %d '%s %d)" % (m.env, THRESHOLD, line), "the promotion threshold", "sys__value_true")
     measured["line"] = line
     return measured

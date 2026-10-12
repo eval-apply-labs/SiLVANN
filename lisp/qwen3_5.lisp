@@ -1,15 +1,16 @@
 ;; QWEN 3.5 — the DeltaNet-and-attention family: dense (the 27B) or with routed experts (the 35B-A3B, the 122B, the 397B).
 ;;
 ;; A token is `(begin (position tok pos) (head))`: the token's embedding, the rotary angles, every layer this machine runs,
-;; and the head — and an answer is `(generate tok pos n …)`, that a token at a time until an end token, on the card. A
-;; layer is a mixer — a DeltaNet layer's or an attention layer's, its residual included — then the MLP: dense, or the
-;; routed experts. A prompt runs as rows, each layer once over a chunk of them: `(begin (embed_rows n) (rows first n))`.
+;; and the head — and an answer is `(generate tok pos n …)` (▶ generate.lisp), that a token at a time until an end
+;; token, on the card. A layer is a mixer — a DeltaNet layer's or an attention layer's, its residual included — then
+;; the MLP: dense, or the routed experts. A prompt runs as rows, each layer once over a chunk of them:
+;; `(begin (embed_rows n) (rows first n))`.
 ;;
 ;; What the boot binds before this file is read (▶ qwen3_5.py `_bindings`):
 ;;   the shape       HIDDEN HIDDEN_BYTES VOCAB EPS THETA ROTARY RUN — RUN the layers this machine runs
 ;;                   EMBEDDING EMB_HALVES EMB_SCALES EMB_BITS — the embedding table in RAM, a row's halves, where the
 ;;                   scales begin, the rows' width
-;;                   PROMPT OUT STOP STOPS SEEN — a prompt chunk's tokens, what `generate` made, the end tokens
+;;                   PROMPT — a prompt chunk's tokens (OUT STOP STOPS SEEN, `generate`'s: ▶ generate.lisp)
 ;;                   HEAD_CODES HEAD_SCALES HEAD_BITS — the head's two planes
 ;;   the settings    ROTATED (the pack keeps its residual rotated) · TIERED (the attention cache in tiers) · ROUTED (the
 ;;                   model has routed experts) · FUSED (the MoE as one word) · EXPERTS_ON_CPU · CARD_TIER — true or false
@@ -176,30 +177,3 @@
 ;; a token's position: its embedding, the angles, the layers
 (defun (position tok pos)
   (begin (embed tok) (nn__rope__angles cs pos THETA ROTARY) (layers pos)))
-
-
-;; ── GENERATION: the tokens of an answer, each the next one's input, without the host between them ─────────────────
-;; From `tok` at `pos`, up to `n` tokens into OUT, ending early after one of STOP's first STOPS. `draw` true draws each
-;; with the card's sampler (▶ sampling.lisp: `penalty inv_t k top_p seed`), false takes the greedy one. Where the
-;; penalty reads them (`reads` 1) each token goes into `seen` first, at `slot`, `count` of them there. Answers how many
-;; it made.
-(defun (stop? tok)
-  (let ((j 0) (hit (< 1 0)))
-    (while '(< j STOPS) '(begin (if (eq? (nth STOP j) tok) (set! hit (< 0 1)) 0) (set! j (+ j 1))))
-    hit))
-
-(defun (generate tok pos n draw reads count slot penalty inv_t k top_p seed)
-  (let ((i 0))
-    (while '(< i n)
-           '(begin
-              (position tok pos)
-              (if (eq? reads 1)
-                  (begin (sys__node_array__set seen slot tok)
-                         (set! slot (+ slot 1)) (if (eq? slot SEEN) (set! slot 0) 0)
-                         (if (< count SEEN) (set! count (+ count 1)) 0))
-                  0)
-              (set! tok (if draw (head_sample count penalty inv_t k top_p seed pos) (head)))
-              (sys__node_array__set OUT i tok)
-              (set! i (+ i 1)) (set! pos (+ pos 1))
-              (if (stop? tok) (set! n i) 0)))
-    i))

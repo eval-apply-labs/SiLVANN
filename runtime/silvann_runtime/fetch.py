@@ -36,11 +36,11 @@ def present(path):
 def ensure_model(path, repo=None, ask=input, yes=False):
     """The model folder at `path`, downloaded first if it is not there and the answer is yes — or at once when `yes`,
     which is what `silvann_core.py download-model` is: the asking already done. A folder that is there without its
-    program, `lisp/`, is asked the same about that alone."""
+    program, `lisp/` or a file of it its family reads, is asked the same about that alone."""
     path = os.path.abspath(path)
     name = os.path.basename(path.rstrip(os.sep))
     if present(path):
-        if not os.path.isdir(os.path.join(path, "lisp")):
+        if _lacks_program(path):
             _program(path, repo or KNOWN.get(name, (None, None))[0], ask, yes)
         return path
     repo, size = (repo, "several GB") if repo else KNOWN.get(name, (None, None))
@@ -58,17 +58,33 @@ def ensure_model(path, repo=None, ask=input, yes=False):
     return _download(repo, path)
 
 
+def _lacks_program(path):
+    """Whether the folder lacks `lisp/`, or a file of it its family's runtime reads (▶ its `PROGRAM`) — a folder fetched
+    for an engine before that file was one of them."""
+    import json
+    from . import ARCHITECTURES
+    lisp = os.path.join(path, "lisp")
+    if not os.path.isdir(lisp):
+        return True
+    try:
+        whole = json.load(open(os.path.join(path, "config.json")))
+    except (OSError, ValueError):
+        return False
+    cls = ARCHITECTURES.get(whole.get("text_config", whole).get("model_type", ""))
+    return cls is not None and any(not os.path.isfile(os.path.join(lisp, n + ".lisp")) for n in cls.PROGRAM)
+
+
 def _program(path, repo, ask, yes):
-    """A folder with its weights and without `lisp/` — the model's program — gets it from the folder's repository, a few
-    files of text. Nothing is fetched without a yes; a folder no repository is known for is left as it is, and the boot
-    names what it lacks."""
+    """A folder with its weights and without its program, or a file of it — `lisp/` — gets `lisp/` from the folder's
+    repository, a few files of text. Nothing is fetched without a yes; a folder no repository is known for is left as
+    it is, and the boot names what it lacks."""
     if repo is None:
         return
     if not yes:
         if not sys.stdin.isatty():
             return
-        if ask("%s has no lisp/ — the model's program. Fetch it from huggingface.co/%s? [Y/n] " % (path, repo)
-               ).strip().lower() in ("n", "no"):
+        if ask("%s lacks lisp/ or a file of it — the model's program. Fetch it from huggingface.co/%s? [Y/n] "
+               % (path, repo)).strip().lower() in ("n", "no"):
             return
     from huggingface_hub import snapshot_download
     snapshot_download(repo_id=repo, local_dir=path, allow_patterns=["lisp/*"])

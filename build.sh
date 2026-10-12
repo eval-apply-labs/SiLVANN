@@ -5,6 +5,8 @@
 #   SILVANN_PYTHON            the interpreter the engine is built for     default python3
 #   SILVANN_SILICON_FAMILIES  which families to build                     default every one on the roster
 #   SILVANN_HIP_ARCHES        the AMD cards to build for, e.g. gfx906     default every one the family lists
+#   SILVANN_NVCC              CUDA's compiler, for NVIDIA cards           default nvcc on the PATH
+#   SILVANN_CUDA_ARCHES       the NVIDIA cards to build for, e.g. 120     default every one the family lists
 set -eu
 cd "$(dirname "$0")"
 PY="${SILVANN_PYTHON:-python3}"

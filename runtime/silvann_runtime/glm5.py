@@ -2,8 +2,8 @@
 
 ⚖ *"at 151gb the point is that experts stay on ram and fixed matrices go on the card"* · *"it is the cpu that computes
 the ram experts"*. So the machine has two workers: the card (worker 0) holds every matrix a token always uses — the
-mixers, the dense MLPs, the shared experts, the routers, the hyper-connections, the embedding and the head — and the
-CPU (worker 1, and worker 2 on a second socket) holds the routed experts in its own memory and runs the eight a token picks. A layer is three short
+mixers, the dense MLPs, the shared experts, the routers, the hyper-connections and the head, and reads a token's row of
+the embedding from a table in RAM — and the CPU (worker 1, and worker 2 on a second socket) holds the routed experts in its own memory and runs the eight a token picks. A layer is three short
 programs:
 ```
   card   a{l}   the attention site: hc pre, norm, the mixer, hc post · the MLP site's hc pre and norm, and then either
@@ -13,7 +13,8 @@ programs:
 ```
 That is the unfused layer, nn's words a layer. The fused one, the default, is the program in `lisp/glm5.lisp` — the
 model folder's — a loop over
-the layers, each ai_glm_5_3's sites over its tables, every CPU socket handed its share of a layer's picks.
+the layers, each ai_glm_5_3's sites over its tables, every CPU socket handed its share of a layer's picks. Either is
+`(position tok pos)`, so an answer is `generate` on the card (▶ lisp/generate.lisp), only its tokens coming back.
 
 The mixer is the model's: KDA (`nn__kda__step` over a conv window and a state a layer) or MLA — the query absorbed into
 a cache of rotated 512-wide latents, one kv head for 64 query heads (`nn__attention__absorb` · `decode` · `expand`).
@@ -34,6 +35,7 @@ import pickle
 import numpy as np
 
 from . import experts_file, expert_tier, sampling
+from .generate import Generates
 from .model_folder import NL, Refused
 
 ARCHITECTURES = ("glm5_next_text",)
@@ -45,8 +47,8 @@ def _half(a):
     return np.asarray(a, dtype="<f2").tobytes()
 
 
-class Glm5:
-    PROGRAM = ("glm5", "glm5_cpu", "sampling")            # the model folder's lisp/ files (▶ `ModelFolder.program`)
+class Glm5(Generates):
+    PROGRAM = ("glm5", "glm5_cpu", "sampling", "generate")    # the model folder's lisp/ files (▶ `ModelFolder.program`)
     SAMPLES_ON_CARD = True          # `head_sample` — ▶ `sampling`
 
     def __init__(self, folder, machine, max_context=2048, layers=None, grid=True, fused=True, sockets=None, experts_int8=True,
@@ -185,8 +187,7 @@ class Glm5:
             self.WIDTH[t] = len(members)
         slots = {t: sum(1 for l in run for n in self.dense_names(l) if self.TYPE[self.key(l, n)] == t) for t in self.WIDTH}
         t = len(groups)
-        # ⭐ THE EMBEDDING STAYS IN RAM — a token needs one row of it, which the host writes to the card each step; the
-        #   card keeps only the head
+        # ⭐ THE EMBEDDING STAYS IN RAM, a table the card reads a row of in place; the card keeps the head
         self.T_HEAD, self.T_STATE, self.T_KV = t, t + 1, t + 2
 
         def plan_of(rec):
@@ -195,6 +196,7 @@ class Glm5:
             return data, lut, NL.SlotPlan(len(data), 0, 0, len(lut))
         self.head_data, self.head_lut, self.HPLAN = plan_of(self.head_rec)
         self.emb_data, self.emb_lut, self.BPLAN = plan_of(self.emb_rec)
+        self.TABLE_BYTES = (len(self.emb_data) + len(self.emb_lut) + 255) // 256 * 256      # the rows, then the scales
         # KDA: the state (heads · head_dim² floats) in the up half, the conv window (q · k · v, three taps) in the down
         self.S_BYTES, self.W_BYTES = self.KH * self.KD * self.KD * 4, 3 * self.KW * 3 * 2
         self.SPLAN = NL.SlotPlan(self.S_BYTES, 0, 0, self.W_BYTES)
@@ -290,6 +292,10 @@ class Glm5:
             self.WORK, works, bigs = max(self.WORK, self.KRSCRATCH), 2, bigs + 1
         card = self._section(big, self.arena, self.collections, kinds, bigs=bigs, mains=2 + (4 + len(self.CPUS) if self.CH else 0),
                              work=self.WORK, works=works)
+        # the embedding table's RAM class — ⛳ with the other two RAM classes, which nn takes all or none of
+        card += ("nn__ram_buffer_result__size_bytes:64\nnn__ram_buffer_result__qty:1\n"
+                 "nn__ram_buffer_experts__size_bytes:64\nnn__ram_buffer_experts__qty:1\n"
+                 "nn__ram_buffer_table__size_bytes:%d\nnn__ram_buffer_table__qty:1\n" % self.TABLE_BYTES)
         # ⛳ a section with no collection is refused, so a run with no MoE layer gives the CPU one of a single slot
         out = {CARD: card}
         moe = sum(self.moe[l] for l in self.run_layers)
@@ -363,7 +369,7 @@ class Glm5:
         if self.SOURCE:
             self._bindings()
         else:
-            m.bind_values(dict(VOCAB=self.VOCAB))
+            m.bind_values(dict(VOCAB=self.VOCAB, STOPS=0, SEEN=sampling.SEEN))      # what the sampler and `generate` read
         m.define_programs(self._procedures)
         if self.CPLAN is not None and self.CH and self.EPLAN is not None:
             self._calibrate_line()
@@ -499,7 +505,7 @@ class Glm5:
                       ("ckv", self.LAT), ("ckn", self.LAT), ("qabs", self.QH * self.LAT), ("olat", self.QH * self.LAT),
                       ("vh", self.QH * self.VD), ("vhr", self.QH * self.VD),
                       ("gu", 2 * self.INTER), ("act", self.INTER), ("actr", self.INTER),
-                      ("logits", self.EXPERTS), ("sgu", 2 * self.MINTER), ("sact", self.MINTER), ("sactr", self.MINTER)):
+                      ("router", self.EXPERTS), ("sgu", 2 * self.MINTER), ("sact", self.MINTER), ("sactr", self.MINTER)):
             self.at[nm] = m.buffer(n * 2, nm)
         m.buffer(256, "mix")
         m.buffer(64, "weights")
@@ -515,8 +521,10 @@ class Glm5:
                 # the activations twice, the fp32 sum
                 m.buffer(2 * self.CH * H, "rrows_k")
                 self.KRS_AT = m.buffer(self.KRSCRATCH, "krscratch")
-        self.EMB_AT = m.buffer(int(self.emb_rec["row_bytes"]), "emb_codes")      # the token's row, written by the host
-        self.EMB_SCALE_AT = m.buffer(64, "emb_scales")
+        self.EMB_AT = m.buffer(self.TABLE_BYTES, "EMBEDDING", ram=True)
+        m.write(self.EMB_AT, self.emb_data)
+        m.write(self.EMB_AT + len(self.emb_data), self.emb_lut)
+        self._answer_buffers()                      # what `generate` made, the end tokens it watches for
         m.buffer(1 << 19, "gscratch")                          # ai_glm_5_3's scratch, its first bytes the MLP site's carry
         self.at["hand"] = m.buffer(2 * (H + self.TOPK), "hand")
         # ⛳ a query attends at most `topk` positions and the filling pool's, so the scores need no more than that
@@ -544,8 +552,7 @@ class Glm5:
             m.buffer(CH * H * 2, "rrows")
             for i in range(1, len(self.CPUS)):
                 m.buffer(CH * H * 2, "rrows%d" % i)
-            self.EMB_ROWS_AT = m.buffer(CH * int(self.emb_rec["row_bytes"]), "emb_rows")
-            self.EMB_RSCALES_AT = m.buffer(max(64, CH * 2), "emb_rscales")
+            m.node_array("PROMPT", CH)            # a chunk's tokens
             m.node_array("nrows", 1)
             m.buffer(self.WORK, "rwork")                         # the rows verbs' — ▶ `_work_bytes`
 
@@ -789,7 +796,8 @@ class Glm5:
         head = lambda at, size: "(nn__expert__plane 0 %d 0 %d %d)" % (self.T_HEAD, at, size)
         tier = self.CPLAN is not None
         m.bind_values(dict(HIDDEN=H, HIDDEN_BYTES=2 * H, MULT=self.MULT, MEAN=1.0 / self.MULT, VOCAB=self.VOCAB, EPS=self.EPS,
-                           RUN=len(run), EMB_HALVES=int(self.emb_rec["row_bytes"]) // 2, EMB_BITS=int(self.emb_rec["d"]),
+                           RUN=len(run), EMB_HALVES=int(self.emb_rec["row_bytes"]) // 2, EMB_SCALES=len(self.emb_data) // 2,
+                           EMB_BITS=int(self.emb_rec["d"]), STOPS=0, SEEN=sampling.SEEN,
                            HEAD_CODES=head(self.HPLAN.at_up_data, self.HPLAN.up_data),
                            HEAD_SCALES=head(self.HPLAN.at_down_lut, self.HPLAN.down_lut), HEAD_BITS=int(self.head_rec["d"]),
                            HAND=self.HAND, HAND_PICKS_AT=self.HAND - 8 * K, HAND_BYTES=2 * (H + K),
@@ -830,6 +838,7 @@ class Glm5:
             return self._composed_procedures()
         self.m.load_source(self.folder.program("glm5"))
         self.m.load_source(self.folder.program("sampling"))
+        self.m.load_source(self.folder.program("generate"))
         if self.EPLAN is not None:
             self.m.load_source(self.folder.program("glm5_cpu"))
 
@@ -837,13 +846,14 @@ class Glm5:
         """The unfused layer's procedures, nn's words a layer — and the fused layer's for a run that takes directions out
         or captures the streams — composed here."""
         m, H = self.m, self.H
-        row = int(self.emb_rec["row_bytes"])
-        # the token's row, un-rotated (Rᵀu = S ⊙ H·u), into every stream
-        m.defun("(defun (embed codes scale) (begin (nn__turboquant__decode (nn__vector__range emb_codes codes %d) "
-                "(nn__vector__range emb_scales scale 1) u 1 %d %d) (nn__hadamard__rotate u ones512 hu %d) "
-                "(nn__vector__pointwise_mul hu signs_row e %d) %s (type e)))"
-                % (row // 2, H, int(self.emb_rec["d"]), H, H,
-                   " ".join("(nn__vector__add e zero_h %s %d)" % (self.rng("streams", j * H, H), H) for j in range(self.MULT))))
+        # the token's row of the embedding table, un-rotated (Rᵀu = S ⊙ H·u), into e — and into every stream
+        m.defun("(defun (embed_e tok) (begin (nn__turboquant__decode (nn__vector__range EMBEDDING (* tok %d) %d) "
+                "(nn__vector__range EMBEDDING (+ %d tok) 1) u 1 %d %d) (nn__hadamard__rotate u ones512 hu %d) "
+                "(nn__vector__pointwise_mul hu signs_row e %d)))"
+                % (int(self.emb_rec["row_bytes"]) // 2, int(self.emb_rec["row_bytes"]) // 2, len(self.emb_data) // 2, H,
+                   int(self.emb_rec["d"]), H, H))
+        m.defun("(defun (embed tok) (begin (embed_e tok) %s (type e)))"
+                % " ".join("(nn__vector__add e zero_h %s %d)" % (self.rng("streams", j * H, H), H) for j in range(self.MULT)))
         # the head: the streams' mean, the final norm, the logits
         mean = ("(nn__vector__add %s %s hm %d) " % (self.rng("streams", 0, H), self.rng("streams", H, H), H)
                 + " ".join("(nn__vector__add hm %s hm %d)" % (self.rng("streams", j * H, H), H) for j in range(2, self.MULT))
@@ -856,6 +866,7 @@ class Glm5:
         m.defun("(defun (head_logits) (begin %s (type hm)))" % logits)
         m.defun("(defun (logits) (begin %s))" % logits)      # what `head_sample` reads (▶ lisp/sampling.lisp)
         m.load_source(self.folder.program("sampling"))
+        m.load_source(self.folder.program("generate"))      # `generate` over the `position` below
         for l in self.run_layers:
             mixer = self._kda(l) if self.kinds[l] == "d" else self._mla(l)
             body = (self._hc(l, "attn") + " (nn__rmsnorm__apply xin %s h %d %r) (nn__hadamard__rotate h signs hr %d) "
@@ -866,8 +877,8 @@ class Glm5:
             if not self.moe[l]:
                 body += self._swiglu(l, "mlp.", "gu", "act", "actr", "hr", "y", self.INTER) + " " + self._post()
             else:
-                body += (self.gemv(l, "mlp.gate.weight", "h", "logits")
-                         + " (nn__vector__top_k_biased logits %d %d picks weights %s %r) "
+                body += (self.gemv(l, "mlp.gate.weight", "h", "router")
+                         + " (nn__vector__top_k_biased router %d %d picks weights %s %r) "
                          % (self.EXPERTS, self.TOPK, self.plane(l, "mlp.gate.e_score_correction_bias", "data"), self.RSCALE))
             m.defun("(defun (a%d at len) (begin %s (type streams)))" % (l, body))
             if self.moe[l]:
@@ -903,17 +914,18 @@ class Glm5:
             self._rows_procedures()
         if self.EPLAN is not None:
             m.view("names")
-        # ⭐ A POSITION, AND THEN ITS HEAD — the step runs `(begin (position_f codes scale pos) <head>)`, the head greedy,
-        #   drawn on the card or the logits left (▶ `step`); `token_f` is the greedy one, named
+        # ⭐ A POSITION, AND THEN ITS HEAD — the step runs `(begin (position tok pos) <head>)`, the head greedy, drawn on
+        #   the card or the logits left (▶ `step`)
         if fused is not None:
-            m.defun("(defun (position_f codes scale pos) (begin (embed codes scale) %s (type streams)))" % fused_tok)
-            m.defun("(defun (token_f codes scale pos) (begin (position_f codes scale pos) (head)))")
+            m.defun("(defun (position tok pos) (begin (embed tok) %s (type streams)))" % fused_tok)
             # a pipeline stage's own layers, the streams in and out (▶ `forward`)
             m.defun("(defun (layers_f pos) (begin %s (type streams)))" % fused)
-        layers = " ".join(("(a%d at len) (sys__compute %d names xw%d) (s%d) (sys__result %d) (c%d)" % (l, CPU, l, l, CPU, l))
-                          if self.moe[l] else "(a%d at len)" % l for l in self.run_layers)
-        m.defun("(defun (position codes scale at len) (begin (embed codes scale) %s (type streams)))" % layers)
-        m.defun("(defun (token codes scale at len) (begin (position codes scale at len) (head)))")
+        if fused is None:
+            # the layers as nn's words, a layer's latent row `at` and the positions it attends `len`
+            layers = " ".join(("(a%d at len) (sys__compute %d names xw%d) (s%d) (sys__result %d) (c%d)" % (l, CPU, l, l, CPU, l))
+                              if self.moe[l] else "(a%d at len)" % l for l in self.run_layers)
+            m.defun("(defun (position tok pos) (let ((at (* pos %d)) (len (+ pos 1))) (embed tok) %s (type streams)))"
+                    % (self.LAT * 2, layers))
 
     def _rows_tables(self):
         """Each CPU's experts table over a prompt's chunk."""
@@ -968,12 +980,9 @@ class Glm5:
             else:
                 body += " (ai_glm_5_3__mlp_rows srows ml%d n rwork)" % l
             m.defun("(defun (r%d first n) (begin %s (type srows)))" % (l, body))
-        row = int(self.emb_rec["row_bytes"])
-        # a token's row, un-rotated, into every stream of row `at` of the chunk
-        m.defun("(defun (embed_row codes scale %s) (begin (nn__turboquant__decode (nn__vector__range emb_rows codes %d) "
-                "(nn__vector__range emb_rscales scale 1) u 1 %d %d) (nn__hadamard__rotate u ones512 hu %d) "
-                "(nn__vector__pointwise_mul hu signs_row e %d) %s (type e)))"
-                % (" ".join("at%d" % j for j in range(self.MULT)), row // 2, H, int(self.emb_rec["d"]), H, H,
+        # a token's row, un-rotated, into every stream of a row of the chunk, its streams at `at0 ..`
+        m.defun("(defun (embed_row tok %s) (begin (embed_e tok) %s (type e)))"
+                % (" ".join("at%d" % j for j in range(self.MULT)),
                    " ".join("(nn__vector__add e zero_h (nn__vector__range srows at%d %d) %d)" % (j, H, H)
                             for j in range(self.MULT))))
 
@@ -1004,23 +1013,28 @@ class Glm5:
         — or the logits left for a sampler on the host (answers None)."""
         if pos >= self.max_context:
             raise Refused("position %d is past the context of %d" % (pos, self.max_context))
-        row = int(self.emb_rec["row_bytes"])
-        self.m.write(self.EMB_AT, self.emb_data[token * row:(token + 1) * row])     # the embedding lives in RAM
-        self.m.write(self.EMB_SCALE_AT, self.emb_lut[token * 2:token * 2 + 2])
-        codes, scale = 0, 0
         head = sample or ("(head)" if greedy else "(head_logits)")
-        if self.FUSED:
-            kind, value = self.m.grid("(begin (position_f %d %d %d) %s)" % (codes, scale, pos, head))
-            return value if greedy or sample else None
-        if self.GRID:
-            kind, value = self.m.grid("(begin (position %d %d %d %d) %s)" % (codes, scale, pos * self.LAT * 2, pos + 1, head))
+        if self.FUSED or self.GRID:
+            value = self._run("(begin (position %d %d) %s)" % (token, pos, head), "position %d" % pos)
             return value if greedy or sample else None
         m = self.m
-        m.must("(embed %d %d)" % (codes, scale), "the embedding at %d" % pos)
+        m.must("(embed %d)" % token, "the embedding at %d" % pos)
         for l in self.run_layers:
             self.layer(l, pos)
         got = m.must(head, "the head at %d" % pos)
         return got if greedy or sample else None
+
+    def _run(self, text, what):
+        """A program's answer, run with every block standing: it hands the CPU sockets their experts (`sys__compute`), and
+        a program that does not would find their blocks never started."""
+        return self.m.grid(text)[1]
+
+    def _prompt(self, tokens):
+        """A prompt chunk's tokens into PROMPT, which `embed_rows` reads — sixty-four to a program, as a program is one
+        form and a form must fit one of the heap's chunks."""
+        for at in range(0, len(tokens), 64):
+            self.m.must("(begin %s 0)" % " ".join("(sys__node_array__set PROMPT %d %d)" % (i, t)
+                                                  for i, t in enumerate(tokens[at:at + 64], at)), "the prompt's tokens")
 
     def prefill(self, tokens, first, greedy=True, sample=None):
         """Positions `first ..` for `tokens`: as rows, a chunk at a time, when the experts are the CPU's and there is more
@@ -1045,10 +1059,7 @@ class Glm5:
         (`x`, MULT·H halves as bytes) set; then the next token (the last stage) or the streams to hand on."""
         m = self.m
         if token is not None:
-            row = int(self.emb_rec["row_bytes"])
-            m.write(self.EMB_AT, self.emb_data[token * row:(token + 1) * row])
-            m.write(self.EMB_SCALE_AT, self.emb_lut[token * 2:token * 2 + 2])
-            m.must("(begin (embed 0 0) (type streams))", "the embedding at %d" % pos)
+            m.must("(begin (embed %d) (type streams))" % token, "the embedding at %d" % pos)
         else:
             m.write(self.STREAMS_AT, x)
         m.grid("(layers_f %d)" % pos)
@@ -1065,17 +1076,15 @@ class Glm5:
         if n > self.CH:
             raise Refused("a chunk is at most %d rows, not %d" % (self.CH, n))
         if tokens is not None:
-            row = int(self.emb_rec["row_bytes"])
-            m.write(self.EMB_ROWS_AT, b"".join(self.emb_data[t * row:(t + 1) * row] for t in tokens))
-            m.write(self.EMB_RSCALES_AT, b"".join(self.emb_lut[t * 2:t * 2 + 2] for t in tokens))
             if self.SOURCE:
+                self._prompt(tokens)
                 m.must("(embed_rows %d)" % n, "the chunk's embeddings")
             else:
                 # ⛳ the embeddings in programs of their own, a hundred rows each: one program is one form, and a form
                 #   must fit in one of the heap's chunks
                 for e0 in range(0, n, 128):
                     m.must("(begin %s (type srows))" % " ".join(
-                        "(embed_row %d %d %s)" % (i * row // 2, i, " ".join(str((i * M + j) * H) for j in range(M)))
+                        "(embed_row %d %s)" % (tokens[i], " ".join(str((i * M + j) * H) for j in range(M)))
                         for i in range(e0, min(n, e0 + 128))), "the chunk's embeddings")
         else:
             m.write(self.SROWS_AT, xs)

@@ -1,8 +1,9 @@
 # Results
 
-Every number on this page was measured on one machine, a Dell R730: two Xeon E5-2680 v4, two AMD Instinct MI50,
-256 GB of RAM. Disk speed 5 GB/s (2.6 GB/s where a row says so), RAM speed 126 GB/s. The README's table of machines
-is drawn from this page.
+Every number on this page but the NVIDIA section's was measured on one machine, a Dell R730: two Xeon E5-2680 v4, two
+AMD Instinct MI50, 256 GB of RAM. Disk speed 5 GB/s (2.6 GB/s where a row says so), RAM speed 126 GB/s. The README's
+table of machines is drawn from this page. The NVIDIA section's machine is a desktop with an RTX 5060 Ti:
+[▶ below](#on-an-nvidia-card-the-rtx-5060-ti).
 
 **How it is measured.** On the card: a prompt of about 2,000 positions, then 32-64 tokens. With the experts on the
 CPU: about 1,000 positions, then 128 tokens (32 in GLM's earlier rows). "All in RAM" means every expert is already in
@@ -69,9 +70,10 @@ scores 8.962 exact and 8.963 with `experts_int8`.
 | D4 | one MI50 | 53 positions/s | 42 tokens/s (56 on a short prompt) |
 | D8 | one MI50 | 36 positions/s | 30 tokens/s (37 on a short prompt) |
 
-Its runtime reads a prompt a position at a time, so its prompt rate is close to its answer rate; reading a prompt as
-rows, as the Qwen and GLM runtimes do, is the next step for it. Its chat template adds about 560 positions, so its rows
-read about 2,600.
+These rows are v0.4.0's, which read Ministral's prompt a position at a time, so its prompt rate is close to its answer
+rate. v0.5.0 reads it as rows, through nn's attention over many rows — on the RTX 5060 Ti at 958 positions a second
+against 34 a position at a time ([▶ below](#on-an-nvidia-card-the-rtx-5060-ti)); on the MI50 it is not measured yet. Its
+chat template adds about 560 positions, so its rows read about 2,600.
 
 ## Qwen 3.5 122B-A10B
 
@@ -121,6 +123,32 @@ The tier of experts starts empty in each of these runs; the prompt fills most of
 rest fills — GLM's reaches about 9 tokens a second by its 240th token with 18 GB. Each tier run answers with the same
 words as its run without, until a near-tie in the 122B's ~20 words in: the card sums its experts in another order than
 the CPU does.
+
+## On an NVIDIA card: the RTX 5060 Ti
+
+A Dell Precision 5820: one Xeon W-2123 (Skylake, four cores, AVX-512), 62 GB of DDR4-2400 in two channels, an NVIDIA
+GeForce RTX 5060 Ti 16 GB (sm_120, 36 SMs, 448 GB/s), CUDA 12.9, driver 595 — measured with v0.5.0. A prompt of about
+2,000 positions (2,568 for Ministral), then 64 tokens (32 on the CPU alone), every expert in RAM; the answer's rate from
+its 10th token on, and on a short prompt from the check against Hugging Face's answer.
+
+| Model | Where it runs | Prompt | Answer |
+|---|---|---|---|
+| Ministral 3 14B `D4` | the card | 958 positions/s | 39.2 tokens/s (45.9 on a short prompt) |
+| Ministral 3 14B `D8` | the card | 873 positions/s | 24.9 tokens/s (27.5) |
+| Qwen 3.8 27B `D4` | the card | 549 positions/s | 23.6 tokens/s (24.4) |
+| Qwen 3.8 27B `D4` | the card, a prompt of 6,033 positions — past the 4,352 the cache keeps at full precision | 472 positions/s | 21.8 tokens/s |
+| Qwen 3.6 35B-A3B `D8E4` | the dense part on the card, the experts on the CPU | 55 positions/s | 27.8 tokens/s |
+| Qwen 3.6 35B-A3B `D8E4` | the same, 8 GB of the card the tier of experts | 117 positions/s | 51.9 tokens/s |
+| Qwen 3.6 35B-A3B `D8E4` | the CPU alone | 20.8 positions/s | 8.6 tokens/s (9.0) |
+| Qwen 3.6 35B-A3B `D8E4` | the CPU alone with AVX2 (`SILVANN_CPU_AVX512=0`) | — | 1.7 tokens/s on a short prompt |
+
+Against one MI50 the 27B reads a prompt 5.7 times as fast here (549 positions a second against 96) — the card's tensor
+cores run the prompt's matrix products — and answers more slowly (23.6 tokens a second against 30.5): a token reads every
+weight once, so the answer follows the memory's speed, 448 GB/s here against the MI50's 1,024. With the experts on the
+CPU the four cores are what limits the 35B (55 positions a second against the R730's 83, whose 28 cores read the
+experts). The tier run is one run: which experts the card holds follows when its copies land, so it varies from
+run to run. Before v0.5.0's kernels, through the library's generic ones, the 27B read a prompt at 19 positions a second
+and answered at 7.8 tokens a second; Ministral `D4` read its prompt a position at a time at 34.
 
 ## What limits the experts on the disk: the drive
 

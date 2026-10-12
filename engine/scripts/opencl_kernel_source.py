@@ -157,6 +157,7 @@ def main():
         r = runs(p)
         for fn, params in rows(p):
             if fn not in r: sys.exit('⛔ %s has a door row and no __RUNS line' % fn)
+            if r[fn][0] == 'NN__GPU__ZZPRIVATE_BY_ROW': continue      # a host door: it calls other doors, no kernel of its own
             source += kernel(fn, params, r[fn]); made += 1
     # the override kernels are in the source already; counted, so the family's table has room for them — every one, even
     # where a driver without sub-groups leaves them out

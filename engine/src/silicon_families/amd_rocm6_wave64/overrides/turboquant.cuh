@@ -1536,15 +1536,28 @@ static void amd_rocm6_wave64__override_gemv_groups_sum(uint16_t* out, nn__turboq
 
 /* ⭐ THE EXACT GEMV FOR AN `x` WIDER THAN THE LANES HOLD — GLM's attention output is 16,384 columns, where the row
  *   kernels above stop at 8,192 and nn's generic body read the 27B's down at 47 GB/s. Built as the groups' sum: four
- *   rows a wave, `x` read from memory a block at a time and used for all four, and no barrier. Each row's sum is
- *   taken whole and then scaled, as nn's body does; only the order of the sum differs. */
-static __global__ AMD_ROCM6_WAVE64__ZZPRIVATE_BOUNDS void amd_rocm6_wave64__zzprivate_wide(uint16_t* out, const uint8_t* weights,
-                                                                                           const uint8_t* luts, const uint16_t* x,
-                                                                                           uint64_t rows, uint64_t cols, uint64_t d,
-                                                                                           unsigned int* over) {
+ *   rows a wave, `x` read from memory a block at a time and used for all four. Each row's sum is taken whole and then
+ *   scaled, as nn's body does; only the order of the sum differs.
+ * ⛳ AT 8 BITS nn's levels are staged in shared memory, the block waiting once before its first row, as the groups' sum
+ *   does; at 4 bits there is nothing to stage, and no wait. `MEASURED` (test/src_gemv_27b_bench.cpp, MI50 card 1, four
+ *   interleaved rounds): the levels read from memory a code at a time held Ministral 3 14B D8's down (5120 x 16384) to
+ *   404.8 us, staged 150.6 — the groups' sum reads it in 155.7 — every output the same; staged at 4 bits as well, GLM's
+ *   4-bit attention output went 72.2 -> 73.1 us. */
+#define AMD_ROCM6_WAVE64__ZZPRIVATE_WIDE_ROOM 512u     /* the levels' 256 halves */
+template <bool LEVELS_STAGED>
+static __device__ inline void amd_rocm6_wave64__zzprivate_wide_rows(uint16_t* out, const uint8_t* weights, const uint8_t* luts,
+                                                                    const uint16_t* x, uint64_t rows, uint64_t cols, uint64_t d,
+                                                                    unsigned int* over) {
     const uint32_t RW = AMD_ROCM6_WAVE64__ZZPRIVATE_SUM_ROWS;
-    /* nn's 8-bit levels read where they are, kept by the L1: staging them in shared memory would need a barrier */
     const uint16_t* table8 = nn__turboquant__zzabi_levels(8u);
+    if (LEVELS_STAGED) {
+        extern __shared__ uint4 room[];
+        uint16_t* staged = (uint16_t*)room;
+        for (uint32_t e = (uint32_t)nn__silicon__lane(); e < 256u; e += AMD_ROCM6_WAVE64__ZZPRIVATE_ROWS * AMD_ROCM6_WAVE64__ZZPRIVATE_WAVE)
+            staged[e] = table8[e];
+        __syncthreads();
+        table8 = staged;
+    }
     uint32_t low[2], high[2];
     amd_rocm6_wave64__zzpackage_tables(low, high);
     const uint32_t lane = (uint32_t)(nn__silicon__lane() % AMD_ROCM6_WAVE64__ZZPRIVATE_WAVE);
@@ -1580,6 +1593,18 @@ static __global__ AMD_ROCM6_WAVE64__ZZPRIVATE_BOUNDS void amd_rocm6_wave64__zzpr
         }
     }
 }
+static __global__ AMD_ROCM6_WAVE64__ZZPRIVATE_BOUNDS void amd_rocm6_wave64__zzprivate_wide_4(uint16_t* out, const uint8_t* weights,
+                                                                                             const uint8_t* luts, const uint16_t* x,
+                                                                                             uint64_t rows, uint64_t cols, uint64_t d,
+                                                                                             unsigned int* over) {
+    amd_rocm6_wave64__zzprivate_wide_rows<false>(out, weights, luts, x, rows, cols, d, over);
+}
+static __global__ AMD_ROCM6_WAVE64__ZZPRIVATE_BOUNDS void amd_rocm6_wave64__zzprivate_wide_8(uint16_t* out, const uint8_t* weights,
+                                                                                             const uint8_t* luts, const uint16_t* x,
+                                                                                             uint64_t rows, uint64_t cols, uint64_t d,
+                                                                                             unsigned int* over) {
+    amd_rocm6_wave64__zzprivate_wide_rows<true>(out, weights, luts, x, rows, cols, d, over);
+}
 /* Whether the wide kernel takes the call, and its launch if so: 4 or 8 bits, whole blocks, rows 8-byte aligned, `x`
  * 16-byte aligned, and the rows and scales it names present. */
 static bool amd_rocm6_wave64__zzprivate_wide_gemv(uint16_t* out, const uint8_t* weights, uint64_t w_room, const uint8_t* luts,
@@ -1588,10 +1613,12 @@ static bool amd_rocm6_wave64__zzprivate_wide_gemv(uint16_t* out, const uint8_t* 
     if ((d != 4u && d != 8u) || cols == 0u || cols % 32u != 0u || ((uint64_t)(uintptr_t)weights) % 8u != 0u
         || ((uint64_t)(uintptr_t)x) % 16u != 0u || rows > w_room / (cols * d / 8u) || rows > l_room / 2u)
         return false;
-    const uint32_t blocks = amd_rocm6_wave64__zzprivate_blocks((const void*)amd_rocm6_wave64__zzprivate_wide,
-                                                               (rows + AMD_ROCM6_WAVE64__ZZPRIVATE_SUM_ROWS - 1u) / AMD_ROCM6_WAVE64__ZZPRIVATE_SUM_ROWS, 0u);
+    const void* kernel = d == 8u ? (const void*)amd_rocm6_wave64__zzprivate_wide_8 : (const void*)amd_rocm6_wave64__zzprivate_wide_4;
+    const size_t room = d == 8u ? AMD_ROCM6_WAVE64__ZZPRIVATE_WIDE_ROOM : 0u;
+    const uint32_t blocks = amd_rocm6_wave64__zzprivate_blocks(kernel, (rows + AMD_ROCM6_WAVE64__ZZPRIVATE_SUM_ROWS - 1u) / AMD_ROCM6_WAVE64__ZZPRIVATE_SUM_ROWS,
+                                                               room);
     void* args[] = { &out, &weights, &luts, &x, &rows, &cols, &d, &over };
-    amd_rocm6_wave64__zzprivate_launch_room((const void*)amd_rocm6_wave64__zzprivate_wide, blocks, args, 0u);
+    amd_rocm6_wave64__zzprivate_launch_room(kernel, blocks, args, room);
     return true;
 }
 

@@ -36,6 +36,8 @@ static inline void amd_rocm6_wave64__override_doors(nn__doors* doors) {
     doors->vector_top_k         = amd_rocm6_wave64__override_vector_top_k;
     doors->vector_penalize      = amd_rocm6_wave64__override_vector_penalize;
     doors->attention_merge      = amd_rocm6_wave64__override_attention_merge;
+    doors->attention_weights_tq      = amd_rocm6_wave64__override_attention_weights_tq;
+    doors->attention_residual_mix_tq = amd_rocm6_wave64__override_attention_residual_mix_tq;
 }
 
 #endif /* SILVANN__SILICON_FAMILIES_AMD_ROCM6_WAVE64_OVERRIDES_DOORS_CUH */

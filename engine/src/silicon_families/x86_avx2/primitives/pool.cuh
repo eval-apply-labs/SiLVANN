@@ -66,6 +66,8 @@ typedef struct x86_avx2__pool {
     uint32_t          generation;              /* one a launch, so a thread knows there is new work */
     int               started;
     int               node;                    /* the NUMA node it and its memory are on, or -1: every one */
+    cpu_set_t         own;                     /* the whole machine's: the CPUs of the caller's core, left free for it */
+    cpu_set_t         worked;                  /* ...and the CPUs of the cores the threads are on, siblings included */
 } x86_avx2__pool;
 
 static x86_avx2__pool x86_avx2__zzprivate_pools[X86_AVX2__DEVICES_MAX];
@@ -221,7 +223,7 @@ static inline void x86_avx2__zzprivate_ticks(unsigned long long* busy, unsigned 
 }
 /* The pool's threads' CPUs into `cpus_out`, and their count. On the whole machine the caller's own core is left
  * out, as it always was — it runs blocks too; on a node every free core has a thread, and the caller runs none. */
-static inline uint32_t x86_avx2__zzprivate_size(int* cpus_out, int node) {
+static inline uint32_t x86_avx2__zzprivate_size(int* cpus_out, int node, cpu_set_t* own, cpu_set_t* worked) {
     enum { MOST = X86_AVX2__ZZPRIVATE_CPUS };
     static unsigned long long b0[MOST], t0[MOST], b1[MOST], t1[MOST];
     memset(b0, 0, sizeof b0); memset(t0, 0, sizeof t0); memset(b1, 0, sizeof b1); memset(t1, 0, sizeof t1);
@@ -230,7 +232,8 @@ static inline uint32_t x86_avx2__zzprivate_size(int* cpus_out, int node) {
     nanosleep(&nap, 0);
     x86_avx2__zzprivate_ticks(b1, t1, MOST);
     /* per physical core (package, core id): its first allowed CPU, and whether every CPU of it is idle */
-    int core_cpu[MOST], core_pkg[MOST], core_id[MOST], core_busy[MOST], cores = 0;
+    int core_cpu[MOST], core_pkg[MOST], core_id[MOST], core_busy[MOST], core_of[MOST], cores = 0;
+    for (int cpu = 0; cpu < MOST; ++cpu) core_of[cpu] = -1;
     for (int cpu = 0; cpu < MOST && cpu < CPU_SETSIZE; ++cpu) {
         if (!CPU_ISSET(cpu, &x86_avx2__zzprivate_allowed)) continue;
         if (node >= 0 && x86_avx2__zzprivate_cpu_node[cpu] != node) continue;
@@ -245,6 +248,7 @@ static inline uint32_t x86_avx2__zzprivate_size(int* cpus_out, int node) {
         while (k < cores && !(core_pkg[k] == pkg && core_id[k] == id)) ++k;
         if (k == cores) { core_cpu[k] = cpu; core_pkg[k] = pkg; core_id[k] = id; core_busy[k] = 0; ++cores; }
         core_busy[k] |= busy;
+        core_of[cpu] = k;
     }
     /* the free cores, alternating packages: first core of package 0, of package 1, second of 0, … */
     int order[MOST], n = 0, max_pkg = 0;
@@ -261,12 +265,26 @@ static inline uint32_t x86_avx2__zzprivate_size(int* cpus_out, int node) {
     uint32_t workers = 0u;
     const char* cap_s = getenv("SILVANN_CPU_THREADS");
     const long cap = cap_s ? strtol(cap_s, 0, 10) : 0;
+    /* ⛔ THE CALLER'S CORE, NOT ITS CPU: `order` holds each core's first CPU, and a caller on the core's second hyperthread
+     *   matched none of them — the pool then took the first cores, the caller's among them, and the caller shared a core
+     *   with a pool thread for the whole run. `MEASURED` (the 35B on the CPU alone, four cores, the pool's report and the
+     *   caller's CPU each run): with the pool on CPUs 0 1 2 and the caller on CPU 4 — core 0's other half — 7.60 tokens/s;
+     *   with the caller's core left out, the same caller CPU, 8.98, as every other run. */
+    const int self_core = self >= 0 && self < MOST ? core_of[self] : -1;
     for (int k = 0; k < n && workers < X86_AVX2__THREADS_MAX; ++k) {
-        if (order[k] == self) continue;
+        if (self_core >= 0 && core_of[order[k]] == self_core) continue;
         if (cap > 0 && (long)(workers + caller) >= cap) break;
         cpus_out[workers++] = order[k];
     }
     if (caller == 1u && n > 0 && workers + 1u > (uint32_t)n) workers = (uint32_t)n - 1u;
+    /* the CPUs of the threads' cores, and on the whole machine those of the caller's own core when it is free */
+    CPU_ZERO(own); CPU_ZERO(worked);
+    for (uint32_t w = 0u; w < workers; ++w)
+        for (int cpu = 0; cpu < MOST && cpu < CPU_SETSIZE; ++cpu)
+            if (core_of[cpu] >= 0 && core_of[cpu] == core_of[cpus_out[w]]) CPU_SET(cpu, worked);
+    if (self >= 0 && self < MOST && core_of[self] >= 0 && !core_busy[core_of[self]] && !CPU_ISSET(self, worked))
+        for (int cpu = 0; cpu < MOST && cpu < CPU_SETSIZE; ++cpu)
+            if (core_of[cpu] == core_of[self]) CPU_SET(cpu, own);
     return workers;
 }
 
@@ -281,7 +299,7 @@ static inline x86_avx2__pool* x86_avx2__zzpackage_start(void) {
         pthread_mutex_init(&p->lock, 0);
         pthread_cond_init(&p->wake, 0);
         p->node = x86_avx2__zzpackage_node_of(device);
-        p->workers = x86_avx2__zzprivate_size(p->cpu, p->node);
+        p->workers = x86_avx2__zzprivate_size(p->cpu, p->node, &p->own, &p->worked);
         for (uint32_t i = 0u; i < p->workers; ++i)
             if (pthread_create(&p->thread[i], 0, x86_avx2__zzprivate_worker, (void*)(uintptr_t)((device << 16) | i)) != 0) { p->workers = i; break; }
         /* ⛳ `SILVANN_CPU_POOL_REPORT=1` says what was chosen: the size is decided from the machine's load at
@@ -314,13 +332,33 @@ static inline void x86_avx2__zzpackage_bind(uint32_t device) {
  * ⛳ One launch at a time a pool: the caller is the worker that bound its device, and nn's doors are called from
  * it in order. Two workers on two devices launch at once, each on its own pool. */
 static inline void x86_avx2__zzprivate_run_body(uint32_t blocks, void (*fn)(void*), void* arg);
+static inline void x86_avx2__zzprivate_launch(x86_avx2__pool* p, uint32_t blocks, void (*fn)(void*), void* arg);
 static inline void x86_avx2__zzpackage_run(uint32_t blocks, void (*fn)(void*), void* arg) {
     x86_avx2__zzprivate_run_body(blocks, fn, arg);
 }
 
+/* ⭐ ON THE WHOLE MACHINE THE CALLER RUNS ITS SHARE ON ITS OWN CORE. The pool leaves the caller's core free for it (▶ the
+ *   sizing), but the caller is never pinned — a thread is where the scheduler puts it — and the scheduler is free to move it
+ *   later onto a sibling of a pool thread's core, where two of a launch's runners share a core while another idles: the
+ *   placement a bad sizing gave, 131 against 110 ms a 35B token on the CPU alone (`MEASURED`, ▶ the sizing). So a launch
+ *   that finds its caller on a pool thread's core moves it to its own for the launch and hands its affinity back after: a
+ *   `sched_getcpu` a launch, and a move only when the caller was misplaced (`REASONED`; the case after a good sizing is not
+ *   one this box has been seen to produce). */
+static inline bool x86_avx2__zzprivate_caller_to_own(const x86_avx2__pool* p, cpu_set_t* saved) {
+    if (p->node >= 0 || CPU_COUNT(&p->own) == 0) return false;
+    const int cpu = sched_getcpu();
+    if (cpu < 0 || cpu >= CPU_SETSIZE || !CPU_ISSET(cpu, &p->worked)) return false;
+    return sched_getaffinity(0, sizeof *saved, saved) == 0 && sched_setaffinity(0, sizeof p->own, &p->own) == 0;
+}
 static inline void x86_avx2__zzprivate_run_body(uint32_t blocks, void (*fn)(void*), void* arg) {
     x86_avx2__pool* p = x86_avx2__zzpackage_start();
     if (blocks == 0u) return;
+    cpu_set_t saved;
+    const bool moved = p->workers != 0u && blocks > 1u && x86_avx2__zzprivate_caller_to_own(p, &saved);
+    x86_avx2__zzprivate_launch(p, blocks, fn, arg);
+    if (moved) (void)sched_setaffinity(0, sizeof saved, &saved);
+}
+static inline void x86_avx2__zzprivate_launch(x86_avx2__pool* p, uint32_t blocks, void (*fn)(void*), void* arg) {
     if (p->workers == 0u || blocks == 1u) {
         for (uint32_t b = 0u; b < blocks; ++b) { x86_avx2__zzpackage_block = b; x86_avx2__zzpackage_blocks = blocks; fn(arg); }
         x86_avx2__zzpackage_block = 0u; x86_avx2__zzpackage_blocks = 1u;

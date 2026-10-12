@@ -8,13 +8,16 @@ gate on the attention, no norm on its queries and keys. So no package of its own
 ```
 — each matrix packed and read through `nn__turboquant__gemv`, whose input is rotated as the pack rotated its columns.
 The PROGRAM is Lisp, written by hand — `lisp/mistral3.lisp`, which the model folder carries and the boot reads — `layers`
-a loop over the layers; a token is one short program, `(begin (position at len qs) (head))`, its embedding row written
-by the host.
+a loop over the layers; a token is one short program, `(begin (position tok pos) (head))`, and an answer is `generate`
+(▶ `generate`), the same a token at a time on the card until an end token. The embedding is a table in RAM the card
+reads a row of: only a row crosses.
 
-⭐ YaRN, IN THE HOST: the rotary's frequencies are YaRN's (the 14B: factor 16 over an original 16,384, θ 10⁹), which
-`nn__rope__angles` does not compute — so the host writes each position's 64 cosines and 64 sines into the angles buffer
-the RoPE reads, 512 bytes a token. ⭐ And past the original 16,384 positions Mistral 3 scales its queries — Llama 4's
-`1 + β log(1 + ⌊pos / 16384⌋)`, β 0.1 — which the host works out a position and every layer applies (`qs`).
+⭐ YaRN, WORKED OUT BY THE HOST AT BOOT: the rotary's frequencies are YaRN's (the 14B: factor 16 over an original 16,384,
+θ 10⁹), which `nn__rope__angles` does not compute — so the boot writes every position's 64 cosines and 64 sines, 512
+bytes a position, into a table on the card the RoPE reads a row of (`CS_K`; the cache is ~160 KB a position). ⭐ And past
+the original 16,384 positions Mistral 3 scales its queries — Llama 4's `1 + β log(1 + ⌊pos / 16384⌋)`, β 0.1 — which
+the queries' table carries in its angles (`CS_Q`): a rotation and a scale commute, and where the scale is 1 the two
+tables are the same bytes.
 
 The cache is every layer's keys and values in halves, `[position][kv head][head dim]`, up to `max_context`.
 """
@@ -25,6 +28,7 @@ import pickle
 import numpy as np
 
 from . import sampling
+from .generate import Generates
 from .model_folder import NL, Refused
 
 ARCHITECTURES = ("ministral3",)
@@ -63,8 +67,8 @@ def yarn_inv_freq(head_dim, rope):
     return interpolation * (1.0 - keep) + extrapolation * keep, attention
 
 
-class Ministral3:
-    PROGRAM = ("mistral3", "sampling")                    # the model folder's lisp/ files (▶ `ModelFolder.program`)
+class Ministral3(Generates):
+    PROGRAM = ("mistral3", "sampling", "generate")        # the model folder's lisp/ files (▶ `ModelFolder.program`)
     SAMPLES_ON_CARD = True          # `head_sample` — ▶ `sampling`
 
     def __init__(self, folder, machine, max_context=8192, layers=None):
@@ -90,6 +94,11 @@ class Ministral3:
         if max_context > c.get("max_position_embeddings", max_context):
             raise Refused("max_context %d is past the model's %d" % (max_context, c["max_position_embeddings"]))
         self.max_context = int(max_context)
+        # a prompt's rows a call (▶ nn's `nn__attention__rows`, `nn__mlp__rows`): nn's 256, or the context if shorter; the
+        # attention's scores hold as many of them as fit 32 MiB — a row's are query heads × the context, fp32 — and the verb
+        # attends the chunk that many rows at a time
+        self.CHUNK = min(256, self.max_context)
+        self.SCORES_ROWS = max(self.QH * self.max_context * 4, 32 << 20)
         self.MOE = False
         self.run_layers = list(range(self.LAYERS)) if layers is None else sorted(layers)
         g = pickle.load(open(os.path.join(folder.path, "global.pkl"), "rb"))
@@ -114,8 +123,7 @@ class Ministral3:
                 self.TYPE[n], self.WHICH[n], self.PLAN[n] = t, i, plans[n]
             self.WIDTH[t] = len(members)
         t = len(groups)
-        # ⭐ THE EMBEDDING STAYS IN RAM — a token needs one row of it, which the host writes each step; the card keeps
-        #   the head
+        # ⭐ THE EMBEDDING STAYS IN RAM, a table the card reads a row of in place; the card keeps the head
         self.T_HEAD, self.T_KV = t, t + 1
 
         def plan_of(rec):
@@ -124,6 +132,7 @@ class Ministral3:
             return data, lut, NL.SlotPlan(len(data), 0, 0, len(lut))
         self.head_data, self.head_lut, self.HPLAN = plan_of(self.head_rec)
         self.emb_data, self.emb_lut, self.BPLAN = plan_of(self.emb_rec)
+        self.TABLE_BYTES = (len(self.emb_data) + len(self.emb_lut) + 255) // 256 * 256      # the rows, then the scales
         # the cache, a slot a layer: its keys in the up half, its values in the down
         kv = self.max_context * self.KVW * 2
         self.KVPLAN = NL.SlotPlan(kv, 0, 0, kv)
@@ -135,13 +144,17 @@ class Ministral3:
 
     def device_params(self):
         """The boot's device section: the buffer pools, the arena and every collection's shape."""
-        big = max(8 << 20, self.QH * self.max_context * 4, self.VOCAB * 2)
+        # the largest class holds a prompt's three large buffers too — the MLP's and the attention's scratch, the scores
+        T = self.CHUNK
+        self.MLP_SCRATCH = max(2 * (2 * self.H + 4 * self.INTER), 8 * 256 + 2 * T * (3 * self.H + 4 * self.INTER))
+        self.ATT_SCRATCH = 16 * 256 + 2 * T * (3 * self.H + 3 * self.QW + self.KVW)
+        big = max(8 << 20, self.QH * self.max_context * 4, self.VOCAB * 2, self.MLP_SCRATCH, self.ATT_SCRATCH, self.SCORES_ROWS)
         types = "".join("nn__expert__type%d__up_bytes:%d\nnn__expert__type%d__down_bytes:%d\nnn__expert__type%d__slots:%d\n"
                         % (t, p.up_bytes, t, p.down_bytes, t, n) for t, p, n in self.collections)
         return ("nn__buffer_resid__size_bytes:2097152\nnn__buffer_resid__qty:8\n"
                 "nn__buffer_main__size_bytes:4194304\nnn__buffer_main__qty:4\n"
                 "nn__buffer_attn_out__size_bytes:1048576\nnn__buffer_attn_out__qty:64\n"
-                "nn__buffer_logits__size_bytes:%d\nnn__buffer_logits__qty:4\n"
+                "nn__buffer_logits__size_bytes:%d\nnn__buffer_logits__qty:7\n"
                 "nn__buffer_partials__size_bytes:1048576\nnn__buffer_partials__qty:8\n"
                 "nn__expert_cache_l1__size_mb:%d\n"
                 "nn__cartridge_sink__tokens:1\nnn__cartridge_sink__bytes_per_token_layer:64\n"
@@ -151,7 +164,11 @@ class Ministral3:
                 "nn__model__kv_cache_layers_fullattn:%d\nnn__model__kv_cache_layers_deltanet:0\n"
                 "nn__conversation__text_size_kb:4\nnn__deltanet_state__bytes_per_layer:64\n"
                 "nn__model__layer_types:%s\nnn__expert__types:%d\n%s"
-                % (big, (self.arena + (256 << 20)) >> 20, self.LAYERS, "f" * self.LAYERS, len(self.collections), types))
+                "nn__ram_buffer_result__size_bytes:64\nnn__ram_buffer_result__qty:1\n"
+                "nn__ram_buffer_experts__size_bytes:64\nnn__ram_buffer_experts__qty:1\n"
+                "nn__ram_buffer_table__size_bytes:%d\nnn__ram_buffer_table__qty:1\n"
+                % (big, (self.arena + (256 << 20)) >> 20, self.LAYERS, "f" * self.LAYERS, len(self.collections), types,
+                   self.TABLE_BYTES))
 
     def workers(self):
         return [(self.m.silicon, 0)]
@@ -191,17 +208,35 @@ class Ministral3:
         m.buffer(H * 2, "fnw", _half(final_w))                  # Mistral's norm is a plain gain
         m.buffer(H * 2, "zero_h", _half(np.zeros(H)))
         m.buffer(64, "one", _half(np.ones(32)))                 # the MLP's down's one weight (▶ nn's mlp.cuh)
-        m.buffer(2 * (2 * H + 4 * self.INTER), "mlp_scratch")
+        T = self.CHUNK
+        # the MLP's scratch, a position's or a chunk's: the rows' pairs, then h · hrot · [gates · ups] · act · actr · ao
+        m.buffer(self.MLP_SCRATCH, "mlp_scratch")
+        # a chunk's: its rows in and out, the attention's scratch — two lists of pairs, then
+        # h · hrot · [q · k] · att · attr · ao (▶ nn's attention.cuh) — its scores, its tokens
+        m.buffer(T * H * 2, "xs")
+        m.buffer(T * H * 2, "h1s")
+        m.buffer(self.ATT_SCRATCH, "att_scratch")
+        m.buffer(self.SCORES_ROWS, "scores_rows")
+        m.node_array("PROMPT", T)
         self.X_AT = m.buffer(H * 2, "x")
         for nm, n in (("h1", H), ("u", H), ("hu", H), ("h", H), ("hr", H), ("y", H), ("hn", H), ("hnr", H),
                       ("qq", self.QW), ("kk", self.KVW), ("att", self.QW), ("attr", self.QW),
                       ("g", self.INTER), ("up", self.INTER), ("gr", self.INTER)):
             m.buffer(n * 2, nm)
-        self.CS_AT = m.buffer(self.AH * 4, "cs")                # a position's cosines then sines, fp32, the host's
+        # every position's cosines then sines, fp32, a row each: the keys', and the queries' with their scale in them
+        keys, queries = [], []
+        for pos in range(self.max_context):
+            ang = pos * self.INV_FREQ
+            cs = np.concatenate([np.cos(ang), np.sin(ang)]) * self.ROPE_SCALE
+            keys.append(cs.astype("<f4").tobytes())
+            queries.append((cs * self.query_scale(pos)).astype("<f4").tobytes())
+        m.buffer(self.max_context * self.AH * 4, "CS_K", b"".join(keys))
+        m.buffer(self.max_context * self.AH * 4, "CS_Q", b"".join(queries))
         m.buffer(self.QH * self.max_context * 4, "scores")
-        row = int(self.emb_rec["row_bytes"])
-        self.EMB_AT = m.buffer(row, "emb_codes")
-        self.EMB_SCALE_AT = m.buffer(64, "emb_scales")
+        self.EMB_AT = m.buffer(self.TABLE_BYTES, "EMBEDDING", ram=True)
+        m.write(self.EMB_AT, self.emb_data)
+        m.write(self.EMB_AT + len(self.emb_data), self.emb_lut)
+        self._answer_buffers()                      # what `generate` made, the end tokens it watches for
         self.LOGITS_AT = m.buffer(self.VOCAB * 2, "logits_h")
         m.buffer(64, "res")
         sampling.buffers(m)
@@ -223,7 +258,8 @@ class Ministral3:
         head = lambda at, size: "(nn__expert__plane 0 %d 0 %d %d)" % (self.T_HEAD, at, size)
         values = dict(HIDDEN=H, INTER=self.INTER, EPS=self.EPS, VOCAB=self.VOCAB, RUN=len(run), Q_HEADS=self.QH,
                       KV_HEADS=self.KVH, HEAD_DIM=self.AH, Q_WIDTH=self.QW, KV_WIDTH=self.KVW,
-                      EMB_HALVES=int(self.emb_rec["row_bytes"]) // 2, EMB_BITS=int(self.emb_rec["d"]),
+                      EMB_HALVES=int(self.emb_rec["row_bytes"]) // 2, EMB_SCALES=len(self.emb_data) // 2,
+                      EMB_BITS=int(self.emb_rec["d"]), CS_HALVES=self.AH * 2, STOPS=0, SEEN=sampling.SEEN,
                       HEAD_CODES=head(self.HPLAN.at_up_data, self.HPLAN.up_data),
                       HEAD_SCALES=head(self.HPLAN.at_down_lut, self.HPLAN.down_lut), HEAD_BITS=int(self.head_rec["d"]),
                       KV_TYPE=self.T_KV, KEYS_AT=self.KVPLAN.at_up_data, VALUES_AT=self.KVPLAN.at_down_data,
@@ -249,50 +285,70 @@ class Ministral3:
                     + ["signs", "one", "mlp_scratch", H, self.INTER] + [values[s + "_BITS"] for s in ("GATE", "UP", "DOWN")]
                     + [self.EPS])
         m.array("MLP", ["ml%d" % l for l in run])
+        # ⭐ A PROMPT AS ROWS: each layer's attention as nn's table (▶ nn's `contracts/objects/attention.cuh`), where every
+        # matrix is TurboQuant's and the widths are whole blocks of 512; otherwise a prompt is read a position at a time
+        self.ROWS = (16 not in [values[s + "_BITS"] for s, _ in self.MATRICES] and H % 512 == 0 and self.QW % 512 == 0)
+        if self.ROWS:
+            cache = lambda l, at: "(nn__expert__plane %d %d 0 %d %d)" % (l, self.T_KV, at, values["CACHE_BYTES"])
+            ats = [n for short, n in self.MATRICES if short in ("Q", "K", "V", "O")]
+            for l in run:
+                m.table("at%d" % l, [self.plane(l, "input_layernorm.weight", "data")]
+                        + [c for n in ats for c in (self.plane(l, n, "data"), self.plane(l, n, "lut"))]
+                        + [cache(l, self.KVPLAN.at_up_data), cache(l, self.KVPLAN.at_down_data), "CS_Q", "CS_K", "signs",
+                           "att_scratch", "scores_rows", H, self.QH, self.KVH, self.AH]
+                        + [values[s + "_BITS"] for s in ("Q", "K", "V", "O")] + [self.EPS])
+            m.array("ATTENTION", ["at%d" % l for l in run])
 
     def _procedures(self):
-        """The program: `lisp/mistral3.lisp` and the sampler's."""
+        """The program: `lisp/mistral3.lisp`, the sampler's and `generate`."""
         self.m.load_source(self.folder.program("mistral3"))
         self.m.load_source(self.folder.program("sampling"))
+        self.m.load_source(self.folder.program("generate"))
 
     # ── ④ running ─────────────────────────────────────────────────────────────────────────────────────────────
     def reset(self):
         """A conversation from nothing: the cache needs nothing — a position reads only rows it has written."""
 
-    def _angles(self, pos):
-        ang = pos * self.INV_FREQ
-        cs = np.concatenate([np.cos(ang), np.sin(ang)]) * self.ROPE_SCALE
-        self.m.write(self.CS_AT, cs.astype("<f4").tobytes())
-
     def query_scale(self, pos):
         """Llama 4's factor on the queries at `pos`: 1 within the original context, then a step every `span` positions."""
         return 1.0 + self.Q_BETA * math.log(1.0 + math.floor(pos / self.Q_SPAN))
-
-    def _stage(self, token):
-        row = int(self.emb_rec["row_bytes"])
-        self.m.write(self.EMB_AT, self.emb_data[token * row:(token + 1) * row])
-        self.m.write(self.EMB_SCALE_AT, self.emb_lut[token * 2:token * 2 + 2])
 
     def step(self, token, pos, greedy=True, sample=None, head=None):
         """One position: the token in, the next token out — greedy, or drawn on the card by `sample` (a `sampling.head`)
         — or the logits left for a sampler on the host (answers None). `head` replaces all three."""
         if pos >= self.max_context:
             raise Refused("position %d is past the context of %d" % (pos, self.max_context))
-        self._stage(token)
-        self._angles(pos)
         head = head or sample or ("(head)" if greedy else "(head_logits)")
-        got = self.m.must("(begin (position %d %d %r) %s)" % (pos * self.KVW * 2, pos + 1, self.query_scale(pos), head),
-                          "position %d" % pos)
+        got = self.m.must("(begin (position %d %d) %s)" % (token, pos, head), "position %d" % pos)
         return got if greedy or sample else None
 
+    def _prompt(self, tokens):
+        """A prompt chunk's tokens into PROMPT, which `embed_rows` reads — sixty-four to a program, as a program is one
+        form and a form must fit one of the heap's chunks."""
+        for at in range(0, len(tokens), 64):
+            self.m.must("(begin %s 0)" % " ".join("(sys__node_array__set PROMPT %d %d)" % (i, t)
+                                                  for i, t in enumerate(tokens[at:at + 64], at)), "the prompt's tokens")
+
     def prefill(self, tokens, first, greedy=True, sample=None):
-        """Positions `first ..` for `tokens`, a position at a time — the head only at the last, the others' logits never
-        made; then the next token (greedy, or drawn by `sample`) or the logits left."""
+        """Positions `first ..` for `tokens` in chunks of rows — each layer one call a chunk — then the next token from
+        the last row (greedy, or drawn by `sample`), or its logits left; a position at a time where the pack keeps a
+        layer's matrix in halves, the head only at the last, the others' logits never made."""
         if first + len(tokens) > self.max_context:
             raise Refused("positions to %d are past the context of %d" % (first + len(tokens), self.max_context))
-        for i, t in enumerate(tokens[:-1]):
-            self.step(t, first + i, head="(type x)")
-        return self.step(tokens[-1], first + len(tokens) - 1, greedy, sample)
+        if not self.ROWS:
+            for i, t in enumerate(tokens[:-1]):
+                self.step(t, first + i, head="(type x)")
+            return self.step(tokens[-1], first + len(tokens) - 1, greedy, sample)
+        for at in range(0, len(tokens), self.CHUNK):
+            chunk = tokens[at:at + self.CHUNK]
+            self._prompt(chunk)
+            self.m.must("(begin (embed_rows %d) (rows %d %d) (type xs))" % (len(chunk), first + at, len(chunk)),
+                        "the rows from %d" % (first + at))
+            last = len(chunk) - 1
+        head = sample or ("(head)" if greedy else "(head_logits)")
+        got = self.m.must("(begin (nn__vector__add (nn__vector__range xs %d %d) zero_h x %d) %s)"
+                          % (last * self.H, self.H, self.H, head), "the prompt's last row")
+        return got if greedy or sample else None
 
     def logits(self):
         return np.frombuffer(self.m.read(self.LOGITS_AT, self.VOCAB * 2), dtype="<f2").astype(np.float32)

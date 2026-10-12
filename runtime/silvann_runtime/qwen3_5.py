@@ -9,8 +9,8 @@ is one short program:
 ```
   (begin (position tok pos) (head))
 ```
-— the embedding a table in RAM the card reads a row of: only a row crosses. An answer is `generate`, the same a token at
-a time on the card until an end token, up to `GENERATE_MOST` a call.
+— the embedding a table in RAM the card reads a row of: only a row crosses. An answer is `generate` (▶ `generate`),
+the same a token at a time on the card until an end token.
 The residual stream `x` never leaves the card; `head` answers the greedy token, `head_sample` one drawn there
 (▶ `sampling`), or `head_logits` leaves the logits for a sampler on the host.
 
@@ -23,12 +23,11 @@ import pickle
 import numpy as np
 
 from . import experts_file, expert_tier, sampling
+from .generate import Generates
 from .model_folder import NL, Refused
 
 GU, DN = NL.GATE_UP, NL.DOWN
 CARD, CPU = 0, 1                  # the workers: the card, and — with the experts there — the CPU
-GENERATE_MOST = 64                # the most tokens one `generate` makes — OUT's length
-STOPS_MOST = 8                    # the most end tokens it watches for
 ARCHITECTURES = ("qwen3_5_text", "qwen3_5_moe_text")
 
 
@@ -36,10 +35,9 @@ def _half(a):
     return np.asarray(a, dtype="<f2").tobytes()
 
 
-class Qwen35:
-    PROGRAM = ("qwen3_5", "qwen3_5_cpu", "sampling")      # the model folder's lisp/ files (▶ `ModelFolder.program`)
+class Qwen35(Generates):
+    PROGRAM = ("qwen3_5", "qwen3_5_cpu", "sampling", "generate")   # the model folder's lisp/ files (▶ `ModelFolder.program`)
     SAMPLES_ON_CARD = True          # `head_sample` — ▶ `sampling`
-    GENERATES = True                # `generate` — an answer's tokens on the card (▶ lisp/qwen3_5.lisp)
 
     def __init__(self, folder, machine, max_context=4096, fused_moe=True, kv="tiered", tiers=None, experts_on="card",
                  experts_from="auto", experts_dir=None, layers=None, chunk=256, experts_ram_gb=None, card_experts_gb=0,
@@ -410,9 +408,7 @@ class Qwen35:
         m.write(self.EMB_AT, self.emb_data)
         m.write(self.EMB_AT + len(self.emb_data), self.emb_lut)
         m.node_array("PROMPT", self.CHUNK)          # a prompt chunk's tokens
-        m.node_array("OUT", GENERATE_MOST)          # what `generate` made
-        m.node_array("STOP", STOPS_MOST)            # the end tokens it watches for
-        self._stops = None
+        self._answer_buffers()                      # what `generate` made, the end tokens it watches for
         self.LOGITS_AT = m.buffer(self.VOCAB * 2, "logits_h")
         m.buffer(64, "res")
         sampling.buffers(m)
@@ -675,6 +671,7 @@ class Qwen35:
         Read from `programs.lisp` instead by the boots that have the same key (▶ `Machine.define_programs`)."""
         self.m.load_source(self.folder.program("qwen3_5"))
         self.m.load_source(self.folder.program("sampling"))
+        self.m.load_source(self.folder.program("generate"))
         if self.CPU_EXPERTS:
             self.m.load_source(self.folder.program("qwen3_5_cpu"))
 
@@ -696,33 +693,6 @@ class Qwen35:
             raise Refused("position %d is past the context of %d" % (pos, self.max_context))
         head = sample or ("(head)" if greedy else "(head_logits)")
         return self._run("(begin (position %d %d) %s)" % (token, pos, head), "position %d" % pos)
-
-    def generate(self, token, pos, n, stop=(), sampler=None):
-        """Up to `n` tokens from `token` at `pos`, each the next one's input, in one program on the card — ending early
-        after one of `stop`. Greedy, or drawn by the card's sampler `sampler` (a `session.Sampler`). Answers the tokens."""
-        n = min(n, GENERATE_MOST, self.max_context - pos)
-        if n <= 0:
-            raise Refused("position %d is past the context of %d" % (pos, self.max_context))
-        self._watch(stop)
-        if sampler is None:
-            call = "(generate %d %d %d (< 1 0) 0 0 0 1.0 1.0 1 1.0 0)" % (token, pos, n)
-        else:
-            reads = sampler.repetition_penalty != 1.0
-            call = "(generate %d %d %d (< 0 1) %d %d %d %r %r %d %r %d)" % (
-                token, pos, n, 1 if reads else 0, min(pos, sampling.SEEN) if reads else 0, pos % sampling.SEEN,
-                float(sampler.repetition_penalty), 1.0 / sampler.temperature, sampler.top_k, min(1.0, float(sampler.top_p)),
-                sampler.seed)
-        made = self._run(call, "the answer from %d" % pos)
-        return [self.m.must("(nth OUT %d)" % j, "a token made") for j in range(made)]
-
-    def _watch(self, stop):
-        """The end tokens `generate` watches for, into STOP — when they are not the ones there already."""
-        stop = tuple(sorted(stop))[:STOPS_MOST]
-        if stop == self._stops:
-            return
-        self.m.must("(begin %s (set! STOPS %d) 0)" % (" ".join("(sys__node_array__set STOP %d %d)" % (j, t)
-                                                              for j, t in enumerate(stop)), len(stop)), "the end tokens")
-        self._stops = stop
 
     def _run(self, text, what):
         """A program's answer. ⛳ With the experts on the CPU it runs with every block standing — it hands them work

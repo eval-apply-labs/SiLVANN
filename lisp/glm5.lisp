@@ -1,13 +1,15 @@
 ;; GLM 5.3 FLASH — four residual streams, Kimi Delta Attention and latent attention, routed experts on the CPUs.
 ;;
-;; A token is `(begin (position_f codes scale pos) (head))`: its embedding into every stream, then every layer this machine
-;; runs. A layer is ai_glm_5_3's sites over its tables: the attention site — a KDA layer's or an MLA layer's mixer, the
-;; streams' hyper-connection around it — then the MLP site: dense, or the router, the shared expert on the card while each
-;; CPU socket runs its share of every picked expert, and the shares summed into the streams. A prompt runs as rows: each
-;; layer once over a chunk, `(begin (embed_rows n) (rows first n))`.
+;; A token is `(begin (position tok pos) (head))`: its row of the embedding into every stream, then every layer this
+;; machine runs. A layer is ai_glm_5_3's sites over its tables: the attention site — a KDA layer's or an MLA layer's mixer,
+;; the streams' hyper-connection around it — then the MLP site: dense, or the router, the shared expert on the card while
+;; each CPU socket runs its share of every picked expert, and the shares summed into the streams. A prompt runs as rows:
+;; each layer once over a chunk, `(begin (embed_rows n) (rows first n))`. An answer is `generate` (▶ generate.lisp).
 ;;
 ;; What the boot binds before this file is read (▶ glm5.py `_bindings`):
-;;   the shape       HIDDEN HIDDEN_BYTES MULT MEAN (1/MULT) VOCAB EPS RUN · EMB_HALVES EMB_BITS · HEAD_CODES HEAD_SCALES HEAD_BITS
+;;   the shape       HIDDEN HIDDEN_BYTES MULT MEAN (1/MULT) VOCAB EPS RUN · HEAD_CODES HEAD_SCALES HEAD_BITS
+;;                   EMBEDDING EMB_HALVES EMB_SCALES EMB_BITS — the embedding table in RAM, a row's halves, where the
+;;                   scales start, its bits
 ;;                   HAND HAND_PICKS_AT HAND_BYTES — a hand row, its picks' place, a position's hand to a socket
 ;;                   ROWS_HANDS_BYTES ROWS_BYTES ROWS_HALVES — a chunk's hands, and its routed rows, to and from a socket
 ;;   the settings    CARD_TIER — true where the card holds a tier of the routed experts
@@ -16,35 +18,38 @@
 ;;                   EXK EXKR (the card's tier's experts tables, a position's and a chunk's)
 ;;   a socket each   SOCKETS of them: SOCKET (its worker), ROUTED_INTO / RROWS_INTO (where its share lands on the card);
 ;;                   ▶ glm5_cpu.lisp for what each runs
-;;   the buffers     streams xin h hr e u hu hand picks routed hm hn hnr srows hands carries rrows rwork … (▶ `_card_buffers`)
+;;   the buffers     streams xin h hr e u hu hand picks routed hm hn hnr srows hands carries rrows rwork … (▶ `_card_buffers`),
+;;                   PROMPT (a chunk's tokens)
 
 
-;; ── the token: its row, un-rotated (Rᵀu = S ⊙ H·u), into every stream ─────────────────────────────────────────────
-(defun (embed codes scale)
+;; ── the token: its row of the embedding, un-rotated (Rᵀu = S ⊙ H·u), into every stream ──────────────────────────────
+;; EMBEDDING is a table in RAM the card reads a row of in place: every token's packed row (EMB_HALVES halves each), then
+;; every token's scale from EMB_SCALES on — the embedding stays in RAM and only a row crosses.
+(defun (embed_e tok)                                   ; the token's row into e
+  (begin (nn__turboquant__decode (nn__vector__range EMBEDDING (* tok EMB_HALVES) EMB_HALVES)
+                                 (nn__vector__range EMBEDDING (+ EMB_SCALES tok) 1) u 1 HIDDEN EMB_BITS)
+         (nn__hadamard__rotate u ones512 hu HIDDEN)
+         (nn__vector__pointwise_mul hu signs_row e HIDDEN)))
+
+(defun (embed tok)
   (let ((j 0))
-    (nn__turboquant__decode (nn__vector__range emb_codes codes EMB_HALVES) (nn__vector__range emb_scales scale 1)
-                            u 1 HIDDEN EMB_BITS)
-    (nn__hadamard__rotate u ones512 hu HIDDEN)
-    (nn__vector__pointwise_mul hu signs_row e HIDDEN)
+    (embed_e tok)
     (while '(< j MULT) '(begin (nn__vector__add e zero_h (nn__vector__range streams (* j HIDDEN) HIDDEN) HIDDEN) (set! j (+ j 1))))
     (type e)))
 
-;; a prompt's row `row`, its staged codes `codes` halves into emb_rows and its scale the `scale`-th, into its streams in srows
-(defun (embed_row codes scale row)
+;; a prompt's row `row`, its token `tok`, into its streams in srows
+(defun (embed_row tok row)
   (let ((j 0))
-    (nn__turboquant__decode (nn__vector__range emb_rows codes EMB_HALVES) (nn__vector__range emb_rscales scale 1)
-                            u 1 HIDDEN EMB_BITS)
-    (nn__hadamard__rotate u ones512 hu HIDDEN)
-    (nn__vector__pointwise_mul hu signs_row e HIDDEN)
+    (embed_e tok)
     (while '(< j MULT)
            '(begin (nn__vector__add e zero_h (nn__vector__range srows (* (+ (* row MULT) j) HIDDEN) HIDDEN) HIDDEN)
                    (set! j (+ j 1))))
     (type e)))
 
-;; the chunk's `n` rows, staged one after another
+;; the chunk's `n` rows, their tokens PROMPT's
 (defun (embed_rows n)
-  (let ((i 0) (codes 0))
-    (while '(< i n) '(begin (embed_row codes i i) (set! codes (+ codes EMB_HALVES)) (set! i (+ i 1))))
+  (let ((i 0))
+    (while '(< i n) '(begin (embed_row (nth PROMPT i) i) (set! i (+ i 1))))
     (type srows)))
 
 
@@ -129,11 +134,9 @@
     (while '(< i RUN) '(begin (layer i pos) (set! i (+ i 1))))
     (type streams)))
 
-(defun (position_f codes scale pos)
-  (begin (embed codes scale) (layers_f pos)))
-
-(defun (token_f codes scale pos)
-  (begin (position_f codes scale pos) (head)))
+;; a token's position: its row of the embedding into the streams, then the layers
+(defun (position tok pos)
+  (begin (embed tok) (layers_f pos)))
 
 
 ;; ── a layer over a prompt's rows ────────────────────────────────────────────────────────────────────────────────────

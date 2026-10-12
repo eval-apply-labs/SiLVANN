@@ -328,7 +328,9 @@ static sys__heap_node ai_qwen_3__attention_tiered_rows__zzabi_apply(const sys__h
     }
 
     /* ④ while the window is the whole cache — nothing warm or cold yet — the rows attend it at once, causally; past it
-       each row: the window up to its own position, the warm and the cold tiers whole, a residual each, merged */
+       each row the window up to its own position, the warm and the cold tiers whole, a residual each, merged — through
+       nn's many-row residual doors, as many rows a pass as the rows' scores hold (a row at a time in the one-row scores
+       when they hold none) */
     if (n_warm == 0u && n_cold == 0u) {
         doors->attention_causal_scores_grouped((float*)(uintptr_t)at[AI_QWEN_3__AT__ROWS_SCORES], (const uint16_t*)(uintptr_t)qr,
                                                        (const uint16_t*)(uintptr_t)wk, qh, kvh, hd, first_w, T);
@@ -336,26 +338,28 @@ static sys__heap_node ai_qwen_3__attention_tiered_rows__zzabi_apply(const sys__h
         doors->attention_causal_mix((uint16_t*)(uintptr_t)attr, (const float*)(uintptr_t)at[AI_QWEN_3__AT__ROWS_SCORES],
                                     (const uint16_t*)(uintptr_t)wv, qh, kvh, hd, first_w, T, over);
     }
-    for (uint64_t r = 0u; r < T && (n_warm != 0u || n_cold != 0u); ++r) {
-        const uint64_t qrr = qr + 2u * r * qw, len = first_w + r + 1u;
-        doors->attention_weights((float*)(uintptr_t)p, (float*)(uintptr_t)(r0 + r * rw), (const uint16_t*)(uintptr_t)qrr,
-                                 (const uint16_t*)(uintptr_t)wk, qh, kvh, hd, len);
-        doors->attention_residual_mix((float*)(uintptr_t)(r0 + r * rw), (const float*)(uintptr_t)p, (const uint16_t*)(uintptr_t)wv, qh, kvh, hd, len);
-        if (n_warm != 0u) {
-            doors->attention_weights_tq((float*)(uintptr_t)p, (float*)(uintptr_t)(r1 + r * rw), (const uint16_t*)(uintptr_t)qrr,
-                                        (const uint8_t*)(uintptr_t)at[AI_QWEN_3__AT__WARM_KC], (const uint16_t*)(uintptr_t)at[AI_QWEN_3__AT__WARM_KS],
-                                        qh, kvh, hd, n_warm, 8u);
-            doors->attention_residual_mix_tq((float*)(uintptr_t)(r1 + r * rw), (const float*)(uintptr_t)p,
-                                             (const uint8_t*)(uintptr_t)at[AI_QWEN_3__AT__WARM_VC], (const uint16_t*)(uintptr_t)at[AI_QWEN_3__AT__WARM_VS],
-                                             qh, kvh, hd, n_warm, 8u);
-        }
-        if (n_cold != 0u) {
-            doors->attention_weights_tq((float*)(uintptr_t)p, (float*)(uintptr_t)(r2 + r * rw), (const uint16_t*)(uintptr_t)qrr,
-                                        (const uint8_t*)(uintptr_t)at[AI_QWEN_3__AT__COLD_KC], (const uint16_t*)(uintptr_t)at[AI_QWEN_3__AT__COLD_KS],
-                                        qh, kvh, hd, n_cold, 4u);
-            doors->attention_residual_mix_tq((float*)(uintptr_t)(r2 + r * rw), (const float*)(uintptr_t)p,
-                                             (const uint8_t*)(uintptr_t)at[AI_QWEN_3__AT__COLD_VC], (const uint16_t*)(uintptr_t)at[AI_QWEN_3__AT__COLD_VS],
-                                             qh, kvh, hd, n_cold, 4u);
+    for (unsigned part = 0u; part < 3u && (n_warm != 0u || n_cold != 0u); ++part) {
+        const uint64_t span = part == 0u ? window : part == 1u ? n_warm : n_cold;     /* the longest row's, a part */
+        if (span == 0u) continue;
+        const uint64_t fit = room[AI_QWEN_3__AT__ROWS_SCORES] / 4u / (qh * span);
+        const uint64_t per = fit == 0u ? 1u : fit < T ? fit : T, pp = fit == 0u ? p : at[AI_QWEN_3__AT__ROWS_SCORES];
+        const uint64_t into = part == 0u ? r0 : part == 1u ? r1 : r2;
+        const uint64_t kc = at[part == 1u ? AI_QWEN_3__AT__WARM_KC : AI_QWEN_3__AT__COLD_KC], ks = at[part == 1u ? AI_QWEN_3__AT__WARM_KS : AI_QWEN_3__AT__COLD_KS];
+        const uint64_t vc = at[part == 1u ? AI_QWEN_3__AT__WARM_VC : AI_QWEN_3__AT__COLD_VC], vs = at[part == 1u ? AI_QWEN_3__AT__WARM_VS : AI_QWEN_3__AT__COLD_VS];
+        for (uint64_t r = 0u; r < T; r += per) {
+            const uint64_t n = T - r < per ? T - r : per, qrr = qr + 2u * r * qw;
+            if (part == 0u) {
+                doors->attention_weights_rows((float*)(uintptr_t)pp, (float*)(uintptr_t)(into + r * rw), (const uint16_t*)(uintptr_t)qrr,
+                                              (const uint16_t*)(uintptr_t)wk, qh, kvh, hd, first_w + r, n);
+                doors->attention_residual_mix_rows((float*)(uintptr_t)(into + r * rw), (const float*)(uintptr_t)pp,
+                                                   (const uint16_t*)(uintptr_t)wv, qh, kvh, hd, first_w + r, n);
+            } else {
+                const uint64_t bits = part == 1u ? 8u : 4u;
+                doors->attention_weights_tq_rows((float*)(uintptr_t)pp, (float*)(uintptr_t)(into + r * rw), (const uint16_t*)(uintptr_t)qrr,
+                                                 (const uint8_t*)(uintptr_t)kc, (const uint16_t*)(uintptr_t)ks, qh, kvh, hd, span, bits, n);
+                doors->attention_residual_mix_tq_rows((float*)(uintptr_t)(into + r * rw), (const float*)(uintptr_t)pp,
+                                                      (const uint8_t*)(uintptr_t)vc, (const uint16_t*)(uintptr_t)vs, qh, kvh, hd, span, bits, n);
+            }
         }
     }
     if (n_warm != 0u) doors->attention_merge((float*)(uintptr_t)r0, (const float*)(uintptr_t)r0, (const float*)(uintptr_t)r1, T * qh, hd);

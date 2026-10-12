@@ -70,6 +70,7 @@ activations         nn__softmax__apply  nn__sigmoid__apply  nn__swiglu__combine
 a layer's MLP       nn__mlp__apply  nn__mlp__rows — a dense SwiGLU MLP, its norm and its residual, over a plane table
 attention           nn__rope__angles  nn__rope__apply  nn__attention__decode
                     nn__attention__residual  nn__attention__merge  nn__attention__finish
+                    nn__attention__rows — a prompt chunk through a plain grouped-query attention, over a plane table
 deltanet            nn__deltanet__rank_1_update  nn__deltanet__readout  nn__deltanet__conv_step
 turboquant codec    nn__turboquant__decode  nn__turboquant__gemv  nn__turboquant__gemv_int8
 hadamard            nn__hadamard__rotate

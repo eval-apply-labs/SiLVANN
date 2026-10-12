@@ -32,7 +32,9 @@
  *                AS_FLOAT   writes it into `out` as the call's `stamp` in the top half and the value's 32
  *                           bits in the bottom — one store, so the program never sees half an answer.
  *                           ▶ `nn/contracts/objects/result.cuh`.
- *   the body     in `kernels/kernels.cuh`
+ *                BY_ROW     no kernel: the door runs its body on the host, and the body calls the family's own
+ *                           one-row door once a row (▶ the many-row residuals, below the list); its width is `1u, 1u`
+ *   the body     in `kernels/kernels.cuh`, or for BY_ROW below the list
  *   the width    blocks, then threads per block — what `nn__silicon__launch` starts. Threads per block
  *                may not pass `NN__SILICON__LANES_MAX` (256), and the compiler refuses a door that does.
  *                ⛳ THE BLOCKS MAY BE AN EXPRESSION OF THE DOOR'S OWN ARGUMENTS — the columns are pasted
@@ -53,6 +55,7 @@
  */
 
 #include "kernels/kernels.cuh"
+#include "../../sys/contracts/abi/silicon_family.cuh"   /* the family's own tables, which the BY_ROW doors call */
 
 /* One block per item of `n`, and one even when there are none: a launch of no blocks is refused. */
 #define NN__GPU__ZZPRIVATE_ONE_PER(n)  ((n) == 0ull ? 1u : (uint32_t)(n))
@@ -149,6 +152,10 @@
 #define nn__attention__zzabi_launch_causal_softmax__RUNS NN__GPU__ZZPRIVATE_WIDE,     nn__attention__zzabi_body_causal_softmax, NN__GPU__ZZPRIVATE_UP_TO(rows * q_heads, NN__KERNELS__BLOCKS_MAX), 256u, (p, q_heads, first, rows)
 #define nn__vector__zzabi_launch_penalize__RUNS          NN__GPU__ZZPRIVATE_WIDE,     nn__vector__zzabi_body_penalize,          NN__GPU__ZZPRIVATE_EACH(count), 256u, (x, n, ids, stride, count, penalty, over)
 #define nn__vector__zzabi_launch_draw__RUNS              NN__GPU__ZZPRIVATE_AS_INT,   nn__vector__zzabi_body_draw,              1u, 1u, (out, stamp, w, k, top_p, seed, pos)
+#define nn__attention__zzabi_launch_weights_rows__RUNS   NN__GPU__ZZPRIVATE_BY_ROW,   nn__attention__zzprivate_weights_by_row,  1u, 1u, (p, res, q, k, q_heads, kv_heads, head_dim, first, rows)
+#define nn__attention__zzabi_launch_residual_mix_rows__RUNS NN__GPU__ZZPRIVATE_BY_ROW, nn__attention__zzprivate_residual_mix_by_row, 1u, 1u, (res, p, v, q_heads, kv_heads, head_dim, first, rows)
+#define nn__attention__zzabi_launch_weights_tq_rows__RUNS NN__GPU__ZZPRIVATE_BY_ROW,  nn__attention__zzprivate_weights_tq_by_row, 1u, 1u, (p, res, q, codes, scales, q_heads, kv_heads, head_dim, length, d, rows)
+#define nn__attention__zzabi_launch_residual_mix_tq_rows__RUNS NN__GPU__ZZPRIVATE_BY_ROW, nn__attention__zzprivate_residual_mix_tq_by_row, 1u, 1u, (res, p, codes, scales, q_heads, kv_heads, head_dim, length, d, rows)
 
 /* ── EVERY ROW BECOMES A KERNEL AND A DOOR ─────────────────────────────────────────────────────────────── */
 /* ⛳ A SERIAL BODY RUNS ON ONE LANE OF ONE BLOCK, so PLAIN sends every other lane home first; a WIDE body
@@ -248,7 +255,7 @@
 #define NN__GPU__ZZPRIVATE_ADDRESS(FN)  ((const void*)0)
 #endif
 #ifndef SYS__SILICON_FAMILY__RUNS_ON_HOST_THREADS
-#define NN__GPU__ZZPRIVATE_EMIT(FN, PARAMS, FORM, BODY, BLOCKS, THREADS, NAMES)                            \
+#define NN__GPU__ZZPRIVATE_LAUNCHED(FN, PARAMS, FORM, BODY, BLOCKS, THREADS, NAMES)                        \
     static_assert((THREADS) >= 1u && (THREADS) <= NN__SILICON__LANES_MAX,                                   \
                   #FN " starts more lanes in a block than every family can run");                          \
     NN__GPU__ZZPRIVATE_KERNEL(FN, PARAMS, FORM, BODY, NAMES)                                                \
@@ -307,7 +314,7 @@
                            NN__GPU__ZZPRIVATE_L4, NN__GPU__ZZPRIVATE_L3, NN__GPU__ZZPRIVATE_L2,             \
                            NN__GPU__ZZPRIVATE_L1)(__VA_ARGS__)
 #define NN__GPU__ZZPRIVATE_UNPAREN(...)  __VA_ARGS__
-#define NN__GPU__ZZPRIVATE_EMIT(FN, PARAMS, FORM, BODY, BLOCKS, THREADS, NAMES)                            \
+#define NN__GPU__ZZPRIVATE_LAUNCHED(FN, PARAMS, FORM, BODY, BLOCKS, THREADS, NAMES)                        \
     static_assert((THREADS) >= 1u && (THREADS) <= NN__SILICON__LANES_MAX,                                   \
                   #FN " starts more lanes in a block than every family can run");                          \
     struct FN##__args { NN__GPU__ZZPRIVATE_FIELDS PARAMS };                                                 \
@@ -323,6 +330,63 @@
         nn__silicon__launch((const void*)FN##__block, #FN "__block", BLOCKS, THREADS, args, sizes, 1u);     \
     }
 #endif
+/* ⛳ THE FORM SAYS HOW A ROW'S DOOR IS MADE: the four that run a body on the card, as a kernel the door launches;
+ *   BY_ROW, as a door that calls its body on the host and launches nothing of its own. */
+#define NN__GPU__ZZPRIVATE_EMIT(FN, PARAMS, FORM, BODY, BLOCKS, THREADS, NAMES)                            \
+    FORM##__EMIT(FN, PARAMS, FORM, BODY, BLOCKS, THREADS, NAMES)
+#define NN__GPU__ZZPRIVATE_WIDE__EMIT      NN__GPU__ZZPRIVATE_LAUNCHED
+#define NN__GPU__ZZPRIVATE_PLAIN__EMIT     NN__GPU__ZZPRIVATE_LAUNCHED
+#define NN__GPU__ZZPRIVATE_AS_INT__EMIT    NN__GPU__ZZPRIVATE_LAUNCHED
+#define NN__GPU__ZZPRIVATE_AS_FLOAT__EMIT  NN__GPU__ZZPRIVATE_LAUNCHED
+#define NN__GPU__ZZPRIVATE_BY_ROW__EMIT(FN, PARAMS, FORM, BODY, BLOCKS, THREADS, NAMES)                    \
+    void FN PARAMS { BODY NAMES; }
+
+/* ── ⭐ THE MANY-ROW RESIDUALS: THE FAMILY'S ONE-ROW DOOR, A ROW AT A TIME ─────────────────────────────────────────
+ * nn's definition of `attention_weights_rows` and the three beside it is their one-row door run once a row: row `r`'s
+ * query at `q + r · q_heads · head_dim`, its residual at `res + r · q_heads · (head_dim + 2)`, its weights at
+ * `p + r · q_heads · span`, laid out there as the one-row door lays them — `span` the longest row's length, `first + rows`
+ * over the window (row `r` scores `first + r + 1` positions) and `length` over a TurboQuant tier (every row all of it).
+ * So a family that has no many-row kernel of its own runs, through these, the launches and the bits a position at a time
+ * runs; one that has answers the door with its own launch and the same bits a row. Each calls the family's own table
+ * (`sys__silicon__own_doors`), where a door the family overrides is its own. */
+static inline const nn__doors* nn__attention__zzprivate_own(void) {
+    return (const nn__doors*)sys__silicon__own_doors(nn_pkg_id);
+}
+static void nn__attention__zzprivate_weights_by_row(float* p, float* res, const uint16_t* q, const uint16_t* k, uint64_t q_heads,
+                                                    uint64_t kv_heads, uint64_t head_dim, uint64_t first, uint64_t rows) {
+    const nn__doors* doors = nn__attention__zzprivate_own();
+    const uint64_t span = first + rows, rf = NN__ATTENTION__RESIDUAL_FLOATS(head_dim);
+    for (uint64_t r = 0u; r < rows; ++r)
+        doors->attention_weights(p + r * q_heads * span, res + r * q_heads * rf, q + r * q_heads * head_dim, k, q_heads,
+                                 kv_heads, head_dim, first + r + 1u);
+}
+static void nn__attention__zzprivate_residual_mix_by_row(float* res, const float* p, const uint16_t* v, uint64_t q_heads,
+                                                         uint64_t kv_heads, uint64_t head_dim, uint64_t first, uint64_t rows) {
+    const nn__doors* doors = nn__attention__zzprivate_own();
+    const uint64_t span = first + rows, rf = NN__ATTENTION__RESIDUAL_FLOATS(head_dim);
+    for (uint64_t r = 0u; r < rows; ++r)
+        doors->attention_residual_mix(res + r * q_heads * rf, p + r * q_heads * span, v, q_heads, kv_heads, head_dim,
+                                      first + r + 1u);
+}
+static void nn__attention__zzprivate_weights_tq_by_row(float* p, float* res, const uint16_t* q, const uint8_t* codes,
+                                                       const uint16_t* scales, uint64_t q_heads, uint64_t kv_heads,
+                                                       uint64_t head_dim, uint64_t length, uint64_t d, uint64_t rows) {
+    const nn__doors* doors = nn__attention__zzprivate_own();
+    const uint64_t rf = NN__ATTENTION__RESIDUAL_FLOATS(head_dim);
+    for (uint64_t r = 0u; r < rows; ++r)
+        doors->attention_weights_tq(p + r * q_heads * length, res + r * q_heads * rf, q + r * q_heads * head_dim, codes, scales,
+                                    q_heads, kv_heads, head_dim, length, d);
+}
+static void nn__attention__zzprivate_residual_mix_tq_by_row(float* res, const float* p, const uint8_t* codes, const uint16_t* scales,
+                                                            uint64_t q_heads, uint64_t kv_heads, uint64_t head_dim, uint64_t length,
+                                                            uint64_t d, uint64_t rows) {
+    const nn__doors* doors = nn__attention__zzprivate_own();
+    const uint64_t rf = NN__ATTENTION__RESIDUAL_FLOATS(head_dim);
+    for (uint64_t r = 0u; r < rows; ++r)
+        doors->attention_residual_mix_tq(res + r * q_heads * rf, p + r * q_heads * length, codes, scales, q_heads, kv_heads,
+                                         head_dim, length, d);
+}
+
 extern "C" {
 nn__CONTRACT__DOORS(NN__GPU__ZZPRIVATE_ROW, nn)
 }

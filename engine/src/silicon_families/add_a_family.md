@@ -42,6 +42,12 @@ of its definitions as `zzabi_` functions (nn's: `nn__turboquant__zzabi_levels`, 
 `v_dot2_f32_f16`, the exact one at 8 bits too, and the rotation as a butterfly through wave shuffles) while its
 primitives still sit at the family's root.
 
+Where nn gives a door a one-row and a many-row form that agree to the bit (`test/src_abi_verbs_on_device.cpp` names
+them), a family that overrides one form with its own arithmetic overrides the other with the same. nn's many-row
+residual doors (`attention_weights_rows`, `attention_residual_mix_rows` and their TurboQuant pair) keep it for
+every family by their definition — the family's own one-row door, a row at a time, through its own table
+(`sys__silicon__own_doors`) — so a family need only override them to run a chunk's rows in one launch.
+
 ⛳ A FAMILY WHOSE BLOCKS ARE THREADS OF THIS PROCESS — the CPU — defines
 `SYS__SILICON_FAMILY__RUNS_ON_HOST_THREADS` in its `unit.cuh`. nn then compiles no kernel: each door packs
 its arguments into a struct and hands the launch a block function, which the family's pool runs once for

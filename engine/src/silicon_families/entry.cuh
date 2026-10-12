@@ -37,6 +37,12 @@ static const void* const silicon_families__zzprivate_package_doors[] = {
 };
 #undef SILICON_FAMILIES__ZZPRIVATE_DOOR_SLOT
 
+/* ⭐ AND EACH TABLE AS THE FAMILY'S OWN DOORS READ IT (▶ `sys__silicon__own_doors`): the same tables, from inside —
+ * by the time a door runs, the program has asked for the family and its overrides are in them. */
+static inline const void* sys__silicon__own_doors(uint64_t package) {
+    return package < (uint64_t)package_count ? silicon_families__zzprivate_package_doors[package] : 0;
+}
+
 #define SILICON_FAMILIES__ZZPRIVATE_TEXT2(T)  #T
 #define SILICON_FAMILIES__ZZPRIVATE_TEXT(T)   SILICON_FAMILIES__ZZPRIVATE_TEXT2(T)
 static const sys__silicon_family silicon_families__zzprivate_this = {

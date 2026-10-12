@@ -242,6 +242,9 @@
     /* ⭐ A DENSE MLP, ITS NORM AND ITS RESIDUAL, OVER A PLANE TABLE — a position, and a prompt's rows. A model's MLP     */ \
     /* site when it is SwiGLU behind an RMS norm: Qwen's dense models and Ministral. ▶ `cpu/opcodes/mlp__abi.cuh`.     */ \
     X(PKG, 66, "nn__mlp__apply",      nn__mlp__zzabi_adapter,                      NN__MLP__APPLY) \
-    X(PKG, 67, "nn__mlp__rows",       nn__mlp__zzabi_adapter_rows,                 NN__MLP__ROWS)
+    X(PKG, 67, "nn__mlp__rows",       nn__mlp__zzabi_adapter_rows,                 NN__MLP__ROWS) \
+    /* ⭐ A PROMPT'S ROWS THROUGH A GROUPED-QUERY ATTENTION, ITS NORM AND ITS RESIDUAL, OVER A PLANE TABLE — the many-row    */ \
+    /* form of a plain attention's one-position words: Ministral's. ▶ `cpu/opcodes/attention__abi.cuh`.                */ \
+    X(PKG, 68, "nn__attention__rows", nn__attention__zzabi_adapter_rows,           NN__ATTENTION__ROWS)
 
 #endif /* SILVANN__PACKAGES_NN_CONTRACTS_MACROS_LANGUAGE_CONTRACT__VERBS_CUH */

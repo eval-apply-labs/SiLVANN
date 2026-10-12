@@ -1,20 +1,27 @@
 ;; MINISTRAL 3 — Mistral's dense models (the 14B; the 8B and 3B are the same shape), as nn's own words.
 ;;
 ;; A layer is grouped-query attention and a SwiGLU MLP, each behind an RMS norm with a plain gain: no package of its own.
-;; A token is `(begin (position at len qs) (head))` — its byte offset in the cache rows, the positions so far, and the
-;; queries' scale — with its embedding row and its rotary angles written by the host first (▶ mistral3.py: YaRN's
-;; frequencies and Llama 4's query scale are worked out there).
+;; A token is `(begin (position tok pos) (head))` — its row of the embedding, a table in RAM the card reads in place, its
+;; angles a row of two tables the boot writes (▶ mistral3.py: YaRN's frequencies and Llama 4's query scale are worked out
+;; there, the scale folded into the queries' table), and every layer — and an answer is `(generate tok pos n …)`
+;; (▶ generate.lisp), that a token at a time until an end token, on the card. A prompt runs as rows, each layer once over a
+;; chunk of them, nn's attention and MLP words: `(begin (embed_rows n) (rows first n))`.
 ;;
 ;; What the boot binds before this file is read (▶ mistral3.py `_bindings`):
 ;;   the shape       HIDDEN INTER EPS VOCAB RUN Q_HEADS KV_HEADS HEAD_DIM Q_WIDTH KV_WIDTH
-;;                   EMB_HALVES EMB_BITS · HEAD_CODES HEAD_SCALES HEAD_BITS
+;;                   EMBEDDING EMB_HALVES EMB_SCALES EMB_BITS — the embedding table in RAM: every token's row, a row's
+;;                   halves, where the scales begin, the rows' width · HEAD_CODES HEAD_SCALES HEAD_BITS
+;;                   CS_K CS_Q CS_HALVES — a position's cosines then sines, fp32, a row each position: the keys', and the
+;;                   queries' with their scale in them; a row's halves
+;;                   OUT STOP STOPS SEEN — `generate`'s (▶ generate.lisp)
 ;;                   KV_TYPE KEYS_AT VALUES_AT KV_ROW_BYTES CACHE_BYTES — the cache, a slot a layer: its keys in the up
 ;;                   half, its values in the down, [position][kv head][head dim] in halves
 ;;                   Q_BITS K_BITS V_BITS O_BITS GATE_BITS UP_BITS DOWN_BITS — a matrix's width, the same in every layer
 ;;   the settings    MLP_WORDS — true where the pack keeps one of the MLP's matrices in halves
 ;;   a layer each    arrays indexed by the layer's place in RUN: LAYER (its number), INPUT_NORM, POST_NORM, each matrix's
-;;                   two planes — Q_CODES Q_SCALES, K_…, V_…, O_…, GATE_…, UP_…, DOWN_… — and MLP (its MLP's table, nn's)
-;;   the buffers     x h1 u hu h hr y hn hnr qq kk att attr g up gr cs scores emb_codes emb_scales logits_h res
+;;                   two planes — Q_CODES Q_SCALES, K_…, V_…, O_…, GATE_…, UP_…, DOWN_… — MLP (its MLP's table, nn's) and,
+;;                   where a prompt runs as rows, ATTENTION (its attention's table, nn's)
+;;   the buffers     x h1 u hu h hr y hn hnr qq kk att attr g up gr scores logits_h res · a chunk's xs h1s and PROMPT
 
 
 ;; out = W·x for one matrix: its input rotated, as the pack rotated its columns; one kept in halves multiplied as it is
@@ -30,13 +37,26 @@
   (nn__expert__plane l KV_TYPE 0 (+ half at) KV_ROW_BYTES))
 
 
-;; ── the token's row, un-rotated (Rᵀu = S ⊙ H·u), into the residual ─────────────────────────────────────────────────
-(defun (embed codes scale)
-  (begin (nn__turboquant__decode (nn__vector__range emb_codes codes EMB_HALVES) (nn__vector__range emb_scales scale 1)
-                                 u 1 HIDDEN EMB_BITS)
+;; ── the token's row of the embedding, un-rotated (Rᵀu = S ⊙ H·u), into the residual ───────────────────────────────
+;; EMBEDDING is a table in RAM the card reads a row of in place: every token's packed row (EMB_HALVES halves each), then
+;; every token's scale from EMB_SCALES on — only a row crosses.
+(defun (embed_into tok into)
+  (begin (nn__turboquant__decode (nn__vector__range EMBEDDING (* tok EMB_HALVES) EMB_HALVES)
+                                 (nn__vector__range EMBEDDING (+ EMB_SCALES tok) 1) u 1 HIDDEN EMB_BITS)
          (nn__hadamard__rotate u ones512 hu HIDDEN)
-         (nn__vector__pointwise_mul hu signs_row x HIDDEN)
+         (nn__vector__pointwise_mul hu signs_row into HIDDEN)
          (type x)))
+
+(defun (embed tok)
+  (embed_into tok x))
+
+;; a prompt's `n` tokens, PROMPT's first `n`, a row of xs each
+(defun (embed_rows n)
+  (let ((i 0) (at 0))
+    (while '(< i n)
+           '(begin (embed_into (nth PROMPT i) (nn__vector__range xs at HIDDEN))
+                   (set! at (+ at HIDDEN)) (set! i (+ i 1))))
+    (type xs)))
 
 
 ;; ── a layer ─────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -55,17 +75,17 @@
     (defun (mlp i)
       (nn__mlp__apply h1 (nth MLP i) x)))
 
-(defun (layer i at len qs)
+(defun (layer i at len csq csk)
   (let ((l (nth LAYER i)))
-    ;; attention: q k v — v straight into its cache row — RoPE on q, and on k into its cache row, then every position
+    ;; attention: q k v — v straight into its cache row — RoPE on q (its angles carry the queries' scale), and on k into
+    ;; its cache row, then every position
     (nn__rmsnorm__apply x (nth INPUT_NORM i) h HIDDEN EPS)
     (nn__hadamard__rotate h signs hr HIDDEN)
     (project (nth Q_CODES i) (nth Q_SCALES i) Q_BITS hr qq Q_WIDTH HIDDEN)
-    (nn__vector__scale qq qs qq Q_WIDTH)
     (project (nth K_CODES i) (nth K_SCALES i) K_BITS hr kk KV_WIDTH HIDDEN)
     (project (nth V_CODES i) (nth V_SCALES i) V_BITS hr (cache_row l VALUES_AT at) KV_WIDTH HIDDEN)
-    (nn__rope__apply qq cs qq Q_HEADS HEAD_DIM)
-    (nn__rope__apply kk cs (cache_row l KEYS_AT at) KV_HEADS HEAD_DIM)
+    (nn__rope__apply qq csq qq Q_HEADS HEAD_DIM)
+    (nn__rope__apply kk csk (cache_row l KEYS_AT at) KV_HEADS HEAD_DIM)
     (nn__attention__decode qq (cache l KEYS_AT) (cache l VALUES_AT) scores att Q_HEADS KV_HEADS HEAD_DIM 0 len)
     (nn__hadamard__rotate att signs attr Q_WIDTH)
     (project (nth O_CODES i) (nth O_SCALES i) O_BITS attr y HIDDEN Q_WIDTH)
@@ -73,13 +93,26 @@
     (mlp i)
     (type x)))
 
-(defun (layers at len qs)
+(defun (layers at len csq csk)
   (let ((i 0))
-    (while '(< i RUN) '(begin (layer i at len qs) (set! i (+ i 1))))
+    (while '(< i RUN) '(begin (layer i at len csq csk) (set! i (+ i 1))))
     (type x)))
 
-(defun (position at len qs)
-  (begin (embed 0 0) (layers at len qs)))
+;; a prompt's rows `first .. first + n`, PROMPT's tokens embedded in xs: each layer once over all of them — nn's attention
+;; word, its keys and values into the cache at their positions, then nn's MLP word — the rows back in xs
+(defun (rows first n)
+  (let ((i 0))
+    (while '(< i RUN)
+           '(begin (nn__attention__rows xs (nth ATTENTION i) first h1s n)
+                   (nn__mlp__rows h1s (nth MLP i) xs n)
+                   (set! i (+ i 1))))
+    (type xs)))
+
+;; a token's position: its embedding, its rows of the angles, every layer — its cache rows `pos` rows in
+(defun (position tok pos)
+  (begin (embed tok)
+         (layers (* pos KV_ROW_BYTES) (+ pos 1) (nn__vector__range CS_Q (* pos CS_HALVES) CS_HALVES)
+                 (nn__vector__range CS_K (* pos CS_HALVES) CS_HALVES))))
 
 
 ;; ── the head ────────────────────────────────────────────────────────────────────────────────────────────────────────

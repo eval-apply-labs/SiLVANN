@@ -58,4 +58,12 @@ typedef struct sys__silicon_family {
  * null otherwise. */
 typedef const sys__silicon_family* (*sys__silicon_family__get)(uint32_t abi_version);
 
+/* ⭐ A FAMILY'S OWN TABLE FOR ONE PACKAGE, READ FROM INSIDE THE FAMILY — what a package's door calls when it is written
+ * as other doors of the same family (nn's many-row residuals, a row at a time through the family's one-row door): the
+ * table this family hands out, its overrides in it. Defined once for every family, by `silicon_families/entry.cuh`; the
+ * program reads a family's tables through the exported symbol instead. */
+#ifndef __OPENCL_C_VERSION__
+static inline const void* sys__silicon__own_doors(uint64_t package);
+#endif
+
 #endif /* SILVANN__PACKAGES_SYS_CONTRACTS_ABI_SILICON_FAMILY_CUH */
