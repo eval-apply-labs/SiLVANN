@@ -58,9 +58,10 @@ class Machine:
         #   starts; a value the user set stays.
         os.environ.setdefault("HIP_FORCE_DEV_KERNARG", "1")
         self.e = importlib.import_module("silvann_engine_" + engine)
-        # a card if any family drives one — its vendor's own first, then OpenCL — else the CPU's own cores. x86_avx2
-        # counts no devices on a CPU without AVX2, which leaves the portable host family
-        for family in ("amd_rocm6_wave64", "nvidia_cuda12", "khronos_opencl2", "x86_avx2"):
+        # a card if any family drives one — its vendor's own first, then OpenCL 2.0, then 1.2 — else the CPU's own
+        # cores. x86_avx2 counts no devices on a CPU without AVX2; the host family then runs the language but answers
+        # none of nn's doors, so a model's first verb refuses with "NPND"
+        for family in ("amd_rocm6_wave64", "nvidia_cuda12", "khronos_opencl2", "khronos_opencl1_igpu", "x86_avx2"):
             if silicon is None and self.e.devices(family) > 0:
                 silicon = family
         if silicon is not None:

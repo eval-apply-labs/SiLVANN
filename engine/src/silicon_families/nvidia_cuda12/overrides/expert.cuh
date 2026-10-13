@@ -24,8 +24,8 @@
  *     its columns in any order; what can differ is where the fp32 sum rounds.
  * The tile is 128 matrix rows by 64 pairs for a matrix many rows read (a dense projection over a chunk), by 32 or by 16
  * for the few rows each routed expert gets. Covers 4 and 8 bits over whole slices of 64 columns, codes on 8 bytes and `x`
- * on 4; anything else is the generic door. A row of `out` is written by the one lane holding its sum, so two pairs of one
- * call naming the same out row would race in the weighted sum — the MoE's downs never do: a pick's row is its own.
+ * on 4; anything else is the generic door. A row of `out` is written by the one lane holding its sum: nn's contract has a
+ * call's pairs name distinct out rows (the MoE's down: a pick's row is its own), so the weighted sum needs no guard.
  * ⛳ THE BARRIERS are the tile's own: the block waits once the levels are staged, once a slice has landed, and once more
  *   before the slice after next overwrites it — the lanes of one launch waiting for each other, as the family's fold does. */
 #define NVIDIA_CUDA12__ZZPRIVATE_KT      64u                               /* columns a slice */

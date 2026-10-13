@@ -8,9 +8,10 @@ table of machines is drawn from this page. The NVIDIA section's machine is a des
 **How it is measured.** On the card: a prompt of about 2,000 positions, then 32-64 tokens. With the experts on the
 CPU: about 1,000 positions, then 128 tokens (32 in GLM's earlier rows). "All in RAM" means every expert is already in
 memory; the other rows start cold, under the memory limit shown, with the expert files dropped from the operating
-system's cache first. The answer's rate is measured after the prompt, from its 10th token on. The rows with a model
-entirely on one MI50, and the 35B's and the 122B D4E4's with the experts on the CPU all in RAM, are v0.4.0's; the others
-were measured with v0.3's card kernels, and where a card does part of the work they are a floor.
+system's cache first. The answer's rate is measured after the prompt, from its 10th token on. The 27B's prompt on one
+MI50 and its row through OpenCL are v0.5.1's; the other rows with a model entirely on one MI50, and the 35B's and the
+122B D4E4's with the experts on the CPU all in RAM, are v0.4.0's; the others were measured with v0.3's card kernels, and
+where a card does part of the work they are a floor.
 
 ## How good each pack is: perplexity
 
@@ -59,8 +60,8 @@ scores 8.962 exact and 8.963 with `experts_int8`.
 
 | Where it runs | Prompt | Answer |
 |---|---|---|
-| one MI50 | 96 positions/s | 30.5 tokens/s (34 on a short prompt) |
-| one MI50 through OpenCL | 48.7 positions/s | 9.3 tokens/s (11.2 on a short prompt) |
+| one MI50 | 101 positions/s | 30.5 tokens/s (34 on a short prompt) |
+| one MI50 through OpenCL | 52.5 positions/s | 10.4 tokens/s (13.1 on a short prompt) |
 | three stages over machines (pipeline parallel) | — | 6.8 tokens/s, the same tokens |
 
 ## Ministral 3 14B
@@ -141,14 +142,23 @@ its 10th token on, and on a short prompt from the check against Hugging Face's a
 | Qwen 3.6 35B-A3B `D8E4` | the same, 8 GB of the card the tier of experts | 117 positions/s | 51.9 tokens/s |
 | Qwen 3.6 35B-A3B `D8E4` | the CPU alone | 20.8 positions/s | 8.6 tokens/s (9.0) |
 | Qwen 3.6 35B-A3B `D8E4` | the CPU alone with AVX2 (`SILVANN_CPU_AVX512=0`) | — | 1.7 tokens/s on a short prompt |
+| Qwen 3.5 122B-A10B `D4E4` | the dense part on the card, the experts on the CPU, read from the disk, 32 GB of RAM | 19.0 positions/s | 8.2 tokens/s — 87% from memory |
+| GLM 5.3 Flash `D8E4` | the same, 60 GB of RAM | 10.0 positions/s | 3.0 tokens/s — 80% from memory |
+| GLM 5.3 Flash `D8E4` | the same, 32 GB of RAM | 10.6 positions/s | 2.3 tokens/s — 65% from memory |
 
-Against one MI50 the 27B reads a prompt 5.7 times as fast here (549 positions a second against 96) — the card's tensor
+Against one MI50 the 27B reads a prompt 5.4 times as fast here (549 positions a second against 101) — the card's tensor
 cores run the prompt's matrix products — and answers more slowly (23.6 tokens a second against 30.5): a token reads every
 weight once, so the answer follows the memory's speed, 448 GB/s here against the MI50's 1,024. With the experts on the
 CPU the four cores are what limits the 35B (55 positions a second against the R730's 83, whose 28 cores read the
 experts). The tier run is one run: which experts the card holds follows when its copies land, so it varies from
 run to run. Before v0.5.0's kernels, through the library's generic ones, the 27B read a prompt at 19 positions a second
 and answered at 7.8 tokens a second; Ministral `D4` read its prompt a position at a time at 34.
+
+The three rows with the disk were measured with v0.5.1, as the R730's were: a prompt of about 1,000 positions from a cold
+start, then 128 tokens, the process held to the RAM it names, the experts read from an NVMe disk reading 5 GB/s.
+Holding the disk to 5 GB/s changed neither model's answer rate; holding it to 2.5 GB/s slowed GLM's by 16% and the
+122B's prompt by 25%. GLM's answer here is limited by reading its experts from RAM: the two channels give the four
+cores at most 36 GB/s, and its rate follows that bandwidth from one core to four.
 
 ## What limits the experts on the disk: the drive
 
@@ -179,10 +189,12 @@ sustains 2.5 GB/s serves it with room to spare.
 a pause; past 75 °C it throttles and holds a steady 2.4 GB/s, less than the 2.6 GB/s disk. A sustained read is what
 GLM with 64 GB does for its whole answer, which is the row marked ‡ above. Give an NVMe drive air on the side that carries its controller.
 
-Projected, not yet measured: with the disk holding 5 GB/s, GLM with 64 GB should answer about **2.5 tokens a
+Projected from the R730's rows: with the disk holding 5 GB/s, GLM with 64 GB should answer about **2.5 tokens a
 second**. A token there is ~270 ms of computing plus its wait on reads, and the wait scales with the bytes read over
 the drive's rate — fitted on the two 64 GB rows above, and checked against the 128 GB row, which it reproduces. Past
-about 5 GB/s the computing dominates: 6 GB/s gives ~2.65, and a disk that took no time at all ~3.7.
+about 5 GB/s the computing dominates: 6 GB/s gives ~2.65, and a disk that took no time at all ~3.7. Measured since on
+another machine (an RTX 5060 Ti, a four-core Xeon, ▶ above): with 60 GB and a 5 GB/s disk GLM answers at **3.0 tokens a
+second**, and holding that disk to 2.5 GB/s costs it 16% — past 5 GB/s the computing dominates there too.
 
 ## How much memory a model needs
 

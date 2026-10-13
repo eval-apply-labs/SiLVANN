@@ -132,6 +132,9 @@ class Ministral3(Generates):
             return data, lut, NL.SlotPlan(len(data), 0, 0, len(lut))
         self.head_data, self.head_lut, self.HPLAN = plan_of(self.head_rec)
         self.emb_data, self.emb_lut, self.BPLAN = plan_of(self.emb_rec)
+        # what the program reads of the two tables once the engine holds them and this program does not
+        self.EMB_ROW_BYTES, self.EMB_BITS = int(self.emb_rec["row_bytes"]), int(self.emb_rec["d"])
+        self.EMB_DATA_BYTES, self.HEAD_BITS = len(self.emb_data), int(self.head_rec["d"])
         self.TABLE_BYTES = (len(self.emb_data) + len(self.emb_lut) + 255) // 256 * 256      # the rows, then the scales
         # the cache, a slot a layer: its keys in the up half, its values in the down
         kv = self.max_context * self.KVW * 2
@@ -177,6 +180,7 @@ class Ministral3(Generates):
     def load(self, progress=None):
         m, b = self.m, self.b
         loader = m.loader()
+        self._head_and_embedding(loader)
         self.kv_at = {}
         for i, l in enumerate(self.run_layers):
             for t in sorted({self.TYPE[n] for n in b.names(l)}):
@@ -188,13 +192,31 @@ class Ministral3(Generates):
             loader.assign(l, self.T_KV, 0, self.kv_at[l])
             if progress:
                 progress(i + 1, len(self.run_layers))
-        loader.layer_width(0, self.T_HEAD, 1)
-        loader.load_bytes(self.HPLAN, self.T_HEAD, 0, self.head_data, self.head_lut)
         if loader.handed() != 0:
             raise Refused("%d slots were reserved and never published" % loader.handed())
         self._buffers()
         self._bindings()
         m.define_programs(self._procedures)
+        self.global_ = None                         # what was left of global.pkl, read by the buffers
+
+    def _head_and_embedding(self, loader):
+        """The head into its slot and the embedding into its RAM buffer, before any layer — then the program lets go of
+        its own copies of them: global.pkl's two records and the bytes made of them. The layers then load beside the
+        engine's copy alone, so the load holds one tensor at a time above the model, not the two tables.
+        ⛳ THE HEAD HAS A COLLECTION OF ITS OWN AND THE EMBEDDING IS THE ONE RAM BUFFER, so neither comes first at another
+          slot's or buffer's expense: every address is what it was with the tables loaded last.
+        `MEASURED` (▶ measurements/2026-10-13_cpu_without_avx2.md): every slot and buffer at its offset on the 14B, the 27B,
+        the 35B and GLM; the 14B through x86_avx2 holds 7.36 GB after its load, against 9.98, and peaks at 7.38, against 10.58."""
+        m = self.m
+        loader.layer_width(0, self.T_HEAD, 1)
+        loader.load_bytes(self.HPLAN, self.T_HEAD, 0, self.head_data, self.head_lut)
+        self.EMB_AT = m.buffer(self.TABLE_BYTES, "EMBEDDING", ram=True)
+        m.write(self.EMB_AT, self.emb_data)
+        m.write(self.EMB_AT + self.EMB_DATA_BYTES, self.emb_lut)
+        for name in ("lm_head.weight", "model.language_model.embed_tokens.weight"):
+            del self.global_[name]
+        self.head_rec = self.emb_rec = None
+        self.head_data = self.head_lut = self.emb_data = self.emb_lut = None
 
     def _buffers(self):
         m, H = self.m, self.H
@@ -233,9 +255,6 @@ class Ministral3(Generates):
         m.buffer(self.max_context * self.AH * 4, "CS_K", b"".join(keys))
         m.buffer(self.max_context * self.AH * 4, "CS_Q", b"".join(queries))
         m.buffer(self.QH * self.max_context * 4, "scores")
-        self.EMB_AT = m.buffer(self.TABLE_BYTES, "EMBEDDING", ram=True)
-        m.write(self.EMB_AT, self.emb_data)
-        m.write(self.EMB_AT + len(self.emb_data), self.emb_lut)
         self._answer_buffers()                      # what `generate` made, the end tokens it watches for
         self.LOGITS_AT = m.buffer(self.VOCAB * 2, "logits_h")
         m.buffer(64, "res")
@@ -258,10 +277,10 @@ class Ministral3(Generates):
         head = lambda at, size: "(nn__expert__plane 0 %d 0 %d %d)" % (self.T_HEAD, at, size)
         values = dict(HIDDEN=H, INTER=self.INTER, EPS=self.EPS, VOCAB=self.VOCAB, RUN=len(run), Q_HEADS=self.QH,
                       KV_HEADS=self.KVH, HEAD_DIM=self.AH, Q_WIDTH=self.QW, KV_WIDTH=self.KVW,
-                      EMB_HALVES=int(self.emb_rec["row_bytes"]) // 2, EMB_SCALES=len(self.emb_data) // 2,
-                      EMB_BITS=int(self.emb_rec["d"]), CS_HALVES=self.AH * 2, STOPS=0, SEEN=sampling.SEEN,
+                      EMB_HALVES=self.EMB_ROW_BYTES // 2, EMB_SCALES=self.EMB_DATA_BYTES // 2,
+                      EMB_BITS=self.EMB_BITS, CS_HALVES=self.AH * 2, STOPS=0, SEEN=sampling.SEEN,
                       HEAD_CODES=head(self.HPLAN.at_up_data, self.HPLAN.up_data),
-                      HEAD_SCALES=head(self.HPLAN.at_down_lut, self.HPLAN.down_lut), HEAD_BITS=int(self.head_rec["d"]),
+                      HEAD_SCALES=head(self.HPLAN.at_down_lut, self.HPLAN.down_lut), HEAD_BITS=self.HEAD_BITS,
                       KV_TYPE=self.T_KV, KEYS_AT=self.KVPLAN.at_up_data, VALUES_AT=self.KVPLAN.at_down_data,
                       KV_ROW_BYTES=self.KVW * 2, CACHE_BYTES=self.max_context * self.KVW * 2)
         for short, n in self.MATRICES:

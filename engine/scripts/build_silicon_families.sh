@@ -116,6 +116,22 @@ for P in $(echo "${SILVANN_SILICON_FAMILIES:-$ALL}" | tr ',' ' '); do
             > "$OUT/khronos_opencl2.log" 2>&1 \
             || { echo "⛔ khronos_opencl2:"; grep -m10 error "$OUT/khronos_opencl2.log"; }
         built khronos_opencl2 "$OUT/libsilvann_khronos_opencl2.so" ;;
+    khronos_opencl1_igpu)
+        # ⛳ AS khronos_opencl2, NO CARD COMPILER — the kernels are OpenCL C 1.2, every pointer's space worked out by the
+        #   generator — and against whichever OpenCL headers and loader the box has: ROCm's, else the system's.
+        CLINC=${SILVANN_OPENCL_INCLUDE:-$([ -f /opt/rocm/include/CL/cl.h ] && echo /opt/rocm/include || echo /usr/include)}
+        CLLIB=${SILVANN_OPENCL_LIB:-$([ -d /opt/rocm/lib ] && echo /opt/rocm/lib || echo /usr/lib/x86_64-linux-gnu)}
+        [ -f "$CLINC/CL/cl.h" ] || { echo "⛔ khronos_opencl1_igpu: no CL/cl.h under $CLINC (set SILVANN_OPENCL_INCLUDE)"; FAILED=1; continue; }
+        python3 scripts/opencl1_kernel_source.py "$OUT/khronos_opencl1_igpu_kernels.cpp" \
+            || { echo "⛔ khronos_opencl1_igpu: nn's kernels would not become OpenCL C 1.2"; FAILED=1; continue; }
+        tu khronos_opencl1_igpu > "$OUT/khronos_opencl1_igpu.cpp"
+        rm -f "$OUT/libsilvann_khronos_opencl1_igpu.so"
+        g++ -O2 -std=c++17 -fPIC -shared -fvisibility=hidden -I src -I "$CLINC" \
+            "$OUT/khronos_opencl1_igpu.cpp" "$OUT/khronos_opencl1_igpu_kernels.cpp" \
+            -L "$CLLIB" -lOpenCL -lpthread -o "$OUT/libsilvann_khronos_opencl1_igpu.so" \
+            > "$OUT/khronos_opencl1_igpu.log" 2>&1 \
+            || { echo "⛔ khronos_opencl1_igpu:"; grep -m10 error "$OUT/khronos_opencl1_igpu.log"; }
+        built khronos_opencl1_igpu "$OUT/libsilvann_khronos_opencl1_igpu.so" ;;
     x86_avx2)
         # ⛳ THE CPU: g++ for the instruction set the family's name promises — the bodies and the overrides are
         #   compiled for AVX2, FMA and F16C, and the family counts no device on a processor without them.

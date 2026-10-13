@@ -160,6 +160,9 @@ class Qwen35(Generates):
             return data, lut, NL.SlotPlan(len(data), 0, 0, len(lut))
         self.head_data, self.head_lut, self.HPLAN = plan_of(self.head_rec)
         self.emb_data, self.emb_lut, self.BPLAN = plan_of(self.emb_rec)
+        # what the program reads of the two tables once the engine holds them and this program does not
+        self.EMB_ROW_BYTES, self.EMB_BITS = int(self.emb_rec["row_bytes"]), int(self.emb_rec["d"])
+        self.EMB_DATA_BYTES, self.HEAD_BITS = len(self.emb_data), int(self.head_rec["d"])
         # ⭐ THE EMBEDDING, A TABLE IN RAM THE CARD READS IN PLACE: the rows, then the scales — a RAM buffer of its own class
         self.TABLE_BYTES = (len(self.emb_data) + len(self.emb_lut) + 255) // 256 * 256
         self.S_BYTES, self.W_BYTES = self.VH * self.LH * self.LH * 4, self.CONV_CH * 3 * 2
@@ -282,6 +285,7 @@ class Qwen35(Generates):
     def load(self, progress=None):
         m, b = self.m, self.b
         loader = m.loader()
+        self._head_and_embedding(loader)
         self.state_at = {}
         self.slot_at = {}              # (layer, name) -> the slot a dense matrix lives in, for a LoRA swap
         for i, l in enumerate(self.run_layers):
@@ -300,8 +304,6 @@ class Qwen35(Generates):
             loader.assign(l, t, 0, self.state_at[l])
             if progress:
                 progress(i + 1, len(self.run_layers))
-        loader.layer_width(0, self.T_HEAD, 1)
-        loader.load_bytes(self.HPLAN, self.T_HEAD, 0, self.head_data, self.head_lut)
         if self.CPLAN is not None:                     # the card's tier, every layer's band of it, empty at boot
             for l in self.run_layers:
                 loader.layer_width(l, self.T_CEXP, self.EXPERTS)
@@ -324,6 +326,26 @@ class Qwen35(Generates):
                 lambda n: "(ai_qwen_3__experts_rows c_hands exrc%d c_rrows %d)" % (self.run_layers[0], n),
                 self.CHUNK, fixed=self.CARD_LINE)
         self.active_lora, self._lora_cache = self.folder.lora, {}     # a LoRA chosen at boot is in the slots already
+        self.global_ = None                         # what was left of global.pkl, read by the buffers
+
+    def _head_and_embedding(self, loader):
+        """The head into its slot and the embedding into its RAM buffer, before any layer — then the program lets go of
+        its own copies of them: global.pkl's two records and the bytes made of them. The layers then load beside the
+        engine's copy alone, so the load holds one tensor at a time above the model, not the two tables.
+        ⛳ THE HEAD HAS A COLLECTION OF ITS OWN AND THE EMBEDDING IS THE ONE RAM BUFFER, so neither comes first at another
+          slot's or buffer's expense: every address is what it was with the tables loaded last.
+        `MEASURED` (▶ measurements/2026-10-13_cpu_without_avx2.md): every slot and buffer at its offset on the 14B, the 27B,
+        the 35B and GLM; the 14B through x86_avx2 holds 7.36 GB after its load, against 9.98, and peaks at 7.38, against 10.58."""
+        m = self.m
+        loader.layer_width(0, self.T_HEAD, 1)
+        loader.load_bytes(self.HPLAN, self.T_HEAD, 0, self.head_data, self.head_lut)
+        self.EMB_AT = m.buffer(self.TABLE_BYTES, "EMBEDDING", ram=True)
+        m.write(self.EMB_AT, self.emb_data)
+        m.write(self.EMB_AT + self.EMB_DATA_BYTES, self.emb_lut)
+        for name in ("lm_head.weight", "model.language_model.embed_tokens.weight"):
+            del self.global_[name]
+        self.head_rec = self.emb_rec = None
+        self.head_data = self.head_lut = self.emb_data = self.emb_lut = None
 
     def _expert_pieces(self, view, l, x, part):
         """Expert `x` of layer `l` as its slot's four pieces (▶ `experts_file`) — the loader's own slices."""
@@ -404,9 +426,6 @@ class Qwen35(Generates):
             rw = 4 * self.QH * (self.AH + 2)
             m.buffer(4 * rw + 2 * (2 * self.QH * self.AH + 3 * self.KV_WIDE), "tier_scratch")
         m.buffer(262144, "mix_scratch")
-        self.EMB_AT = m.buffer(self.TABLE_BYTES, "EMBEDDING", ram=True)
-        m.write(self.EMB_AT, self.emb_data)
-        m.write(self.EMB_AT + len(self.emb_data), self.emb_lut)
         m.node_array("PROMPT", self.CHUNK)          # a prompt chunk's tokens
         self._answer_buffers()                      # what `generate` made, the end tokens it watches for
         self.LOGITS_AT = m.buffer(self.VOCAB * 2, "logits_h")
@@ -633,11 +652,11 @@ class Qwen35(Generates):
         """What `lisp/qwen3_5.lisp` reads: the shape, the settings, and a layer's tables gathered into arrays indexed by its
         place in the layers this machine runs."""
         m, H, run = self.m, self.H, self.run_layers
-        row = int(self.emb_rec["row_bytes"])
+        row = self.EMB_ROW_BYTES
         plane = lambda at, size: "(nn__expert__plane 0 %d 0 %d %d)" % (self.T_HEAD, at, size)
         values = dict(HIDDEN=H, HIDDEN_BYTES=2 * H, VOCAB=self.VOCAB, EPS=self.EPS, THETA=self.THETA, ROTARY=self.ROT,
-                      RUN=len(run), EMB_HALVES=row // 2, EMB_SCALES=len(self.emb_data) // 2, EMB_BITS=int(self.emb_rec["d"]),
-                      HEAD_BITS=int(self.head_rec["d"]), STOPS=0, SEEN=sampling.SEEN,
+                      RUN=len(run), EMB_HALVES=row // 2, EMB_SCALES=self.EMB_DATA_BYTES // 2, EMB_BITS=self.EMB_BITS,
+                      HEAD_BITS=self.HEAD_BITS, STOPS=0, SEEN=sampling.SEEN,
                       HEAD_CODES=plane(self.HPLAN.at_up_data, self.HPLAN.up_data),
                       HEAD_SCALES=plane(self.HPLAN.at_down_lut, self.HPLAN.down_lut),
                       ROTATED=bool(self.ROTATED), TIERED=bool(self.TIERED), ROUTED=bool(self.MOE),

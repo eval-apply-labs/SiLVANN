@@ -11,9 +11,14 @@ obliges you to offer its source to that service's users. A commercial licence is
 
 ## 2. Third-party code in the source tree
 
-**None.** The engine, the runtime and the build scripts are original work; no third-party source file is
-vendored. The release is source only: each user builds the engine on their own machine, so no vendor binary
-is redistributed.
+One parser, carried unchanged in `engine/scripts/third_party/` (its README says why). The engine, the runtime and
+the other build scripts are original work. The release is source only: each user builds the engine on their own
+machine, so no vendor binary is redistributed.
+
+| component | version | licence | its notice | used by |
+|---|---|---|---|---|
+| pycparser (Eli Bendersky) | 2.22 | BSD-3-Clause | `engine/scripts/third_party/pycparser/LICENSE` | `engine/scripts/opencl1_kernel_source.py`, which writes nn's kernels as OpenCL C 1.2 for the `khronos_opencl1_igpu` family |
+| PLY (David M. Beazley), the copy pycparser carries | 3.9 | BSD-3-Clause | the header of each file in `engine/scripts/third_party/pycparser/ply/` | pycparser |
 
 ## 3. What the build compiles against, and what the runtime imports
 
@@ -24,7 +29,7 @@ Headers and libraries the builder installs themselves:
 | pybind11 3.0 | BSD-3-Clause | the evaluator's Python module (`engine/src/pybind.cuh`) |
 | AMD ROCm / HIP runtime | MIT (HIP headers and runtime) | the `amd_rocm6_wave64` family |
 | NVIDIA CUDA toolkit | NVIDIA CUDA EULA | the `nvidia_cuda12` family, built only where `nvcc` is installed; it links the CUDA runtime statically, so a binary of it may be redistributed only under that EULA's terms |
-| Khronos OpenCL headers | Apache-2.0 | the `khronos_opencl2` family |
+| Khronos OpenCL headers | Apache-2.0 | the `khronos_opencl2` and `khronos_opencl1_igpu` families |
 
 Python packages the runtime imports (`requirements.txt`), installed by the user:
 
@@ -56,8 +61,9 @@ model's.
 ## 5. How to re-derive this file
 
 ```bash
-# third-party source in the tree (expect: nothing)
-grep -rlE "Copyright|SPDX-License" engine/src runtime
+# third-party source in the tree (expect: nothing in engine/src and runtime; pycparser and its PLY in engine/scripts)
+grep -rlE "Copyright|SPDX-License" engine/src runtime engine/scripts
+grep -h "__version__ =" engine/scripts/third_party/pycparser/__init__.py engine/scripts/third_party/pycparser/ply/__init__.py
 # the headers the build includes
 grep -rhoE "#include <(CL/[a-z_.]+|hip/[a-z_.]+|cuda[a-z_.]*|pybind11/[a-z_.]+)>" engine/src | sort -u
 # the Python packages' licences, from their installed metadata

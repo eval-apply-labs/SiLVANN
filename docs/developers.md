@@ -128,10 +128,20 @@ and the attention's scores on the tensor cores (`mma.sync`), and `x86_avx2` its 
 processor has it, chosen when the library loads (`SILVANN_CPU_AVX512=0` keeps AVX2). Where nn gives a door a one-row
 and a many-row form that agree to the bit — the mix of an attention and its causal form, a residual and its form over a
 prompt's rows, a norm and its rows — a family that answers one with its own arithmetic answers the other with the same.
-A prompt read as rows is checked against the same prompt read a position at a time by the tokens that follow: the two
-are not the same bits everywhere (the grouped scores add in pairs, a card's GEMM in its own order). `khronos_opencl2`
+A prompt read as rows and the same prompt read a position at a time may sum in their own orders (the grouped scores add
+in pairs, a card's GEMM in its own, a CPU's routed experts over a prompt go through the int8 GEMM), so they are checked as
+a model is against Hugging Face: after the prompt the two must be nearer each other than the model is to Hugging Face, over
+Hugging Face's five best tokens, and the tokens that follow may part only where the two best were within a quarter of a
+logit of each other. What holds to the bit is one configuration against itself: the same model, options and input give the
+same logits in every run (`test/src_runtime_repeat.py`). With a card's tier of experts the requests since boot are part of
+the configuration: the tier warms as it is used, and an expert computed on the card rounds otherwise than on the CPU, so
+the same requests in the same order from boot give the same logits, and one request alone after others may not.
+`khronos_opencl2`
 runs on the MI50 through ROCm's OpenCL (nn's verbs, the 27B and the 35B against HF); `nvidia_cuda12` on an RTX 5060 Ti
-(nn's verbs, every pack but GLM's against HF).
+(nn's verbs, every pack but GLM's against HF); `khronos_opencl1_igpu`, for integrated GPUs whose OpenCL is 1.2, on the
+same card through NVIDIA's OpenCL (nn's verbs, the 27B against HF): its build writes nn's kernels as OpenCL C 1.2 with
+every pointer's address space worked out (`engine/scripts/opencl1_kernel_source.py`), and its folder's README says what
+it is for and how a device is added.
 
 ## When a card faults
 

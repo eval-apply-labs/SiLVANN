@@ -145,6 +145,21 @@ static inline bool x86_avx2__zzprivate_x_room_for(uint64_t cols) {
     return x86_avx2__zzprivate_x_room != 0u;
 }
 
+/* ⛳ A GEMM'S DECODED ROWS IN A SCRATCH OF THE THREAD'S OWN, kept and grown across calls and fetched once a tile: six rows
+ *   of 32,768 columns are 768 KiB, no size for a stack frame — one is probed a page at a time on every call where GCC's
+ *   stack-clash protection is on (by default here), and an array sized at run time is not portable C++. Null when there is
+ *   no room, and the tile then takes its rows from the codes. */
+static __thread float*   x86_avx2__zzprivate_rows_room = 0;
+static __thread uint64_t x86_avx2__zzprivate_rows_room_n = 0;
+static inline float* x86_avx2__zzprivate_rows_scratch(uint64_t floats) {
+    if (floats > x86_avx2__zzprivate_rows_room_n) {
+        free(x86_avx2__zzprivate_rows_room);
+        x86_avx2__zzprivate_rows_room = (float*)aligned_alloc(64, ((floats * 4u + 63u) / 64u) * 64u);
+        x86_avx2__zzprivate_rows_room_n = x86_avx2__zzprivate_rows_room ? floats : 0u;
+    }
+    return x86_avx2__zzprivate_rows_room;
+}
+
 /* ── THE AVX-512 BODIES (below, ▶ `THE SAME DOORS ON AVX-512`), and whether they are installed ─────────────── */
 /* ⛳ TUNED FOR THE AVX-512 CORES, as well as compiled for them: under generic tuning GCC folds a load into every FMA that
  *   uses it, so the GEMM's tile loaded each `x` once a row and ran out of loads — `MEASURED` (the tile alone, 4 threads,
@@ -603,10 +618,11 @@ static void x86_avx2__override_deltanet_conv_step(uint16_t* o, uint16_t* s, cons
  *   (as the processor reports it, 256 KiB where it does not), at least twelve, goes through every row of the block's run
  *   before the next; a row's dots are the same arithmetic, so the answer is the same bits. */
 static uint64_t x86_avx2__zzprivate_l2 = 256u * 1024u;
-/* ⛳ A DECODED ROW ON THE STACK AT THE ROW'S OWN WIDTH: at the widest, two rows of 32,768 floats would be a 256 KiB frame,
- *   which GCC's stack-clash protection (on by default here) probes a page at a time on every call — 64 pages before a
- *   two-row tile did anything (`MEASURED`, the generated code); sized to the call's columns a 2,048-wide row is 8 KiB. A
- *   buffer a thread in its place was slower — the int8 GEMM's weighted sums 368 -> 574 us (`MEASURED`, the sweep). */
+/* ⛳ THE INT8 GEMM'S ROW OF LEVELS ON THE STACK AT THE ROW'S OWN WIDTH (`cols` bytes): a frame of the widest row would be
+ *   probed a page at a time on every call where GCC's stack-clash protection is on (by default here), and a buffer a thread
+ *   in its place was slower — the int8 GEMM's weighted sums 368 -> 574 us (`MEASURED`, the sweep). The float GEMM's six
+ *   decoded rows, 768 KiB at the widest, take the thread's scratch (`x86_avx2__zzprivate_rows_scratch`), fetched once a
+ *   tile. */
 static inline uint64_t x86_avx2__zzprivate_pair_block(uint64_t cols) {
     const uint64_t fit = x86_avx2__zzprivate_l2 / 2u / (cols * 4u);
     return fit < 12u ? 12u : fit - fit % 12u;
@@ -653,46 +669,82 @@ static inline float x86_avx2__zzprivate_dotf(const float* a, const float* b, uin
     }
     return x86_avx2__zzprivate_hsum(_mm256_add_ps(_mm256_add_ps(a0, a1), _mm256_add_ps(a2, a3)));
 }
-/* One matrix row against its pairs, their `x` widened at `xf`, pair `j`'s at `xf + j·cols`. */
+/* A pair's product with a decoded row, weighted into the running sum or rounded into `out`. */
+static inline void x86_avx2__zzprivate_put(float v, const uint32_t* rows, const uint16_t* w, uint64_t j, uint64_t out_rows, uint64_t r,
+                                           uint16_t* out, float* acc, unsigned int* over) {
+    const uint64_t at = (uint64_t)rows[2u * j + 1u] * out_rows + r;
+    if (out) out[at] = nn__kernels__zzabi_to_half(v, over);
+    else acc[at] += v * _cvtsh_ss(w[rows[2u * j]]);
+}
+/* One matrix row against its pairs, their `x` widened at `xf`, pair `j`'s at `xf + j·cols`: decoded into the thread's
+ * scratch, or a pair at a time from the codes when there is no room — the gemv's dot either way. */
 static inline void x86_avx2__zzprivate_row_pairs(uint64_t d, const uint8_t* row, float scale, const float* xf, const uint32_t* rows,
                                                  const uint16_t* w, uint64_t count, uint64_t cols, uint64_t out_rows, uint64_t r,
                                                  uint16_t* out, float* acc, unsigned int* over, __m256i tlo, __m256i thi) {
-    float wf[cols] __attribute__((aligned(32)));
-    x86_avx2__zzprivate_decode_row(d, row, cols, wf, tlo, thi);
-    /* ⭐ FOUR PAIRS AT A TIME against the decoded row, two sums each: a load of the row serves four products, and
-     *   eight sums in flight keep both multiply-add units busy — ▶ the commit that measured it. The rest one by one. */
-    float v4[4];
-    uint64_t j = 0;
-    for (; j + 4u <= count; j += 4u) {
-        const float* x0 = xf + j * cols;
-        const float* x1 = x0 + cols;
-        const float* x2 = x1 + cols;
-        const float* x3 = x2 + cols;
-        __m256 a0 = _mm256_setzero_ps(), a1 = _mm256_setzero_ps(), a2 = _mm256_setzero_ps(), a3 = _mm256_setzero_ps();
-        __m256 b0 = _mm256_setzero_ps(), b1 = _mm256_setzero_ps(), b2 = _mm256_setzero_ps(), b3 = _mm256_setzero_ps();
-        for (uint64_t k = 0; k < cols; k += 16u) {
-            const __m256 w0 = _mm256_load_ps(wf + k), w1 = _mm256_load_ps(wf + k + 8u);
-            a0 = _mm256_fmadd_ps(w0, _mm256_loadu_ps(x0 + k), a0); b0 = _mm256_fmadd_ps(w1, _mm256_loadu_ps(x0 + k + 8u), b0);
-            a1 = _mm256_fmadd_ps(w0, _mm256_loadu_ps(x1 + k), a1); b1 = _mm256_fmadd_ps(w1, _mm256_loadu_ps(x1 + k + 8u), b1);
-            a2 = _mm256_fmadd_ps(w0, _mm256_loadu_ps(x2 + k), a2); b2 = _mm256_fmadd_ps(w1, _mm256_loadu_ps(x2 + k + 8u), b2);
-            a3 = _mm256_fmadd_ps(w0, _mm256_loadu_ps(x3 + k), a3); b3 = _mm256_fmadd_ps(w1, _mm256_loadu_ps(x3 + k + 8u), b3);
+    if (count == 0u) return;
+    float* wf = x86_avx2__zzprivate_rows_scratch(cols);
+    if (!wf) {
+        for (uint64_t j = 0; j < count; ++j) {
+            const float* x = xf + j * cols;
+            const float v = d == 4u ? x86_avx2__zzprivate_dot4(row, x, cols, tlo, thi) : d == 8u ? x86_avx2__zzprivate_dot8(row, x, cols)
+                          : x86_avx2__zzprivate_dot16((const uint16_t*)(const void*)row, x, cols);
+            x86_avx2__zzprivate_put(v * scale, rows, w, j, out_rows, r, out, acc, over);
         }
-        v4[0] = x86_avx2__zzprivate_hsum(_mm256_add_ps(a0, b0));
-        v4[1] = x86_avx2__zzprivate_hsum(_mm256_add_ps(a1, b1));
-        v4[2] = x86_avx2__zzprivate_hsum(_mm256_add_ps(a2, b2));
-        v4[3] = x86_avx2__zzprivate_hsum(_mm256_add_ps(a3, b3));
-        for (uint64_t q = 0; q < 4u; ++q) {
-            const float v = v4[q] * scale;
-            const uint64_t at = (uint64_t)rows[2u * (j + q) + 1u] * out_rows + r;
-            if (out) out[at] = nn__kernels__zzabi_to_half(v, over);
-            else acc[at] += v * _cvtsh_ss(w[rows[2u * (j + q)]]);
-        }
+        return;
     }
-    for (; j < count; ++j) {
-        const float v = x86_avx2__zzprivate_dotf(wf, xf + j * cols, cols) * scale;
-        const uint64_t at = (uint64_t)rows[2u * j + 1u] * out_rows + r;
-        if (out) out[at] = nn__kernels__zzabi_to_half(v, over);
-        else acc[at] += v * _cvtsh_ss(w[rows[2u * j]]);
+    x86_avx2__zzprivate_decode_row(d, row, cols, wf, tlo, thi);
+    for (uint64_t j = 0; j < count; ++j)
+        x86_avx2__zzprivate_put(x86_avx2__zzprivate_dotf(wf, xf + j * cols, cols) * scale, rows, w, j, out_rows, r, out, acc, over);
+}
+/* ⭐ THREE ROWS BY FOUR PAIRS, A SUM A PASS — the AVX-512 tile's arrangement in sixteen registers. A dot sums chunk `c` of 8
+ *   columns into sum `c % 4`, so a pass over chunks e, e + 4, … gives every (row, pair) of the tile its sum `e` — 12 in
+ *   flight, each load of a row serving four products and each load of a pair's `x` three — and the four passes' sums are
+ *   added as `x86_avx2__zzprivate_dotf` adds its own: the gemv's bits. ⛳ Called with a literal `n`. */
+#define X86_AVX2__ZZPRIVATE_TILE_ROWS2 3u
+static inline void x86_avx2__zzprivate_three_rows(const float* const* w, const float* const* xq, uint64_t n, uint64_t cols, float v[3][4]) {
+    __m256 keep[4][3][4];
+    for (uint64_t e = 0; e < 4u; ++e) {
+        __m256 s[3][4];
+        for (int a = 0; a < 3; ++a) for (uint64_t q = 0; q < n; ++q) s[a][q] = _mm256_setzero_ps();
+        for (uint64_t k = 8u * e; k < cols; k += 32u) {
+            const __m256 w0 = _mm256_load_ps(w[0] + k), w1 = _mm256_load_ps(w[1] + k), w2 = _mm256_load_ps(w[2] + k);
+            for (uint64_t q = 0; q < n; ++q) {
+                const __m256 x = _mm256_loadu_ps(xq[q] + k);
+                s[0][q] = _mm256_fmadd_ps(w0, x, s[0][q]); s[1][q] = _mm256_fmadd_ps(w1, x, s[1][q]); s[2][q] = _mm256_fmadd_ps(w2, x, s[2][q]);
+            }
+        }
+        for (int a = 0; a < 3; ++a) for (uint64_t q = 0; q < n; ++q) keep[e][a][q] = s[a][q];
+    }
+    for (int a = 0; a < 3; ++a)
+        for (uint64_t q = 0; q < n; ++q)
+            v[a][q] = x86_avx2__zzprivate_hsum(_mm256_add_ps(_mm256_add_ps(keep[0][a][q], keep[1][a][q]), _mm256_add_ps(keep[2][a][q], keep[3][a][q])));
+}
+/* Rows `r` to `r + 2` of a matrix against their pairs, decoded once into the thread's scratch. */
+static inline void x86_avx2__zzprivate_rows3_pairs(uint64_t d, const uint8_t* const* row, const float* scale, const float* xf,
+                                                   const uint32_t* rows, const uint16_t* w, uint64_t count, uint64_t cols, uint64_t out_rows,
+                                                   uint64_t r, uint16_t* out, float* acc, unsigned int* over, __m256i tlo, __m256i thi) {
+    float* room = count != 0u ? x86_avx2__zzprivate_rows_scratch(X86_AVX2__ZZPRIVATE_TILE_ROWS2 * cols) : 0;
+    if (!room) {
+        for (uint64_t a = 0; a < X86_AVX2__ZZPRIVATE_TILE_ROWS2; ++a)
+            x86_avx2__zzprivate_row_pairs(d, row[a], scale[a], xf, rows, w, count, cols, out_rows, r + a, out, acc, over, tlo, thi);
+        return;
+    }
+    const float* wf[3];
+    for (uint64_t a = 0; a < X86_AVX2__ZZPRIVATE_TILE_ROWS2; ++a) {
+        x86_avx2__zzprivate_decode_row(d, row[a], cols, room + a * cols, tlo, thi);
+        wf[a] = room + a * cols;
+    }
+    for (uint64_t j = 0; j < count; j += 4u) {
+        const uint64_t n = count - j < 4u ? count - j : 4u;
+        const float* xq[4] = { xf + j * cols, xf + (j + (n > 1u ? 1u : 0u)) * cols, xf + (j + (n > 2u ? 2u : 0u)) * cols,
+                               xf + (j + (n > 3u ? 3u : 0u)) * cols };
+        float v[3][4];
+        if (n == 4u) x86_avx2__zzprivate_three_rows(wf, xq, 4u, cols, v);
+        else if (n == 3u) x86_avx2__zzprivate_three_rows(wf, xq, 3u, cols, v);
+        else if (n == 2u) x86_avx2__zzprivate_three_rows(wf, xq, 2u, cols, v);
+        else x86_avx2__zzprivate_three_rows(wf, xq, 1u, cols, v);
+        for (uint64_t a = 0; a < X86_AVX2__ZZPRIVATE_TILE_ROWS2; ++a)
+            for (uint64_t q = 0; q < n; ++q) x86_avx2__zzprivate_put(v[a][q] * scale[a], rows, w, j + q, out_rows, r + a, out, acc, over);
     }
 }
 static void x86_avx2__zzprivate_expert_rows(void* a) {
@@ -703,7 +755,16 @@ static void x86_avx2__zzprivate_expert_rows(void* a) {
     const uint64_t block = x86_avx2__zzprivate_pair_block(c->cols);
     for (uint64_t j0 = 0; j0 < c->count; j0 += block) {
         const uint64_t m = c->count - j0 < block ? c->count - j0 : block;
-        for (uint64_t r = r0; r < r1; ++r)
+        uint64_t r = r0;
+        for (; r + X86_AVX2__ZZPRIVATE_TILE_ROWS2 <= r1; r += X86_AVX2__ZZPRIVATE_TILE_ROWS2) {
+            const uint8_t* row[3]; float scale[3];
+            for (uint64_t a = 0; a < X86_AVX2__ZZPRIVATE_TILE_ROWS2; ++a) {
+                row[a] = c->weights + (r + a) * row_bytes; scale[a] = x86_avx2__zzprivate_gemm_scale(c->luts, c->d, r + a);
+            }
+            x86_avx2__zzprivate_rows3_pairs(c->d, row, scale, c->xf + j0 * c->cols, c->rows + 2u * j0, c->w, m, c->cols, c->out_rows, r,
+                                            c->out, c->acc, c->over, tlo, thi);
+        }
+        for (; r < r1; ++r)
             x86_avx2__zzprivate_row_pairs(c->d, c->weights + r * row_bytes, x86_avx2__zzprivate_gemm_scale(c->luts, c->d, r), c->xf + j0 * c->cols,
                                           c->rows + 2u * j0, c->w, m, c->cols, c->out_rows, r, c->out, c->acc, c->over, tlo, thi);
     }
@@ -714,13 +775,25 @@ static void x86_avx2__zzprivate_expert_groups(void* a) {
     const uint64_t b = nn__silicon__block(), n = nn__silicon__blocks();
     const uint64_t t0 = c->total * b / n, t1 = c->total * (b + 1u) / n;
     uint64_t i = 0u, base = 0u;
-    for (uint64_t t = t0; t < t1; ++t) {
+    for (uint64_t t = t0; t < t1; ) {
         while (t >= base + c->g.out_rows[i]) { base += c->g.out_rows[i]; ++i; }
-        const uint64_t r = t - base;
-        x86_avx2__zzprivate_row_pairs(c->g.d[i], (const uint8_t*)(uintptr_t)c->g.codes[i] + r * (c->cols * c->g.d[i] / 8u),
-                                      x86_avx2__zzprivate_gemm_scale((const uint8_t*)(uintptr_t)c->g.luts[i], c->g.d[i], r), c->xf + c->xf_at[i],
-                                      c->rows + 2u * c->g.pairs_at[i], 0, c->g.pairs[i], c->cols, c->g.out_rows[i], r,
-                                      c->out + c->g.out_at[i], 0, c->over, tlo, thi);
+        const uint64_t r = t - base, row_bytes = c->cols * c->g.d[i] / 8u;
+        const uint8_t* codes = (const uint8_t*)(uintptr_t)c->g.codes[i];
+        const uint8_t* luts = (const uint8_t*)(uintptr_t)c->g.luts[i];
+        if (t + X86_AVX2__ZZPRIVATE_TILE_ROWS2 <= t1 && r + X86_AVX2__ZZPRIVATE_TILE_ROWS2 <= c->g.out_rows[i]) {   /* three rows of one matrix */
+            const uint8_t* row[3]; float scale[3];
+            for (uint64_t a = 0; a < X86_AVX2__ZZPRIVATE_TILE_ROWS2; ++a) {
+                row[a] = codes + (r + a) * row_bytes; scale[a] = x86_avx2__zzprivate_gemm_scale(luts, c->g.d[i], r + a);
+            }
+            x86_avx2__zzprivate_rows3_pairs(c->g.d[i], row, scale, c->xf + c->xf_at[i], c->rows + 2u * c->g.pairs_at[i], 0, c->g.pairs[i],
+                                            c->cols, c->g.out_rows[i], r, c->out + c->g.out_at[i], 0, c->over, tlo, thi);
+            t += X86_AVX2__ZZPRIVATE_TILE_ROWS2;
+        } else {
+            x86_avx2__zzprivate_row_pairs(c->g.d[i], codes + r * row_bytes, x86_avx2__zzprivate_gemm_scale(luts, c->g.d[i], r), c->xf + c->xf_at[i],
+                                          c->rows + 2u * c->g.pairs_at[i], 0, c->g.pairs[i], c->cols, c->g.out_rows[i], r,
+                                          c->out + c->g.out_at[i], 0, c->over, tlo, thi);
+            t += 1u;
+        }
     }
 }
 /* Pairs' `x` rows widened to floats, pair `j` at `xf + j·cols` — for a 4-bit matrix under the AVX-512 bodies split as
@@ -998,8 +1071,8 @@ static void x86_avx2__override_hadamard_blocks(uint16_t* out, const uint16_t* in
  *            nibbles index the 16 levels as they lie and the high ones after a shift: 16 levels an instruction, in floats,
  *            no half to widen and no byte to interleave. The run's even columns come out first and its odd ones second,
  *            so `x` is split the same way once a call (`xd`), and a row the GEMM decodes is laid out so too.
- *   8 bits   the levels are symmetric, `level[255 − c] = −level[c]` as halves (checked when the doors are installed; the
- *            AVX2 gathers otherwise): the first 128 levels are four registers of halves, a code past 127 is inverted onto
+ *   8 bits   the levels are symmetric, `level[255 − c] = −level[c]` as halves (checked when the doors are installed; they are
+ *            gathered otherwise): the first 128 levels are four registers of halves, a code past 127 is inverted onto
  *            255 − c, two `vpermt2w` and a blend on bit 6 give 32 halves, the code's bit 7 goes onto their sign, and two
  *            `vcvtph2ps` widen them. No gather: on Skylake under the microcode's `gather_data_sampling` mitigation the AVX2
  *            gathers read 2.9-4.1 GB/s.
@@ -1065,21 +1138,30 @@ static X86_AVX2__ZZPRIVATE_AVX512 inline float x86_avx2__zzprivate_dot4_512(cons
     }
     return x86_avx2__zzprivate_sum4_512(a0, a1, a2, a3);
 }
-/* One 8-bit row's product with `xf`; the AVX2 gathers when the levels are not symmetric. */
+/* 32 codes' 8-bit levels as two runs of 16 floats: through the halves' registers, or gathered from the floats where the
+ * levels are not symmetric — the same values either way, so a dot's sums do not depend on which. */
+static X86_AVX2__ZZPRIVATE_AVX512 inline void x86_avx2__zzprivate_codes8_512(const uint8_t* codes, const __m512i* t8, __m512* lo, __m512* hi) {
+    if (x86_avx2__zzprivate_wide8) {
+        x86_avx2__zzprivate_lev8_512(_mm512_cvtepu8_epi16(_mm256_loadu_si256((const __m256i*)codes)), t8, lo, hi);
+        return;
+    }
+    *lo = _mm512_i32gather_ps(_mm512_cvtepu8_epi32(_mm_loadu_si128((const __m128i*)codes)), x86_avx2__zzprivate_levels8, 4);
+    *hi = _mm512_i32gather_ps(_mm512_cvtepu8_epi32(_mm_loadu_si128((const __m128i*)(codes + 16u))), x86_avx2__zzprivate_levels8, 4);
+}
+/* One 8-bit row's product with `xf`. */
 static X86_AVX2__ZZPRIVATE_AVX512 inline float x86_avx2__zzprivate_dot8_512(const uint8_t* row, const float* xf, uint64_t cols, const __m512i* t8) {
-    if (!x86_avx2__zzprivate_wide8) return x86_avx2__zzprivate_dot8(row, xf, cols);
     __m512 a0 = _mm512_setzero_ps(), a1 = _mm512_setzero_ps(), a2 = _mm512_setzero_ps(), a3 = _mm512_setzero_ps(), l, h;
     uint64_t k = 0;
     for (; k + 64u <= cols; k += 64u) {
-        x86_avx2__zzprivate_lev8_512(_mm512_cvtepu8_epi16(_mm256_loadu_si256((const __m256i*)(row + k))), t8, &l, &h);
+        x86_avx2__zzprivate_codes8_512(row + k, t8, &l, &h);
         a0 = _mm512_fmadd_ps(l, _mm512_loadu_ps(xf + k), a0);
         a1 = _mm512_fmadd_ps(h, _mm512_loadu_ps(xf + k + 16u), a1);
-        x86_avx2__zzprivate_lev8_512(_mm512_cvtepu8_epi16(_mm256_loadu_si256((const __m256i*)(row + k + 32u))), t8, &l, &h);
+        x86_avx2__zzprivate_codes8_512(row + k + 32u, t8, &l, &h);
         a2 = _mm512_fmadd_ps(l, _mm512_loadu_ps(xf + k + 32u), a2);
         a3 = _mm512_fmadd_ps(h, _mm512_loadu_ps(xf + k + 48u), a3);
     }
     if (k < cols) {
-        x86_avx2__zzprivate_lev8_512(_mm512_cvtepu8_epi16(_mm256_loadu_si256((const __m256i*)(row + k))), t8, &l, &h);
+        x86_avx2__zzprivate_codes8_512(row + k, t8, &l, &h);
         a0 = _mm512_fmadd_ps(l, _mm512_loadu_ps(xf + k), a0);
         a1 = _mm512_fmadd_ps(h, _mm512_loadu_ps(xf + k + 16u), a1);
     }
@@ -1243,14 +1325,12 @@ static X86_AVX2__ZZPRIVATE_AVX512 inline void x86_avx2__zzprivate_decode_row_512
     } else if (d == 16u) {
         for (uint64_t k = 0; k < cols; k += 16u)
             _mm512_store_ps(wf + k, _mm512_cvtph_ps(_mm256_loadu_si256((const __m256i*)(row + 2u * k))));
-    } else if (x86_avx2__zzprivate_wide8) {
+    } else {
         for (uint64_t k = 0; k < cols; k += 32u) {
             __m512 l, h;
-            x86_avx2__zzprivate_lev8_512(_mm512_cvtepu8_epi16(_mm256_loadu_si256((const __m256i*)(row + k))), t8, &l, &h);
+            x86_avx2__zzprivate_codes8_512(row + k, t8, &l, &h);
             _mm512_store_ps(wf + k, l); _mm512_store_ps(wf + k + 16u, h);
         }
-    } else {
-        x86_avx2__zzprivate_decode_row(d, row, cols, wf, _mm256_setzero_si256(), _mm256_setzero_si256());
     }
 }
 /* A decoded row's product with one pair's `x`: the dots' four sums. */
@@ -1323,6 +1403,7 @@ static X86_AVX2__ZZPRIVATE_AVX512 inline void x86_avx2__zzprivate_row_dots_512(u
                                                                                uint64_t cols, uint64_t out_rows, uint64_t r, uint16_t* out,
                                                                                float* acc, unsigned int* over, __m512 t4, const __m512i* t8) {
     float v4[4];
+    if (count == 0u) return;
     if (d == 4u) {
         const float* x[4] = { xf, xf + (count > 1u ? cols : 0u), xf + (count > 2u ? 2u * cols : 0u), xf + (count > 3u ? 3u * cols : 0u) };
         if (count == 1u) v4[0] = x86_avx2__zzprivate_dot4_512(row, xf, cols, t4);
@@ -1343,11 +1424,14 @@ static X86_AVX2__ZZPRIVATE_AVX512 inline void x86_avx2__zzprivate_row_pairs_512(
                                                                                 const uint32_t* rows, const uint16_t* w, uint64_t count,
                                                                                 uint64_t cols, uint64_t out_rows, uint64_t r, uint16_t* out,
                                                                                 float* acc, unsigned int* over, __m512 t4, const __m512i* t8) {
-    if (count <= X86_AVX2__ZZPRIVATE_FUSED_PAIRS) {
-        x86_avx2__zzprivate_row_dots_512(d, row, scale, xf, rows, w, count, cols, out_rows, r, out, acc, over, t4, t8);
+    float* wf = count > X86_AVX2__ZZPRIVATE_FUSED_PAIRS ? x86_avx2__zzprivate_rows_scratch(cols) : 0;
+    if (!wf) {
+        for (uint64_t j = 0; j < count; j += X86_AVX2__ZZPRIVATE_FUSED_PAIRS) {
+            const uint64_t n = count - j < X86_AVX2__ZZPRIVATE_FUSED_PAIRS ? count - j : X86_AVX2__ZZPRIVATE_FUSED_PAIRS;
+            x86_avx2__zzprivate_row_dots_512(d, row, scale, xf + j * cols, rows + 2u * j, w, n, cols, out_rows, r, out, acc, over, t4, t8);
+        }
         return;
     }
-    float wf[cols] __attribute__((aligned(64)));
     x86_avx2__zzprivate_decode_row_512(d, row, cols, wf, t4, t8);
     float v4[4];
     uint64_t j = 0;
@@ -1385,64 +1469,61 @@ static X86_AVX2__ZZPRIVATE_AVX512 inline void x86_avx2__zzprivate_row_pairs_512(
     }
 }
 #undef X86_AVX2__ZZPRIVATE_FOUR
-/* ⭐ TWO ROWS AT A TIME, THEIR PAIRS THREE AT A TIME: each load of a decoded row serves three products and each load of a
- *   pair's `x` two, 24 sums in flight — and every row and pair keeps the four sums of the dots above, so the answer is the
- *   one-row tile's, and the gemv's, to the bit. `MEASURED` (`scripts/tq_cpu_avx512_gemm_probe.c`, 12 experts
- *   1024 x 2048, 16 pairs, 4 threads): 202 GFLOP/s a row at a time, 297 two at a time. */
-#define X86_AVX2__ZZPRIVATE_PAIR2(Q, E, AT) {                                                                     \
-        const __m512 x_ = _mm512_loadu_ps(xq[Q] + (AT));                                                       \
-        s[0][Q][E] = _mm512_fmadd_ps(w0_, x_, s[0][Q][E]); s[1][Q][E] = _mm512_fmadd_ps(w1_, x_, s[1][Q][E]); }
-#define X86_AVX2__ZZPRIVATE_THREE(E, AT) X86_AVX2__ZZPRIVATE_PAIR2(0, E, AT) X86_AVX2__ZZPRIVATE_PAIR2(1, E, AT) X86_AVX2__ZZPRIVATE_PAIR2(2, E, AT)
-#define X86_AVX2__ZZPRIVATE_TWO(E, AT)   X86_AVX2__ZZPRIVATE_PAIR2(0, E, AT) X86_AVX2__ZZPRIVATE_PAIR2(1, E, AT)
-#define X86_AVX2__ZZPRIVATE_ONE(E, AT)   X86_AVX2__ZZPRIVATE_PAIR2(0, E, AT)
-#define X86_AVX2__ZZPRIVATE_ROWS2(PAIRS, E, AT) { const __m512 w0_ = _mm512_load_ps(w0 + (AT)), w1_ = _mm512_load_ps(w1 + (AT)); PAIRS(E, AT) }
-#define X86_AVX2__ZZPRIVATE_WALK(PAIRS) {                                                                           \
-        for (; k + 64u <= cols; k += 64u) {                                                                    \
-            X86_AVX2__ZZPRIVATE_ROWS2(PAIRS, 0, k) X86_AVX2__ZZPRIVATE_ROWS2(PAIRS, 1, k + 16u)                \
-            X86_AVX2__ZZPRIVATE_ROWS2(PAIRS, 2, k + 32u) X86_AVX2__ZZPRIVATE_ROWS2(PAIRS, 3, k + 48u)          \
-        }                                                                                                      \
-        if (k < cols) { X86_AVX2__ZZPRIVATE_ROWS2(PAIRS, 0, k) X86_AVX2__ZZPRIVATE_ROWS2(PAIRS, 1, k + 16u) }  \
+/* ⭐ SIX ROWS BY FOUR PAIRS, A SUM A PASS. A dot sums chunk `c` of 16 columns into sum `c % 4`, and sum `e` sees only the
+ *   chunks e, e + 4, e + 8, … — so one pass over those gives every (row, pair) of the tile its sum `e` in one register: 24
+ *   sums in flight, each load of a decoded row serving four products and each load of a pair's `x` six. The four passes'
+ *   sums are kept and added as the dots above add theirs, `(0 + 1) + (2 + 3)` and across the lanes: the gemv's bits.
+ *   `MEASURED` (`scripts/tq_cpu_gemm_tiles_probe.c`, 4 threads, every answer the four-sum gemv's to the bit): the 35B's dense
+ *   12,352 × 2,048 over 256 pairs 324 -> 430 GFLOP/s and the 27B's gate and up, 34,816 × 5,120, 286 -> 421, against two
+ *   rows by three pairs with all four sums in registers. ⛳ Called with a literal `n`, so the sums stay in registers. */
+#define X86_AVX2__ZZPRIVATE_TILE_ROWS 6u
+static X86_AVX2__ZZPRIVATE_AVX512 inline void x86_avx2__zzprivate_six_rows_512(const float* const* w, const float* const* xq, uint64_t n,
+                                                                               uint64_t cols, float v[6][4]) {
+    __m512 keep[4][6][4];
+    for (uint64_t e = 0; e < 4u; ++e) {
+        __m512 s[6][4];
+        for (int a = 0; a < 6; ++a) for (uint64_t q = 0; q < n; ++q) s[a][q] = _mm512_setzero_ps();
+        for (uint64_t k = 16u * e; k < cols; k += 64u) {
+            __m512 x[4];
+            for (uint64_t q = 0; q < n; ++q) x[q] = _mm512_loadu_ps(xq[q] + k);
+            for (int a = 0; a < 6; ++a) {
+                const __m512 w_ = _mm512_load_ps(w[a] + k);
+                for (uint64_t q = 0; q < n; ++q) s[a][q] = _mm512_fmadd_ps(w_, x[q], s[a][q]);
+            }
+        }
+        for (int a = 0; a < 6; ++a) for (uint64_t q = 0; q < n; ++q) keep[e][a][q] = s[a][q];
     }
-/* Two decoded rows against `n` pairs (1 to 3), their `x` at `xq`: `v[a][q]`, row `a`'s product with pair `q`. */
-static X86_AVX2__ZZPRIVATE_AVX512 inline void x86_avx2__zzprivate_two_rows_512(const float* w0, const float* w1, const float* const* xq,
-                                                                               uint64_t n, uint64_t cols, float v[2][3]) {
-    __m512 s[2][3][4];
-    for (int a = 0; a < 2; ++a) for (int q = 0; q < 3; ++q) for (int e = 0; e < 4; ++e) s[a][q][e] = _mm512_setzero_ps();
-    uint64_t k = 0;
-    if (n == 3u) X86_AVX2__ZZPRIVATE_WALK(X86_AVX2__ZZPRIVATE_THREE)
-    else if (n == 2u) X86_AVX2__ZZPRIVATE_WALK(X86_AVX2__ZZPRIVATE_TWO)
-    else X86_AVX2__ZZPRIVATE_WALK(X86_AVX2__ZZPRIVATE_ONE)
-    for (int a = 0; a < 2; ++a)
-        for (int q = 0; q < 3; ++q) v[a][q] = x86_avx2__zzprivate_sum4_512(s[a][q][0], s[a][q][1], s[a][q][2], s[a][q][3]);
+    for (int a = 0; a < 6; ++a)
+        for (uint64_t q = 0; q < n; ++q) v[a][q] = x86_avx2__zzprivate_sum4_512(keep[0][a][q], keep[1][a][q], keep[2][a][q], keep[3][a][q]);
 }
-#undef X86_AVX2__ZZPRIVATE_WALK
-#undef X86_AVX2__ZZPRIVATE_ROWS2
-#undef X86_AVX2__ZZPRIVATE_ONE
-#undef X86_AVX2__ZZPRIVATE_TWO
-#undef X86_AVX2__ZZPRIVATE_THREE
-#undef X86_AVX2__ZZPRIVATE_PAIR2
-/* Rows `r` and `r + 1` of a matrix against their pairs, as `x86_avx2__zzprivate_row_pairs_512` takes one. */
-static X86_AVX2__ZZPRIVATE_AVX512 inline void x86_avx2__zzprivate_rows2_pairs_512(uint64_t d, const uint8_t* row0, const uint8_t* row1,
-                                                                                  float scale0, float scale1, const float* xf,
-                                                                                  const uint32_t* rows, const uint16_t* w, uint64_t count,
-                                                                                  uint64_t cols, uint64_t out_rows, uint64_t r, uint16_t* out,
-                                                                                  float* acc, unsigned int* over, __m512 t4, const __m512i* t8) {
-    if (count <= X86_AVX2__ZZPRIVATE_FUSED_PAIRS) {
-        x86_avx2__zzprivate_row_dots_512(d, row0, scale0, xf, rows, w, count, cols, out_rows, r, out, acc, over, t4, t8);
-        x86_avx2__zzprivate_row_dots_512(d, row1, scale1, xf, rows, w, count, cols, out_rows, r + 1u, out, acc, over, t4, t8);
+/* Rows `r` to `r + 5` of a matrix against their pairs, as `x86_avx2__zzprivate_row_pairs_512` takes one: from the codes a row
+ * at a time for a few pairs, else decoded into the thread's scratch and four pairs at a time. */
+static X86_AVX2__ZZPRIVATE_AVX512 inline void x86_avx2__zzprivate_rows6_pairs_512(uint64_t d, const uint8_t* const* row, const float* scale,
+                                                                                  const float* xf, const uint32_t* rows, const uint16_t* w,
+                                                                                  uint64_t count, uint64_t cols, uint64_t out_rows, uint64_t r,
+                                                                                  uint16_t* out, float* acc, unsigned int* over, __m512 t4,
+                                                                                  const __m512i* t8) {
+    float* room = count > X86_AVX2__ZZPRIVATE_FUSED_PAIRS ? x86_avx2__zzprivate_rows_scratch(X86_AVX2__ZZPRIVATE_TILE_ROWS * cols) : 0;
+    if (!room) {
+        for (uint64_t a = 0; a < X86_AVX2__ZZPRIVATE_TILE_ROWS; ++a)
+            x86_avx2__zzprivate_row_pairs_512(d, row[a], scale[a], xf, rows, w, count, cols, out_rows, r + a, out, acc, over, t4, t8);
         return;
     }
-    float wf0[cols] __attribute__((aligned(64))), wf1[cols] __attribute__((aligned(64)));
-    float* wf[2] = { wf0, wf1 };
-    x86_avx2__zzprivate_decode_row_512(d, row0, cols, wf[0], t4, t8);
-    x86_avx2__zzprivate_decode_row_512(d, row1, cols, wf[1], t4, t8);
-    const float scale[2] = { scale0, scale1 };
-    for (uint64_t j = 0; j < count; j += 3u) {
-        const uint64_t n = count - j < 3u ? count - j : 3u;
-        const float* xq[3] = { xf + j * cols, xf + (j + (n > 1u ? 1u : 0u)) * cols, xf + (j + (n > 2u ? 2u : 0u)) * cols };
-        float v[2][3];
-        x86_avx2__zzprivate_two_rows_512(wf[0], wf[1], xq, n, cols, v);
-        for (uint64_t a = 0; a < 2u; ++a)
+    const float* wf[6];
+    for (uint64_t a = 0; a < X86_AVX2__ZZPRIVATE_TILE_ROWS; ++a) {
+        x86_avx2__zzprivate_decode_row_512(d, row[a], cols, room + a * cols, t4, t8);
+        wf[a] = room + a * cols;
+    }
+    for (uint64_t j = 0; j < count; j += 4u) {
+        const uint64_t n = count - j < 4u ? count - j : 4u;
+        const float* xq[4] = { xf + j * cols, xf + (j + (n > 1u ? 1u : 0u)) * cols, xf + (j + (n > 2u ? 2u : 0u)) * cols,
+                               xf + (j + (n > 3u ? 3u : 0u)) * cols };
+        float v[6][4];
+        if (n == 4u) x86_avx2__zzprivate_six_rows_512(wf, xq, 4u, cols, v);
+        else if (n == 3u) x86_avx2__zzprivate_six_rows_512(wf, xq, 3u, cols, v);
+        else if (n == 2u) x86_avx2__zzprivate_six_rows_512(wf, xq, 2u, cols, v);
+        else x86_avx2__zzprivate_six_rows_512(wf, xq, 1u, cols, v);
+        for (uint64_t a = 0; a < X86_AVX2__ZZPRIVATE_TILE_ROWS; ++a)
             for (uint64_t q = 0; q < n; ++q) {
                 const float val = v[a][q] * scale[a];
                 const uint64_t at = (uint64_t)rows[2u * (j + q) + 1u] * out_rows + r + a;
@@ -1462,11 +1543,14 @@ static X86_AVX2__ZZPRIVATE_AVX512 void x86_avx2__zzprivate_expert_rows_512(void*
         const float* xf = c->xf + j0 * c->cols;
         const uint32_t* rows = c->rows + 2u * j0;
         uint64_t r = r0;
-        for (; r + 2u <= r1; r += 2u)
-            x86_avx2__zzprivate_rows2_pairs_512(c->d, c->weights + r * row_bytes, c->weights + (r + 1u) * row_bytes,
-                                                x86_avx2__zzprivate_gemm_scale(c->luts, c->d, r), x86_avx2__zzprivate_gemm_scale(c->luts, c->d, r + 1u), xf,
-                                                rows, c->w, m, c->cols, c->out_rows, r, c->out, c->acc, c->over, t4, t8);
-        if (r < r1)
+        for (; r + X86_AVX2__ZZPRIVATE_TILE_ROWS <= r1; r += X86_AVX2__ZZPRIVATE_TILE_ROWS) {
+            const uint8_t* row[6]; float scale[6];
+            for (uint64_t a = 0; a < X86_AVX2__ZZPRIVATE_TILE_ROWS; ++a) {
+                row[a] = c->weights + (r + a) * row_bytes; scale[a] = x86_avx2__zzprivate_gemm_scale(c->luts, c->d, r + a);
+            }
+            x86_avx2__zzprivate_rows6_pairs_512(c->d, row, scale, xf, rows, c->w, m, c->cols, c->out_rows, r, c->out, c->acc, c->over, t4, t8);
+        }
+        for (; r < r1; ++r)
             x86_avx2__zzprivate_row_pairs_512(c->d, c->weights + r * row_bytes, x86_avx2__zzprivate_gemm_scale(c->luts, c->d, r), xf, rows, c->w,
                                               m, c->cols, c->out_rows, r, c->out, c->acc, c->over, t4, t8);
     }
@@ -1482,11 +1566,14 @@ static X86_AVX2__ZZPRIVATE_AVX512 void x86_avx2__zzprivate_expert_groups_512(voi
         const uint64_t r = t - base, row_bytes = c->cols * c->g.d[i] / 8u;
         const uint8_t* codes = (const uint8_t*)(uintptr_t)c->g.codes[i];
         const uint8_t* luts = (const uint8_t*)(uintptr_t)c->g.luts[i];
-        if (t + 1u < t1 && r + 1u < c->g.out_rows[i]) {          /* two rows of one matrix */
-            x86_avx2__zzprivate_rows2_pairs_512(c->g.d[i], codes + r * row_bytes, codes + (r + 1u) * row_bytes, x86_avx2__zzprivate_gemm_scale(luts, c->g.d[i], r),
-                                                x86_avx2__zzprivate_gemm_scale(luts, c->g.d[i], r + 1u), c->xf + c->xf_at[i], c->rows + 2u * c->g.pairs_at[i], 0,
-                                                c->g.pairs[i], c->cols, c->g.out_rows[i], r, c->out + c->g.out_at[i], 0, c->over, t4, t8);
-            t += 2u;
+        if (t + X86_AVX2__ZZPRIVATE_TILE_ROWS <= t1 && r + X86_AVX2__ZZPRIVATE_TILE_ROWS <= c->g.out_rows[i]) {   /* six rows of one matrix */
+            const uint8_t* row[6]; float scale[6];
+            for (uint64_t a = 0; a < X86_AVX2__ZZPRIVATE_TILE_ROWS; ++a) {
+                row[a] = codes + (r + a) * row_bytes; scale[a] = x86_avx2__zzprivate_gemm_scale(luts, c->g.d[i], r + a);
+            }
+            x86_avx2__zzprivate_rows6_pairs_512(c->g.d[i], row, scale, c->xf + c->xf_at[i], c->rows + 2u * c->g.pairs_at[i], 0, c->g.pairs[i],
+                                                c->cols, c->g.out_rows[i], r, c->out + c->g.out_at[i], 0, c->over, t4, t8);
+            t += X86_AVX2__ZZPRIVATE_TILE_ROWS;
         } else {
             x86_avx2__zzprivate_row_pairs_512(c->g.d[i], codes + r * row_bytes, x86_avx2__zzprivate_gemm_scale(luts, c->g.d[i], r), c->xf + c->xf_at[i],
                                               c->rows + 2u * c->g.pairs_at[i], 0, c->g.pairs[i], c->cols, c->g.out_rows[i], r,

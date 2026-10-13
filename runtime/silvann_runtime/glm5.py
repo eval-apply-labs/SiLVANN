@@ -196,6 +196,9 @@ class Glm5(Generates):
             return data, lut, NL.SlotPlan(len(data), 0, 0, len(lut))
         self.head_data, self.head_lut, self.HPLAN = plan_of(self.head_rec)
         self.emb_data, self.emb_lut, self.BPLAN = plan_of(self.emb_rec)
+        # what the program reads of the two tables once the engine holds them and this program does not
+        self.EMB_ROW_BYTES, self.EMB_BITS = int(self.emb_rec["row_bytes"]), int(self.emb_rec["d"])
+        self.EMB_DATA_BYTES, self.HEAD_BITS = len(self.emb_data), int(self.head_rec["d"])
         self.TABLE_BYTES = (len(self.emb_data) + len(self.emb_lut) + 255) // 256 * 256      # the rows, then the scales
         # KDA: the state (heads · head_dim² floats) in the up half, the conv window (q · k · v, three taps) in the down
         self.S_BYTES, self.W_BYTES = self.KH * self.KD * self.KD * 4, 3 * self.KW * 3 * 2
@@ -270,7 +273,7 @@ class Glm5(Generates):
                    kinds, len(types), typed))
 
     def workers(self):
-        return [("amd_rocm6_wave64", 0)] + [("x86_avx2", c["dev"]) for c in self.CPUS]
+        return [(self.m.silicon, 0)] + [("x86_avx2", c["dev"]) for c in self.CPUS]
 
     def device_params(self):
         """The card's section and each CPU worker's: {worker: text}."""
@@ -333,6 +336,7 @@ class Glm5(Generates):
         m, b = self.m, self.b
         m.act_as(CARD)
         loader = m.loader()
+        self._head_and_embedding(loader)
         self.state_at = {}
         for l in self.run_layers:
             for t in sorted({self.TYPE[self.key(l, n)] for n in self.dense_names(l)}):
@@ -344,8 +348,6 @@ class Glm5(Generates):
             loader.layer_width(l, t, 1)
             self.state_at[l] = loader.reserve(t)
             loader.assign(l, t, 0, self.state_at[l])
-        loader.layer_width(0, self.T_HEAD, 1)
-        loader.load_bytes(self.HPLAN, self.T_HEAD, 0, self.head_data, self.head_lut)
         if self.CPLAN is not None:
             self._card_experts(loader)
         if loader.handed() != 0:
@@ -373,6 +375,26 @@ class Glm5(Generates):
         m.define_programs(self._procedures)
         if self.CPLAN is not None and self.CH and self.EPLAN is not None:
             self._calibrate_line()
+        self.global_ = None                         # what was left of global.pkl, read by the buffers
+
+    def _head_and_embedding(self, loader):
+        """The head into its slot and the embedding into its RAM buffer, before any layer — then the program lets go of
+        its own copies of them: global.pkl's two records and the bytes made of them. The layers then load beside the
+        engine's copy alone, so the load holds one tensor at a time above the model, not the two tables.
+        ⛳ THE HEAD HAS A COLLECTION OF ITS OWN AND THE EMBEDDING IS THE ONE RAM BUFFER, so neither comes first at another
+          slot's or buffer's expense: every address is what it was with the tables loaded last.
+        `MEASURED` (▶ measurements/2026-10-13_cpu_without_avx2.md): every slot and buffer at its offset on the 14B, the 27B,
+        the 35B and GLM; the 14B through x86_avx2 holds 7.36 GB after its load, against 9.98, and peaks at 7.38, against 10.58."""
+        m = self.m
+        loader.layer_width(0, self.T_HEAD, 1)
+        loader.load_bytes(self.HPLAN, self.T_HEAD, 0, self.head_data, self.head_lut)
+        self.EMB_AT = m.buffer(self.TABLE_BYTES, "EMBEDDING", ram=True)
+        m.write(self.EMB_AT, self.emb_data)
+        m.write(self.EMB_AT + self.EMB_DATA_BYTES, self.emb_lut)
+        for name in ("lm_head.weight", "model.language_model.embed_tokens.weight"):
+            del self.global_[name]
+        self.head_rec = self.emb_rec = None
+        self.head_data = self.head_lut = self.emb_data = self.emb_lut = None
 
     def _calibrate_line(self):
         """`nn__expert_major__vram_promotion_threshold_picks`, measured and bound (▶ `expert_tier.calibrate`): one socket's
@@ -521,9 +543,6 @@ class Glm5(Generates):
                 # the activations twice, the fp32 sum
                 m.buffer(2 * self.CH * H, "rrows_k")
                 self.KRS_AT = m.buffer(self.KRSCRATCH, "krscratch")
-        self.EMB_AT = m.buffer(self.TABLE_BYTES, "EMBEDDING", ram=True)
-        m.write(self.EMB_AT, self.emb_data)
-        m.write(self.EMB_AT + len(self.emb_data), self.emb_lut)
         self._answer_buffers()                      # what `generate` made, the end tokens it watches for
         m.buffer(1 << 19, "gscratch")                          # ai_glm_5_3's scratch, its first bytes the MLP site's carry
         self.at["hand"] = m.buffer(2 * (H + self.TOPK), "hand")
@@ -796,10 +815,10 @@ class Glm5(Generates):
         head = lambda at, size: "(nn__expert__plane 0 %d 0 %d %d)" % (self.T_HEAD, at, size)
         tier = self.CPLAN is not None
         m.bind_values(dict(HIDDEN=H, HIDDEN_BYTES=2 * H, MULT=self.MULT, MEAN=1.0 / self.MULT, VOCAB=self.VOCAB, EPS=self.EPS,
-                           RUN=len(run), EMB_HALVES=int(self.emb_rec["row_bytes"]) // 2, EMB_SCALES=len(self.emb_data) // 2,
-                           EMB_BITS=int(self.emb_rec["d"]), STOPS=0, SEEN=sampling.SEEN,
+                           RUN=len(run), EMB_HALVES=self.EMB_ROW_BYTES // 2, EMB_SCALES=self.EMB_DATA_BYTES // 2,
+                           EMB_BITS=self.EMB_BITS, STOPS=0, SEEN=sampling.SEEN,
                            HEAD_CODES=head(self.HPLAN.at_up_data, self.HPLAN.up_data),
-                           HEAD_SCALES=head(self.HPLAN.at_down_lut, self.HPLAN.down_lut), HEAD_BITS=int(self.head_rec["d"]),
+                           HEAD_SCALES=head(self.HPLAN.at_down_lut, self.HPLAN.down_lut), HEAD_BITS=self.HEAD_BITS,
                            HAND=self.HAND, HAND_PICKS_AT=self.HAND - 8 * K, HAND_BYTES=2 * (H + K),
                            ROWS_HANDS_BYTES=self.CH * self.HAND, ROWS_BYTES=2 * H * self.CH, ROWS_HALVES=H * self.CH,
                            CARD_TIER=tier, CARD=CARD, SOCKETS=len(self.CPUS)))
@@ -850,8 +869,7 @@ class Glm5(Generates):
         m.defun("(defun (embed_e tok) (begin (nn__turboquant__decode (nn__vector__range EMBEDDING (* tok %d) %d) "
                 "(nn__vector__range EMBEDDING (+ %d tok) 1) u 1 %d %d) (nn__hadamard__rotate u ones512 hu %d) "
                 "(nn__vector__pointwise_mul hu signs_row e %d)))"
-                % (int(self.emb_rec["row_bytes"]) // 2, int(self.emb_rec["row_bytes"]) // 2, len(self.emb_data) // 2, H,
-                   int(self.emb_rec["d"]), H, H))
+                % (self.EMB_ROW_BYTES // 2, self.EMB_ROW_BYTES // 2, self.EMB_DATA_BYTES // 2, H, self.EMB_BITS, H, H))
         m.defun("(defun (embed tok) (begin (embed_e tok) %s (type e)))"
                 % " ".join("(nn__vector__add e zero_h %s %d)" % (self.rng("streams", j * H, H), H) for j in range(self.MULT)))
         # the head: the streams' mean, the final norm, the logits
@@ -861,7 +879,7 @@ class Glm5(Generates):
         logits = (mean + " (nn__rmsnorm__apply hm fnw hn %d %r) (nn__hadamard__rotate hn signs hnr %d) " % (H, self.EPS, H)
                   + "(nn__turboquant__gemv (nn__expert__plane 0 %d 0 %d %d) (nn__expert__plane 0 %d 0 %d %d) hnr logits_h %d %d %d)"
                   % (self.T_HEAD, self.HPLAN.at_up_data, self.HPLAN.up_data, self.T_HEAD, self.HPLAN.at_down_lut,
-                     self.HPLAN.down_lut, self.VOCAB, H, int(self.head_rec["d"])))
+                     self.HPLAN.down_lut, self.VOCAB, H, self.HEAD_BITS))
         m.defun("(defun (head) (begin %s (nn__argmax__find logits_h res %d) (nn__buffer__read res)))" % (logits, self.VOCAB))
         m.defun("(defun (head_logits) (begin %s (type hm)))" % logits)
         m.defun("(defun (logits) (begin %s))" % logits)      # what `head_sample` reads (▶ lisp/sampling.lisp)

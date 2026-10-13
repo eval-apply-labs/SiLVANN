@@ -5,6 +5,7 @@
 #include "../packages/sys/contracts/abi/silicon_family.cuh"   /* what a family is, and the bound on its number */
 #include "host/includes.cuh"                                  /* each family's `includes`, in roster order */
 #include "x86_avx2/includes.cuh"
+#include "khronos_opencl1_igpu/includes.cuh"
 #include "khronos_opencl2/includes.cuh"
 #include "amd_rocm6_wave64/includes.cuh"
 #include "nvidia_cuda12/includes.cuh"
@@ -35,11 +36,12 @@
  * ⛳ THE VENDOR IS THERE FOR ONE RULE: two families of one vendor are never opened in one process. ▶ the
  *   same file for why. */
 #define SILICON_FAMILIES__LIST(X)                                                                          \
-    X(0u,   HOST,             host,             host)                                                    \
-    X(50u,  X86_AVX2,         x86_avx2,         x86)                                                     \
-    X(100u, KHRONOS_OPENCL2,  khronos_opencl2,  khronos)                                                 \
-    X(200u, AMD_ROCM6_WAVE64, amd_rocm6_wave64, amd)                                                     \
-    X(300u, NVIDIA_CUDA12,    nvidia_cuda12,    nvidia)
+    X(0u,   HOST,                 host,                 host)                                            \
+    X(50u,  X86_AVX2,             x86_avx2,             x86)                                             \
+    X(75u,  KHRONOS_OPENCL1_IGPU, khronos_opencl1_igpu, khronos)                                         \
+    X(100u, KHRONOS_OPENCL2,      khronos_opencl2,      khronos)                                         \
+    X(200u, AMD_ROCM6_WAVE64,     amd_rocm6_wave64,     amd)                                             \
+    X(300u, NVIDIA_CUDA12,        nvidia_cuda12,        nvidia)
 
 #define SILICON_FAMILIES__ZZPRIVATE_ROW(ID, NAME, FOLDER, VENDOR)    SILICON_FAMILIES__##NAME = (ID),
 #define SILICON_FAMILIES__ZZPRIVATE_TALLY(ID, NAME, FOLDER, VENDOR)  + 1u

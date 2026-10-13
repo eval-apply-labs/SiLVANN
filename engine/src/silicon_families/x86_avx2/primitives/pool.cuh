@@ -221,6 +221,17 @@ static inline void x86_avx2__zzprivate_ticks(unsigned long long* busy, unsigned 
     }
     fclose(f);
 }
+/* ⛳ THE TOPOLOGY IN ONE PLACE: a CPU's package and physical core, from Linux's `/sys`. Where they cannot be read — a
+ *   container without `/sys`, another system — the CPU counts as a core of its own on package 0, so the pool has a thread
+ *   a free CPU; unread, every CPU would match one unknown core and the pool would be the caller alone. */
+static inline void x86_avx2__zzprivate_core_of(int cpu, int* pkg, int* id) {
+    char path[128];
+    snprintf(path, sizeof path, "/sys/devices/system/cpu/cpu%d/topology/physical_package_id", cpu);
+    *pkg = x86_avx2__zzprivate_read_int(path);
+    snprintf(path, sizeof path, "/sys/devices/system/cpu/cpu%d/topology/core_id", cpu);
+    *id = x86_avx2__zzprivate_read_int(path);
+    if (*pkg < 0 || *id < 0) { *pkg = 0; *id = X86_AVX2__ZZPRIVATE_CPUS + cpu; }
+}
 /* The pool's threads' CPUs into `cpus_out`, and their count. On the whole machine the caller's own core is left
  * out, as it always was — it runs blocks too; on a node every free core has a thread, and the caller runs none. */
 static inline uint32_t x86_avx2__zzprivate_size(int* cpus_out, int node, cpu_set_t* own, cpu_set_t* worked) {
@@ -237,11 +248,8 @@ static inline uint32_t x86_avx2__zzprivate_size(int* cpus_out, int node, cpu_set
     for (int cpu = 0; cpu < MOST && cpu < CPU_SETSIZE; ++cpu) {
         if (!CPU_ISSET(cpu, &x86_avx2__zzprivate_allowed)) continue;
         if (node >= 0 && x86_avx2__zzprivate_cpu_node[cpu] != node) continue;
-        char path[128];
-        snprintf(path, sizeof path, "/sys/devices/system/cpu/cpu%d/topology/physical_package_id", cpu);
-        const int pkg = x86_avx2__zzprivate_read_int(path);
-        snprintf(path, sizeof path, "/sys/devices/system/cpu/cpu%d/topology/core_id", cpu);
-        const int id = x86_avx2__zzprivate_read_int(path);
+        int pkg, id;
+        x86_avx2__zzprivate_core_of(cpu, &pkg, &id);
         const unsigned long long dt = t1[cpu] - t0[cpu], db = b1[cpu] - b0[cpu];
         const int busy = dt > 0ull && db * 2ull > dt;
         int k = 0;

@@ -65,8 +65,8 @@ The name is `<vendor>_<runtime><major>_<trait>` — `amd_rocm7_wave64`, `nvidia_
 folder's name, the prefix of every function the family defines, the name of its binary and the name
 a boot asks for it by.
 
-Its number places it in the roster, `SILICON_FAMILIES__LIST` in `roster.cuh`: the host is 0,
-`khronos_opencl2` 100, `amd_rocm6_wave64` 200, `nvidia_cuda12` 300. Numbers leave gaps on purpose, so a family can be placed
+Its number places it in the roster, `SILICON_FAMILIES__LIST` in `roster.cuh`: the host is 0, `x86_avx2` 50,
+`khronos_opencl1_igpu` 75, `khronos_opencl2` 100, `amd_rocm6_wave64` 200, `nvidia_cuda12` 300. Numbers leave gaps on purpose, so a family can be placed
 between two others; they must rise down the list, and the build refuses one that does not, or one past
 `SYS__SILICON_FAMILY__SLOTS`. Numbers never move and are never reused, because a machine records the
 number of the silicon it stood up on.
@@ -131,7 +131,9 @@ static __device__ inline float nn__silicon__half_to_float(uint16_t h);  /* exact
 `hipLaunchKernel`, `cudaLaunchKernel` — takes `kernel` and ignores the rest. One that finds kernels by
 name in a program it compiled takes `name`, `sizes` and `count`: `khronos_opencl2` is that case, and
 defines `SYS__SILICON_FAMILY__KERNELS_BY_NAME` so nn compiles no kernel for it, and its kernels come
-from `scripts/opencl_kernel_source.py` instead. nn's doors (`packages/nn/gpu/doors.cuh`) are written
+from `scripts/opencl_kernel_source.py` instead. `khronos_opencl1_igpu` is the same for OpenCL 1.2, from
+`scripts/opencl1_kernel_source.py`, which works out every pointer's address space from the kernels down,
+so nn's bodies name none; it also adds after a kernel's own arguments the buffers its addresses are in. nn's doors (`packages/nn/gpu/doors.cuh`) are written
 once against it, for every family.
 The arithmetic is the precise function, never a fast approximation: `packages/nn/contracts/abi/gpu.cuh`
 says why for each. The lanes are the runtime's own thread index and block width (`threadIdx.x`,

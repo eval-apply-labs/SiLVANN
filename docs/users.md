@@ -80,7 +80,8 @@ The UI is a web page on port 8090 that talks to the server on port 8765; it can 
 can be exported and imported. One conversation runs at a time; a second request while one is running is
 answered `503` with `Retry-After: 5`, and the UI retries.
 
-On a machine with no card the model runs on the CPU's own cores (the `x86_avx2` family). The pack made for
+On a machine with no card the model runs on the CPU's own cores (the `x86_avx2` family, which needs AVX2, FMA and F16C:
+Intel from Haswell, 2013, AMD from Excavator, 2015; an older processor has no family to run on). The pack made for
 that is `Qwen3.6-35B-A3B_silvann_tq_D4E4`: its dense part at 4 bits, about 15 tokens a second on the test machine's
 two Xeons. On a processor with AVX-512 (F, BW, VL and DQ) the family's matrix products use it: on a four-core Xeon
 W-2123 with two DDR4-2400 sticks the 35B D8E4 alone ran at 9.0 tokens a second against 1.7 with AVX2, and with its

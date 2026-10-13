@@ -4,6 +4,7 @@
 /* What this file needs, named where a reader — and an editor — can follow it. */
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include "../../packages/nn/contracts/defaults.cuh"   /* NN__ARITHMETIC__FAST */
 #include "../../packages/nn/contracts/abi/gpu.cuh"    /* what is answered here, and NN__SILICON__LANES_MAX */
 
@@ -18,11 +19,14 @@
 
 /* Start `kernel` on `blocks` blocks of `threads` threads, with `args` holding a pointer to each of its
  * arguments, in order — HIP's own launch by pointer. It returns once the launch is queued; the work is
- * waited for with sys's `compute_completed`, and a launch that failed is found there too. */
+ * waited for with sys's `compute_completed`. A launch over no blocks has nothing to do and is not made (HIP
+ * refuses an empty grid); a launch HIP refuses is named on stderr, since the wait after it does not report it. */
 static inline void nn__silicon__launch(const void* kernel, const char* name, uint32_t blocks, uint32_t threads,
                                        void** args, const size_t* sizes, uint32_t count) {
-    (void)name; (void)sizes; (void)count;   /* a launch by pointer needs only the address */
-    (void)hipLaunchKernel(kernel, dim3(blocks), dim3(threads), args, 0, 0);
+    (void)sizes; (void)count;   /* a launch by pointer needs only the address */
+    if (blocks == 0u) return;
+    const hipError_t e = hipLaunchKernel(kernel, dim3(blocks), dim3(threads), args, 0, 0);
+    if (e != hipSuccess) fprintf(stderr, "amd_rocm6_wave64: %s did not launch (%u blocks of %u): %s\n", name, blocks, threads, hipGetErrorString(e));
 }
 
 /* The arithmetic, from HIP's device library: the precise functions unless nn's `NN__ARITHMETIC__FAST`
