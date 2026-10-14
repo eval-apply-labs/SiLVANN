@@ -1,9 +1,9 @@
 # Running SiLVANN
 
-This is a **developer preview (v0.5.0)**. It is tested on Linux with AMD Instinct MI50 cards (gfx906, ROCm 6), with an
+This is a **developer preview (v0.7.0)**. It is tested on Linux with AMD Instinct MI50 cards (gfx906, ROCm 6), with an
 NVIDIA GeForce RTX 5060 Ti (sm_120, CUDA 12.9), and on the CPU alone with AVX2 and with AVX-512 — on Ubuntu 22.04. On a
-Windows PC, boot Linux from a USB SSD (below); WSL2 and other NVIDIA generations are untested, Apple silicon is not
-supported yet. If something does not build or does not run on your
+Windows PC, run the Docker image or boot Linux from a USB SSD (below); Windows itself and other NVIDIA generations are
+untested, Apple silicon is not supported yet. If something does not build or does not run on your
 machine, you are expected to be able to read the error and the source.
 
 ## 1. Build
@@ -35,6 +35,15 @@ family whose toolchain is missing is skipped and named. `SILVANN_HIP_ARCHES=gfx9
 generation only, which is much faster than building for every one, and `SILVANN_CUDA_ARCHES=120` the same for NVIDIA
 (the number is the card's compute capability: 120 for the RTX 50 series, 89 for the 40, 86 for the 30). A card is given
 to the family that includes it when the server starts — nothing in a model's config names the card.
+
+### On Windows: the Docker image
+
+SiLVANN runs on Linux, and on Windows it runs in Linux through WSL 2: the Docker image holds the release, its
+environment and its build for an NVIDIA card or the CPU, and Docker Desktop runs it, with the chat in the browser. The
+models are downloaded from the UI into the image's volume. [`docker/README.md`](../docker/README.md) has the steps and
+the scripts: `silvann_install`, `silvann_start`, `silvann_stop`, and `silvann_export` / `silvann_import` to carry it,
+models and all, to another drive or PC. It has been run on Linux (Docker, an RTX 5060 Ti: the 27B and the 35B against
+Hugging Face as outside it, at the same speed) and not yet on Windows.
 
 ### On Windows: Linux on a USB SSD
 
@@ -69,12 +78,44 @@ venv/bin/python silvann_core.py download-model Qwen3.6-35B-A3B_silvann_tq_D8E4
 A model lands in `models/<name>/` with a `configs/default.json` and its program in `lisp/` — the Lisp the evaluator
 runs it with, yours to read and change. The server refuses a model that is not there and tells you this command.
 
+The UI's Options download a model too, with its progress. Hugging Face serves a client that is not signed in more slowly:
+a token with read access (huggingface.co/settings/tokens) saved with `venv/bin/python silvann_core.py hf-token --set`
+(`silvann token --set`), or in the UI's Options, is used by every download after; `HF_TOKEN` in the environment comes
+first.
+
 ## 3. Serve it, and chat
 
 ```bash
 venv/bin/python start_silvann_server.py --model models/Qwen3.6-35B-A3B_silvann_tq_D8E4 [--port 8765]
 venv/bin/python silvann_ui.py --port 8090
 ```
+
+**Pictures** (the Qwen models): the UI's 📎 button attaches one to the next message — it is read when it is attached,
+and the message carries it; the server reads one at `POST /cartridges/<id>/images` and a message names it in `images`.
+The model's vision tower runs on the card: a picture is made at most 4 megapixels (`picture_pixels`; its tokens: a
+1024 x 1024 picture is 1,024, a 2048 x 2048 one 4,096), and takes from a quarter of a second (a small one) to about 15 s (the
+largest) on the test machine's RTX 5060 Ti, and from 0.13 s to about 8.5 s on an MI50 — every patch of a picture attends
+every other, so its time grows with the
+square of its size. A folder fetched before
+v0.7.0 lacks `lisp/qwen3_5_pictures.lisp` and refuses pictures until `silvann download <model>` fetches it.
+
+**GLM 5.3 Flash reads pictures and videos** the same way: its own tower (24 blocks) runs on
+the card, a picture at most 4 megapixels by default (`picture_pixels`; 21,396 patches of 14 x 14) — 0.25 s for 448 x 448
+and 12 s for 2044 x 2044 on an MI50.
+
+**Videos**, for the Qwen models and GLM, are attached with the same button: an animated GIF, WebP or PNG is read as it
+is, any other video file (MP4 and the like) through PyAV, which `install.sh` installs from `requirements-nonfree.txt`
+(the Docker image leaves it out, and its scripts' `install_nonfree` adds it). Its frames are taken
+at 2 a second, two frames read together as one picture, each pair's time written into the message as the model's own
+processor writes it (Qwen's before the pair, the middle of its two frames: "<1.2 seconds>"; GLM's after it, its first
+frame's: "1.0 seconds"); a video is made at most half the conversation's context in tokens, and the Qwen models also keep
+it within 25 megapixels over all its frames, as their processor does.
+
+**Files**, for every model: a Word document (`.docx`), a PDF (its text, through pypdf, which `install.sh` installs) or
+a text file (Markdown, CSV, JSON, code) attached with the same button is read when it is attached, and its text goes
+into the message before what you type, as `<file name="…">…</file>` — cut, with a note, to what the conversation's
+context still holds. The server takes them at the same `POST /cartridges/<id>/images` (it answers `kind: "document"`),
+and `/health` says `files`.
 
 The UI is a web page on port 8090 that talks to the server on port 8765; it can also start a server itself (Options). Conversations are saved under `user_sessions/` and
 can be exported and imported. One conversation runs at a time; a second request while one is running is
@@ -120,8 +161,10 @@ The Qwen models' `options`:
 | `chunk` | positions, 1 to 256, default 256 | how many positions of a prompt go through a layer at once |
 | `experts_on` | `"card"` (default), `"cpu"` | the routed experts on the card, or on the CPU — the setup for a card too small to hold them; the 122B's `default.json` starts with `"cpu"` |
 | `experts_from` | `"auto"`, `"ram"`, `"disk"`, `"mapped"` | with the experts on the CPU: copied into RAM, or read from a file on the disk as they are needed — `disk` keeps the ones used in the engine's own memory, as much of it as there is (`experts_ram_gb` to set it), `mapped` leaves that to the system's page cache and is slower; `auto` chooses by the memory there is |
-| `card_experts_gb` | gigabytes, default `0` | with the experts on the CPU: the card's own tier of them, below |
+| `card_experts_gb` | gigabytes, default `0` | with the experts on the CPU from RAM (`experts_from: "ram"`): the card's own tier of them, below |
 | `experts_int8` | `false` (default), `true` | with the experts on the CPU: a generated token's experts multiplied in integers, faster on the CPU and slightly less exact — ▶ the quantisation table |
+| `picture_pixels` | pixels, default `4194304` (2048 x 2048) | the largest picture the boot makes room for on the card, about 23 KB of the card's memory a 16 x 16 patch (0.37 GB at the default); a larger picture is made smaller. `0` keeps none and reads pictures on the CPU instead (1.8 GB of RAM, at most a megapixel) |
+| `picture_weights` | `"auto"` (default), `"card"`, `"ram"` | the vision tower's weights, 0.6 GB: on the card, or in RAM and written to the card a block at a time as a picture is read (about 0.1 s more a picture); `auto` puts them on the card when the experts are on the CPU and in RAM otherwise |
 
 GLM 5.3 Flash's `options`:
 
@@ -130,7 +173,7 @@ GLM 5.3 Flash's `options`:
 | `experts_from` | `"auto"`, `"ram"`, `"disk"`, `"mapped"` | its routed experts (142 GB) in RAM, or read from a file on the disk as they are needed — `disk` keeps the ones used in the engine's own memory (`experts_ram_gb` to set how much), `mapped` leaves that to the system's page cache; `auto` puts them in RAM when they leave a fifth of the available memory free — about 180 GB available |
 | `chunk` | positions, default 256 | how many positions of a prompt go through a layer at once; with the experts on the disk, 1024 reads a prompt faster |
 | `sockets` | `1`, `2` | the CPU sockets the experts are split over; by default, all of them |
-| `card_experts_gb` | gigabytes, default `0` | the card's own tier of experts, below |
+| `card_experts_gb` | gigabytes, default `0` | with the experts in RAM (`experts_from: "ram"`): the card's own tier of experts, below |
 | `card_exclusive` | `false` (default), `true` | with `experts_from: "ram"`: what the card's tier holds is not also kept in RAM, below |
 
 ### The card's tier of experts

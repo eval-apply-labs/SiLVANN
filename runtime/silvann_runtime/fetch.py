@@ -92,10 +92,57 @@ def _program(path, repo, ask, yes):
 
 def _download(repo, path):
     from huggingface_hub import snapshot_download
-    snapshot_download(repo_id=repo, local_dir=path)
+    snapshot_download(repo_id=repo, local_dir=path, **_reported(os.environ.get("SILVANN_DOWNLOAD_PROGRESS")))
     if not present(path):
         raise Refused("the download of %s finished but %s is not a model folder" % (repo, path))
     return path
+
+
+def _reported(report):
+    """`snapshot_download`'s progress, counted into the file `report` names (`SILVANN_DOWNLOAD_PROGRESS`, which the UI's
+    downloader sets) as JSON at most twice a second: `{bar: [count, total]}` for each of its bars, the bytes received
+    among them. Hugging Face's client writes a file in blocks of a few hundred MB, so the bytes received are what moves
+    on a slow connection. No file named: nothing is passed and the client's own bars are drawn."""
+    if not report:
+        return {}
+    import json
+    import threading
+    import time
+    from huggingface_hub.utils import tqdm as hf_tqdm
+    counts, lock, last = {}, threading.Lock(), [0.0]
+
+    def write(force):
+        now = time.monotonic()
+        if not force and now - last[0] < 0.5:
+            return
+        last[0] = now
+        tmp = report + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(counts, f)
+        os.replace(tmp, report)
+
+    class Reported(hf_tqdm):
+        # counted here as well as by tqdm, which counts nothing when it draws nothing (no terminal)
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._bar = str(kwargs.get("name") or kwargs.get("desc") or "bar")
+            self._count = int(kwargs.get("initial") or 0)
+
+        def update(self, n=1):
+            with lock:
+                self._count += int(n or 0)
+                counts[self._bar] = [self._count, int(self.total or 0)]
+                write(False)
+            return super().update(n)
+
+        def close(self):
+            with lock:
+                if hasattr(self, "_bar"):
+                    counts[self._bar] = [self._count, int(self.total or 0)]
+                    write(True)
+            return super().close()
+
+    return {"tqdm_class": Reported}
 
 
 if __name__ == "__main__":

@@ -43,6 +43,11 @@
     /* experts expert-major, the card's close                                                                        */ \
     X(PKG, 17, "ai_qwen_3__pre_expert_rows",  ai_qwen_3__pre_expert_rows__zzabi_adapter,  AI_QWEN_3__PRE_EXPERT_ROWS) \
     X(PKG, 18, "ai_qwen_3__experts_rows",     ai_qwen_3__experts_rows__zzabi_adapter,     AI_QWEN_3__EXPERTS_ROWS) \
-    X(PKG, 19, "ai_qwen_3__post_expert_rows", ai_qwen_3__post_expert_rows__zzabi_adapter, AI_QWEN_3__POST_EXPERT_ROWS)
+    X(PKG, 19, "ai_qwen_3__post_expert_rows", ai_qwen_3__post_expert_rows__zzabi_adapter, AI_QWEN_3__POST_EXPERT_ROWS) \
+    /* ⭐⭐ A PICTURE THROUGH THE VISION TOWER — the patch embedding, a block over every patch, the merger into the  */ \
+    /* text model's width. ▶ `cpu/opcodes/vision__abi.cuh`, `contracts/objects/vision.cuh`.                        */ \
+    X(PKG, 20, "ai_qwen_3__vision_embed",  ai_qwen_3__vision_embed__zzabi_adapter,  AI_QWEN_3__VISION_EMBED) \
+    X(PKG, 21, "ai_qwen_3__vision_block",  ai_qwen_3__vision_block__zzabi_adapter,  AI_QWEN_3__VISION_BLOCK) \
+    X(PKG, 22, "ai_qwen_3__vision_merger", ai_qwen_3__vision_merger__zzabi_adapter, AI_QWEN_3__VISION_MERGER)
 
 #endif /* SILVANN__PACKAGES_AI_QWEN_3_CONTRACTS_MACROS_LANGUAGE_CONTRACT__VERBS_CUH */

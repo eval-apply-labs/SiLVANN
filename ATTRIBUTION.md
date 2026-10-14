@@ -43,6 +43,9 @@ Python packages the runtime imports (`requirements.txt`), installed by the user:
 | pydantic | MIT |
 | httpx | BSD-3-Clause |
 | nicegui | MIT |
+| Pillow | MIT-CMU (HPND) — a picture decoded and resized for the vision tower |
+| pypdf | BSD-3-Clause — a PDF's text, for a file attached to a message |
+| PyAV (`av`), in `requirements-nonfree.txt` — `install.sh` installs it; the Docker image does not carry it, and its scripts' `install_nonfree` fetches it from PyPI into the user's volume | BSD-3-Clause — a video file's frames. Its wheels carry FFmpeg's libraries (LGPL-3.0-or-later, as FFmpeg reports itself) and the codec libraries they link, x264 and x265 among them (GPL-2.0-or-later) |
 
 ## 4. Models
 

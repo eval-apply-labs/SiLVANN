@@ -17,6 +17,7 @@ The residual stream `x` never leaves the card; `head` answers the greedy token, 
 A conversation's STATE is the DeltaNet layers' recurrent state and conv window and the attention layers' keys and
 values up to its length — `state_regions` says where, so a conversation can be put away and brought back.
 """
+import json
 import os
 import pickle
 
@@ -36,12 +37,13 @@ def _half(a):
 
 
 class Qwen35(Generates):
-    PROGRAM = ("qwen3_5", "qwen3_5_cpu", "sampling", "generate")   # the model folder's lisp/ files (▶ `ModelFolder.program`)
+    PROGRAM = ("qwen3_5", "qwen3_5_cpu", "sampling", "generate", "qwen3_5_pictures")   # the model folder's lisp/ files (▶ `ModelFolder.program`)
     SAMPLES_ON_CARD = True          # `head_sample` — ▶ `sampling`
 
     def __init__(self, folder, machine, max_context=4096, fused_moe=True, kv="tiered", tiers=None, experts_on="card",
                  experts_from="auto", experts_dir=None, layers=None, chunk=256, experts_ram_gb=None, card_experts_gb=0,
-                 card_landing=1, card_line=None, experts_int8=False):
+                 card_landing=1, card_line=None, experts_int8=False, picture_pixels=1 << 22,
+                 picture_weights="auto"):
         if folder.architecture not in ARCHITECTURES:
             raise Refused("%s is a %r model, not one of %s" % (folder.path, folder.architecture, ARCHITECTURES))
         c, b = folder.config, folder.bundle
@@ -53,6 +55,10 @@ class Qwen35(Generates):
         self.QH, self.KVH, self.AH = c["num_attention_heads"], c["num_key_value_heads"], c["head_dim"]
         rope = c.get("rope_parameters") or {}
         self.ROT = int(self.AH * (rope.get("partial_rotary_factor") or c["partial_rotary_factor"]))
+        # M-RoPE: a token's three positions (time, row, column), interleaved by frequency — the row's sections, then the
+        #   column's, in nn's `rope_angles_mrope_rows` word; 0 when the model has none (its pictures are refused)
+        section = rope.get("mrope_section") or []
+        self.MROPE = (section[1] | (section[2] << 16)) if len(section) == 3 and rope.get("mrope_interleaved") else 0
         self.THETA = int(rope.get("rope_theta") or c["rope_theta"])
         # The norms' epsilon: the program's own norm takes it from here, and ai_qwen_3's words hold it as
         # AI_QWEN_3__RMS_NORM_EPS, so a config that says otherwise is refused rather than half-honoured.
@@ -94,6 +100,19 @@ class Qwen35(Generates):
         self.global_ = g
         self.head_rec, self.emb_rec = g["lm_head.weight"], g["model.language_model.embed_tokens.weight"]
         self.VOCAB = int(self.head_rec["rows"])
+        # ⭐ PICTURES' FORMS, a file of their own that a runtime before them never reads — so a pack's qwen3_5.lisp stays
+        #   one every runtime runs; a folder without it reads text, and refuses pictures (▶ `vision`). Decided at the boot,
+        #   as a boot that reads `programs.lisp` never calls `_procedures`; the file is in that file's key, so what it
+        #   holds was composed with the pictures exactly when the folder has them
+        self.PICTURES = os.path.isfile(os.path.join(folder.path, "lisp", "qwen3_5_pictures.lisp"))
+        # ⭐ PICTURES ON THE CARD (NN-78): the vision tower's weights in a collection of their own and its scratch in another,
+        #   sized for pictures of up to `picture_pixels` (0: none, and none of the card's memory for them) — where the
+        #   folder has the program's pictures file, the pack the tower, the model M-RoPE, and this machine the first layers
+        self.VIS = bool(self.PICTURES and self.MROPE and picture_pixels and (layers is None or 0 in layers)
+                        and "model.visual.blocks.0.attn.qkv.weight" in g)
+        self.PICTURE_PIXELS = int(picture_pixels or 0)
+        if picture_weights not in ("auto", "card", "ram"):
+            raise Refused("picture_weights is 'auto', 'card' or 'ram', not %r" % (picture_weights,))
         # ⭐ THE ROUTED EXPERTS ON THE CARD, OR ON THE CPU — ⚖ *"the potato tier should fit with an l2 of 8gb and the rest
         #   on disk"*: `experts_on="cpu"` leaves the card the rest of the model and a CPU worker the experts, in RAM
         #   (`experts_from="ram"`) or mapped from their file (`"disk"`, ▶ `experts_file`), `"auto"` choosing by the
@@ -107,6 +126,12 @@ class Qwen35(Generates):
             raise Refused("experts on the CPU: this model has no routed experts")
         if self.CPU_EXPERTS:
             self.FUSED = False          # the split words: the router on the card, the experts on the CPU
+        # ⭐ THE TOWER'S WEIGHTS (~0.6 GB packed) ON THE CARD OR IN RAM — `REASONED`: with the experts on the CPU the RAM is
+        #   theirs and the card has room, so the card; with the model on the card the card is the scarce memory (the 27B
+        #   at 32,768 positions leaves a 16 GB card 1 GB), so RAM, a word's planes written to the card before it runs; a
+        #   machine whose worker is a CPU has the one memory, so its slot
+        self.VIS_RAM = self.VIS and (picture_weights == "ram" or (picture_weights == "auto" and not self.CPU_EXPERTS
+                                                                  and machine.silicon not in ("host", "x86_avx2")))
         # ⭐ THE CARD'S TIER OF ROUTED EXPERTS (NN-48) — the experts on the CPU, and `card_experts_gb` of them on the card as
         #   well: the card computes the picks it holds, the CPU the rest; an expert the CPU computed earns a slot by nn's
         #   qualifier and is copied whole from the CPU's memory while the card computes (`card_landing` a visit at most); a
@@ -127,6 +152,12 @@ class Qwen35(Generates):
         if self.CPU_EXPERTS:
             self.EXPERTS_FROM = experts_file.choose(experts_from, self.cpu_arena)
             self.experts_dir = experts_dir or os.path.join(folder.path, "experts")
+        # a card's tier copies an expert from its place in the CPU's memory, which only the experts loaded into RAM have
+        # (`SRC`): from the disk or mapped it would ask for experts and never hold one — `MEASURED` 2026-10-12 from the disk
+        # (measurements/2026-10-12_nvme_array_122b_glm.md), `REASONED` mapped, from `SRC`
+        if self.CARD_GB and self.EXPERTS_FROM != "ram":
+            raise Refused("a card's tier of experts is copied from the experts in RAM — experts_from 'ram', not %r"
+                          % self.EXPERTS_FROM)
         # ⭐ FROM THE DISK, THE EXPERTS ARE A CACHE IN THE CPU WORKER'S OWN MEMORY — read from the file into a slot when a
         #   token picks one that is not there, straight from the drive, the layer's least recently used given up for it.
         #   `"mapped"` maps the file instead. ▶ glm5.py's, and nn's loader.
@@ -193,10 +224,16 @@ class Qwen35(Generates):
                 self.cpu_arena = self.EPLAN.slot_bytes * self.EXPERTS * len(run)
         coll += [(self.T_HEAD, self.HPLAN, 1), (self.T_STATE, self.SPLAN, n_d),
                  (self.T_KV, self.KVPLAN, len(run) - n_d)]
+        after = self.T_KV + 1
+        if self.VIS:
+            self.T_VIS, self.T_VSCR = after, after + 1
+            self._vision_plan()
+            coll += [(self.T_VIS, self.VPLAN, 1), (self.T_VSCR, self.VSPLAN, 1)]
+            after += 2
         # the card's tier: whole experts, laid out as the CPU's, so a promotion copies a slot as it is
         self.CPLAN, self.T_CEXP, self.CARD_SLOTS, self.SRC = None, None, 0, {}
         if self.CARD_GB and self.MOE:
-            self.CPLAN, self.T_CEXP = self.EPLAN, self.T_KV + 1
+            self.CPLAN, self.T_CEXP = self.EPLAN, after
             self.CARD_SLOTS = int(self.CARD_GB * (1 << 30)) // self.EPLAN.slot_bytes
             if self.CARD_SLOTS < len(run):
                 raise Refused("%.1f GB holds %d experts, fewer than one a layer" % (self.CARD_GB, self.CARD_SLOTS))
@@ -286,6 +323,8 @@ class Qwen35(Generates):
         m, b = self.m, self.b
         loader = m.loader()
         self._head_and_embedding(loader)
+        if self.VIS:
+            self._vision_load(loader)
         self.state_at = {}
         self.slot_at = {}              # (layer, name) -> the slot a dense matrix lives in, for a LoRA swap
         for i, l in enumerate(self.run_layers):
@@ -318,6 +357,8 @@ class Qwen35(Generates):
         if self.CPLAN is not None:
             self._tier_tables()
         self._bindings()
+        if self.VIS:
+            self._vision_bindings()
         m.define_programs(self._procedures)
         if self.CPLAN is not None:
             self.CALIBRATION = expert_tier.calibrate(
@@ -327,6 +368,165 @@ class Qwen35(Generates):
                 self.CHUNK, fixed=self.CARD_LINE)
         self.active_lora, self._lora_cache = self.folder.lora, {}     # a LoRA chosen at boot is in the slots already
         self.global_ = None                         # what was left of global.pkl, read by the buffers
+
+    # ── pictures: the vision tower on the card ───────────────────────────────────────────────────────────────
+    def _vision_plan(self):
+        """Where the tower's planes go, and its scratch's. Every record of global.pkl's `model.visual.*` is a plane as the
+        pack keeps it — a matrix's codes and its scales, a vector's halves — but the patch embedding, whose rows of 16 no
+        product takes, which becomes a matrix of halves (1152 rows of 1536), and the position table, which stays on the
+        host for each picture's resampling (▶ `vision.Vision`). The planes are in groups, a word's each — the embedding's,
+        a block's, the merger's: on the card (`picture_weights` "card") the groups lie one after another in the tower's
+        slot; in RAM ("ram") they lie so in the host's memory, and the slot is one group's room, which each word's planes
+        are written into before it runs."""
+        vc = json.load(open(os.path.join(self.folder.path, "config.json")))["vision_config"]
+        self.VC = vc
+        g, self.VREC, self.D_VIS = self.global_, {}, {}
+        group_of = lambda short: ("embed" if short.startswith("patch_embed.") else "merger" if short.startswith("merger.")
+                                  else int(short.split(".")[1]))
+        self.VGROUPS = ["embed"] + list(range(vc["depth"])) + ["merger"]
+        size = {k: 0 for k in self.VGROUPS}
+
+        def place(group, name, nbytes):
+            self.VREC[name] = (group, size[group], nbytes)
+            size[group] += (nbytes + 255) // 256 * 256
+        for name in sorted(k for k in g if k.startswith("model.visual.")):
+            short, rec = name[len("model.visual."):], g[name]
+            if short == "pos_embed.weight":
+                continue
+            if short == "patch_embed.proj.weight":
+                rows = int(rec["original_shape"][0])
+                place("embed", short, rows * (int(np.prod(rec["original_shape"])) // rows) * 2)
+                self.D_VIS[short] = 16
+                continue
+            place(group_of(short), short, len(np.asarray(rec["vbr_data"]).tobytes()))
+            self.D_VIS[short] = int(rec["d"])
+            if int(rec["d"]) != 16:
+                place(group_of(short), short + ":lut", 2 * int(rec["rows"]))
+        self.VHOST, at = {}, 0                         # a group's place among them all, and its bytes
+        for k in self.VGROUPS:
+            self.VHOST[k] = (at, size[k])
+            at += size[k]
+        self.VIS_BYTES = at
+        self.VCARD = ({k: 0 for k in self.VGROUPS} if self.VIS_RAM else {k: self.VHOST[k][0] for k in self.VGROUPS})
+        room = max(size.values()) if self.VIS_RAM else at
+        self.VPLAN = NL.SlotPlan(room, 0, 0, 256)          # every plane in the up half (nn takes no empty half)
+        H, P = vc["hidden_size"], vc["patch_size"]
+        M = vc["spatial_merge_size"] ** 2
+        self.VIS_ROWS = max(M, self.PICTURE_PIXELS // (P * P) // M * M)     # the most patches a picture is made into
+        self.VIS_CHUNK = 1024                                                # the MLP's rows a step
+        n, I, hd, out = self.VIS_ROWS, vc["intermediate_size"], H // vc["num_heads"], vc["out_hidden_size"]
+        IN = 3 * vc["temporal_patch_size"] * P * P
+        pairs, step = (8 * n + 15) & ~15, min(self.VIS_CHUNK, n)
+        # ▶ `ai_qwen_3__vision_block`'s scratch: the pairs, h, hrot (a row of the MLP's width where its second matrix is
+        #   rotated), q k v, the MLP's two, the angles
+        rot = max(n * H, step * I)
+        scratch = pairs + 2 * (4 * n * H + rot + step * (I + H)) + 4 * n * hd
+        self.VSCR, at = {}, 0
+        for name, nbytes in (("x", 2 * n * H), ("pix", 2 * n * IN), ("pos", 2 * n * H), ("rc", 8 * n),
+                             ("out", 2 * (n // M) * out), ("scratch", scratch)):
+            self.VSCR[name] = (at, nbytes)
+            at += (nbytes + 255) // 256 * 256
+        self.VSPLAN = NL.SlotPlan(at, 0, 0, 256)
+
+    def _vision_load(self, loader):
+        """The tower's planes into its slot — or into the host's memory, its slot then a group's room — each record let go
+        of once it is there; the position table decoded to the host's floats; the scratch's slot reserved."""
+        from .vision import decoded
+        g = self.global_
+        loader.layer_width(0, self.T_VIS, 1)
+        self.VIS_AT = loader.reserve(self.T_VIS)
+        self.VIS_HOST = np.zeros(self.VIS_BYTES, np.uint8) if self.VIS_RAM else None
+
+        def put(name, data):
+            group, at, _ = self.VREC[name]
+            if self.VIS_RAM:
+                a = self.VHOST[group][0] + at
+                self.VIS_HOST[a:a + len(data)] = np.frombuffer(data, np.uint8)
+            else:
+                loader.write(self.VIS_AT + self.VCARD[group] + at, data)
+        for name in sorted(k for k in g if k.startswith("model.visual.")):
+            short, rec = name[len("model.visual."):], g.pop(name)
+            if short == "pos_embed.weight":
+                self.POS_TABLE = decoded(rec).astype(np.float32)
+                continue
+            if short == "patch_embed.proj.weight":
+                put(short, decoded(rec).reshape(int(rec["original_shape"][0]), -1).astype("<f2").tobytes())
+                continue
+            put(short, np.asarray(rec["vbr_data"]).tobytes())
+            if int(rec["d"]) != 16:
+                put(short + ":lut", np.asarray(rec["vbr_lut"]).astype("<f2").tobytes())
+        loader.assign(0, self.T_VIS, 0, self.VIS_AT)
+        loader.layer_width(0, self.T_VSCR, 1)
+        self.VSCR_AT = loader.reserve(self.T_VSCR)
+        loader.assign(0, self.T_VSCR, 0, self.VSCR_AT)
+
+    def _vision_bindings(self):
+        """The tower's tables — the embedding's, a block's each, the merger's — and the scratch's planes."""
+        m, vc = self.m, self.VC
+        H, heads = vc["hidden_size"], vc["num_heads"]
+
+        def w(name):
+            group, at, nbytes = self.VREC[name]
+            return "(nn__expert__plane 0 %d 0 %d %d)" % (self.T_VIS, self.VCARD[group] + at, nbytes)
+        sp = lambda name: "(nn__expert__plane 0 %d 0 %d %d)" % ((self.T_VSCR,) + self.VSCR[name])
+        d = lambda name: int(self.D_VIS[name])
+        IN = 3 * vc["temporal_patch_size"] * vc["patch_size"] ** 2
+        # a matrix's scales below 16 bits; at 16 the cell is not read, and its bias stands in
+        lut = lambda n: w(n + ":lut") if d(n) != 16 else w(n.replace("weight", "bias"))
+        m.table("VE", [w("patch_embed.proj.weight"), w("patch_embed.proj.bias"), w("patch_embed.proj.bias"), sp("scratch"),
+                       H, IN, 16])
+        for i in range(vc["depth"]):
+            p = "blocks.%d." % i
+            m.table("VB%d" % i, [w(p + "norm1.weight"), w(p + "norm1.bias"),
+                                 w(p + "attn.qkv.weight"), lut(p + "attn.qkv.weight"), w(p + "attn.qkv.bias"),
+                                 w(p + "attn.proj.weight"), lut(p + "attn.proj.weight"), w(p + "attn.proj.bias"),
+                                 w(p + "norm2.weight"), w(p + "norm2.bias"),
+                                 w(p + "mlp.linear_fc1.weight"), lut(p + "mlp.linear_fc1.weight"),
+                                 w(p + "mlp.linear_fc1.bias"),
+                                 w(p + "mlp.linear_fc2.weight"), lut(p + "mlp.linear_fc2.weight"),
+                                 w(p + "mlp.linear_fc2.bias"),
+                                 "signs", sp("scratch"),
+                                 H, heads, H // heads, vc["intermediate_size"], d(p + "attn.qkv.weight"),
+                                 d(p + "attn.proj.weight"), d(p + "mlp.linear_fc1.weight"), d(p + "mlp.linear_fc2.weight"),
+                                 int((vc.get("rope_parameters") or {}).get("rope_theta", 10000)), self.VIS_CHUNK])
+        m.table("VM", [w("merger.norm.weight"), w("merger.norm.bias"),
+                       w("merger.linear_fc1.weight"), lut("merger.linear_fc1.weight"), w("merger.linear_fc1.bias"),
+                       w("merger.linear_fc2.weight"), lut("merger.linear_fc2.weight"), w("merger.linear_fc2.bias"),
+                       "signs", sp("scratch"), H, vc["spatial_merge_size"] ** 2, vc["out_hidden_size"],
+                       d("merger.linear_fc1.weight"), d("merger.linear_fc2.weight")])
+        self.VPLANES = {k: sp(k) for k in ("x", "pix", "pos", "rc", "out")}
+
+    def vision_rows(self, pixel_values, rowcol, pos, blocks=None):
+        """A picture's patches through the tower on the card: `pixel_values` (patches x 1536), each patch's row and column
+        (`rowcol`, patches x 2) and its position table's rows (`pos`, patches x 1152) in; the tokens' rows (patches / 4 x
+        the text model's width, float32) out — or, given `blocks`, the patches' residual after that many blocks (a check's
+        stage). With the weights in RAM, a word's planes are written to the card before it runs: a write follows the
+        words before it on the card (the families' `memory_write`), so the slot is free when it is written."""
+        n, vc = len(pixel_values), self.VC
+        M = vc["spatial_merge_size"] ** 2
+        if n > self.VIS_ROWS:
+            raise Refused("%d patches, and this boot holds %d (picture_pixels %d)" % (n, self.VIS_ROWS, self.PICTURE_PIXELS))
+        m, base = self.m, self.VSCR_AT
+        m.write(base + self.VSCR["pix"][0], np.ascontiguousarray(pixel_values, dtype="<f2").tobytes())
+        m.write(base + self.VSCR["pos"][0], np.ascontiguousarray(pos, dtype="<f2").tobytes())
+        m.write(base + self.VSCR["rc"][0], np.ascontiguousarray(rowcol, dtype="<u4").tobytes())
+        P = self.VPLANES
+        depth = vc["depth"] if blocks is None else blocks
+        words = ([("embed", "(ai_qwen_3__vision_embed %s %s VE %d %s)" % (P["pix"], P["pos"], n, P["x"]))]
+                 + [(i, "(ai_qwen_3__vision_block %s %s VB%d %d)" % (P["x"], P["rc"], i, n)) for i in range(depth)]
+                 + ([("merger", "(ai_qwen_3__vision_merger %s VM %d %s)" % (P["x"], n, P["out"]))] if blocks is None else []))
+        for group, word in words:
+            if self.VIS_RAM:
+                at, nbytes = self.VHOST[group]
+                m.write_from(self.VIS_AT, self.VIS_HOST.ctypes.data + at, nbytes)
+            # a word's answer is its out plane, or the error that says why it did not run
+            if m.must("(type %s)" % word, "the tower's word %s" % word.split()[0][1:]) == self.m.K["sys__error"]:
+                raise Refused("the tower's word %s answered an error" % word.split()[0][1:])
+        if blocks is not None:
+            x = m.read(base + self.VSCR["x"][0], n * vc["hidden_size"] * 2)
+            return np.frombuffer(x, dtype="<f2").reshape(n, -1).astype(np.float32)
+        out = m.read(base + self.VSCR["out"][0], (n // M) * vc["out_hidden_size"] * 2)
+        return np.frombuffer(out, dtype="<f2").reshape(n // M, -1).astype(np.float32)
 
     def _head_and_embedding(self, loader):
         """The head into its slot and the embedding into its RAM buffer, before any layer — then the program lets go of
@@ -443,7 +643,8 @@ class Qwen35(Generates):
         else:
             m.buffer(self.CHUNK * self.QH * self.max_context * 4, "scores_rows")
         self.XS_AT = m.buffer(self.CHUNK * H * 2, "xs")
-        m.buffer(self.CHUNK * H * 2, "h1s")
+        self.H1S_AT = m.buffer(self.CHUNK * H * 2, "h1s")
+        self.ROWPOS_AT = m.buffer(self.CHUNK * 12, "rowpos")      # a chunk's rotary positions, three uint32 a row
         if self.MOE:
             # the router's hand, its picks and its scratch, and the experts verb's — the MoE in three reads them on the
             # card as the CPU's experts read the hand and the picks
@@ -659,6 +860,7 @@ class Qwen35(Generates):
                       HEAD_BITS=self.HEAD_BITS, STOPS=0, SEEN=sampling.SEEN,
                       HEAD_CODES=plane(self.HPLAN.at_up_data, self.HPLAN.up_data),
                       HEAD_SCALES=plane(self.HPLAN.at_down_lut, self.HPLAN.down_lut),
+                      LAG=0, ROWPOS=False, MROPE=self.MROPE,
                       ROTATED=bool(self.ROTATED), TIERED=bool(self.TIERED), ROUTED=bool(self.MOE),
                       FUSED=bool(self.MOE and self.FUSED), EXPERTS_ON_CPU=bool(self.CPU_EXPERTS),
                       CARD_TIER=self.CPLAN is not None, CARD=CARD, CPU=CPU)
@@ -689,6 +891,8 @@ class Qwen35(Generates):
         """The program: `lisp/qwen3_5.lisp`, the sampler's, and — the experts on the CPU — the pictures the card hands it.
         Read from `programs.lisp` instead by the boots that have the same key (▶ `Machine.define_programs`)."""
         self.m.load_source(self.folder.program("qwen3_5"))
+        if self.PICTURES:
+            self.m.load_source(self.folder.program("qwen3_5_pictures"))
         self.m.load_source(self.folder.program("sampling"))
         self.m.load_source(self.folder.program("generate"))
         if self.CPU_EXPERTS:
@@ -705,13 +909,50 @@ class Qwen35(Generates):
                           "(nn__vector__zero %s %d)" % (self.state(l, "down"), self.W_BYTES // 2)]
         self.m.must("(begin %s (type x))" % " ".join(zeros), "the reset")
 
-    def step(self, token, pos, greedy=True, sample=None):
+    def step(self, token, pos, greedy=True, sample=None, lag=0):
         """One position: the token in, the next token out — greedy, or drawn on the card by `sample` (a
-        `sampling.head`) — or the logits left for a sampler on the host."""
+        `sampling.head`) — or the logits left for a sampler on the host. `lag`: how far its rotary position is behind
+        `pos` (an image before it took fewer positions than places)."""
         if pos >= self.max_context:
             raise Refused("position %d is past the context of %d" % (pos, self.max_context))
         head = sample or ("(head)" if greedy else "(head_logits)")
-        return self._run("(begin (position %d %d) %s)" % (token, pos, head), "position %d" % pos)
+        self._lag = lag                                    # what `generate` finds set (▶ generate.py)
+        return self._run("(begin (set! LAG %d) (position %d %d) %s)" % (lag, token, pos, head), "position %d" % pos)
+
+    # ── pictures: the tower's rows in place of their pads, and M-RoPE's positions ─────────────────────────────
+    def vision(self):
+        """The model's vision tower (▶ `vision.Vision`), made when the first picture comes."""
+        if getattr(self, "_vision", None) is None:
+            if not self.MROPE:
+                raise Refused("%s reads no pictures: its rotary has no M-RoPE sections" % self.folder.path)
+            # ⛳ the program travels with the model (lisp/): a folder fetched before pictures has no qwen3_5_pictures.lisp
+            if not self.PICTURES:
+                raise Refused("%s has no lisp/qwen3_5_pictures.lisp — the program's pictures, which a folder fetched before "
+                              "v0.7.0 lacks: `silvann download <model>` fetches it, and only it" % self.folder.path)
+            from .vision import Vision
+            self._vision = Vision(self.folder, self if getattr(self, "VIS", False) else None)
+        return self._vision
+
+    def _rows_in(self, rows, at, n):
+        """A chunk's rows that are a picture's — `rows` {index in the prompt: the tower's row} — written over their pads'
+        embeddings in `xs`, through `h1s` and rotated into the residual's basis on the card when the pack keeps it
+        rotated, a run of consecutive rows at a time."""
+        H, mine = self.H, sorted(i - at for i in rows if at <= i < at + n)
+        runs, start = [], None
+        for k, r in enumerate(mine):
+            if start is None:
+                start = r
+            if k + 1 == len(mine) or mine[k + 1] != r + 1:
+                runs.append((start, r + 1))
+                start = None
+        for a, b in runs:
+            block = np.stack([rows[at + r] for r in range(a, b)]).astype("<f2").tobytes()
+            if not self.ROTATED:
+                self.m.write(self.XS_AT + a * H * 2, block)
+                continue
+            self.m.write(self.H1S_AT + a * H * 2, block)
+            self.m.must("(begin (nn__hadamard__rotate (nn__vector__range h1s %d %d) signs (nn__vector__range xs %d %d) %d) "
+                        "(type xs))" % (a * H, (b - a) * H, a * H, (b - a) * H, (b - a) * H), "a picture's rows")
 
     def _run(self, text, what):
         """A program's answer. ⛳ With the experts on the CPU it runs with every block standing — it hands them work
@@ -727,17 +968,31 @@ class Qwen35(Generates):
             self.m.must("(begin %s 0)" % " ".join("(sys__node_array__set PROMPT %d %d)" % (i, t)
                                                   for i, t in enumerate(tokens[at:at + 64], at)), "the prompt's tokens")
 
-    def prefill(self, tokens, first, greedy=True, sample=None):
+    def prefill(self, tokens, first, greedy=True, sample=None, positions=None, rows=None):
         """Positions `first ..` for `tokens` in chunks of rows — each layer one call a chunk — then the next token from
-        the last row (greedy, or drawn by `sample`), or its logits left for a sampler."""
+        the last row (greedy, or drawn by `sample`), or its logits left for a sampler. A picture's tokens come with
+        `rows` {index in `tokens`: the tower's row, in place of that pad's embedding} and every token with its three
+        rotary `positions` (n x 3, ▶ `vision.positions`); without them a token's position is its place in the cache."""
         if first + len(tokens) > self.max_context:
             raise Refused("positions to %d are past the context of %d" % (first + len(tokens), self.max_context))
+        if (positions is not None or rows) and not (self.MROPE and self.PICTURES):
+            raise Refused("%s reads no pictures here (▶ `vision`)" % self.folder.path)
+        rows = rows or {}
         step = min(self.CHUNK, self.HOT) if self.TIERED else self.CHUNK      # a chunk never outgrows the hot ring
         for at in range(0, len(tokens), step):
             chunk = tokens[at:at + step]
             self._prompt(chunk)
-            self._run("(begin (embed_rows %d) (rows %d %d) (type xs))" % (len(chunk), first + at, len(chunk)),
-                      "the rows from %d" % (first + at))
+            given = positions is not None
+            if given:
+                self.m.write(self.ROWPOS_AT, np.ascontiguousarray(positions[at:at + len(chunk)], dtype="<u4").tobytes())
+            if any(at <= i < at + len(chunk) for i in rows):
+                self.m.must("(begin (embed_rows %d) (type xs))" % len(chunk), "the rows' embeddings from %d" % (first + at))
+                self._rows_in(rows, at, len(chunk))
+                start = ""
+            else:
+                start = "(embed_rows %d)" % len(chunk)
+            self._run("(begin (set! ROWPOS %s) %s (rows %d %d) (set! ROWPOS (< 1 0)) (type xs))"
+                      % ("(< 0 1)" if given else "(< 1 0)", start, first + at, len(chunk)), "the rows from %d" % (first + at))
             last = len(chunk) - 1
         head = sample or ("(head)" if greedy else "(head_logits)")
         return self._run("(begin (nn__vector__add (nn__vector__range xs %d %d) zero_h x %d) %s)"
@@ -759,9 +1014,10 @@ class Qwen35(Generates):
                         "position %d" % pos)
         return got if head else self.m.read(self.X_AT, self.H * 2)
 
-    def forward_rows(self, first, tokens=None, xs=None, n=None, head=False):
+    def forward_rows(self, first, tokens=None, xs=None, n=None, head=False, positions=None, rows=None):
         """A chunk of positions `first ..` as rows through this machine's layers, from `tokens` or from the rows `xs`.
-        Answers the next token from the last row when `head`, else this machine's rows."""
+        Answers the next token from the last row when `head`, else this machine's rows. A picture's: `rows` {index in
+        the chunk: the tower's row} over its pads (with `tokens`) and the chunk's rotary `positions` (▶ `prefill`)."""
         if self.CPU_EXPERTS:
             # ⛳ the experts on the CPU read a prompt a position at a time (no rows words for them here): the chunk's
             #   positions through `forward` in turn — the same tokens, a pipeline's coordinator none the wiser
@@ -776,14 +1032,23 @@ class Qwen35(Generates):
                     rows.append(got)
             return got if head else b"".join(rows)
         m, H = self.m, self.H
+        if (positions is not None or rows) and not (self.MROPE and self.PICTURES):
+            raise Refused("%s reads no pictures here (▶ `vision`)" % self.folder.path)
         if tokens is not None:
             n = len(tokens)
             self._prompt(tokens)
             start = "(embed_rows %d)" % n
+            if rows:
+                m.must("(begin (embed_rows %d) (type xs))" % n, "the rows' embeddings from %d" % first)
+                self._rows_in(rows, 0, n)
+                start = ""
         else:
             m.write(self.XS_AT, xs)
             start = ""
-        m.must("(begin %s (rows %d %d) (type xs))" % (start, first, n), "the rows from %d" % first)
+        if positions is not None:
+            m.write(self.ROWPOS_AT, np.ascontiguousarray(positions[:n], dtype="<u4").tobytes())
+        m.must("(begin (set! ROWPOS %s) %s (rows %d %d) (set! ROWPOS (< 1 0)) (type xs))"
+               % ("(< 0 1)" if positions is not None else "(< 1 0)", start, first, n), "the rows from %d" % first)
         if not head:
             return m.read(self.XS_AT, n * H * 2)
         return m.must("(begin (nn__vector__add (nn__vector__range xs %d %d) zero_h x %d) (head))" % ((n - 1) * H, H, H),

@@ -29,6 +29,7 @@ system keeps the file's pages, so the memory holds the experts in use and the di
 Every matrix is a TurboQuant record rotated along its input, so each gemv is handed its input rotated; the lossless
 ones (d = 16: the routers, the maps, the norms) take it as it is.
 """
+import json
 import os
 import pickle
 
@@ -54,6 +55,7 @@ class Glm5(Generates):
     def __init__(self, folder, machine, max_context=2048, layers=None, grid=True, fused=True, sockets=None, experts_int8=True,
                  experts_from="auto", experts_dir=None, chunk=256, experts_ram_gb=None, card_experts_gb=0, card_hot=None,
                  card_landing=1, card_line=None, card_exclusive=False, card_free=16, card_duplex_line=1200, card_duplex=None, card_landing_line=3,
+                 picture_pixels=1 << 22,
                  ):
         if folder.architecture not in ARCHITECTURES:
             raise Refused("%s is a %r model, not one of %s" % (folder.path, folder.architecture, ARCHITECTURES))
@@ -133,6 +135,12 @@ class Glm5(Generates):
         if self.CARD_EXCLUSIVE and self.EXPERTS_FROM != "ram":
             raise Refused("an exclusive tier moves experts between the card and the sockets' memory — experts_from 'ram', "
                           "not %r" % self.EXPERTS_FROM)
+        # an inclusive tier copies an expert from its place in a socket's memory, which only the experts loaded into RAM
+        # have (`SRC`): from the disk or mapped it would ask for experts and never hold one — `MEASURED` 2026-10-12 from
+        # the disk (measurements/2026-10-12_nvme_array_122b_glm.md), `REASONED` mapped, from `SRC`
+        if self.CARD_GB and self.EXPERTS_FROM != "ram":
+            raise Refused("a card's tier of experts is copied from the experts in RAM — experts_from 'ram', not %r"
+                          % self.EXPERTS_FROM)
         # ⭐ FROM THE DISK, THE EXPERTS ARE A CACHE IN EACH WORKER'S OWN MEMORY — read from the worker's file into a slot
         #   when a token picks one that is not there, straight from the drive (`O_DIRECT`), the layer's least recently used
         #   given up for it; and a prompt's, a batch at a time, the next batch read while one computes. ⚖ *"the engine
@@ -157,6 +165,15 @@ class Glm5(Generates):
         #   wants to be large — a chunk's picks reach most of a layer's experts, so each is streamed about once a chunk
         self.CH = max(1, min(chunk, max_context)) if fused else 0
         self.experts_dir = experts_dir or os.path.join(folder.path, "experts")
+        # ⭐ PICTURES ON THE CARD (NN-81): the vision tower's weights in a collection of their own and its scratch in another,
+        #   sized for pictures of up to `picture_pixels` (0: none, and none of the card's memory for them — the tower then
+        #   runs on the host, ▶ vision_glm.py) — where the pack carries the tower, a prompt goes as rows (the only way a
+        #   picture goes in) and this machine holds the first layers
+        self.PICTURE_PIXELS = int(picture_pixels or 0)
+        self.VIS = bool(self.PICTURE_PIXELS and self.CH and self.EPLAN is not None and 0 in self.run_layers
+                        and "model.visual.blocks.0.attn.qkv.weight" in g)
+        if self.VIS:
+            self._vision_plan()
 
     @staticmethod
     def cn(i, name):
@@ -337,6 +354,8 @@ class Glm5(Generates):
         m.act_as(CARD)
         loader = m.loader()
         self._head_and_embedding(loader)
+        if self.VIS:
+            self._vision_load(loader)
         self.state_at = {}
         for l in self.run_layers:
             for t in sorted({self.TYPE[self.key(l, n)] for n in self.dense_names(l)}):
@@ -368,6 +387,8 @@ class Glm5(Generates):
                 self._cpu_buffers(i)
         m.act_as(CARD)
         self._tables()
+        if self.VIS:
+            self._vision_tables()
         if self.SOURCE:
             self._bindings()
         else:
@@ -1054,10 +1075,197 @@ class Glm5(Generates):
             self.m.must("(begin %s 0)" % " ".join("(sys__node_array__set PROMPT %d %d)" % (i, t)
                                                   for i, t in enumerate(tokens[at:at + 64], at)), "the prompt's tokens")
 
-    def prefill(self, tokens, first, greedy=True, sample=None):
+    # ── pictures: the vision tower on the card ─────────────────────────────────────────────────────────────────
+    def _vision_plan(self):
+        """Where the tower's planes go, and its scratch's: a collection each, after the model's. Every record of global.pkl's
+        `model.visual.*` is a plane as the pack keeps it — a matrix's codes and its scales, a vector's halves — but the two
+        convolutions, whose rows of 14 and of 2 no product takes: the patch embedding becomes a matrix of halves (1024
+        rows of 1176), the downsampling one of 4096 rows of 4096, its columns laid out for the four patches as they lie
+        (a patch's 1024 channels, then the next patch's). A block's gate and up biases are one plane, side by side."""
+        vc = json.load(open(os.path.join(self.folder.path, "config.json")))["vision_config"]
+        self.VC = vc
+        g, self.VREC, self.D_VIS = self.global_, {}, {}
+        H, I, out, P = vc["hidden_size"], vc["intermediate_size"], vc["out_hidden_size"], vc["patch_size"]
+        M = vc["spatial_merge_size"] ** 2
+        self.VGROUPS = ["embed"] + list(range(vc["depth"])) + ["tail"]
+        group_of = lambda short: ("embed" if short.startswith("patch_embed.")
+                                  else int(short.split(".")[1]) if short.startswith("blocks.") else "tail")
+        size, at = {k: 0 for k in self.VGROUPS}, 0
+
+        def place(group, name, nbytes, d=16):
+            self.VREC[name] = (group, size[group], nbytes)
+            self.D_VIS[name] = d
+            size[group] += (nbytes + 255) // 256 * 256
+        for name in sorted(k for k in g if k.startswith("model.visual.")):
+            short, rec = name[len("model.visual."):], g[name]
+            if short in ("patch_embed.proj.weight", "downsample.weight"):
+                shape = [int(x) for x in rec["original_shape"]]
+                place(group_of(short), short, 2 * int(np.prod(shape)))
+                continue
+            if short.endswith(("mlp.gate_proj.bias", "mlp.up_proj.bias")):
+                continue                                       # ▶ `mlp.gu_bias` below
+            d = int(rec["d"])
+            place(group_of(short), short, len(np.asarray(rec["vbr_data"]).tobytes()), d)
+            if d != 16:
+                place(group_of(short), short + ":lut", 2 * int(rec["rows"]))
+        for i in range(vc["depth"]):
+            place(i, "blocks.%d.mlp.gu_bias" % i, 2 * 2 * I)
+        self.VCARD = {}
+        for k in self.VGROUPS:
+            self.VCARD[k] = at
+            at += size[k]
+        self.VIS_BYTES = at
+        self.VPLAN = NL.SlotPlan(at, 0, 0, 256)               # every plane in the up half (nn takes no empty half)
+        self.VIS_ROWS = max(M, self.PICTURE_PIXELS // (P * P) // M * M)     # the most patches a picture is made into
+        self.VIS_CHUNK = 1024                                                # the MLPs' rows a step
+        n, hd, PI = self.VIS_ROWS, H // vc["num_heads"], vc["projection_intermediate_size"]
+        IN, tokens = 3 * vc["temporal_patch_size"] * P * P, n // M
+        pairs = lambda rows: (24 * rows + 255) & ~255
+        step, step2 = min(self.VIS_CHUNK, n), min(self.VIS_CHUNK, tokens)
+        # ▶ ai_glm_5_3's `vision_block` and `vision_tail`: their scratch, one after the other in the same room
+        block = pairs(n) + 2 * (n * H + max(n * H, step * I) + 3 * n * H + 2 * step * I + 2 * step * I + step * H) + 4 * n * hd
+        big = max(n * H, tokens * out)
+        tail = pairs(tokens) + 2 * (big + tokens * out + max(tokens * out, step2 * PI) + 2 * step2 * PI + 2 * step2 * PI)
+        self.VSCR, at = {}, 0
+        for name, nbytes in (("x", 2 * n * H), ("pix", 2 * n * IN), ("rc", 8 * n), ("out", 2 * tokens * out),
+                             ("scratch", max(block, tail, pairs(n)))):
+            self.VSCR[name] = (at, nbytes)
+            at += (nbytes + 255) // 256 * 256
+        self.VSPLAN = NL.SlotPlan(at, 0, 0, 256)
+        self.T_VIS = max(t for t, _, _ in self.collections) + 1
+        self.T_VSCR = self.T_VIS + 1
+        self.collections += [(self.T_VIS, self.VPLAN, 1), (self.T_VSCR, self.VSPLAN, 1)]
+        self.arena += self.VPLAN.slot_bytes + self.VSPLAN.slot_bytes
+
+    def _vision_load(self, loader):
+        """The tower's planes into its slot, each record let go of once it is there; the scratch's slot reserved."""
+        from .vision import decoded
+        g, vc = self.global_, self.VC
+        loader.layer_width(0, self.T_VIS, 1)
+        self.VIS_AT = loader.reserve(self.T_VIS)
+
+        def put(name, data):
+            group, at, _ = self.VREC[name]
+            loader.write(self.VIS_AT + self.VCARD[group] + at, data)
+        bias = {}
+        for name in sorted(k for k in g if k.startswith("model.visual.")):
+            short, rec = name[len("model.visual."):], g.pop(name)
+            if short == "patch_embed.proj.weight":
+                put(short, decoded(rec).reshape(int(rec["original_shape"][0]), -1).astype("<f2").tobytes())
+            elif short == "downsample.weight":
+                w = decoded(rec)                                # out, channels, the block's row, its column
+                put(short, w.reshape(w.shape[0], w.shape[1], -1).transpose(0, 2, 1).reshape(w.shape[0], -1).astype("<f2").tobytes())
+            elif short.endswith(("mlp.gate_proj.bias", "mlp.up_proj.bias")):
+                bias[short] = np.asarray(rec["vbr_data"]).tobytes()
+            else:
+                put(short, np.asarray(rec["vbr_data"]).tobytes())
+                if int(rec["d"]) != 16:
+                    put(short + ":lut", np.asarray(rec["vbr_lut"]).astype("<f2").tobytes())
+        for i in range(vc["depth"]):
+            p = "blocks.%d.mlp." % i
+            put(p + "gu_bias", bias[p + "gate_proj.bias"] + bias[p + "up_proj.bias"])
+        loader.assign(0, self.T_VIS, 0, self.VIS_AT)
+        loader.layer_width(0, self.T_VSCR, 1)
+        self.VSCR_AT = loader.reserve(self.T_VSCR)
+        loader.assign(0, self.T_VSCR, 0, self.VSCR_AT)
+
+    def _vision_tables(self):
+        """The tower's tables — the embedding's, a block's each, the tail's — and the scratch's planes."""
+        m, vc = self.m, self.VC
+        H, heads = vc["hidden_size"], vc["num_heads"]
+        eps, limit = float(vc.get("rms_norm_eps", 1e-5)), float(vc.get("swiglu_limit", 10.0))
+
+        def w(name):
+            group, at, nbytes = self.VREC[name]
+            return "(nn__expert__plane 0 %d 0 %d %d)" % (self.T_VIS, self.VCARD[group] + at, nbytes)
+        sp = lambda name: "(nn__expert__plane 0 %d 0 %d %d)" % ((self.T_VSCR,) + self.VSCR[name])
+        d = lambda name: int(self.D_VIS[name])
+        # a matrix's codes and scales; at 16 bits the scales' cell is not read, and the codes stand in
+        pair = lambda n: [w(n), w(n + ":lut") if d(n) != 16 else w(n)]
+        IN = 3 * vc["temporal_patch_size"] * vc["patch_size"] ** 2
+        m.table("GVE", pair("patch_embed.proj.weight") + [w("patch_embed.proj.bias"), sp("scratch"), H, IN, 16])
+        for i in range(vc["depth"]):
+            p = "blocks.%d." % i
+            m.table("GVB%d" % i, [w(p + "norm1.weight")] + pair(p + "attn.qkv.weight") + [w(p + "attn.qkv.bias"),
+                                  w(p + "attn.q_norm.weight"), w(p + "attn.k_norm.weight")]
+                    + pair(p + "attn.proj.weight") + [w(p + "attn.proj.bias"), w(p + "norm2.weight")]
+                    + pair(p + "mlp.gate_proj.weight") + pair(p + "mlp.up_proj.weight") + [w(p + "mlp.gu_bias")]
+                    + pair(p + "mlp.down_proj.weight") + [w(p + "mlp.down_proj.bias"), "signs", sp("scratch"),
+                       H, heads, H // heads, vc["intermediate_size"], d(p + "attn.qkv.weight"), d(p + "attn.proj.weight"),
+                       d(p + "mlp.gate_proj.weight"), d(p + "mlp.down_proj.weight"),
+                       int((vc.get("rope_parameters") or {}).get("rope_theta", 10000)), self.VIS_CHUNK, eps, limit])
+        m.table("GVT", [w("post_layernorm.weight")] + pair("downsample.weight") + [w("downsample.bias")]
+                + pair("merger.proj.weight") + [w("merger.post_projection_norm.weight"), w("merger.post_projection_norm.bias")]
+                + pair("merger.gate_proj.weight") + pair("merger.up_proj.weight") + pair("merger.down_proj.weight")
+                + ["signs", sp("scratch"), H, vc["spatial_merge_size"] ** 2, vc["out_hidden_size"],
+                   vc["projection_intermediate_size"], 16, d("merger.proj.weight"), d("merger.gate_proj.weight"),
+                   d("merger.down_proj.weight"), self.VIS_CHUNK, eps, 1e-5, limit])
+        self.VPLANES = {k: sp(k) for k in ("x", "pix", "rc", "out")}
+
+    def vision_rows(self, pixel_values, rowcol, blocks=None):
+        """A picture's patches through the tower on the card: `pixel_values` (patches x 1176) and each patch's row and
+        column (`rowcol`, patches x 2) in; the tokens' rows (patches / 4 x the text model's width, float32) out — or, given
+        `blocks`, the patches' residual after that many blocks (a check's stage)."""
+        n, vc = len(pixel_values), self.VC
+        M = vc["spatial_merge_size"] ** 2
+        if n > self.VIS_ROWS:
+            raise Refused("%d patches, and this boot holds %d (picture_pixels %d)" % (n, self.VIS_ROWS, self.PICTURE_PIXELS))
+        m, base = self.m, self.VSCR_AT
+        m.write(base + self.VSCR["pix"][0], np.ascontiguousarray(pixel_values, dtype="<f2").tobytes())
+        m.write(base + self.VSCR["rc"][0], np.ascontiguousarray(rowcol, dtype="<u4").tobytes())
+        P = self.VPLANES
+        depth = vc["depth"] if blocks is None else blocks
+        words = (["(ai_glm_5_3__vision_embed %s GVE %d %s)" % (P["pix"], n, P["x"])]
+                 + ["(ai_glm_5_3__vision_block %s %s GVB%d %d)" % (P["x"], P["rc"], i, n) for i in range(depth)]
+                 + (["(ai_glm_5_3__vision_tail %s GVT %d %s)" % (P["x"], n, P["out"])] if blocks is None else []))
+        for word in words:
+            # a word's answer is its out plane, or the error that says why it did not run
+            if m.must("(type %s)" % word, "the tower's word %s" % word.split()[0][1:]) == self.m.K["sys__error"]:
+                raise Refused("the tower's word %s answered an error" % word.split()[0][1:])
+        if blocks is not None:
+            x = m.read(base + self.VSCR["x"][0], n * vc["hidden_size"] * 2)
+            return np.frombuffer(x, dtype="<f2").reshape(n, -1).astype(np.float32)
+        out = m.read(base + self.VSCR["out"][0], (n // M) * vc["out_hidden_size"] * 2)
+        return np.frombuffer(out, dtype="<f2").reshape(n // M, -1).astype(np.float32)
+
+    # ── pictures: the tower's rows in place of their pads ───────────────────────────────────────────────────────
+    def vision(self):
+        """The model's vision tower (▶ `vision_glm.GlmVision`), made when the first picture comes. GLM's attention has no
+        rotary part, so a picture's tokens take their places in the cache as text does: they need only their rows."""
+        if getattr(self, "_vision", None) is None:
+            if not (self.CH and self.EPLAN is not None):
+                raise Refused("a picture goes in with a prompt read as rows: the experts on the CPU, `fused` on")
+            from .vision_glm import GlmVision
+            v = GlmVision(self.folder, card=self if self.VIS else None)
+            if v.out != self.H:
+                raise Refused("the tower's rows are %d wide and the model's %d" % (v.out, self.H))
+            self._vision = v
+        return self._vision
+
+    def _rows_in(self, rows, n):
+        """A chunk's rows that are a picture's — `rows` {index in the chunk: the tower's row} — written into every stream
+        of their rows of srows, over their pads' embeddings, a run of consecutive rows at a time."""
+        H, M = self.H, self.MULT
+        mine = sorted(r for r in rows if 0 <= r < n)
+        runs, start = [], None
+        for k, r in enumerate(mine):
+            if start is None:
+                start = r
+            if k + 1 == len(mine) or mine[k + 1] != r + 1:
+                runs.append((start, r + 1))
+                start = None
+        for a, b in runs:
+            block = np.stack([rows[r] for r in range(a, b)]).astype("<f2")
+            self.m.write(self.SROWS_AT + a * M * H * 2, np.repeat(block[:, None, :], M, axis=1).tobytes())
+
+    def prefill(self, tokens, first, greedy=True, sample=None, rows=None):
         """Positions `first ..` for `tokens`: as rows, a chunk at a time, when the experts are the CPU's and there is more
-        than one; then the next token from the last row (greedy), or its logits left for a sampler."""
+        than one; then the next token from the last row (greedy), or its logits left for a sampler. A picture's tokens
+        come with `rows` {index in `tokens`: the tower's row, in place of that pad's embedding}."""
+        pictures = rows or {}
         rows = bool(self.CH) and self.EPLAN is not None and len(tokens) >= 2
+        if pictures and not rows:
+            raise Refused("a picture goes in with a prompt read as rows: the experts on the CPU, two tokens or more")
         if not rows:
             out = None
             for i, tok in enumerate(tokens):
@@ -1068,7 +1276,9 @@ class Glm5(Generates):
         out = None
         for at in range(0, len(tokens), self.CH):
             chunk = tokens[at:at + self.CH]
-            out = self.forward_rows(first + at, tokens=chunk, head=at + self.CH >= len(tokens), greedy=greedy, sample=sample)
+            mine = {i - at: r for i, r in pictures.items() if at <= i < at + len(chunk)}
+            out = self.forward_rows(first + at, tokens=chunk, head=at + self.CH >= len(tokens), greedy=greedy, sample=sample,
+                                    rows=mine)
         return out
 
     # ── a pipeline stage (▶ `pipeline.py`): this machine's layers, the streams crossing between stages ─────────────
@@ -1085,10 +1295,10 @@ class Glm5(Generates):
             return m.must("(head)", "the head at %d" % pos)
         return m.read(self.STREAMS_AT, self.MULT * self.H * 2)
 
-    def forward_rows(self, first, tokens=None, xs=None, n=None, head=False, greedy=True, sample=None):
-        """A chunk of rows through this stage's layers: its tokens embedded (the first stage) or its rows' streams that came
-        across (`xs`, `n` rows of MULT·H halves) written; then the next token from its last row (the last stage), or the
-        rows' streams to hand on."""
+    def forward_rows(self, first, tokens=None, xs=None, n=None, head=False, greedy=True, sample=None, rows=None):
+        """A chunk of rows through this stage's layers: its tokens embedded (the first stage) — a picture's `rows` {index in
+        the chunk: the tower's row} over its pads' — or its rows' streams that came across (`xs`, `n` rows of MULT·H
+        halves) written; then the next token from its last row (the last stage), or the rows' streams to hand on."""
         m, H, M = self.m, self.H, self.MULT
         n = len(tokens) if tokens is not None else n
         if n > self.CH:
@@ -1104,6 +1314,8 @@ class Glm5(Generates):
                     m.must("(begin %s (type srows))" % " ".join(
                         "(embed_row %d %s)" % (tokens[i], " ".join(str((i * M + j) * H) for j in range(M)))
                         for i in range(e0, min(n, e0 + 128))), "the chunk's embeddings")
+            if rows:
+                self._rows_in(rows, n)
         else:
             m.write(self.SROWS_AT, xs)
         if self.SOURCE:

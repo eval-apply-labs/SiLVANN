@@ -42,6 +42,8 @@ from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
 ROOT = Path(__file__).resolve().parent
+# the conversations go beside the release, or in the folder SILVANN_DATA names (the Docker image's volume)
+DATA = Path(os.environ.get("SILVANN_DATA") or ROOT)
 # the runtime beside this file in a release, or the development tree's
 RUNTIME = Path(os.environ.get("SILVANN_RUNTIME", ROOT / "runtime" if (ROOT / "runtime").is_dir()
                               else ROOT.parent / "backstage" / "python"))
@@ -107,11 +109,12 @@ class State:
         self.model = self.runtime = self.chat = None
         self.config = {}
         self.model_id = ""
-        self.dir = ROOT / "user_sessions"
+        self.dir = DATA / "user_sessions"
         self.owner = {}                     # cartridge id -> the web user who has it open
         self.last_ping = {}
         self.turns = {}                     # cartridge id -> its turn in flight
         self.busy_cart = None
+        self.images = {}                    # cartridge id -> {image id: a picture read, waiting for its message}
         self.lock = asyncio.Lock()          # the endpoints that touch the card, one at a time
 
 
@@ -220,7 +223,7 @@ def _boot(args):
     S.runtime = Runtime(S.model)
     S.chat = Chat(S.model.folder)
     S.model_id = folder.name
-    S.dir = ROOT / "user_sessions" / folder.name
+    S.dir = DATA / "user_sessions" / folder.name
     S.dir.mkdir(parents=True, exist_ok=True)
     print("[silvann_server] %s (%s) booted in %.0f s — context %d, LoRA %s"
           % (folder.name, S.model.folder.architecture, time.time() - t0, S.model.max_context, cfg.get("lora")), flush=True)
@@ -279,7 +282,20 @@ def health():
             "tenants_loaded": len(S.runtime.cartridges) if S.runtime else 0,
             "active": S.runtime.active.id if S.runtime and S.runtime.active else None,
             "model_dir": m.folder.path if m else None, "pp_slice": "all", "num_gpus": 1, "max_context": m.max_context if m else 0,
-            "adapter": "silvann_runtime"}
+            "adapter": "silvann_runtime", "images": _reads_pictures(), "files": True}
+
+
+def _reads_pictures():
+    """Whether the model reads pictures: its runtime has a vision tower and the pack carries it (▶ vision.py, a Qwen 3.5
+    with M-RoPE; vision_glm.py, GLM 5.3) — the model's `vision()` refuses otherwise."""
+    m = S.model
+    if m is None or not hasattr(m, "vision"):
+        return False
+    try:
+        m.vision()
+        return True
+    except SR.Refused:
+        return False
 
 
 @app.get("/busy")
@@ -481,8 +497,38 @@ async def stop_cartridge(cid: str, x_cart_password: Optional[str] = Header(defau
 
 
 @app.post("/cartridges/{cid}/images")
-async def upload_image(cid: str, file: UploadFile = File(...)):
-    raise HTTPException(501, "images are not served by this runtime yet")
+async def upload_image(cid: str, file: UploadFile = File(...), x_cart_password: Optional[str] = Header(default=None)):
+    """An attachment for the conversation's next message, kept under the id this answers until a message names it —
+    `{image_id, kind, merged_thw, n_placeholders}`: a picture or a video read through the model's vision
+    tower; or a document — Word, PDF, text — whose text the message carries, for any model (▶ silvann_runtime/documents.py)."""
+    _check_password(cid, x_cart_password)
+    if S.runtime.cartridges.get(cid) is None:
+        raise HTTPException(409, "not bound — call /bind first")
+    data = await file.read()
+    from silvann_runtime import documents
+    if documents.is_document(data, file.filename):
+        try:
+            doc = await asyncio.to_thread(lambda: documents.read_document(data, file.filename or "file"))
+        except SR.Refused as ex:
+            raise HTTPException(415, str(ex))
+        image_id = uuid.uuid4().hex[:12]
+        S.images.setdefault(cid, {})[image_id] = doc
+        return {"image_id": image_id, "kind": "document", "merged_thw": [], "n_placeholders": 0, "chars": len(doc.text)}
+    if not hasattr(S.model, "vision"):
+        raise HTTPException(415, "%s reads no pictures" % S.model_id)
+    try:
+        image = await asyncio.to_thread(lambda: S.model.vision().read(data))
+    except SR.Refused as ex:
+        raise HTTPException(415, str(ex))
+    except Exception as ex:                                   # not a picture Pillow reads
+        raise HTTPException(400, "not read as a picture: %s" % ex)
+    image_id = uuid.uuid4().hex[:12]
+    S.images.setdefault(cid, {})[image_id] = image
+    m = S.model.vision().merge
+    pairs = getattr(image, "pairs", None)                   # a video: its pairs of frames, each read as a picture
+    return {"image_id": image_id, "merged_thw": [image.grid[0], image.grid[1] // m, image.grid[2] // m],
+            "n_placeholders": image.tokens, "kind": "video" if pairs is not None else "picture",
+            "frames": 2 * len(pairs) if pairs is not None else 1}
 
 
 @app.post("/cartridges/{cid}/save")
@@ -507,10 +553,10 @@ async def save_cartridge(cid: str, req: SaveReq, x_cart_password: Optional[str] 
 async def post_message(cid: str, req: MessageReq, x_cart_password: Optional[str] = Header(default=None),
                        x_web_user_id: Optional[str] = Header(default=None)):
     """The answer as text/event-stream: `event: token` {"token_id", "text"} a token, then `event: done` or `event: error`.
+    Where the prompt opened the answer's think block (a thinking Qwen's, GLM's), the first token's text begins with its
+    `<think>`, so the answer's text is whole: its thinking, `</think>`, the answer.
     ⛔ A turn already on the card answers 503 with `Retry-After: 5`; the caller asks again."""
     _check_password(cid, x_cart_password)
-    if req.images:
-        raise HTTPException(501, "images are not served by this runtime yet")
     c = S.runtime.cartridges.get(cid)
     if c is None:
         raise HTTPException(409, "not bound — call /bind first")
@@ -521,30 +567,61 @@ async def post_message(cid: str, req: MessageReq, x_cart_password: Optional[str]
         S.last_ping[x_web_user_id] = time.time()
     side = _sidecar(cid)
     extra = side.setdefault("extra", {})
-    new = S.chat.turn(c.tokens, req.text, extra.get("system_prompt"), extra.get("enable_thinking", S.config.get("thinking", True)))
+    waiting = S.images.get(cid, {})
+    if any(i not in waiting for i in req.images):
+        raise HTTPException(404, "a picture this message names was not uploaded to this conversation")
+    items = [waiting[i] for i in req.images]
+    # the message's pictures before its videos, as the chat frames them; a video's pairs of frames each a picture's pads;
+    # its documents' text before its own, each cut to what the context has room for
+    docs = [im for im in items if hasattr(im, "framed")]
+    pics = [im for im in items if not hasattr(im, "pairs") and not hasattr(im, "framed")]
+    vids = [im for im in items if hasattr(im, "pairs")]
+    text = req.text
+    if docs:
+        room = S.model.max_context - len(c.tokens) - len(S.chat.encode(req.text)) - sum(im.tokens for im in pics + vids) - 512
+        framed = []
+        for d in docs:
+            ids = S.chat.encode(d.text)
+            share = max(0, room // len(docs))
+            body = d.text if len(ids) <= share else (
+                S.chat.tok.decode(ids[:share]) + "\n[… the rest of %s did not fit the conversation]" % d.name)
+            framed.append(d.framed(body))
+        text = "".join(framed) + req.text
+    try:
+        new = S.chat.turn(c.tokens, text, extra.get("system_prompt"),
+                          extra.get("enable_thinking", S.config.get("thinking", True)), images=[im.tokens for im in pics],
+                          videos=[[(im.tokens, t) for im, t in v.pairs] for v in vids])
+    except SR.Refused as ex:
+        raise HTTPException(415, str(ex))
+    images = pics + [im for v in vids for im, _ in v.pairs]
+    placed = list(zip(S.chat.image_starts(new, S.model.vision().pads), images)) if images else []
     room = S.model.max_context - len(c.tokens) - len(new)
     if room <= 0:
         raise HTTPException(413, "the conversation has reached the context of %d" % S.model.max_context)
     queue, loop = asyncio.Queue(), asyncio.get_running_loop()
     answer, shown = [], [""]
+    opened = S.chat.opened(new)                               # the answer begins inside the think block the prompt opened
 
     def on_token(tok):
         answer.append(tok)
-        text = S.chat.decode(answer)
+        text = opened + S.chat.decode(answer)
         delta, shown[0] = text[len(shown[0]):], text
         loop.call_soon_threadsafe(queue.put_nowait, ("token", json.dumps({"token_id": tok, "text": delta})))
 
     try:
-        turn = S.runtime.turn(c, new, min(req.max_new_tokens, room), sampler=_sampler(), stop=S.chat.stop, on_token=on_token)
+        turn = S.runtime.turn(c, new, min(req.max_new_tokens, room), sampler=_sampler(), stop=S.chat.stop, on_token=on_token,
+                              images=placed)
     except Busy:
         raise HTTPException(503, "busy — another conversation's turn is on the card", headers={"Retry-After": "5"})
     S.turns[cid], S.busy_cart = turn, cid
+    for i in req.images:                                      # a picture is the message's now, in the conversation
+        waiting.pop(i, None)
 
     def finish():
         try:
             turn.wait()
-            extra.setdefault("history", []).append({"role": "user", "content": req.text})
-            extra["history"].append({"role": "assistant", "content": S.chat.decode(answer)})
+            extra.setdefault("history", []).append({"role": "user", "content": req.text, "images": len(req.images)})
+            extra["history"].append({"role": "assistant", "content": opened + S.chat.decode(answer)})
             _write_sidecar(cid, side)
             loop.call_soon_threadsafe(queue.put_nowait, ("done", "{}"))
         except Exception as ex:

@@ -6,6 +6,7 @@
 #include "cpu/opcodes/moe__abi.cuh"
 #include "cpu/opcodes/mixer__abi.cuh"
 #include "cpu/opcodes/prefill__abi.cuh"
+#include "cpu/opcodes/vision__abi.cuh"
 #include "cpu/abi_surface__impl.cuh"    /* its C interface, as data for a host language to bind */
 #define PACKAGE_ai_qwen_3_PRESENT 1
 

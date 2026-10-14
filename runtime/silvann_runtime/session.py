@@ -44,6 +44,10 @@ class Cartridge:
         self.tokens = []                            # every token it has seen, prompt and answers
         self.length = 0                             # the positions whose state the card has written
         self.state = None                           # the state's bytes, while it is off the card
+        # its pictures: where each one's pads begin in `tokens`, its grid, and the tower's rows that stand for them
+        #   (halves, as the card takes them) — kept so a conversation brought back without its state runs them again
+        self.images = []
+        self.lag = 0                                # how far its next position is behind its length (▶ vision.positions)
 
     def matches(self, identity):
         return all(self.identity.get(k) == identity.get(k) for k in ("model", "packing", "architecture"))
@@ -51,9 +55,12 @@ class Cartridge:
     # ── on disk: a header naming what it belongs to, the tokens, and the state when it has one ─────────────────
     def save(self, path, with_state=True):
         header = dict(id=self.id, identity=self.identity, lora=self.lora, length=self.length,
-                      has_state=bool(with_state and self.state is not None))
+                      has_state=bool(with_state and self.state is not None), lag=self.lag,
+                      images=[dict(at=im["at"], grid=list(im["grid"])) for im in self.images])
         arrays = dict(header=np.frombuffer(json.dumps(header).encode(), dtype=np.uint8),
                       tokens=np.asarray(self.tokens, dtype=np.int64))
+        for i, im in enumerate(self.images):
+            arrays["image%d" % i] = np.asarray(im["rows"], dtype=np.float16)
         if header["has_state"]:
             for i, blob in enumerate(self.state):
                 arrays["s%d" % i] = np.frombuffer(blob, dtype=np.uint8)
@@ -66,9 +73,11 @@ class Cartridge:
         h = json.loads(bytes(z["header"]).decode())
         c = cls(h["identity"], h["lora"], h["id"])
         c.tokens = [int(t) for t in z["tokens"]]
+        c.images = [dict(at=im["at"], grid=tuple(im["grid"]), rows=z["image%d" % i]) for i, im in enumerate(h.get("images", []))]
         if h["has_state"]:
             c.state = [bytes(z["s%d" % i]) for i in range(len([k for k in z.files if k.startswith("s")]))]
             c.length = h["length"]
+            c.lag = h.get("lag", 0)
         return c
 
 
@@ -133,17 +142,20 @@ class Runtime:
         else:
             m.reset()                                 # without its state, every token it has seen is run again
             c.length = 0
+            c.lag = 0
         self.active = c
         self.stats["switches"] += 1
 
     # ── turns ───────────────────────────────────────────────────────────────────────────────────────────────
-    def turn(self, c, new_tokens, max_new, sampler=None, stop=(), on_token=None):
+    def turn(self, c, new_tokens, max_new, sampler=None, stop=(), on_token=None, images=()):
         """Start a turn: `new_tokens` into the conversation, then up to `max_new` tokens of answer. Answers an object
-        whose `.wait()` gives the answer's tokens. ⛔ Raises `Busy` while another turn has the card."""
+        whose `.wait()` gives the answer's tokens. `images`: the pictures in `new_tokens`, each (where its pads begin
+        in `new_tokens`, a `vision.Image`). ⛔ Raises `Busy` while another turn has the card."""
         with self._lock:
             if self._running is not None and not self._running.done.is_set():
                 raise Busy("a turn is on the card")
             t = _Turn(c, list(new_tokens), max_new, sampler, set(stop), on_token)
+            t.images = list(images)
             self._running = t
         threading.Thread(target=self._serve, args=(t,), daemon=True).start()
         return t
@@ -168,20 +180,46 @@ class Runtime:
             raise Refused("a turn needs a token to run")
         if c.length + len(pending) + t.max_new > m.max_context:
             raise Refused("the conversation would pass the context of %d" % m.max_context)
+        for offset, im in t.images:
+            c.images.append(dict(at=len(c.tokens) + offset, grid=im.grid, rows=im.rows.astype(np.float16)))
         c.tokens += t.new_tokens
         greedy = t.sampler is None or (t.sampler.temperature <= 0 and t.sampler.repetition_penalty == 1.0)
         # ⭐ DRAWN ON THE CARD where the model has the procedure and the sampler fits it — only the token comes back
         card = not greedy and t.sampler.card(m)
         if card and t.sampler.repetition_penalty != 1.0:
             sampling.remember(m.m, c.tokens)
-        if len(pending) > 1:                          # a prompt: its rows at once, where the model has the words
+        # ⭐ PICTURES: their pads' rows are the tower's. A Qwen model's positions from the first picture on are M-RoPE's —
+        #   its three a token, and a token's position no longer its place (▶ vision.positions), `lag` carrying the
+        #   difference; GLM's tokens keep their places (▶ vision_glm.py), and only the rows go in
+        shown = [im for im in c.images if im["at"] >= c.length]
+        pictures = bool(shown) or c.lag > 0
+        mrope = False
+        if len(pending) > 1 or pictures:              # a prompt: its rows at once, where the model has the words
             last = c.length + len(pending) - 1
-            out = m.prefill(pending, c.length, greedy=greedy, sample=sampling.head(t.sampler, last) if card else None)
+            extra = {}
+            if pictures:
+                v = m.vision()
+                rows = {}
+                for im in shown:
+                    for j in range(len(im["rows"])):
+                        rows[im["at"] - c.length + j] = im["rows"][j]
+                extra = dict(rows=rows)
+                mrope = getattr(v, "mrope", True)
+                if mrope:
+                    from .vision import positions
+                    pos, after = positions(pending, [(im["at"] - c.length, im["grid"]) for im in shown], v.pads, v.merge,
+                                           start=c.length - c.lag)
+                    extra["positions"] = pos
+            out = m.prefill(pending, c.length, greedy=greedy, sample=sampling.head(t.sampler, last) if card else None,
+                            **extra)
             c.length += len(pending)
+            if mrope:
+                c.lag = c.length - after
         else:
             out = m.step(pending[0], c.length, greedy=greedy,
                          sample=sampling.head(t.sampler, c.length, pending[0]) if card else None)
             c.length += 1
+        lag = dict(lag=c.lag) if c.lag else {}
         # ⭐ THE ANSWER GENERATED ON THE CARD where the model has the loop and the token is chosen there — `GENERATE_CALL`
         #   tokens a call, so a stream sees them in that many at a time and a cancel waits for at most that many
         on_card = getattr(m, "GENERATES", False) and (greedy or card)
@@ -196,7 +234,7 @@ class Runtime:
                 return answer
             if on_card:
                 made = m.generate(tok, c.length, min(GENERATE_CALL, t.max_new - len(answer)), t.stop,
-                                  t.sampler if card else None)
+                                  t.sampler if card else None, **lag)
                 c.length += len(made)                 # each made token's input was run: `tok`, then all but the last
                 for x in made[:-1]:                   # ⛳ none of them an end token — the loop ends at one
                     answer.append(x)
@@ -205,7 +243,8 @@ class Runtime:
                         t.on_token(x)
                 tok = made[-1]
                 continue
-            out = m.step(tok, c.length, greedy=greedy, sample=sampling.head(t.sampler, c.length, tok) if card else None)
+            out = m.step(tok, c.length, greedy=greedy, sample=sampling.head(t.sampler, c.length, tok) if card else None,
+                         **lag)
             c.length += 1
             tok = out if greedy or card else t.sampler(m.logits(), c.tokens)
 
@@ -228,6 +267,7 @@ class _Turn:
         self.cartridge, self.new_tokens, self.max_new = cartridge, new_tokens, max_new
         self.sampler, self.stop, self.on_token = sampler, stop, on_token
         self.done, self.result, self.error, self.cancelled = threading.Event(), None, None, False
+        self.images = []
 
     def wait(self, timeout=None):
         self.done.wait(timeout)

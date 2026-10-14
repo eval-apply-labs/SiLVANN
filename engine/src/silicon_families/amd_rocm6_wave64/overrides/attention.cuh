@@ -480,4 +480,152 @@ static void amd_rocm6_wave64__override_attention_residual_mix_tq(float* res, con
                         AMD_ROCM6_WAVE64__ZZPRIVATE_ROWS * AMD_ROCM6_WAVE64__ZZPRIVATE_WAVE, args, sizes, 7u);
 }
 
+/* ⭐ ATTENTION OVER A SET — a picture's patches, every row to every row. nn's `attention_set` gives a block a (row, head)
+ *   and its lanes the keys, each lane carrying the head's sums in an array it indexes at run time — on gfx906 an array
+ *   in scratch memory — and every block reads every key and value row of its head. `MEASURED` (node03, v0.7.0-rc3, the
+ *   27B's tower on an MI50, test/src_runtime_vision_time.py): 1,024 / 4,096 / 16,384 patches in 5.6 / 72 / 1,084 s.
+ *   Here a block takes 128 rows of one head, two lanes a row, each lane half the head: its half of the query as half
+ *   pairs and of the sums as floats, in registers (the head's width a template argument, so every index is a constant;
+ *   a whole head a lane held 144 registers at a width of 72, one wave a SIMD). The block's keys and values come
+ *   through shared memory 64 rows at a time: the four waves stage a tile, wait for it, read it, and wait again before
+ *   the next (STAGING). A lane scores 16 keys at a time — its half's two-half dots, the pair's two halves added across
+ *   the two lanes — folds their largest into its running one and rescales its sums once, and mixes the values two keys
+ *   at a time: their weights rounded to halves and paired, the tile's values laid out as pairs of the two keys' same
+ *   element, so each element's sum is one more two-half dot. A tile of 64 keys runs without a key's bound in sight.
+ *   nn sums its products in another order and keeps its weights as floats — within the bench's tolerance of nn's host
+ *   body, as the CUDA family's set attention, which rounds its weights to halves too. Heads of whole products of 8
+ *   columns, 128 at most; anything else is nn's. `MEASURED` (the same test, with the 16-bit tiles of expert.cuh and the
+ *   ladder of hadamard.cuh): 1,024 / 4,096 / 16,384 patches in 0.27 / 1.15 / 8.3 s, this kernel about 5.7 s of the
+ *   last. */
+#define AMD_ROCM6_WAVE64__ZZPRIVATE_SET_TILE  64u      /* keys a stage */
+#define AMD_ROCM6_WAVE64__ZZPRIVATE_SET_SUB   8u       /* keys a lane scores at once */
+#define AMD_ROCM6_WAVE64__ZZPRIVATE_SET_ROWS  128u     /* rows a block, two lanes each */
+/* 2 to the `x`: the card's one instruction (`v_exp_f32`). The scores are scaled by log2(e) as well, so the softmax's
+ * exponentials are base 2 and every one is of a number at most 0 — where the instruction is exact to a unit or two. */
+static __device__ inline float amd_rocm6_wave64__zzprivate_exp2(float x) { return __builtin_amdgcn_exp2f(x); }
+/* A staged tile's keys `0 .. n` for one lane's half of the head: `KW` words of the key a key (its half's pairs, padded
+ * to whole loads), `HD` elements of the values a pair of keys. `N` the tile's keys when it is whole, else 0 and `n`. */
+template <uint32_t D, uint32_t N>
+static __device__ __forceinline__ void amd_rocm6_wave64__zzprivate_set_tile(float* acc, float& m, float& l, const uint32_t* q,
+                                                                           const uint32_t* keys, const uint32_t* values,
+                                                                           uint32_t n, float scale) {
+    constexpr uint32_t HP = D / 4u, KW = (HP + 3u) & ~3u, HD = D / 2u, SUB = AMD_ROCM6_WAVE64__ZZPRIVATE_SET_SUB;
+    const uint32_t count = N != 0u ? N : n;
+#pragma unroll 1
+    for (uint32_t s0 = 0u; s0 < count; s0 += SUB) {                     /* a sub-tile's registers at a time */
+        float sc[SUB];
+        float top = m;
+#pragma unroll
+        for (uint32_t u = 0u; u < SUB; ++u) {
+            float dot = 0.0f;
+            const uint32_t* kr = keys + (s0 + u) * 2u * KW;
+#pragma unroll
+            for (uint32_t w = 0u; w < HP; ++w) dot = nn__silicon__dot2(q[w], kr[w], dot);
+            dot += amd_rocm6_wave64__zzpackage_xor(dot, 1u);           /* the other half's, from the pair's other lane */
+            sc[u] = N != 0u || s0 + u < count ? dot * scale : -NN__KERNELS__INFINITY;
+            top = sc[u] > top ? sc[u] : top;
+        }
+        const float f = amd_rocm6_wave64__zzprivate_exp2(m - top);      /* the sums so far, at the new largest */
+        l *= f;
+#pragma unroll
+        for (uint32_t d = 0u; d < HD; ++d) acc[d] *= f;
+        m = top;
+#pragma unroll
+        for (uint32_t u = 0u; u < SUB; u += 2u) {
+            const float p0 = N != 0u || s0 + u < count ? amd_rocm6_wave64__zzprivate_exp2(sc[u] - m) : 0.0f;
+            const float p1 = N != 0u || s0 + u + 1u < count ? amd_rocm6_wave64__zzprivate_exp2(sc[u + 1u] - m) : 0.0f;
+            const _Float16 h0 = (_Float16)p0, h1 = (_Float16)p1;
+            l += (float)h0 + (float)h1;                                 /* the weights the values are mixed with */
+            const uint32_t pw = (uint32_t)__builtin_bit_cast(uint16_t, h0) | ((uint32_t)__builtin_bit_cast(uint16_t, h1) << 16);
+            const uint32_t* vr = values + ((s0 + u) / 2u) * D;
+#pragma unroll
+            for (uint32_t d = 0u; d < HD; ++d) acc[d] = nn__silicon__dot2(pw, vr[d], acc[d]);
+        }
+    }
+}
+template <uint32_t D>
+static __device__ inline void amd_rocm6_wave64__zzprivate_attention_set(uint16_t* o, const uint16_t* qkv, uint64_t rows,
+                                                                        uint64_t heads, unsigned int* over) {
+    constexpr uint32_t HP = D / 4u, KW = (HP + 3u) & ~3u, HD = D / 2u;  /* a lane's half: pairs, padded words, elements */
+    constexpr uint32_t TILE = AMD_ROCM6_WAVE64__ZZPRIVATE_SET_TILE, ROWS = AMD_ROCM6_WAVE64__ZZPRIVATE_SET_ROWS;
+    constexpr uint32_t LANES = AMD_ROCM6_WAVE64__ZZPRIVATE_ROWS * AMD_ROCM6_WAVE64__ZZPRIVATE_WAVE;
+    __shared__ uint32_t keys[TILE * 2u * KW];                             /* key j's half h, pair w at (2j + h)·KW + w */
+    __shared__ uint32_t values[(TILE / 2u) * D];                          /* keys 2i and 2i+1's element d at i·D + d */
+    const uint64_t H = heads * D, stride = 3ull * H, groups = (rows + ROWS - 1u) / ROWS;
+    const uint32_t t = (uint32_t)nn__silicon__lane(), h = t & 1u;
+    const float scale = 1.4426950408889634f / nn__silicon__sqrtf((float)D);   /* log2(e) / sqrt(D): base-2 scores */
+    for (uint64_t item = nn__silicon__block(); item < heads * groups; item += nn__silicon__blocks()) {
+        const uint64_t e = item / groups, r = (item - e * groups) * ROWS + t / 2u;
+        const bool mine = r < rows;
+        uint32_t q[HP];
+        const uint32_t* qr = (const uint32_t*)(qkv + (mine ? r : 0ull) * stride + e * D + h * HD);
+#pragma unroll
+        for (uint32_t w = 0u; w < HP; ++w) q[w] = mine ? qr[w] : 0u;
+        float acc[HD];
+#pragma unroll
+        for (uint32_t d = 0u; d < HD; ++d) acc[d] = 0.0f;
+        float m = -NN__KERNELS__INFINITY, l = 0.0f;
+        for (uint64_t base = 0ull; base < rows; base += TILE) {
+            const uint32_t n = rows - base < TILE ? (uint32_t)(rows - base) : TILE;
+            for (uint32_t i = t; i < TILE * 2u * KW; i += LANES) {        /* the tile's keys, each half on whole loads */
+                const uint32_t j = i / (2u * KW), rest = i - j * 2u * KW, hh = rest / KW, w = rest - hh * KW;
+                keys[i] = j < n && w < HP ? ((const uint32_t*)(qkv + (base + j) * stride + H + e * D + hh * HD))[w] : 0u;
+            }
+            for (uint32_t i = t; i < (TILE / 2u) * (D / 2u); i += LANES) { /* its values, two keys' same element a word */
+                const uint32_t jp = i / (D / 2u), w = i - jp * (D / 2u), j = 2u * jp;
+                const uint32_t a = j < n ? ((const uint32_t*)(qkv + (base + j) * stride + 2ull * H + e * D))[w] : 0u;
+                const uint32_t b = j + 1u < n ? ((const uint32_t*)(qkv + (base + j + 1u) * stride + 2ull * H + e * D))[w] : 0u;
+                values[jp * D + 2u * w] = (a & 0xFFFFu) | (b << 16);
+                values[jp * D + 2u * w + 1u] = (a >> 16) | (b & 0xFFFF0000u);
+            }
+            __syncthreads();                                              /* the tile, before any lane reads it */
+            if (n == TILE)
+                amd_rocm6_wave64__zzprivate_set_tile<D, TILE>(acc, m, l, q, keys + h * KW, values + h * HD, n, scale);
+            else
+                amd_rocm6_wave64__zzprivate_set_tile<D, 0u>(acc, m, l, q, keys + h * KW, values + h * HD, n, scale);
+            __syncthreads();                                              /* every lane done with the tile */
+        }
+        if (mine) {
+            uint16_t* out = o + r * H + e * D + h * HD;
+#pragma unroll
+            for (uint32_t d = 0u; d < HD; ++d) out[d] = amd_rocm6_wave64__zzpackage_to_half(acc[d] / l, over);
+        }
+    }
+}
+/* The block's bound, and two waves a SIMD: the registers the compiler may take, 128 — the most two waves leave each
+ * (left to itself it took 177, one wave a SIMD). `MEASURED` (node03, the 27B's tower at 16,384 patches, 16 keys a step
+ * then): two waves 12.4 s, three 16.4 s — 84 registers, a lane's sums partly in scratch. */
+#define AMD_ROCM6_WAVE64__ZZPRIVATE_SET_BOUNDS __launch_bounds__(256) __attribute__((amdgpu_waves_per_eu(2)))
+template <uint32_t D>
+static __global__ AMD_ROCM6_WAVE64__ZZPRIVATE_SET_BOUNDS void amd_rocm6_wave64__zzprivate_attention_set_head(uint16_t* o, const uint16_t* qkv,
+                                                                                                             uint64_t rows, uint64_t heads,
+                                                                                                             unsigned int* over) {
+    amd_rocm6_wave64__zzprivate_attention_set<D>(o, qkv, rows, heads, over);
+}
+/* What it takes: a head of whole products of 8 columns, 128 at most, `qkv` on four bytes (its pairs' loads). */
+static void amd_rocm6_wave64__override_attention_set(uint16_t* o, const uint16_t* qkv, uint64_t rows, uint64_t heads,
+                                                     uint64_t head_dim, unsigned int* over) {
+    static const void* const kernels[16] = {           /* a head's width in 8s, less one */
+        (const void*)amd_rocm6_wave64__zzprivate_attention_set_head<8u>,   (const void*)amd_rocm6_wave64__zzprivate_attention_set_head<16u>,
+        (const void*)amd_rocm6_wave64__zzprivate_attention_set_head<24u>,  (const void*)amd_rocm6_wave64__zzprivate_attention_set_head<32u>,
+        (const void*)amd_rocm6_wave64__zzprivate_attention_set_head<40u>,  (const void*)amd_rocm6_wave64__zzprivate_attention_set_head<48u>,
+        (const void*)amd_rocm6_wave64__zzprivate_attention_set_head<56u>,  (const void*)amd_rocm6_wave64__zzprivate_attention_set_head<64u>,
+        (const void*)amd_rocm6_wave64__zzprivate_attention_set_head<72u>,  (const void*)amd_rocm6_wave64__zzprivate_attention_set_head<80u>,
+        (const void*)amd_rocm6_wave64__zzprivate_attention_set_head<88u>,  (const void*)amd_rocm6_wave64__zzprivate_attention_set_head<96u>,
+        (const void*)amd_rocm6_wave64__zzprivate_attention_set_head<104u>, (const void*)amd_rocm6_wave64__zzprivate_attention_set_head<112u>,
+        (const void*)amd_rocm6_wave64__zzprivate_attention_set_head<120u>, (const void*)amd_rocm6_wave64__zzprivate_attention_set_head<128u> };
+    if (rows == 0u || heads == 0u || head_dim == 0u || head_dim % 8u != 0u || head_dim > 128u
+     || ((uint64_t)(uintptr_t)qkv) % 4u != 0u || ((uint64_t)(uintptr_t)o) % 2u != 0u) {
+        nn__attention__zzabi_launch_set(o, qkv, rows, heads, head_dim, over);
+        return;
+    }
+    const uint64_t lanes = AMD_ROCM6_WAVE64__ZZPRIVATE_ROWS * AMD_ROCM6_WAVE64__ZZPRIVATE_WAVE;
+    const uint64_t items = heads * ((rows + AMD_ROCM6_WAVE64__ZZPRIVATE_SET_ROWS - 1u) / AMD_ROCM6_WAVE64__ZZPRIVATE_SET_ROWS);
+    const uint32_t blocks = items < NN__KERNELS__BLOCKS_MAX ? (uint32_t)items : NN__KERNELS__BLOCKS_MAX;
+    void* args[] = { &o, &qkv, &rows, &heads, &over };
+    const size_t sizes[] = { sizeof o, sizeof qkv, sizeof rows, sizeof heads, sizeof over };
+    nn__silicon__launch(kernels[head_dim / 8u - 1u], "amd_rocm6_wave64__zzprivate_attention_set", blocks, (uint32_t)lanes,
+                        args, sizes, 5u);
+}
+
 #endif /* SILVANN__SILICON_FAMILIES_AMD_ROCM6_WAVE64_OVERRIDES_ATTENTION_CUH */

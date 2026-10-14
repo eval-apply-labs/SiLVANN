@@ -23,6 +23,11 @@
     X(PKG, 9, "ai_glm_5_3__mlp_rows",     ai_glm_5_3__mlp_rows__zzabi_adapter,     AI_GLM_5_3__MLP_ROWS)     \
     X(PKG, 10, "ai_glm_5_3__route_rows",  ai_glm_5_3__route_rows__zzabi_adapter,   AI_GLM_5_3__ROUTE_ROWS)   \
     X(PKG, 11, "ai_glm_5_3__close_rows",  ai_glm_5_3__close_rows__zzabi_adapter,   AI_GLM_5_3__CLOSE_ROWS)   \
-    X(PKG, 12, "ai_glm_5_3__experts_rows", ai_glm_5_3__experts_rows__zzabi_adapter, AI_GLM_5_3__EXPERTS_ROWS)
+    X(PKG, 12, "ai_glm_5_3__experts_rows", ai_glm_5_3__experts_rows__zzabi_adapter, AI_GLM_5_3__EXPERTS_ROWS) \
+    /* ⭐⭐ A PICTURE THROUGH THE VISION TOWER — the patch embedding, a block over every patch, the tail (the last norm,  */ \
+    /* the downsampling, the merger) into the text model's width. ▶ `cpu/opcodes/vision__abi.cuh`, `contracts/objects/vision.cuh`. */ \
+    X(PKG, 13, "ai_glm_5_3__vision_embed", ai_glm_5_3__vision_embed__zzabi_adapter, AI_GLM_5_3__VISION_EMBED) \
+    X(PKG, 14, "ai_glm_5_3__vision_block", ai_glm_5_3__vision_block__zzabi_adapter, AI_GLM_5_3__VISION_BLOCK) \
+    X(PKG, 15, "ai_glm_5_3__vision_tail",  ai_glm_5_3__vision_tail__zzabi_adapter,  AI_GLM_5_3__VISION_TAIL)
 
 #endif /* SILVANN__PACKAGES_AI_GLM_5_3_CONTRACTS_MACROS_LANGUAGE_CONTRACT__VERBS_CUH */

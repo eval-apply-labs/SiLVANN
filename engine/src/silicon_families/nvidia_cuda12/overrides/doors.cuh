@@ -33,6 +33,7 @@ static inline void nvidia_cuda12__override_doors(nn__doors* doors) {
     doors->attention_residual_mix_rows     = nvidia_cuda12__override_attention_residual_mix_rows;
     doors->attention_weights_tq_rows       = nvidia_cuda12__override_attention_weights_tq_rows;
     doors->attention_residual_mix_tq_rows  = nvidia_cuda12__override_attention_residual_mix_tq_rows;
+    doors->attention_set                   = nvidia_cuda12__override_attention_set;
     doors->argmax               = nvidia_cuda12__override_argmax;
     doors->expert_rows          = nvidia_cuda12__override_expert_rows;
     doors->expert_rows_sum      = nvidia_cuda12__override_expert_rows_sum;

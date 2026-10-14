@@ -12,6 +12,9 @@
 #   SILVANN_REF      a branch of it                            default the repository's own
 #   SILVANN_BIN      where the `silvann` command goes          default ~/.local/bin
 #   SILVANN_NVCC     CUDA's compiler, when it is not found     default nvcc on the PATH, else /usr/local/cuda*/bin/nvcc
+#   SILVANN_SILICON_FAMILIES  the families to build, e.g. "x86_avx2 nvidia_cuda12"   default the ones this machine's
+#                    CPU and cards need — named for a build where the cards are not, as the Docker image's is
+#   SILVANN_NONFREE  0 leaves requirements-nonfree.txt out (PyAV, for video files), as the Docker image does   default 1
 #
 #   bash install.sh             fetch (or update), the environment, the build, the command
 #   bash install.sh --build     the build alone, the cards and compilers looked for again (`silvann build`)
@@ -88,6 +91,10 @@ find_cards() {
         fi
     fi
     note "memory: $(awk '/MemTotal/ {printf "%.0f GB", $2 / 1048576}' /proc/meminfo) of RAM"
+    if [ -n "${SILVANN_SILICON_FAMILIES:-}" ]; then
+        FAMILIES=$SILVANN_SILICON_FAMILIES
+        note "the families SILVANN_SILICON_FAMILIES names: $FAMILIES"
+    fi
 }
 
 # ── the release ───────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -119,6 +126,11 @@ environment() {
     [ -x "$DIR/venv/bin/python" ] || python3 -m venv "$DIR/venv"
     "$DIR/venv/bin/python" -m pip install --quiet --upgrade pip
     "$DIR/venv/bin/python" -m pip install --quiet -r "$DIR/requirements.txt"
+    # what it reads more with and runs without: a failure is said, not fatal
+    if [ "${SILVANN_NONFREE:-1}" != 0 ] && [ -f "$DIR/requirements-nonfree.txt" ]; then
+        "$DIR/venv/bin/python" -m pip install --quiet -r "$DIR/requirements-nonfree.txt" \
+            || note "requirements-nonfree.txt was not installed: SiLVANN runs without it (a video file other than an animated picture is refused)"
+    fi
 }
 
 build() {
@@ -146,6 +158,7 @@ cmd=\${1:-help}; [ \$# -gt 0 ] && shift
 case "\$cmd" in
     list|list-models)          exec "\$PY" "\$HERE/silvann_core.py" list-models "\$@" ;;
     download|download-model)   exec "\$PY" "\$HERE/silvann_core.py" download-model "\$@" ;;
+    token|hf-token)            exec "\$PY" "\$HERE/silvann_core.py" hf-token "\$@" ;;
     serve)
         [ \$# -gt 0 ] || { echo "silvann serve <model> [config] [--port 8765]   — a model in \$HERE/models"; exit 1; }
         model=\$1; shift
@@ -161,6 +174,7 @@ case "\$cmd" in
         cat <<HELP
 silvann list                        the models this release can fetch, and which are here
 silvann download <model>            a model into \$HERE/models
+silvann token [--set | --forget]    the Hugging Face token the downloads use (faster than none)
 silvann serve <model> [config]      the server, on port 8765 (--port to change it)
 silvann ui                          the chat in a browser, on port 8090, talking to the server
 silvann build                       build again — after installing CUDA or ROCm, say

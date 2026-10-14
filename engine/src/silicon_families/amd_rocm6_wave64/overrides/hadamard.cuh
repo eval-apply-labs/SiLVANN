@@ -91,15 +91,12 @@ static void amd_rocm6_wave64__override_hadamard_rotate(uint16_t* out, const uint
  *   `E = block / 64` consecutive elements, and the butterfly is the 512-block's above: the stages under `E` apart in a
  *   lane's registers, the rest across lanes by shuffles. `inverse` leaves the input unsigned and signs the output, as
  *   nn's body does. A wave reads its whole block before it writes any of it, so `out` may be `in`. */
+/* One block of `E · 64` from `at`, a wave's: what `hadamard_block` below and the ladder's rows run. */
 template <uint32_t E>
-static __device__ inline void amd_rocm6_wave64__zzprivate_hadamard_block(uint16_t* out, const uint16_t* in, const uint16_t* sign,
-                                                                          uint64_t blocks, uint64_t inverse, unsigned int* over) {
+static __device__ __forceinline__ void amd_rocm6_wave64__zzprivate_hadamard_at(uint16_t* out, const uint16_t* in, uint64_t at,
+                                                                       const uint16_t* sign, uint64_t inverse, unsigned int* over) {
     const uint32_t lane = (uint32_t)(nn__silicon__lane() % AMD_ROCM6_WAVE64__ZZPRIVATE_WAVE);
-    const uint64_t block = nn__silicon__block() * AMD_ROCM6_WAVE64__ZZPRIVATE_ROWS
-                         + nn__silicon__lane() / AMD_ROCM6_WAVE64__ZZPRIVATE_WAVE;
-    if (block >= blocks) return;
     const uint32_t B = E * AMD_ROCM6_WAVE64__ZZPRIVATE_WAVE;
-    const uint64_t at = block * B;
     const uint32_t c0 = lane * E;
     /* the lane's halves and signs read once, before either use, so each is one read: read where they are used, under
      * `inverse`, they are 3·E reads of two bytes, and a block of 512 6.3 us against 3.7 this way (`MEASURED`, back to back) */
@@ -143,6 +140,15 @@ static __device__ inline void amd_rocm6_wave64__zzprivate_hadamard_block(uint16_
 #pragma unroll
     for (uint32_t e = 0u; e < E; ++e) out[at + c0 + e] = o[e];
 }
+template <uint32_t E>
+static __device__ inline void amd_rocm6_wave64__zzprivate_hadamard_block(uint16_t* out, const uint16_t* in, const uint16_t* sign,
+                                                                          uint64_t blocks, uint64_t inverse, unsigned int* over) {
+    const uint64_t block = nn__silicon__block() * AMD_ROCM6_WAVE64__ZZPRIVATE_ROWS
+                         + nn__silicon__lane() / AMD_ROCM6_WAVE64__ZZPRIVATE_WAVE;
+    if (block >= blocks) return;
+    const uint32_t B = E * AMD_ROCM6_WAVE64__ZZPRIVATE_WAVE;
+    amd_rocm6_wave64__zzprivate_hadamard_at<E>(out, in, block * B, sign, inverse, over);
+}
 
 static __global__ AMD_ROCM6_WAVE64__ZZPRIVATE_BOUNDS void amd_rocm6_wave64__zzprivate_hadamard_e2(uint16_t* out, const uint16_t* in, const uint16_t* sign,
                                                                                                   uint64_t blocks, uint64_t inverse, unsigned int* over) {
@@ -175,6 +181,44 @@ static void amd_rocm6_wave64__override_hadamard_blocks(uint16_t* out, const uint
     void* args[] = { &out, &in, &sign, &blocks, &inverse, &over };
     const size_t sizes[] = { sizeof out, sizeof in, sizeof sign, sizeof blocks, sizeof inverse, sizeof over };
     nn__silicon__launch(kernel, "amd_rocm6_wave64__zzprivate_hadamard", launch,
+                        AMD_ROCM6_WAVE64__ZZPRIVATE_ROWS * AMD_ROCM6_WAVE64__ZZPRIVATE_WAVE, args, sizes, 6u);
+}
+
+/* ⭐ THE PACK'S LADDER, ROW BY ROW — `hadamard_ladder_rows`: each row of `cols` rotated in blocks of 512, then a 256 when
+ *   at least that much is left, then a 128 (a row of 1152: 512 · 512 · 128), each block's signs from the vector's start,
+ *   as the packer rotated a matrix that wide. nn's generic body gives a lane an output and sums its whole block directly
+ *   — `MEASURED` (rocprof, node03, the 27B's tower at 16,384 patches): 3.1 s of a 16.6 s picture. Here a wave takes a
+ *   block of a row, the butterfly of `hadamard_blocks` above. Rows whose width is whole 128s; anything else is nn's. */
+static __global__ AMD_ROCM6_WAVE64__ZZPRIVATE_BOUNDS void amd_rocm6_wave64__zzprivate_ladder(uint16_t* out, const uint16_t* in,
+                                                                                             const uint16_t* sign, uint64_t cols,
+                                                                                             uint64_t rows, unsigned int* over) {
+    const uint64_t whole = cols / 512u, rest = cols - whole * 512u;
+    const uint64_t units = whole + (rest >= 256u ? 1u : 0u) + (rest % 256u != 0u ? 1u : 0u);
+    for (uint64_t u = nn__silicon__block() * AMD_ROCM6_WAVE64__ZZPRIVATE_ROWS + nn__silicon__lane() / AMD_ROCM6_WAVE64__ZZPRIVATE_WAVE;
+         u < rows * units; u += nn__silicon__blocks() * AMD_ROCM6_WAVE64__ZZPRIVATE_ROWS) {
+        const uint64_t row = u / units, j = u - row * units, at = row * cols;
+        if (j < whole)
+            amd_rocm6_wave64__zzprivate_hadamard_at<8u>(out, in, at + j * 512u, sign, 0u, over);
+        else if (rest >= 256u && j == whole)
+            amd_rocm6_wave64__zzprivate_hadamard_at<4u>(out, in, at + whole * 512u, sign, 0u, over);
+        else
+            amd_rocm6_wave64__zzprivate_hadamard_at<2u>(out, in, at + whole * 512u + (rest >= 256u ? 256u : 0u), sign, 0u, over);
+    }
+}
+static void amd_rocm6_wave64__override_hadamard_ladder_rows(uint16_t* out, const uint16_t* in, const uint16_t* sign, uint64_t cols,
+                                                            uint64_t rows, unsigned int* over) {
+    const uint64_t n = cols * rows;
+    const bool apart = out == in || out + n <= in || in + n <= out;
+    if (cols == 0u || rows == 0u || cols % 128u != 0u || !apart) {
+        nn__hadamard__zzabi_launch_ladder_rows(out, in, sign, cols, rows, over);
+        return;
+    }
+    const uint64_t units = rows * (cols / 512u + (cols % 512u >= 256u ? 1u : 0u) + (cols % 256u != 0u ? 1u : 0u));
+    const uint64_t want = (units + AMD_ROCM6_WAVE64__ZZPRIVATE_ROWS - 1u) / AMD_ROCM6_WAVE64__ZZPRIVATE_ROWS;
+    const uint32_t launch = want < NN__KERNELS__BLOCKS_MAX ? (uint32_t)want : NN__KERNELS__BLOCKS_MAX;
+    void* args[] = { &out, &in, &sign, &cols, &rows, &over };
+    const size_t sizes[] = { sizeof out, sizeof in, sizeof sign, sizeof cols, sizeof rows, sizeof over };
+    nn__silicon__launch((const void*)amd_rocm6_wave64__zzprivate_ladder, "amd_rocm6_wave64__zzprivate_ladder", launch,
                         AMD_ROCM6_WAVE64__ZZPRIVATE_ROWS * AMD_ROCM6_WAVE64__ZZPRIVATE_WAVE, args, sizes, 6u);
 }
 

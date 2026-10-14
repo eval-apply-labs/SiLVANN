@@ -31,6 +31,23 @@ static bool ai_qwen_3__prefill__zzprivate_run_pairs(sys__engine__ctx* ctx, uint6
     return sys__gpu__memory_write(ctx->family, (void*)(uintptr_t)at, pairs, (size_t)(8u * count));
 }
 
+/* ⭐ A CHUNK'S POSITIONS FOR ITS ROTARY. `(… first h1 rows)` gives each row its place in the cache, `first + r`, as its
+ *   position; `(… first h1 rows positions sections)` gives the rotary positions of their own — three uint32 a row, its
+ *   time, its row and its column (an image's tokens have a row and a column of their own, and the text after an image
+ *   is not at its place in the cache) — and M-RoPE's sections (▶ nn's `rope_angles_mrope_rows`). The cache's rows are
+ *   `first ..` either way. False if the two arguments are there and are not a buffer of `rows` positions and an
+ *   integer; `*positions` 0 when they are not there. */
+static bool ai_qwen_3__prefill__zzprivate_positions(const sys__heap_node* argv, unsigned argc, uint64_t rows,
+                                                    uint64_t* positions, uint64_t* sections) {
+    *positions = 0u;
+    *sections = 0u;
+    if (argc == 5u) return true;
+    uint64_t room = 0u;
+    if (argc != 7u || argv[6].dtype != SYS__KIND__VALUE_INT || !nn__primitives__room(&argv[5], positions, &room)) return false;
+    *sections = argv[6].args[0];
+    return rows <= room / 12u;
+}
+
 /* The bytes of `rows` rows of a matrix at width `d` and `cols` columns, and of their scales. */
 static uint64_t ai_qwen_3__prefill__zzprivate_codes(uint64_t d, uint64_t rows, uint64_t cols) {
     return rows * nn__turboquant__row_bytes(d, cols);
@@ -102,10 +119,11 @@ static sys__heap_node ai_qwen_3__deltanet_rows__zzabi_apply(const sys__heap_node
     return nn__doors_answer(&argv[2]);
 }
 
-/* `(ai_qwen_3__attention_rows x planes first h1 rows)` -> `h1`: positions `first .. first + rows`. Every row's key
- * and value are written into the caches before any query reads them, and row `r` reads rows `0 .. first + r`. */
+/* `(ai_qwen_3__attention_rows x planes first h1 rows [positions sections])` -> `h1`: the cache's rows `first .. first +
+ * rows`, at those positions or at `positions`' (▶ `zzprivate_positions`). Every row's key and value are written into the
+ * caches before any query reads them, and row `r` reads rows `0 .. first + r`. */
 static sys__heap_node ai_qwen_3__attention_rows__zzabi_apply(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx) {
-    if (argc != 5u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
+    if (argc != 5u && argc != 7u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
     uint64_t x = 0, x_room = 0, h1 = 0, h1_room = 0;
     if (!sys__heap_node__carries_reference(argv[1].dtype) || !sys__node_array__is(argv[1].args[0])
      || argv[2].dtype != SYS__KIND__VALUE_INT || argv[4].dtype != SYS__KIND__VALUE_INT
@@ -154,7 +172,14 @@ static sys__heap_node ai_qwen_3__attention_rows__zzabi_apply(const sys__heap_nod
     doors->expert_rows((uint16_t*)(uintptr_t)at[AI_QWEN_3__AT__V_CACHE], (const uint8_t*)(uintptr_t)at[AI_QWEN_3__AT__V], room[AI_QWEN_3__AT__V],
                        (const uint8_t*)(uintptr_t)at[AI_QWEN_3__AT__V_LUT], room[AI_QWEN_3__AT__V_LUT], (const uint16_t*)(uintptr_t)hrot,
                        (const uint32_t*)(uintptr_t)vpairs, T, v[AI_QWEN_3__AT__D_V], kvw, H, over);
-    doors->rope_angles_rows((float*)(uintptr_t)cs, first, (float)(uint32_t)theta, rot, T);
+    uint64_t positions = 0u, sections = 0u;
+    if (!ai_qwen_3__prefill__zzprivate_positions(argv, argc, T, &positions, &sections))
+        return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
+    if (positions != 0u)
+        doors->rope_angles_mrope_rows((float*)(uintptr_t)cs, (const uint32_t*)(uintptr_t)positions, (float)(uint32_t)theta, rot, T,
+                                      sections);
+    else
+        doors->rope_angles_rows((float*)(uintptr_t)cs, first, (float)(uint32_t)theta, rot, T);
     /* every head's query normed and rotated; every key normed and rotated straight into its cache row */
     doors->rmsnorm_rows((uint16_t*)(uintptr_t)qn, (const uint16_t*)(uintptr_t)qg, (const uint16_t*)(uintptr_t)at[AI_QWEN_3__AT__Q_NORM],
                         hd, T * qh, 2u * hd, hd, AI_QWEN_3__RMS_NORM_EPS, over);
@@ -179,7 +204,8 @@ static sys__heap_node ai_qwen_3__attention_rows__zzabi_apply(const sys__heap_nod
     return nn__doors_answer(&argv[3]);
 }
 
-/* `(ai_qwen_3__attention_tiered_rows xs planes first h1s n)` -> `h1s`: rows `first .. first + n` of a prompt through the
+/* `(ai_qwen_3__attention_tiered_rows xs planes first h1s n [positions sections])` -> `h1s`: rows `first .. first + n` (at
+ * `positions` when given, ▶ `zzprivate_positions`) of a prompt through the
  * tiered cache (▶ `ai_qwen_3__attention_tiered` for the tiers). The projections as the one-cache rows verb makes them;
  * then each row's key and value rotated into its place — the sink, or its slot of the hot ring, the row it displaces
  * cooled to the warm ring first and the warm row that displaces to the cold tier — so the chunk goes in and what it
@@ -188,7 +214,7 @@ static sys__heap_node ai_qwen_3__attention_rows__zzabi_apply(const sys__heap_nod
  * tiers whole, merged as the one-position verb merges them. ⛳ `n` is at most the hot ring, so the chunk's rows never
  * displace one another. */
 static sys__heap_node ai_qwen_3__attention_tiered_rows__zzabi_apply(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx) {
-    if (argc != 5u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
+    if (argc != 5u && argc != 7u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
     uint64_t x = 0, x_room = 0, h1 = 0, h1_room = 0;
     if (!sys__heap_node__carries_reference(argv[1].dtype) || !sys__node_array__is(argv[1].args[0])
      || argv[2].dtype != SYS__KIND__VALUE_INT || argv[4].dtype != SYS__KIND__VALUE_INT
@@ -268,7 +294,14 @@ static sys__heap_node ai_qwen_3__attention_tiered_rows__zzabi_apply(const sys__h
     doors->expert_rows((uint16_t*)(uintptr_t)vt, (const uint8_t*)(uintptr_t)at[AI_QWEN_3__AT__V], room[AI_QWEN_3__AT__V],
                        (const uint8_t*)(uintptr_t)at[AI_QWEN_3__AT__V_LUT], room[AI_QWEN_3__AT__V_LUT], (const uint16_t*)(uintptr_t)hrot,
                        (const uint32_t*)(uintptr_t)vpairs, T, v[AI_QWEN_3__AT__D_V], kvw, H, over);
-    doors->rope_angles_rows((float*)(uintptr_t)cs, first, (float)(uint32_t)theta, rot, T);
+    uint64_t positions = 0u, sections = 0u;
+    if (!ai_qwen_3__prefill__zzprivate_positions(argv, argc, T, &positions, &sections))
+        return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
+    if (positions != 0u)
+        doors->rope_angles_mrope_rows((float*)(uintptr_t)cs, (const uint32_t*)(uintptr_t)positions, (float)(uint32_t)theta, rot, T,
+                                      sections);
+    else
+        doors->rope_angles_rows((float*)(uintptr_t)cs, first, (float)(uint32_t)theta, rot, T);
     doors->rmsnorm_rows((uint16_t*)(uintptr_t)qn, (const uint16_t*)(uintptr_t)qg, (const uint16_t*)(uintptr_t)at[AI_QWEN_3__AT__Q_NORM],
                         hd, T * qh, 2u * hd, hd, AI_QWEN_3__RMS_NORM_EPS, over);
     doors->rope_rows((uint16_t*)(uintptr_t)qn, (const uint16_t*)(uintptr_t)qn, (const float*)(uintptr_t)cs, T, qh, hd, qw, rot, over);

@@ -188,6 +188,7 @@ typedef struct amd_rocm6_wave64__tile_job {
  * the loops and the sums' registers come out as if written for it. */
 #define AMD_ROCM6_WAVE64__ZZPRIVATE_RT_MAX 4u
 #define AMD_ROCM6_WAVE64__ZZPRIVATE_PT_MAX 4u
+template <bool HALVES>
 static __device__ __forceinline__ void amd_rocm6_wave64__zzprivate_tile(const amd_rocm6_wave64__tile_job* jp, const uint32_t TR,
                                                                           const uint32_t TP, const uint32_t RT, const uint32_t PT) {
     const amd_rocm6_wave64__tile_job& j = *jp;
@@ -215,13 +216,17 @@ static __device__ __forceinline__ void amd_rocm6_wave64__zzprivate_tile(const am
         for (uint64_t k0 = 0u; k0 < j.cols; k0 += AMD_ROCM6_WAVE64__ZZPRIVATE_KT) {
             for (uint32_t e = t; e < TP * HK; e += n) {
                 const uint32_t p = e / HK, c = e % HK;
-                xs[p][c] = p0 + p < j.pairs[i]
+                xs[p][c] = p0 + p < j.pairs[i] && (!HALVES || k0 + 2u * c < j.cols)
                     ? ((const uint32_t*)(const void*)(j.x + (uint64_t)pr[2u * (p0 + p)] * j.cols + k0))[c] : 0u;
             }
             for (uint32_t e = t; e < TR * HK; e += n) {
                 const uint32_t r = e / HK, c = e % HK;
                 uint32_t v = 0u;
-                if (r0 + r < j.out_rows[i]) {
+                if (HALVES) {                                             /* the halves themselves, the tail as zeros */
+                    const uint64_t col = k0 + 2u * c;
+                    if (r0 + r < j.out_rows[i] && col < j.cols)
+                        v = ((const uint32_t*)(const void*)(codes + (r0 + r) * row_bytes))[col / 2u];
+                } else if (r0 + r < j.out_rows[i]) {
                     const uint64_t col = k0 + 2u * c;
                     const uint32_t unit = ((const uint16_t*)(const void*)(codes + (r0 + r) * row_bytes))[col / per];
                     const uint32_t s = (uint32_t)((col % per) * d);
@@ -249,7 +254,8 @@ static __device__ __forceinline__ void amd_rocm6_wave64__zzprivate_tile(const am
         for (uint32_t a = 0u; a < RT; ++a) {
             const uint64_t r = r0 + tr + a;
             if (r >= j.out_rows[i]) continue;
-            const float scale = nn__silicon__half_to_float((uint16_t)((uint32_t)lut[r * 2u] | ((uint32_t)lut[r * 2u + 1u] << 8)));
+            const float scale = HALVES ? 1.0f                        /* a 16-bit row carries no scale */
+                : nn__silicon__half_to_float((uint16_t)((uint32_t)lut[r * 2u] | ((uint32_t)lut[r * 2u + 1u] << 8)));
             for (uint32_t q = 0u; q < PT; ++q) {
                 const uint64_t p = p0 + tp + q;
                 if (p >= j.pairs[i]) continue;
@@ -261,27 +267,38 @@ static __device__ __forceinline__ void amd_rocm6_wave64__zzprivate_tile(const am
         }
     }
 }
-/* The two shapes: 64 matrix rows by 64 pairs for a matrix many rows read, 64 by 16 for a routed expert's few. */
+/* The two shapes: 64 matrix rows by 64 pairs for a matrix many rows read, 64 by 16 for a routed expert's few — and the
+ * first again for matrices of 16 bits (nn's width of halves, no scale, any even number of columns: a vision tower's
+ * 4,304-wide MLP), a kernel of its own so the codes' are compiled as they were. */
 static __global__ AMD_ROCM6_WAVE64__ZZPRIVATE_BOUNDS void amd_rocm6_wave64__zzprivate_tile_wide(amd_rocm6_wave64__tile_job j) {
-    amd_rocm6_wave64__zzprivate_tile(&j, 64u, 64u, 4u, 4u);
+    amd_rocm6_wave64__zzprivate_tile<false>(&j, 64u, 64u, 4u, 4u);
 }
 static __global__ AMD_ROCM6_WAVE64__ZZPRIVATE_BOUNDS void amd_rocm6_wave64__zzprivate_tile_few(amd_rocm6_wave64__tile_job j) {
-    amd_rocm6_wave64__zzprivate_tile(&j, 64u, 16u, 4u, 1u);
+    amd_rocm6_wave64__zzprivate_tile<false>(&j, 64u, 16u, 4u, 1u);
+}
+static __global__ AMD_ROCM6_WAVE64__ZZPRIVATE_BOUNDS void amd_rocm6_wave64__zzprivate_tile_wide_halves(amd_rocm6_wave64__tile_job j) {
+    amd_rocm6_wave64__zzprivate_tile<true>(&j, 64u, 64u, 4u, 4u);
 }
 
-/* A tile job for `count` matrices, each checked as the generic body would (4 or 8 bits, whole slices of 128 columns,
- * the rows the room holds), launched on the shape its pairs want; false when one does not fit, for the caller's
- * fallback. */
+/* A tile job for `count` matrices, each checked as the generic body would — every one 4 or 8 bits over whole slices of
+ * 64 columns, or every one 16 bits over any even number of columns — the rows the room holds, launched on the shape
+ * its pairs want; false when one does not fit, for the caller's fallback. */
 static inline bool amd_rocm6_wave64__zzprivate_tiles(amd_rocm6_wave64__tile_job* j) {
-    if (j->count == 0u || j->count > NN__EXPERT__GROUPS_MAX || j->cols == 0u || j->cols % AMD_ROCM6_WAVE64__ZZPRIVATE_KT != 0u
-     || ((uint64_t)(uintptr_t)j->x) % 4u != 0u)
+    if (j->count == 0u || j->count > NN__EXPERT__GROUPS_MAX || j->cols == 0u || ((uint64_t)(uintptr_t)j->x) % 4u != 0u)
         return false;
+    const bool halves = j->d[0] == 16u;
+    if (halves ? j->cols % 2u != 0u : j->cols % AMD_ROCM6_WAVE64__ZZPRIVATE_KT != 0u) return false;
     uint64_t most = 0u;
     for (uint64_t i = 0u; i < j->count; ++i) {
-        if ((j->d[i] != 4u && j->d[i] != 8u) || j->out_rows[i] == 0u || ((uint64_t)(uintptr_t)j->codes[i]) % 2u != 0u) return false;
+        if (halves ? j->d[i] != 16u || ((uint64_t)(uintptr_t)j->codes[i]) % 4u != 0u
+                   : (j->d[i] != 4u && j->d[i] != 8u) || ((uint64_t)(uintptr_t)j->codes[i]) % 2u != 0u) return false;
+        if (j->out_rows[i] == 0u) return false;
         if (j->pairs[i] > most) most = j->pairs[i];
     }
     const bool few = most <= 16u;
+    /* a token's few rows of 16 bits stay where they were: through a tile the 35B's answer was 1.1% slower (`MEASURED`
+     * on the MI50, four rounds, test/src_runtime_bench.py), where a prompt's many rows were 7% faster */
+    if (halves && few) return false;
     const uint64_t TP = few ? 16u : 64u;
     j->first[0] = 0u;
     for (uint64_t i = 0u; i < j->count; ++i)
@@ -290,12 +307,11 @@ static inline bool amd_rocm6_wave64__zzprivate_tiles(amd_rocm6_wave64__tile_job*
     const uint32_t blocks = j->first[j->count] < NN__KERNELS__BLOCKS_MAX ? (uint32_t)j->first[j->count] : NN__KERNELS__BLOCKS_MAX;
     void* args[] = { j };
     const size_t sizes[] = { sizeof *j };
-    if (few)
-        nn__silicon__launch((const void*)amd_rocm6_wave64__zzprivate_tile_few, "amd_rocm6_wave64__zzprivate_tile_few", blocks,
-                            AMD_ROCM6_WAVE64__ZZPRIVATE_ROWS * AMD_ROCM6_WAVE64__ZZPRIVATE_WAVE, args, sizes, 1u);
-    else
-        nn__silicon__launch((const void*)amd_rocm6_wave64__zzprivate_tile_wide, "amd_rocm6_wave64__zzprivate_tile_wide", blocks,
-                            AMD_ROCM6_WAVE64__ZZPRIVATE_ROWS * AMD_ROCM6_WAVE64__ZZPRIVATE_WAVE, args, sizes, 1u);
+    const void* kernel = few ? (const void*)amd_rocm6_wave64__zzprivate_tile_few
+                             : (halves ? (const void*)amd_rocm6_wave64__zzprivate_tile_wide_halves
+                                       : (const void*)amd_rocm6_wave64__zzprivate_tile_wide);
+    nn__silicon__launch(kernel, few ? "amd_rocm6_wave64__zzprivate_tile_few" : "amd_rocm6_wave64__zzprivate_tile_wide", blocks,
+                        AMD_ROCM6_WAVE64__ZZPRIVATE_ROWS * AMD_ROCM6_WAVE64__ZZPRIVATE_WAVE, args, sizes, 1u);
     return true;
 }
 /* One matrix's call as a tile job. */
@@ -304,7 +320,7 @@ static inline bool amd_rocm6_wave64__zzprivate_tiles_one(uint16_t* out, float* a
                                                         const uint16_t* w, uint64_t count, uint64_t d, uint64_t out_rows, uint64_t cols,
                                                         unsigned int* over) {
     const uint64_t row_bytes = cols * d / 8u;
-    if (count == 0u || row_bytes == 0u || out_rows > w_room / row_bytes || out_rows > l_room / 2u) return false;
+    if (count == 0u || row_bytes == 0u || out_rows > w_room / row_bytes || (d != 16u && out_rows > l_room / 2u)) return false;
     amd_rocm6_wave64__tile_job j = {};
     j.codes[0] = (uint64_t)(uintptr_t)weights; j.luts[0] = (uint64_t)(uintptr_t)luts; j.out_rows[0] = out_rows; j.d[0] = d;
     j.out_at[0] = 0u; j.pairs_at[0] = 0u; j.pairs[0] = count; j.count = 1u; j.cols = cols;

@@ -1,6 +1,6 @@
 # SiLVANN
 
-> **Developer preview, v0.6.0.** It runs the models below well on the hardware it was tested on, and it is shared
+> **Developer preview, v0.7.0.** It runs the models below well on the hardware it was tested on, and it is shared
 > for people who can find their way around a build and a stack trace. NVIDIA cards are tested on one, a GeForce
 > RTX 5060 Ti; Apple silicon is not tested yet.
 
@@ -22,9 +22,9 @@ One model a kind of machine — the one that suits it best, measured:
 |---|---|---|
 | No graphics card, 12 GB of RAM, an NVMe disk | [Qwen 3.6 35B-A3B](https://huggingface.co/eval-apply/Qwen3.6-35B-A3B_silvann_tq_D4E4) (`D4E4`) on the CPU alone, its experts read from the disk | 11.7 tokens/s |
 | An 8 GB card | [Ministral 3 14B](https://huggingface.co/eval-apply/Ministral-3-14B_silvann_tq_D4) (`D4`) on the card, at a 4,096-token context | 42 tokens/s ◦ |
-| A 16 GB card | [Qwen 3.8 27B](https://huggingface.co/eval-apply/Qwen3.8-27B_silvann_tq_D4) on the card | 30.5 tokens/s |
-| A 16 GB card — alt | [Ministral 3 14B](https://huggingface.co/eval-apply/Ministral-3-14B_silvann_tq_D8) (`D8`) on the card, at an 8,192-token context | 30 tokens/s ◦ |
-| A 24 GB card | [Qwen 3.6 35B-A3B](https://huggingface.co/eval-apply/Qwen3.6-35B-A3B_silvann_tq_D8E4) on the card | 87 tokens/s |
+| A 16 GB card | [Qwen 3.8 27B](https://huggingface.co/eval-apply/Qwen3.8-27B_silvann_tq_D4) on the card | 31.5 tokens/s |
+| A 16 GB card — alt | [Ministral 3 14B](https://huggingface.co/eval-apply/Ministral-3-14B_silvann_tq_D8) (`D8`) on the card, at an 8,192-token context | 30.6 tokens/s ◦ |
+| A 24 GB card | [Qwen 3.6 35B-A3B](https://huggingface.co/eval-apply/Qwen3.6-35B-A3B_silvann_tq_D8E4) on the card | 90 tokens/s |
 | An 8 GB card, 32 GB of RAM, an NVMe disk | [Qwen 3.5 122B-A10B](https://huggingface.co/eval-apply/Qwen3.5-122B-A10B_silvann_tq_D4E4) (`D4E4`) — the dense part on the card, the experts on the CPU | 4.7 tokens/s ◦ |
 | A 32 GB card, 80 GB of RAM | Qwen 3.5 122B-A10B, its experts in RAM and 24 GB of them on the card | 19.9 tokens/s |
 | A 16 GB card, 150 GB of RAM | [GLM 5.3 Flash](https://huggingface.co/eval-apply/GLM-5.3-Flash_silvann_tq_D4E4), its experts in RAM and 6 GB of them on the card | 7.5 tokens/s |
@@ -32,10 +32,11 @@ One model a kind of machine — the one that suits it best, measured:
 
 On AMD Instinct MI50 cards in a Dell R730, each process held to the memory its row names — except the rows with experts
 on the card, which ran on the machine's 256 GB and name what the model needs. ◦ Ran on a 32 GB card: the model fits the
-smaller one, which has not been measured. The rows with a model entirely on the card are v0.4.0's; the others were
-measured with v0.3, and where a card does part of the work they are a floor. **Every model and pack, the other
-machines (down to a 4 GB card reading its experts from the disk), and how long a conversation fits:
-[`docs/models.md`](docs/models.md)**; every measurement: [`docs/results.md`](docs/results.md).
+smaller one, which has not been measured. The rows with a model entirely on the card were measured on this release
+before its pictures were added (its answers since within 1% of them); the others were measured with v0.3, and where a
+card does part of the work they are a floor. **Every model and pack, the other machines (down to a 4 GB card reading its
+experts from the disk), and how long a conversation fits: [`docs/models.md`](docs/models.md)**; every measurement:
+[`docs/results.md`](docs/results.md).
 
 On an NVIDIA card — a GeForce RTX 5060 Ti 16 GB in a desktop with a four-core Xeon W-2123 and two DDR4-2400 sticks
 (62 GB), about what a local-model enthusiast's machine has — measured with v0.5.0 the same way, a prompt of about 2,000
@@ -49,6 +50,50 @@ positions and then the answer:
 | [Qwen 3.6 35B-A3B](https://huggingface.co/eval-apply/Qwen3.6-35B-A3B_silvann_tq_D8E4) (`D8E4`) | the dense part on the card, the experts on the CPU, and 8 GB of the card the tier of experts used most | 117 positions/s | 52 tokens/s |
 | the same | without the tier | 55 positions/s | 28 tokens/s |
 | the same | on the CPU alone | 21 positions/s | 8.6 tokens/s |
+
+**New in v0.7.0:** pictures. The Qwen models read one — the 27B, the 35B-A3B and the 122B, whose packs carry the vision
+tower: in the UI the 📎 button attaches it to a message, and over the server's API `/cartridges/<id>/images` reads it
+and a message names it. The picture is prepared as Hugging Face's processor prepares it and read by the model's tower;
+its tokens take the model's three-part positions (time, row and column: M-RoPE), which the library computes in a word of
+its own. The tower runs on the card, in the library's words — LayerNorm, GELU, attention over a set of patches, their
+two-axis rotary — over the pack's own codes, with the CUDA family's set attention on the tensor cores and the AMD
+family's own: pictures up to 4 megapixels (2048 x 2048, 4,096 tokens), from a quarter of a second for a small one to
+about 15 s at the largest on an RTX 5060 Ti, and from 0.13 s to about 8.5 s on an MI50. Its weights (0.6 GB) stay on the card when the experts are on the CPU and in RAM otherwise, and its working
+memory on the card is sized at boot for the largest picture — the 27B at its default context still fits a 16 GB card
+(`picture_pixels`, `picture_weights`: [`docs/users.md`](docs/users.md)). Checked against Hugging Face on the same
+weights: the tower's output within 0.5% (Hugging Face's own tower in bfloat16 is 2.5% from its float32), and over a
+picture's prompt the first attention layer within 6e-4. A conversation keeps its pictures, and is saved and brought back
+with them. GLM 5.3 Flash reads pictures too, through the tower its pack carries (24 blocks of its own design, in the
+library's words on the card: 0.25 s for 448 x 448, 12 s for 2044 x 2044 on an MI50; within 0.92% of Hugging Face's
+float32, whose own bfloat16 is 7.6% away). Ministral 3 reads none: its pack carries no tower.
+
+Videos, for the Qwen models and GLM: the same button attaches one — an animated GIF, WebP or PNG as it is, any other
+video file through PyAV, which `install.sh` installs from `requirements-nonfree.txt` and the Docker image leaves out
+(its scripts' `install_nonfree` adds it: [`docker/README.md`](docker/README.md)). Its frames are taken at 2 a second, two frames read
+together as one picture by the tower, each pair's time written into the message as the model's processor writes it; a
+video is made at most half the conversation's context in tokens. Checked against Hugging Face's processor and tower on
+the same weights — the frames, their times, the prompt to the token, the Qwen models' positions, the tower's rows
+within 6e-4 — and a 6-second video's digits named in order by the 27B, the 35B-A3B and GLM.
+
+Files, for every model: a Word document (`.docx`), a PDF (through pypdf, which the install brings) or a text file
+(Markdown, CSV, JSON, code), attached with the same button, is read when it is attached, and its text goes into the
+message before what you type, cut with a note to what the conversation's context still holds.
+
+A model's program travels with it: the pictures' part is a file of its own, `lisp/qwen3_5_pictures.lisp`, which a folder fetched
+before this release lacks — it reads text as before and refuses pictures until `silvann download <model>` fetches the
+file.
+
+A Docker image, for Windows above all ([`docker/README.md`](docker/README.md)). It is the release, its environment and
+its build for an NVIDIA card or the CPU, with the chat as the app in the browser; scripts install, update, start, stop,
+export and import it — the models and the conversations included, so a copy on one drive starts again on another. It is
+not published yet: `docker build -f docker/Dockerfile .` builds it. It has run on Linux, where the 27B and the 35B
+answer in it as Hugging Face does, at the speed they have outside it; not yet on Windows. The UI downloads a model too:
+its Options list the models this release fetches, download one with its progress and start it; a Hugging Face token
+saved there, or with `silvann token --set`, makes the downloads faster. `SILVANN_DATA` puts the models and the
+conversations in a folder of their own. And on a machine of two processors the runtime keeps itself out of the kernel's
+NUMA balancing, whose sampling cost a card's run a few percent: on an MI50 in a two-socket server the 35B answers at 90
+tokens a second, from 87.5, and reads a prompt at 199 positions a second, from 194.5; the card rows above are this
+release's.
 
 **New in v0.6.0:** a family for old integrated GPUs, `khronos_opencl1_igpu`: the library's kernels as OpenCL C 1.2, for
 a GPU whose OpenCL has neither shared virtual memory nor the generic address space. The build works out every pointer's
@@ -135,10 +180,10 @@ what the card holds is not also kept in RAM ([`docs/models.md`](docs/models.md#t
 | | |
 |---|---|
 | **Tested** | Linux with AMD Instinct MI50 (gfx906), ROCm 6; Linux with an NVIDIA GeForce RTX 5060 Ti (sm_120), CUDA 12.9, driver 595 — every pack but GLM's checked against Hugging Face, the 35B's tier of experts included; the CPU alone with AVX2 (Xeon E5-2680 v4) and with AVX-512 (Xeon W-2123); OpenCL 2.0 with sub-groups, on the MI50 — the 27B and the 35B checked against Hugging Face, the 27B answering at 9-11 tokens a second and reading a prompt at 49 positions a second; the 122B's tier of experts, 11.7 tokens a second with 18 GB of the card (9.7 without); OpenCL 1.2 through NVIDIA's OpenCL on the RTX 5060 Ti — the 27B checked against Hugging Face, at 1.6 tokens a second (the family is for integrated GPUs) |
-| **Untested** | Windows itself — on a Windows PC, boot Linux from a USB SSD; WSL2 may work ([`docs/users.md`](docs/users.md#on-windows-linux-on-a-usb-ssd)); other NVIDIA generations (the CUDA family is built for sm_75 to sm_120: Turing to Blackwell); GLM 5.3 Flash on an NVIDIA card; other AMD generations; OpenCL on other devices, the integrated GPUs `khronos_opencl1_igpu` is for among them; AVX-512 on processors other than Skylake (AMD's Zen 4 and 5, later Xeons) |
+| **Untested** | Windows — the Docker image ([`docker/README.md`](docker/README.md)), run so far on Linux only, or Linux booted from a USB SSD ([`docs/users.md`](docs/users.md#on-windows-the-docker-image)); other NVIDIA generations (the CUDA family is built for sm_75 to sm_120: Turing to Blackwell); GLM 5.3 Flash on an NVIDIA card; other AMD generations; OpenCL on other devices, the integrated GPUs `khronos_opencl1_igpu` is for among them; AVX-512 on processors other than Skylake (AMD's Zen 4 and 5, later Xeons) |
 | **Not yet** | Apple silicon |
 
-Images are not accepted yet: the server answers an image with 501.
+Pictures and videos are read by the Qwen models and GLM 5.3 Flash (v0.7.0, above); Ministral 3 does not read them.
 
 ## Quick start
 
@@ -173,6 +218,7 @@ end of a sentence, layers replaced by simpler programs, multi-token prediction a
 ```
 install.sh          fetches, builds and installs the `silvann` command — the one-line install
 build.sh            builds the engine into lib/
+docker/             the Docker image, and the scripts that run it as an app on Windows and Linux
 engine/src/         the interpreter (engine, sys), the library (nn), the models (ai_qwen_3, ai_glm_5_3), and
                     silicon_families/ — one folder a kind of silicon, what it answers for the library
 runtime/            the Python side: a model folder booted onto the machine, conversations, the chat framing

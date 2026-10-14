@@ -5,12 +5,42 @@ silicon family the wheel loads. `Machine` chooses the family, boots with the tex
 what the tests all wrote for themselves: run a program, make a buffer and bind it, fill a table, define a procedure,
 read and write a card's memory.
 """
+import ctypes
 import importlib
 import os
+import platform
 import re
 import sys
 
 from .composer import Composer, read_all, to_text
+
+# ⭐ THE PROCESS'S MEMORY POLICY IS MPOL_LOCAL, SET WHEN THIS MODULE IS FIRST IMPORTED: a page is placed on the node of
+#   the thread that first touches it, as the default places it, but without the default's migrate-on-fault flag, so on
+#   a machine of several NUMA nodes the kernel's NUMA balancing never samples this process. Its sampling faults on the
+#   host's hot pages — the evaluator's heap, the buffers a card reads — and moved almost nothing here. A thread takes
+#   its policy from the thread that starts it, so the call comes before the runtime starts any; the CPU family's own
+#   large memory carries its own policy (`mbind`, x86_avx2's sys.cuh) and is not changed by it. A machine of one node,
+#   or a container whose seccomp profile refuses the call, keeps the default.
+#   `MEASURED` (node03: two Xeon E5-2680 v4, an MI50; test/src_runtime_bench.py, interleaved against the default;
+#   ▶ measurements/2026-10-13_v060_on_node03.md, NN-76): the 35B D8E4 reads a 2,035-position prompt at 199 positions/s
+#   against 194.5 and answers at 90 tokens/s against 87.5 (105 against 100 after a short prompt), its ~46,000 faults a
+#   prompt down to under 100; the 27B, Ministral and the 122B with its experts on the CPU 1-3% faster, the 35B with its
+#   experts on the CPU 5% in its prompt; OpenCL and the CPU alone the same.
+_SET_MEMPOLICY = {"x86_64": 238, "aarch64": 237}      # the system call's number on each processor
+_MPOL_LOCAL = 4
+
+
+def _memory_policy_local():
+    number = _SET_MEMPOLICY.get(platform.machine())
+    if not sys.platform.startswith("linux") or number is None:
+        return
+    try:
+        ctypes.CDLL(None, use_errno=True).syscall(number, _MPOL_LOCAL, None, ctypes.c_ulong(0))
+    except (OSError, AttributeError):
+        pass
+
+
+_memory_policy_local()
 
 
 class EngineError(Exception):

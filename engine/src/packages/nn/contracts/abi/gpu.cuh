@@ -115,6 +115,13 @@ typedef struct nn__gemm__tile {
     X(PKG, void, rmsnorm_rows,             nn__rmsnorm__zzabi_launch_rows,             (uint16_t* o, const uint16_t* x, const uint16_t* w, uint64_t n, uint64_t rows, uint64_t x_stride, uint64_t o_stride, float eps, unsigned int* over)) \
     X(PKG, void, rope_rows,                nn__rope__zzabi_launch_rows,                (uint16_t* o, const uint16_t* x, const float* cs, uint64_t rows, uint64_t heads, uint64_t head_stride, uint64_t row_stride, uint64_t rot, unsigned int* over)) \
     X(PKG, void, rope_angles_rows,         nn__rope__zzabi_launch_angles_rows,         (float* cs, uint64_t first, float theta, uint64_t head_dim, uint64_t rows)) \
+    X(PKG, void, rope_angles_mrope_rows,   nn__rope__zzabi_launch_angles_mrope_rows,   (float* cs, const uint32_t* positions, float theta, uint64_t head_dim, uint64_t rows, uint64_t sections)) \
+    X(PKG, void, rope_angles_axial_rows,   nn__rope__zzabi_launch_angles_axial_rows,   (float* cs, const uint32_t* positions, float theta, uint64_t head_dim, uint64_t rows)) \
+    X(PKG, void, layernorm_rows,           nn__layernorm__zzabi_launch_rows,           (uint16_t* o, const uint16_t* x, const uint16_t* w, const uint16_t* b, uint64_t n, uint64_t rows, uint64_t x_stride, uint64_t o_stride, float eps, unsigned int* over)) \
+    X(PKG, void, vector_bias_rows,         nn__vector__zzabi_launch_bias_rows,         (uint16_t* o, const uint16_t* x, const uint16_t* b, uint64_t n, uint64_t rows, unsigned int* over)) \
+    X(PKG, void, vector_gelu,              nn__vector__zzabi_launch_gelu,              (uint16_t* o, const uint16_t* x, uint64_t n, uint64_t exact, unsigned int* over)) \
+    X(PKG, void, attention_set,            nn__attention__zzabi_launch_set,            (uint16_t* o, const uint16_t* qkv, uint64_t rows, uint64_t heads, uint64_t head_dim, unsigned int* over)) \
+    X(PKG, void, hadamard_ladder_rows,     nn__hadamard__zzabi_launch_ladder_rows,     (uint16_t* out, const uint16_t* in, const uint16_t* sign, uint64_t cols, uint64_t rows, unsigned int* over)) \
     X(PKG, void, attention_causal_scores,  nn__attention__zzabi_launch_causal_scores,  (float* p, const uint16_t* q, const uint16_t* k, uint64_t q_heads, uint64_t kv_heads, uint64_t head_dim, uint64_t first, uint64_t rows)) \
     X(PKG, void, attention_causal_mix,     nn__attention__zzabi_launch_causal_mix,     (uint16_t* o, const float* p, const uint16_t* v, uint64_t q_heads, uint64_t kv_heads, uint64_t head_dim, uint64_t first, uint64_t rows, unsigned int* over)) \
     X(PKG, void, attention_gate_rows,      nn__attention__zzabi_launch_gate_rows,      (uint16_t* o, const uint16_t* att, const uint16_t* qg, uint64_t heads, uint64_t head_dim, unsigned int* over)) \

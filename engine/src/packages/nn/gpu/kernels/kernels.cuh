@@ -1446,6 +1446,159 @@ static __device__ inline void nn__rope__zzabi_body_angles_rows(float* cs, uint64
     }
 }
 
+/* ⭐ M-RoPE's ANGLES — a row's three positions, its time, its row and its column in an image (`positions + 3r`), each
+ *   frequency taking one of them, interleaved: frequency `k` takes the row's when `k % 3 == 1` and `k < 3·h`, the
+ *   column's when `k % 3 == 2` and `k < 3·w`, and the time's otherwise — `h` in the low 16 bits of `sections`, `w` in
+ *   the next 16 (Qwen 3.5's 11 and 10). Laid out as `angles_rows`' and the same arithmetic item for item, so a row
+ *   whose three positions are one position has that position's angles to the bit: text is RoPE as before. */
+static __device__ inline void nn__rope__zzabi_body_angles_mrope_rows(float* cs, const uint32_t* positions, float theta,
+                                                                     uint64_t head_dim, uint64_t rows, uint64_t sections) {
+    const uint64_t pairs = head_dim / 2ull, n = rows * pairs;
+    const uint64_t by_row = sections & 0xFFFFull, by_column = (sections >> 16) & 0xFFFFull;
+    const float r = nn__silicon__expf(-2.0f / (float)(uint32_t)head_dim * nn__silicon__logf(theta));
+    for (uint64_t i = nn__kernels__zzprivate_first(); i < n; i += nn__kernels__zzprivate_stride()) {
+        const uint64_t row = i / pairs, k = i - row * pairs, third = k - (k / 3ull) * 3ull;
+        const uint64_t which = (third == 1ull && k < 3ull * by_row) ? 1ull : (third == 2ull && k < 3ull * by_column) ? 2ull : 0ull;
+        float frequency = 1.0f;
+        for (uint64_t m = 0ull; m < k; ++m) frequency *= r;
+        const float angle = (float)(uint64_t)positions[3ull * row + which] * frequency;
+        cs[row * head_dim + k] = nn__silicon__cosf(angle);
+        cs[row * head_dim + pairs + k] = nn__silicon__sinf(angle);
+    }
+}
+
+/* ⭐ A VISION TOWER'S ANGLES — axial: a patch's row and its column (`positions + 2r`), the first half of the frequencies
+ *   the row's and the second the column's, each half the same ladder (`theta^(-2k/(head_dim/2))`, Qwen 3.5's tower:
+ *   18 and 18 of a 72-wide head), laid out as `angles_rows`' so `rope_rows` turns the whole head with them. */
+static __device__ inline void nn__rope__zzabi_body_angles_axial_rows(float* cs, const uint32_t* positions, float theta,
+                                                                     uint64_t head_dim, uint64_t rows) {
+    const uint64_t pairs = head_dim / 2ull, per_axis = pairs / 2ull, n = rows * pairs;
+    const float r = nn__silicon__expf(-2.0f / (float)(uint32_t)pairs * nn__silicon__logf(theta));
+    for (uint64_t i = nn__kernels__zzprivate_first(); i < n; i += nn__kernels__zzprivate_stride()) {
+        const uint64_t row = i / pairs, k = i - row * pairs, axis = k < per_axis ? 0ull : 1ull, kk = k - axis * per_axis;
+        float frequency = 1.0f;
+        for (uint64_t m = 0ull; m < kk; ++m) frequency *= r;
+        const float angle = (float)(uint64_t)positions[2ull * row + axis] * frequency;
+        cs[row * head_dim + k] = nn__silicon__cosf(angle);
+        cs[row * head_dim + pairs + k] = nn__silicon__sinf(angle);
+    }
+}
+
+/* ⭐ LAYERNORM, A ROW AT A TIME — the mean taken off and the variance's root divided, then the gain and the bias:
+ *   `o = (x - mean) / sqrt(var + eps) · w + b`, in fp32 inside. A block a row, its lanes folded, as `rmsnorm_rows`;
+ *   rows `x_stride` / `o_stride` elements apart. */
+static __device__ inline void nn__layernorm__zzabi_body_rows(uint16_t* o, const uint16_t* x, const uint16_t* w,
+                                                             const uint16_t* b, uint64_t n, uint64_t rows,
+                                                             uint64_t x_stride, uint64_t o_stride, float eps,
+                                                             unsigned int* over) {
+    const uint64_t lane = nn__silicon__lane(), lanes = nn__silicon__lanes();
+    for (uint64_t r = nn__silicon__block(); r < rows; r += nn__silicon__blocks()) {
+        const uint16_t* xr = x + r * x_stride;
+        uint16_t* orow = o + r * o_stride;
+        float sum = 0.0f;
+        for (uint64_t i = lane; i < n; i += lanes) sum += nn__silicon__half_to_float(xr[i]);
+        const float mean = nn__silicon__lanes_sum(sum) / (float)n;
+        float sq = 0.0f;
+        for (uint64_t i = lane; i < n; i += lanes) {
+            const float d = nn__silicon__half_to_float(xr[i]) - mean;
+            sq += d * d;
+        }
+        const float inv = 1.0f / nn__silicon__sqrtf(nn__silicon__lanes_sum(sq) / (float)n + eps);
+        for (uint64_t i = lane; i < n; i += lanes) {
+            const float v = (nn__silicon__half_to_float(xr[i]) - mean) * inv * nn__silicon__half_to_float(w[i])
+                          + nn__silicon__half_to_float(b[i]);
+            bool hit = false;
+            orow[i] = nn__primitives__zzpackage_float_to_half(v, &hit);
+            if (hit) *over = NN__KERNELS__OVERFLOWED;
+        }
+    }
+}
+
+/* Every row of `n` with the bias `b` added — a layer's bias over its rows. `o` may be `x`. */
+static __device__ inline void nn__vector__zzabi_body_bias_rows(uint16_t* o, const uint16_t* x, const uint16_t* b,
+                                                               uint64_t n, uint64_t rows, unsigned int* over) {
+    for (uint64_t i = nn__kernels__zzprivate_first(); i < n * rows; i += nn__kernels__zzprivate_stride()) {
+        bool hit = false;
+        o[i] = nn__primitives__zzpackage_float_to_half(nn__silicon__half_to_float(x[i]) + nn__silicon__half_to_float(b[i % n]),
+                                                       &hit);
+        if (hit) *over = NN__KERNELS__OVERFLOWED;
+    }
+}
+
+/* erf, Abramowitz and Stegun's 7.1.26: within 1.5e-7 of it, from `expf` — nn's own, so every family's is this one. */
+static __device__ inline float nn__vector__zzprivate_erf(float x) {
+    const float a = x < 0.0f ? -x : x, t = 1.0f / (1.0f + 0.3275911f * a);
+    const float y = 1.0f - ((((1.061405429f * t - 1.453152027f) * t + 1.421413741f) * t - 0.284496736f) * t + 0.254829592f)
+                         * t * nn__silicon__expf(-a * a);
+    return x < 0.0f ? -y : y;
+}
+
+/* ⭐ GELU, ELEMENT BY ELEMENT — `exact` 1: `x/2 · (1 + erf(x/√2))`; 0: the tanh form,
+ *   `x/2 · (1 + tanh(√(2/π)·(x + 0.044715·x³)))`, tanh from `expf` as `1 - 2/(e^{2z} + 1)`. `o` may be `x`. */
+static __device__ inline void nn__vector__zzabi_body_gelu(uint16_t* o, const uint16_t* x, uint64_t n, uint64_t exact,
+                                                          unsigned int* over) {
+    for (uint64_t i = nn__kernels__zzprivate_first(); i < n; i += nn__kernels__zzprivate_stride()) {
+        const float v = nn__silicon__half_to_float(x[i]);
+        float g;
+        if (exact != 0ull) {
+            g = 0.5f * v * (1.0f + nn__vector__zzprivate_erf(v * 0.70710678118654752f));
+        } else {
+            const float z = 0.79788456080286536f * (v + 0.044715f * v * v * v);
+            g = 0.5f * v * (2.0f - 2.0f / (nn__silicon__expf(2.0f * z) + 1.0f));
+        }
+        bool hit = false;
+        o[i] = nn__primitives__zzpackage_float_to_half(g, &hit);
+        if (hit) *over = NN__KERNELS__OVERFLOWED;
+    }
+}
+
+/* ⭐ ATTENTION OVER A SET — every row of it attends every row of it, no mask: a picture's patches. Each row of `qkv` is
+ *   its query, key and value side by side (`[3][heads][head_dim]`); `o`'s row is the heads' answers. A block a (row,
+ *   head): its lanes share the keys, each keeping its own running largest score, sum and weighted values (a softmax
+ *   that never holds the scores), merged across the lanes at the end — so a set of any size costs its rows, not their
+ *   square, in memory. `head_dim` at most `NN__ATTENTION__SET_HEAD_MAX`. */
+#define NN__ATTENTION__SET_HEAD_MAX 128u
+static __device__ inline void nn__attention__zzabi_body_set(uint16_t* o, const uint16_t* qkv, uint64_t rows, uint64_t heads,
+                                                            uint64_t head_dim, unsigned int* over) {
+    const uint64_t H = heads * head_dim, stride = 3ull * H;
+    const uint64_t lane = nn__silicon__lane(), lanes = nn__silicon__lanes();
+    const float scale = 1.0f / nn__silicon__sqrtf((float)(uint32_t)head_dim), none = -3.0e38f;
+    for (uint64_t i = nn__silicon__block(); i < rows * heads; i += nn__silicon__blocks()) {
+        const uint64_t r = i / heads, e = i - r * heads;
+        const uint16_t* q = qkv + r * stride + e * head_dim;
+        float acc[NN__ATTENTION__SET_HEAD_MAX];
+        for (uint64_t d = 0ull; d < head_dim; ++d) acc[d] = 0.0f;
+        float m = none, s = 0.0f;
+        for (uint64_t j = lane; j < rows; j += lanes) {
+            const uint16_t* k = qkv + j * stride + H + e * head_dim;
+            float dot = 0.0f;
+            for (uint64_t d = 0ull; d < head_dim; ++d) dot += nn__silicon__half_to_float(q[d]) * nn__silicon__half_to_float(k[d]);
+            dot *= scale;
+            if (dot > m) {
+                const float f = nn__silicon__expf(m - dot);
+                s *= f;
+                for (uint64_t d = 0ull; d < head_dim; ++d) acc[d] *= f;
+                m = dot;
+            }
+            const float p = nn__silicon__expf(dot - m);
+            s += p;
+            const uint16_t* v = k + H;
+            for (uint64_t d = 0ull; d < head_dim; ++d) acc[d] += p * nn__silicon__half_to_float(v[d]);
+        }
+        const float largest = nn__silicon__lanes_max(m);
+        const float f = m > none ? nn__silicon__expf(m - largest) : 0.0f;          /* a lane that had no key: nothing */
+        s *= f;
+        for (uint64_t d = 0ull; d < head_dim; ++d) acc[d] *= f;
+        const float total = nn__silicon__lanes_sum(s);
+        nn__silicon__lanes_sums(acc, (uint32_t)head_dim);
+        for (uint64_t d = lane; d < head_dim; d += lanes) {
+            bool hit = false;
+            o[r * H + e * head_dim + d] = nn__primitives__zzpackage_float_to_half(acc[d] / total, &hit);
+            if (hit) *over = NN__KERNELS__OVERFLOWED;
+        }
+    }
+}
+
 /* ⭐ CAUSAL ATTENTION, `rows` QUERIES: row `r` is position `first + r` and attends the cache's rows
  *   `0 .. first + r`, so its keys and values must already be in the cache. A block a (row, query head); the
  *   weights go to `p + (r·q_heads + h)·(first + rows)`, and the second launch mixes them, as for one query. */
@@ -2238,6 +2391,37 @@ static __device__ inline void nn__hadamard__zzabi_body_blocks(uint16_t* out, con
         if (inverse != 0ull) sum *= nn__silicon__half_to_float(sign[r]);
         bool hit = false;
         out[i] = nn__primitives__zzpackage_float_to_half(sum, &hit);
+        if (hit) *over = NN__KERNELS__OVERFLOWED;
+    }
+}
+
+/* ⭐ THE ROTATION ROW BY ROW IN THE PACK'S LADDER — a row of `cols` (a multiple of 128) in blocks of 512, then a 256 and
+ *   a 128 for what is left (1152: 512 · 512 · 128), each block `R = H·(S ⊙ u)` with the first `block` of `sign`, as the
+ *   packer rotated a matrix whose rows are that wide (`nn_compressor.blocks_for`) — what a row multiplied by such a
+ *   matrix's codes is rotated by first. `out` and `in` must not overlap. */
+static __device__ inline void nn__hadamard__zzabi_body_ladder_rows(uint16_t* out, const uint16_t* in, const uint16_t* sign,
+                                                                    uint64_t cols, uint64_t rows, unsigned int* over) {
+    const uint64_t whole = cols - cols % 512ull, rest = cols - whole;
+    for (uint64_t i = nn__kernels__zzprivate_first(); i < rows * cols; i += nn__kernels__zzprivate_stride()) {
+        const uint64_t row = i / cols, c = i - row * cols;
+        uint64_t start, block;
+        if (c < whole) { start = c - c % 512ull; block = 512ull; }
+        else if (rest >= 256ull && c < whole + 256ull) { start = whole; block = 256ull; }
+        else { start = whole + (rest >= 256ull ? 256ull : 0ull); block = 128ull; }
+        const uint16_t* a = in + row * cols + start;
+        const uint64_t at = c - start;
+        float s0 = 0.0f, s1 = 0.0f;
+        for (uint64_t k = 0ull; k < block; k += 2ull) {
+            uint64_t p0 = at & k, p1 = at & (k + 1ull);
+            p0 ^= p0 >> 8; p0 ^= p0 >> 4; p0 ^= p0 >> 2; p0 ^= p0 >> 1;
+            p1 ^= p1 >> 8; p1 ^= p1 >> 4; p1 ^= p1 >> 2; p1 ^= p1 >> 1;
+            const float v0 = nn__silicon__half_to_float(a[k]) * nn__silicon__half_to_float(sign[k]);
+            const float v1 = nn__silicon__half_to_float(a[k + 1ull]) * nn__silicon__half_to_float(sign[k + 1ull]);
+            s0 += (p0 & 1ull) ? -v0 : v0;
+            s1 += (p1 & 1ull) ? -v1 : v1;
+        }
+        bool hit = false;
+        out[i] = nn__primitives__zzpackage_float_to_half((s0 + s1) / nn__silicon__sqrtf((float)(uint32_t)block), &hit);
         if (hit) *over = NN__KERNELS__OVERFLOWED;
     }
 }

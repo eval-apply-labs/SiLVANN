@@ -1,0 +1,5 @@
+# What SiLVANN reads more with and runs without, whose wheels carry binaries under copyleft licences (the LGPL, the GPL:
+# ATTRIBUTION.md) that the Docker image does not redistribute. install.sh installs it beside requirements.txt; in the
+# Docker image the scripts' `install_nonfree` installs it from PyPI into the data volume (docker/README.md).
+# PyAV: a video file other than an animated picture (MP4 and the like).
+av>=14.0

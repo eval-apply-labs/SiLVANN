@@ -18,9 +18,11 @@ import json
 import os
 import re
 import secrets
+import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from collections import deque
@@ -283,17 +285,23 @@ async def _export_download(token: str):
 
 REPO_ROOT = Path(__file__).resolve().parent          # main/ — the runtime root
 SERVER_SCRIPT = REPO_ROOT / "start_silvann_server.py"
-MODELS_DIR = REPO_ROOT / "models"                    # main/models/<name>/ — self-contained model folders
+CORE_SCRIPT = REPO_ROOT / "silvann_core.py"          # lists and downloads the models this release knows
+# what the machine keeps — the models and the conversations: beside the UI, or where SILVANN_DATA says (the Docker
+# image's volume), as the server and silvann_core.py read it
+DATA_DIR = Path(os.environ.get("SILVANN_DATA") or REPO_ROOT)
+MODELS_DIR = DATA_DIR / "models"                     # models/<name>/ — self-contained model folders
+LAST_START = DATA_DIR / "ui_last_start.json"         # the model a --local UI starts again when it starts
+TOKEN_FILE = DATA_DIR / ".huggingface_token"         # the Hugging Face token, as silvann_core.py's hf-token saves it
 # the documents: docs/ beside the UI in a release, backstage/release/ in the development tree
 RELEASE_DIR = REPO_ROOT if (REPO_ROOT / "docs" / "users.md").exists() else REPO_ROOT.parent / "backstage" / "release"
 DOCS_DIR = RELEASE_DIR / "docs"
 
 
 def list_models():
-    """The self-contained model folders under main/models/ (folder names; __pycache__ excluded)."""
+    """The model folders under MODELS_DIR that are there whole — a download still running is not one yet."""
     if not MODELS_DIR.is_dir():
         return []
-    return sorted(d.name for d in MODELS_DIR.iterdir() if d.is_dir() and d.name != "__pycache__")
+    return sorted(d.name for d in MODELS_DIR.iterdir() if d.is_dir() and model_present(d.name))
 
 
 def model_configs_dir(model: str) -> Path:
@@ -318,7 +326,9 @@ def model_default_config(model: str) -> Optional[str]:
     return dflt if dflt in list_model_configs(model) else None
 
 
-LOCAL_AVAILABLE = SERVER_SCRIPT.exists() and bool(list_models())
+# local mode needs the server beside the UI; a machine with no model yet downloads one from the same panel
+LOCAL_AVAILABLE = SERVER_SCRIPT.exists()
+LOCAL_APP = False                                    # --local: the UI as the app over this machine's models
 
 # Help-view documents: (label, path). path=None -> the built-in UI guide (HELP_MARKDOWN below).
 # The .md files are read from the repo at view time; only present when the UI runs from the repo root.
@@ -417,6 +427,166 @@ class ServerProcess:
 SERVER = ServerProcess()
 
 
+# ---------- Models fetched from Hugging Face (process-wide singleton) ----------
+
+def model_present(name: str) -> bool:
+    """A model folder that is there: its pack and its config (as silvann_runtime.fetch.present says)."""
+    return (MODELS_DIR / name / "pack.json").is_file() and (MODELS_DIR / name / "config.json").is_file()
+
+
+def folder_bytes(path: Path) -> int:
+    """The bytes under a folder, the files a download is still writing included (`.cache/huggingface/download/`)."""
+    total = 0
+    for root, _, files in os.walk(path):
+        for f in files:
+            try:
+                total += os.stat(os.path.join(root, f)).st_size
+            except OSError:
+                pass
+    return total
+
+
+def approx_bytes(size: str) -> int:
+    """`"20 GB"`, the size the release lists for a model, in bytes; 0 when it does not read as one."""
+    m = re.match(r"\s*([\d.]+)\s*([KMGT])B", size or "")
+    return int(float(m.group(1)) * 1000 ** "KMGT".index(m.group(2)) * 1000) if m else 0
+
+
+def saved_token() -> Optional[str]:
+    """The Hugging Face token the downloads use: HF_TOKEN in the environment, else the one saved in TOKEN_FILE."""
+    if os.environ.get("HF_TOKEN"):
+        return os.environ["HF_TOKEN"]
+    try:
+        return TOKEN_FILE.read_text().strip() or None
+    except OSError:
+        return None
+
+
+def save_token(token: str):
+    """`token` into TOKEN_FILE, readable by its owner alone (as silvann_core.py's hf-token writes it); "" removes it."""
+    if not token:
+        TOKEN_FILE.unlink(missing_ok=True)
+        return
+    TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(TOKEN_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(token.strip() + "\n")
+    os.chmod(TOKEN_FILE, 0o600)
+
+
+def token_owner(token: str) -> Optional[str]:
+    """The account a token signs in as; ValueError when Hugging Face refuses it, None when it could not be asked."""
+    from huggingface_hub import HfApi
+    from huggingface_hub.errors import HfHubHTTPError
+    try:
+        return HfApi().whoami(token=token).get("name") or "?"
+    except HfHubHTTPError as ex:
+        if ex.response is not None and ex.response.status_code in (401, 403):
+            raise ValueError(f"Hugging Face refused the token ({ex.response.status_code})")
+        return None
+    except Exception:
+        return None
+
+
+def repo_bytes(repo: str) -> int:
+    """The bytes of every file in a Hugging Face repository; 0 when it cannot be asked."""
+    try:
+        from huggingface_hub import HfApi
+        return sum(s.size or 0 for s in HfApi().model_info(repo, files_metadata=True, token=saved_token()).siblings)
+    except Exception:
+        return 0
+
+
+class ModelDownloads:
+    """The models this release can fetch, and one at a time fetched into MODELS_DIR by `silvann_core.py download-model`
+    in a subprocess, which also writes the folder's `configs/default.json`. Progress is the bytes the folder held when
+    the download started and those received since (the subprocess counts them into a file, `SILVANN_DOWNLOAD_PROGRESS`),
+    against the repository's: Hugging Face's client writes a file in blocks of a few hundred MB, so the bytes on the
+    disk alone move in steps. A download stopped and started again keeps the files it finished. One is refused when
+    the disk under MODELS_DIR has less room than the model still needs, and 1 GB."""
+
+    def __init__(self):
+        self.known: Optional[list] = None   # [{name, repo, size}], read once from silvann_core.py
+        self.proc: Optional[subprocess.Popen] = None
+        self.name: Optional[str] = None
+        self.total = 0
+        self.base = 0                        # the bytes the folder held when the download started
+        self.report = os.path.join(tempfile.gettempdir(), "silvann_download_%d.json" % os.getpid())
+        self.message = ""
+        self.lines: deque[str] = deque(maxlen=200)
+
+    def catalogue(self) -> list:
+        if self.known is None:
+            r = subprocess.run([sys.executable, str(CORE_SCRIPT), "list-models", "--json"], capture_output=True,
+                               text=True, cwd=str(REPO_ROOT), timeout=300)
+            if r.returncode != 0:
+                raise RuntimeError("silvann_core.py list-models failed: " + (r.stderr or r.stdout)[-500:])
+            self.known = [{k: m[k] for k in ("name", "repo", "size")}
+                          for m in json.loads(r.stdout.strip().splitlines()[-1])]
+        return [dict(m, here=model_present(m["name"])) for m in self.known]
+
+    def running(self) -> bool:
+        return self.proc is not None and self.proc.poll() is None
+
+    def start(self, name: str):
+        if self.running():
+            raise RuntimeError(f"{self.name} is downloading — one at a time")
+        model = next((m for m in self.catalogue() if m["name"] == name), None)
+        if model is None:
+            raise RuntimeError(f"{name} is not a model this release knows")
+        total = repo_bytes(model["repo"]) or approx_bytes(model["size"])
+        MODELS_DIR.mkdir(parents=True, exist_ok=True)
+        base = folder_bytes(MODELS_DIR / name)
+        need = max(0, total - base)
+        free = shutil.disk_usage(MODELS_DIR).free
+        if need + (1 << 30) > free:
+            raise RuntimeError(f"{name} needs {need / 1e9:.1f} GB more, and {MODELS_DIR} has {free / 1e9:.1f} GB free")
+        self.name, self.total, self.base, self.message = name, total, base, ""
+        self.lines.clear()
+        try:
+            os.remove(self.report)
+        except OSError:
+            pass
+        self.proc = subprocess.Popen([sys.executable, str(CORE_SCRIPT), "download-model", name],
+                                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
+                                     cwd=str(REPO_ROOT), env=dict(os.environ, SILVANN_DOWNLOAD_PROGRESS=self.report))
+        threading.Thread(target=self._drain, daemon=True).start()
+
+    def _drain(self):
+        proc = self.proc
+        for line in iter(proc.stdout.readline, ""):     # text mode turns a progress bar's \r into lines too
+            if line.strip():
+                self.lines.append(line.rstrip())
+        rc = proc.wait()
+        self.message = ("done" if rc == 0 else
+                        "stopped" if rc < 0 else "failed: " + (self.lines[-1] if self.lines else f"exit {rc}"))
+
+    def progress(self) -> tuple:
+        """(bytes there, bytes in all) of the model being or last downloaded: those on the disk, or those it held at
+        the start and the bytes received since when that is more."""
+        if not self.name:
+            return 0, self.total
+        received = 0
+        try:
+            bars = json.load(open(self.report))
+            received = (bars.get("huggingface_hub.snapshot_download.transfer")
+                        or bars.get("huggingface_hub.snapshot_download") or [0])[0]
+        except (OSError, ValueError):
+            pass
+        return max(folder_bytes(MODELS_DIR / self.name), self.base + received), self.total
+
+    def cancel(self):
+        if self.running():
+            self.proc.terminate()
+            try:
+                self.proc.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+
+
+DOWNLOADS = ModelDownloads()
+
+
 # ---------- Per-browser session state ----------
 
 def _session_default():
@@ -472,6 +642,11 @@ async def page():
     # button forever route to stop().
     state["streaming"] = False
     state["active_bound"] = False
+    if LOCAL_APP:
+        # the app over this machine's models: its local panel, and the options view until a server is up
+        state["server_mode"] = "local"
+        if not SERVER.is_running():
+            state["view"] = "options"
     # Per-browser-tab UUID. app.storage.tab requires the WS handshake to be done first —
     # await client.connected() before touching it. Survives reloads within the tab, dies on close.
     import uuid as _uuid
@@ -743,17 +918,18 @@ async def page():
         image_busy_row.set_visibility(False)
         with ui.row().classes("w-full items-end gap-2"):
             # The paperclip uses the same `ui.upload` widget the cartridge import uses, but
-            # with `accepted_files="image/*"` and bound to the active cart's /images endpoint.
+            # accepting pictures, videos and documents (each read by the server at the same endpoint)
+            # and bound to the active cart's /images endpoint.
             # auto_upload fires on file selection so the user doesn't have to click upload twice.
             attach_upload = ui.upload(auto_upload=True, max_files=1,
-                                       max_file_size=10 * 1024 * 1024
-                                       ).props('label="" accept="image/*" flat hide-upload-btn '
-                                               'color=primary')
+                                       max_file_size=100 * 1024 * 1024
+                                       ).props('label="" accept="image/*,video/*,.pdf,.docx,.txt,.md,.csv,.json,text/*" '
+                                               'flat hide-upload-btn color=primary')
             attach_upload.classes("hidden")
             attach_btn = ui.button(icon="attach_file"
                                    ).props("color=primary"
-                                           ).tooltip("Attach an image to the next message")
-            attach_btn.set_visibility(False)       # images are not accepted by this release's runtime (the server answers 501)
+                                           ).tooltip("Attach a document, or a picture or video for a model that reads them, to the next message")
+            attach_btn.set_visibility(False)       # shown when the server's model reads pictures or files (its /health)
             input_box = ui.textarea(placeholder="Type a message — Enter to send, Shift+Enter for newline"
                                     ).classes("flex-grow").props("autogrow outlined")
             max_in = ui.number(label="max tokens", value=2048, min=1, max=4096).classes("w-32")
@@ -857,11 +1033,129 @@ async def page():
             if not LOCAL_AVAILABLE:
                 ui.label(
                     f"Local mode unavailable: this UI process can't find start_silvann_server.py "
-                    f"or any model folders under {MODELS_DIR}. Run the UI from main/ (the runtime root) "
-                    f"to enable local control."
+                    f"beside it. Run the UI from main/ (the runtime root) to enable local control."
                 ).classes("text-orange-600 max-w-2xl")
             else:
-                ui.label(f"Models dir: {MODELS_DIR}").classes("text-xs opacity-70")
+                # MODELS — the ones this release can fetch, which are here, and the one downloading
+                ui.label("Models").classes("font-bold")
+                ui.label(f"Downloaded from Hugging Face into {MODELS_DIR}. Help → Running SiLVANN says what "
+                         f"each needs; one larger than the card runs its experts on the CPU."
+                         ).classes("text-xs opacity-70 max-w-2xl whitespace-normal")
+
+                # the Hugging Face token: faster downloads than a client that is not signed in, and the repositories
+                #   whose terms its account accepted
+                def token_state():
+                    if os.environ.get("HF_TOKEN"):
+                        return "Hugging Face token: HF_TOKEN, from the environment the UI was started in"
+                    token = saved_token()
+                    if token:
+                        return f"Hugging Face token: saved ({token[:3]}…{token[-4:]})"
+                    return ("Hugging Face token: none — downloads go as a client that is not signed in, which Hugging "
+                            "Face serves more slowly. A token with read access: huggingface.co/settings/tokens")
+
+                with ui.row().classes("items-end gap-2"):
+                    token_in = ui.input("Hugging Face token", password=True, password_toggle_button=True
+                                        ).props("dense").classes("w-80")
+                    token_save = ui.button("save").props("dense outline")
+                    token_forget = ui.button("forget").props("dense flat")
+                token_lbl = ui.label(token_state()).classes("text-xs opacity-70 max-w-2xl whitespace-normal")
+
+                async def save_hf_token():
+                    token = (token_in.value or "").strip()
+                    if not token:
+                        safe_notify("paste a token first", type="warning")
+                        return
+                    try:
+                        who = await asyncio.to_thread(token_owner, token)
+                    except ValueError as e:
+                        safe_notify(f"not saved: {e}", type="negative")
+                        return
+                    save_token(token)
+                    token_in.value = ""
+                    token_lbl.set_text(token_state() + (f" — signed in as {who}" if who else
+                                                        " — not checked: Hugging Face did not answer"))
+                    safe_notify("token saved", type="positive")
+
+                def forget_hf_token():
+                    save_token("")
+                    token_lbl.set_text(token_state())
+                    safe_notify("token removed", type="info")
+                token_save.on_click(save_hf_token)
+                token_forget.on_click(forget_hf_token)
+
+                def _free_bytes():
+                    d = MODELS_DIR
+                    while not d.exists() and d != d.parent:
+                        d = d.parent
+                    return shutil.disk_usage(d).free
+
+                @ui.refreshable
+                def models_table():
+                    if DOWNLOADS.known is None:
+                        ui.label("reading the list of models…").classes("text-xs opacity-70")
+                        return
+                    ui.label(f"{_free_bytes() / 1e9:.0f} GB free on this disk").classes("text-xs opacity-70")
+                    with ui.grid(columns="auto auto auto").classes("items-center gap-x-6 gap-y-1"):
+                        for m in DOWNLOADS.catalogue():
+                            ui.label(m["name"]).classes("font-mono text-sm")
+                            ui.label(m["size"]).classes("text-sm")
+                            if m["here"]:
+                                ui.label("here").classes("text-sm text-green-700")
+                            elif DOWNLOADS.running() and DOWNLOADS.name == m["name"]:
+                                ui.label("downloading…").classes("text-sm")
+                            else:
+                                ui.button("download", on_click=lambda _, n=m["name"]: start_download(n)
+                                          ).props("dense outline")
+                models_table()
+
+                async def read_catalogue():
+                    try:
+                        await asyncio.to_thread(DOWNLOADS.catalogue)
+                    except Exception as e:
+                        safe_notify(f"the list of models could not be read: {e}", type="negative")
+                    models_table.refresh()
+                if DOWNLOADS.known is None:
+                    asyncio.create_task(read_catalogue())
+
+                async def start_download(name):
+                    try:
+                        await asyncio.to_thread(DOWNLOADS.start, name)
+                        safe_notify(f"downloading {name}", type="info")
+                    except Exception as e:
+                        safe_notify(f"not downloaded: {e}", type="negative")
+                    models_table.refresh()
+
+                with ui.row().classes("items-center gap-3 w-full") as dl_row:
+                    dl_bar = ui.linear_progress(value=0, show_value=False).classes("w-80")
+                    dl_label = ui.label("").classes("text-xs font-mono")
+                    dl_stop = ui.button("stop the download", on_click=lambda: asyncio.to_thread(DOWNLOADS.cancel)
+                                        ).props("dense flat color=negative")
+                dl_row.set_visibility(False)
+                dl_seen = {"running": DOWNLOADS.running()}
+
+                def refresh_model_select():
+                    opts = list_models()
+                    keep = (model_select.value if model_select.value in opts
+                            else DOWNLOADS.name if DOWNLOADS.name in opts else (opts[0] if opts else None))
+                    model_select.set_options(opts, value=keep)
+
+                def pump_download():
+                    running = DOWNLOADS.running()
+                    if DOWNLOADS.name and (running or DOWNLOADS.message):
+                        have, total = DOWNLOADS.progress()
+                        dl_row.set_visibility(True)
+                        dl_bar.set_value(min(1.0, have / total) if total else 0)
+                        dl_label.set_text(f"{DOWNLOADS.name}: {have / 1e9:.1f} of {total / 1e9:.1f} GB"
+                                          + ("" if running else f" — {DOWNLOADS.message}"))
+                        dl_stop.set_visibility(running)
+                    if running != dl_seen["running"]:
+                        dl_seen["running"] = running
+                        models_table.refresh()
+                        if not running:
+                            refresh_model_select()
+                ui.timer(1.0, pump_download)
+
+                ui.label(f"Models dir: {MODELS_DIR}").classes("text-xs opacity-70 mt-2")
 
                 def _config_desc(model, name):
                     # Surface the config's "_comment" so users see what each setup does (VRAM,
@@ -999,9 +1293,11 @@ async def page():
             status_tip.text = (f"OK — {h['model_id']} · layers {h['pp_slice']} · "
                                f"gpus {h['num_gpus']} · tenants {h['tenants_loaded']}"
                                + (f" · active {h['active'][:8]}" if h['active'] else ""))
+            attach_btn.set_visibility(bool(h.get("images") or h.get("files")))
         except Exception as e:
             status_dot.classes(replace="text-red-500").style("font-size: 12px")
             status_tip.text = f"down: {type(e).__name__}: {e}"
+            attach_btn.set_visibility(False)
 
     async def connect_clicked():
         state["endpoint"] = endpoint_in.value
@@ -1639,6 +1935,9 @@ async def page():
             try:
                 model_dir = str(MODELS_DIR / model_select.value)
                 SERVER.start(model_dir, config_select.value, int(port_in.value))
+                if LOCAL_APP:                     # started again when the app is next started
+                    LAST_START.write_text(json.dumps({"model": model_select.value, "config": config_select.value,
+                                                      "port": int(port_in.value)}))
                 state["server_port"] = int(port_in.value)
                 state["selected_model"] = model_select.value
                 state["selected_config"] = config_select.value
@@ -1852,13 +2151,19 @@ The **Endpoint** field at the bottom is the server the UI talks to — `http://l
   done.
 - One conversation is answered at a time. A message sent while another is being answered waits
   (**"⏳ waiting my turn…"**) and then streams.
-- Images are not accepted yet.
+- **📎** attaches a picture to the next message, when the model reads pictures (the Qwen models): it is read when it is
+  attached, a chip shows it, and the message carries it. A picture stays in the conversation and is saved with it.
 
 ## Options — a server on this machine
 
+**Models** lists the models this release can fetch, their sizes and which are here. **download** fetches one from
+Hugging Face into `models/`, with its progress; it is refused when the disk has less room than the model needs, and a
+download stopped and started again keeps the files it finished. One downloads at a time. A **Hugging Face token**
+(read access, from huggingface.co/settings/tokens) makes the downloads faster: **save** checks it with Hugging Face and
+keeps it for every download after; **forget** removes it.
+
 Pick a **model** from `models/`, then one of its **configs**, and **start**. The UI runs
-`start_silvann_server.py --model models/<name> <config>`, shows its output, and points the Endpoint at it. A model
-that is not there is fetched first with `python3 silvann_core.py download-model <name>`.
+`start_silvann_server.py --model models/<name> <config>`, shows its output, and points the Endpoint at it.
 
 A config is `models/<name>/configs/<config>.json`:
 
@@ -1872,28 +2177,58 @@ CPU. **Running SiLVANN**, in the list above, has every option.
 
 ## Where things are
 
-- Conversations: `user_sessions/<model>/<id>/`, on the server's machine.
+- Conversations: `user_sessions/<model>/<id>/`, on the server's machine. `models/` and `user_sessions/` are in the
+  folder `SILVANN_DATA` names when it is set — the Docker image's volume, `/data`.
 - A model and its configs: `models/<name>/`; the programs it runs, as written at its last start:
   `models/<name>/programs.lisp`.
 - The UI's own settings (endpoint, the last conversation, passwords you typed): this browser's storage.
+- The Hugging Face token Options saves: `.huggingface_token` beside `models/`, readable by its owner alone. An export of
+  the Docker image's volume carries it: **forget** it before giving an export to someone else.
 """
 
 
 # ---------- CLI ----------
 
+def _start_last():
+    """The model a --local UI started last, started again as it was — the app opens where it was left."""
+    try:
+        last = json.loads(LAST_START.read_text())
+    except (OSError, ValueError):
+        return
+    model, config = last.get("model") or "", last.get("config") or ""
+    if model_present(model) and config and (model_configs_dir(model) / config).is_file():
+        SERVER.start(str(MODELS_DIR / model), config, int(last.get("port", 8765)))
+
+
+def _stop_all():
+    """A --local UI stopping (a container's `docker stop`): the download stopped, the conversations saved, the server
+    stopped — ServerProcess.stop asks the server to save them first."""
+    DOWNLOADS.cancel()
+    SERVER.stop()
+
+
 def main():
+    global LOCAL_APP
     p = argparse.ArgumentParser()
     p.add_argument("--port", type=int, default=8080, help="port for the NiceGUI app (default 8080)")
+    p.add_argument("--host", default=None, help="the address the UI listens on (default NiceGUI's own)")
     p.add_argument("--endpoint", default=None,
                    help="default SiLVANN server endpoint (override on first launch)")
     p.add_argument("--no-browser", action="store_true", help="don't auto-open the browser")
+    p.add_argument("--local", action="store_true",
+                   help="the UI as the app over this machine's models (the Docker image's): the local panel first, "
+                        "the model started last started again, and the server stopped with the UI")
     args = p.parse_args()
 
     if args.endpoint:
         os.environ["SILVANN_DEFAULT_ENDPOINT"] = args.endpoint
+    if args.local:
+        LOCAL_APP = True
+        app.on_startup(_start_last)
+        app.on_shutdown(_stop_all)
 
-    ui.run(port=args.port, title="SiLVANN", show=not args.no_browser,
-           storage_secret="silvann-ui")
+    ui.run(port=args.port, title="SiLVANN", show=not args.no_browser, storage_secret="silvann-ui",
+           reload=not args.local, **({"host": args.host} if args.host else {}))
 
 
 if __name__ in {"__main__", "__mp_main__"}:

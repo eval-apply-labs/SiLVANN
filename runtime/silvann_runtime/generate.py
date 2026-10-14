@@ -20,13 +20,17 @@ class Generates:
         self.m.node_array("STOP", STOPS_MOST)
         self._stops = None
 
-    def generate(self, token, pos, n, stop=(), sampler=None):
+    def generate(self, token, pos, n, stop=(), sampler=None, lag=0):
         """Up to `n` tokens from `token` at `pos`, each the next one's input, in one program on the card — ending early
-        after one of `stop`. Greedy, or drawn by the card's sampler `sampler` (a `session.Sampler`). Answers the tokens."""
+        after one of `stop`. Greedy, or drawn by the card's sampler `sampler` (a `session.Sampler`). `lag`: how far the
+        tokens' rotary positions are behind their places (a family whose program reads LAG). Answers the tokens."""
         n = min(n, GENERATE_MOST, self.max_context - pos)
         if n <= 0:
             raise Refused("position %d is past the context of %d" % (pos, self.max_context))
         self._watch(stop)
+        if lag != getattr(self, "_lag", 0):
+            self.m.must("(begin (set! LAG %d) 0)" % lag, "the rotary's lag")
+            self._lag = lag
         if sampler is None:
             call = "(generate %d %d %d (< 1 0) 0 0 0 1.0 1.0 1 1.0 0)" % (token, pos, n)
         else:

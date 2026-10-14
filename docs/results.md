@@ -5,13 +5,15 @@ AMD Instinct MI50, 256 GB of RAM. Disk speed 5 GB/s (2.6 GB/s where a row says s
 table of machines is drawn from this page. The NVIDIA section's machine is a desktop with an RTX 5060 Ti:
 [▶ below](#on-an-nvidia-card-the-rtx-5060-ti).
 
-**How it is measured.** On the card: a prompt of about 2,000 positions, then 32-64 tokens. With the experts on the
-CPU: about 1,000 positions, then 128 tokens (32 in GLM's earlier rows). "All in RAM" means every expert is already in
-memory; the other rows start cold, under the memory limit shown, with the expert files dropped from the operating
-system's cache first. The answer's rate is measured after the prompt, from its 10th token on. The 27B's prompt on one
-MI50 and its row through OpenCL are v0.5.1's; the other rows with a model entirely on one MI50, and the 35B's and the
-122B D4E4's with the experts on the CPU all in RAM, are v0.4.0's; the others were measured with v0.3's card kernels, and
-where a card does part of the work they are a floor.
+**How it is measured.** On the card: a prompt of about 2,000 positions, then 32-64 tokens. With the experts on the CPU:
+about 1,000 positions, then 128 tokens (32 in GLM's earlier rows). "All in RAM" means every expert is already in memory;
+the other rows start cold, under the memory limit shown, with the expert files dropped from the operating system's cache
+first. The answer's rate is measured after the prompt, from its 10th token on. The rows with a model entirely on one
+MI50, and the 35B's and the 122B D4E4's with the experts on the CPU all in RAM, were measured on v0.7.0 before its
+pictures were added (its answers since within 1% of them), whose runtime keeps the process out of the kernel's NUMA
+balancing (on this two-socket machine its sampling cost a card's run 1.5-3%, and the 35B's prompt with its experts on
+the CPU 5%); the 27B's row through OpenCL is v0.5.1's (the same on v0.7.0 before its pictures); the others were measured
+with v0.3's card kernels, and where a card does part of the work they are a floor.
 
 ## How good each pack is: perplexity
 
@@ -49,8 +51,8 @@ scores 8.962 exact and 8.963 with `experts_int8`.
 
 | Where it runs | Prompt | Answer |
 |---|---|---|
-| one MI50 | 193 positions/s | 87 tokens/s (102 on a short prompt) |
-| one MI50 for the dense part, the experts on the CPU, all in RAM | 83 positions/s | 27 tokens/s |
+| one MI50 | 199 positions/s | 90 tokens/s (105 on a short prompt) |
+| one MI50 for the dense part, the experts on the CPU, all in RAM | 88 positions/s | 28.4 tokens/s |
 | the same, the experts read from the disk, 8 GB of RAM | 32 positions/s† | 11.9 tokens/s — 90% of expert reads from memory |
 | the same, 6 GB of RAM | 31 positions/s† | 10.2 tokens/s — 83% from memory |
 | `D4E4`, the CPU alone, no card, all in RAM | — | 15.4 tokens/s on a short prompt |
@@ -60,7 +62,7 @@ scores 8.962 exact and 8.963 with `experts_int8`.
 
 | Where it runs | Prompt | Answer |
 |---|---|---|
-| one MI50 | 101 positions/s | 30.5 tokens/s (34 on a short prompt) |
+| one MI50 | 102 positions/s | 31.5 tokens/s (34 on a short prompt) |
 | one MI50 through OpenCL | 52.5 positions/s | 10.4 tokens/s (13.1 on a short prompt) |
 | three stages over machines (pipeline parallel) | — | 6.8 tokens/s, the same tokens |
 
@@ -68,19 +70,18 @@ scores 8.962 exact and 8.963 with `experts_int8`.
 
 | Pack | Where it runs | Prompt | Answer |
 |---|---|---|---|
-| D4 | one MI50 | 53 positions/s | 42 tokens/s (56 on a short prompt) |
-| D8 | one MI50 | 36 positions/s | 30 tokens/s (37 on a short prompt) |
+| D4 | one MI50 | 162 positions/s | 42 tokens/s (56 on a short prompt) |
+| D8 | one MI50 | 158 positions/s | 30.6 tokens/s (38 on a short prompt) |
 
-These rows are v0.4.0's, which read Ministral's prompt a position at a time, so its prompt rate is close to its answer
-rate. v0.5.0 reads it as rows, through nn's attention over many rows — on the RTX 5060 Ti at 958 positions a second
-against 34 a position at a time ([▶ below](#on-an-nvidia-card-the-rtx-5060-ti)); on the MI50 it is not measured yet. Its
-chat template adds about 560 positions, so its rows read about 2,600.
+Ministral reads its prompt as rows, through nn's attention over many rows (v0.4.0, a position at a time, read 53
+positions a second on the D4 pack). Its chat template adds about 560 positions, so its rows read about 2,600, and a short
+prompt about 620.
 
 ## Qwen 3.5 122B-A10B
 
 | Pack | Where it runs | Prompt | Answer |
 |---|---|---|---|
-| `D4E4` | one MI50 for the dense part, the experts on the CPU, all in RAM | 41 positions/s | 12.9 tokens/s |
+| `D4E4` | one MI50 for the dense part, the experts on the CPU, all in RAM | 43 positions/s | 14.4 tokens/s |
 | `D4E4` | the same, the experts read from the disk, 32 GB of RAM | 11 positions/s† | 4.7 tokens/s — 87% from memory |
 | `D4E4` | the same, 16 GB of RAM | 10 positions/s† | 3.2 tokens/s — 73% from memory |
 | `D8E4` | one MI50 for the dense part, the experts on the CPU, all in RAM | 25 positions/s | 6.1 tokens/s |
