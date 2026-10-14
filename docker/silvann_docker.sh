@@ -15,18 +15,24 @@
 #   bash docker/silvann_docker.sh install_nonfree requirements-nonfree.txt (PyAV, for video files) from PyPI into the
 #                                                 volume: a container started for it, then stopped; a running app
 #                                                 restarted. Again after an update that changes the image's Python
+#   bash docker/silvann_docker.sh open_data       the volume's folder — models/, user_sessions/ — opened, or its path said:
+#                                                 a model's folder copied into models/ is the app's at the next start
+#   bash docker/silvann_docker.sh reclaim_space   Windows' (silvann.ps1): Docker Desktop's disk file compacted. Here the
+#                                                 volume is a folder on this disk, and a deleted model's room is free at once
 #
 #   SILVANN_IMAGE   the image        default ghcr.io/eval-apply-labs/silvann:main — the nightly, built from main.
 #                   From v1.0 a major version has its tag (:1), which its minor and patch releases update in place
 #   SILVANN_PORT    the UI's port    default 8080
+#   SILVANN_NAME    the container    default silvann
+#   SILVANN_VOLUME  the volume       default silvann-data — another name keeps a second SiLVANN beside the first
 #   SILVANN_ENGINE  docker | podman  default whichever is installed, docker first
 #   HF_TOKEN        a Hugging Face token, handed to the container at start: its client downloads faster signed in
 set -euo pipefail
 
 IMAGE=${SILVANN_IMAGE:-ghcr.io/eval-apply-labs/silvann:main}
 PORT=${SILVANN_PORT:-8080}
-NAME=silvann
-VOLUME=silvann-data
+NAME=${SILVANN_NAME:-silvann}
+VOLUME=${SILVANN_VOLUME:-silvann-data}
 # the UI saves every conversation before it stops; a long one takes a while to write
 STOP_SECONDS=300
 
@@ -186,6 +192,21 @@ install_nonfree() {
     say "installed — a video file (MP4 and the like) is read now"
 }
 
+# where the volume is on this machine: a model's folder copied into its models/ is listed by the UI's Options, and the
+# next start gives it to the app's user (the image's entrypoint)
+open_data() {
+    E volume inspect "$VOLUME" >/dev/null 2>&1 || stop "there is no volume $VOLUME: \`bash $0 install\` first"
+    local dir; dir=$(E volume inspect -f '{{.Mountpoint}}' "$VOLUME")
+    say "the data — models/, user_sessions/ — is in $dir"
+    note "a model's folder copied into models/ is listed by the UI's Options; \`bash $0 stop\` and \`start\` make it the app's"
+    if [ ! -w "$dir" ]; then
+        note "this user cannot write there ($ENGINE keeps it under its own ids): copy through a container instead —"
+        note "  $ENGINE run --rm --user 0:0 -v $VOLUME:/data -v <folder>:/in:ro --entrypoint cp $IMAGE -r /in /data/models/<name>"
+        return
+    fi
+    command -v xdg-open >/dev/null && xdg-open "$dir" >/dev/null 2>&1 || true
+}
+
 import_from() {
     local dir=${1:-}; [ -n "$dir" ] || stop "import <dir> — the folder export wrote"
     dir=$(cd "$dir" && pwd)
@@ -222,5 +243,7 @@ case "${1:-}" in
     export)        export_to "${2:-}" ;;
     import)        import_from "${2:-}" ;;
     install_nonfree) install_nonfree ;;
+    open_data)     open_data ;;
+    reclaim_space) say "nothing to reclaim on Linux: the volume is a folder on this machine's disk, and a deleted model's room is free at once" ;;
     *)             sed -n '2,/^set -euo/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 2 ;;
 esac

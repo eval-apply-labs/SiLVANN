@@ -69,9 +69,11 @@ RUN apt-get update \
  && mkdir -p /data && chown silvann:silvann /data
 COPY --from=build /opt/silvann /opt/silvann
 COPY docker/image_notices.py /opt/silvann/docker/image_notices.py
+COPY docker/entrypoint.sh /opt/silvann/docker/entrypoint.sh
 # requirements-nonfree.txt is not in the image: the scripts' `install_nonfree` installs it from PyPI into the volume, under
 # /data/python/<the image's Python version>, which silvann-data.pth puts on the environment's path when it exists
 RUN ln -s /opt/silvann/silvann /usr/local/bin/silvann \
+ && chmod 755 /opt/silvann/docker/entrypoint.sh \
  && /opt/silvann/venv/bin/python /opt/silvann/docker/image_notices.py > /opt/silvann/IMAGE_NOTICES.md \
  && /opt/silvann/venv/bin/python -c "import site, sys; open(site.getsitepackages()[0] + '/silvann-data.pth', 'w').write('/data/python/%d.%d\n' % sys.version_info[:2])"
 
@@ -80,8 +82,10 @@ ENV NVIDIA_VISIBLE_DEVICES=all \
     NVIDIA_DRIVER_CAPABILITIES=compute,utility \
     SILVANN_DATA=/data \
     NICEGUI_STORAGE_PATH=/data/.nicegui \
-    PYTHONUNBUFFERED=1
-USER silvann
+    PYTHONUNBUFFERED=1 \
+    HOME=/home/silvann
+# no USER: the entrypoint starts as root, gives what the volume holds to silvann (a model pasted in through Windows'
+# Explorer comes in as root's), and runs the app as silvann
 WORKDIR /opt/silvann
 VOLUME /data
 EXPOSE 8080
@@ -90,6 +94,6 @@ LABEL org.opencontainers.image.title="SiLVANN" \
       org.opencontainers.image.source="https://github.com/eval-apply-labs/SiLVANN" \
       org.opencontainers.image.licenses="AGPL-3.0-only"
 # tini passes `docker stop`'s SIGTERM to the UI, which saves the conversations and stops the server before it exits
-ENTRYPOINT ["/usr/bin/tini", "--"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/opt/silvann/docker/entrypoint.sh"]
 CMD ["/opt/silvann/venv/bin/python", "/opt/silvann/silvann_ui.py", "--local", "--host", "0.0.0.0", "--port", "8080", \
      "--no-browser"]

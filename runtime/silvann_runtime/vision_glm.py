@@ -35,7 +35,7 @@ import pickle
 import numpy as np
 
 from .model_folder import Refused
-from .vision import Image, Video, decoded, frames_of
+from .vision import MAX_VIDEO_TOKENS, Frames, Image, Video, as_picture, decoded, frames_of
 
 # the original repository's processor_config.json `image_processor`, which the packs do not carry
 PROCESSOR = {"min_image_tokens": 16, "max_image_tokens": 8000,
@@ -75,6 +75,7 @@ def smart_resize(num_frames, height, width, temporal_factor, factor, min_tokens,
 
 class GlmVision:
     mrope = False                   # its tokens keep their places in the cache: the text model has no rotary
+    max_video_tokens = MAX_VIDEO_TOKENS   # the server's `max_tokens_per_video` where its config says one
 
     def __init__(self, folder, max_tokens=None, card=None):
         config = json.load(open(os.path.join(folder.path, "config.json")))
@@ -199,7 +200,8 @@ class GlmVision:
 
     def read(self, data):
         """A file's bytes read: a still picture as an `Image`; an animated picture or a video file as a `Video`."""
-        video = None if hasattr(data, "convert") else frames_of(data)
+        fit = lambda n, height, width: self.video_canvas(n, height, width, self.video_tokens)[3:1:-1]   # noqa: E731
+        video = None if hasattr(data, "convert") else frames_of(data, self.sample_frames, fit)
         if video is not None:
             return Video(self.read_video(*video, max_tokens=self.video_tokens))
         pixel_values, grid = self.patches(data)
@@ -207,8 +209,10 @@ class GlmVision:
 
     @property
     def video_tokens(self):
-        """The most tokens a video is made into here: half the boot's context, or the host's bound."""
-        return max(VIDEO["min_image_tokens"], self.card.max_context // 2 if self.card is not None else 4 * HOST_MAX_TOKENS)
+        """The most tokens a video is made into here: `max_video_tokens` (▶ vision.MAX_VIDEO_TOKENS), and at most half the
+        boot's context, or the host's bound."""
+        return max(VIDEO["min_image_tokens"], min(self.max_video_tokens, self.card.max_context // 2 if self.card is not None
+                                                   else 4 * HOST_MAX_TOKENS))
 
     # ── a video: frames sampled, two frames a temporal patch, each pair read as a picture of its own ──────────────
     @staticmethod
@@ -252,9 +256,28 @@ class GlmVision:
         idx = self.sample_frames(len(frames), fps)
         if not idx:
             raise Refused("a video of %d frames at %.3g a second is too short to read a frame from" % (len(frames), fps))
-        pics = [f if hasattr(f, "convert") else PILImage.fromarray(np.asarray(f)) for f in (frames[i] for i in idx)]
-        pics = [p.convert("RGB") for p in pics]
-        n, height, width = len(pics), pics[0].height, pics[0].width
+        height, width = frames.size if isinstance(frames, Frames) else as_picture(frames[idx[0]]).size[::-1]
+        n = len(idx)
+        th, tw, ch, cw = self.video_canvas(n, height, width, max_tokens)
+        x = np.zeros((n, th, tw, 3), dtype=np.float32)
+        for k, i in enumerate(idx):                                                  # a frame at a time, to the canvas
+            p = as_picture(frames[i])
+            if (p.height, p.width) != (ch, cw):
+                p = p.resize((cw, ch), PILImage.BICUBIC)
+            x[k, :ch, :cw] = np.asarray(p, dtype=np.float32)
+        x /= 255.0                                                                    # scaled in place
+        x -= np.asarray(PROCESSOR["image_mean"], np.float32)
+        x /= np.asarray(PROCESSOR["image_std"], np.float32)
+        if n % self.temporal:
+            x = np.concatenate([x, np.repeat(x[-1:], self.temporal - n % self.temporal, 0)])
+        gt, gh, gw, p, m, T = len(x) // self.temporal, th // self.patch, tw // self.patch, self.patch, self.merge, self.temporal
+        x = x.reshape(gt, T, gh // m, m, p, gw // m, m, p, 3).transpose(0, 2, 5, 3, 6, 8, 1, 4, 7)   # one copy, below
+        times = [idx[i] / fps for i in range(0, len(idx), self.temporal)][:gt]
+        return x.reshape(gt * gh * gw, 3 * T * p * p), (gt, gh, gw), times
+
+    def video_canvas(self, n, height, width, max_tokens=None):
+        """(th, tw, ch, cw): the canvas `n` frames of `height` x `width` go on, and the size each is resized to inside it,
+        its aspect kept (▶ `video_patches`)."""
         factor = self.patch * self.merge
         limit = min(VIDEO["max_image_tokens"], max_tokens or VIDEO["max_image_tokens"])
         th, tw = smart_resize(n, height, width, self.temporal, factor, VIDEO["min_image_tokens"], limit)
@@ -262,20 +285,7 @@ class GlmVision:
         scale = min(th / height, tw / width)
         if n * height * width >= per_token * VIDEO["min_image_tokens"]:
             scale = min(1.0, scale)
-        ch, cw = max(1, min(th, math.floor(height * scale))), max(1, min(tw, math.floor(width * scale)))
-        x = np.zeros((n, th, tw, 3), dtype=np.float32)
-        for k, p in enumerate(pics):
-            if (p.height, p.width) != (ch, cw):
-                p = p.resize((cw, ch), PILImage.BICUBIC)
-            x[k, :ch, :cw] = np.asarray(p, dtype=np.float32)
-        x = (x / 255.0 - np.asarray(PROCESSOR["image_mean"], np.float32)) / np.asarray(PROCESSOR["image_std"], np.float32)
-        x = x.transpose(0, 3, 1, 2)                                                   # frames, channels, h, w
-        if n % self.temporal:
-            x = np.concatenate([x, np.repeat(x[-1:], self.temporal - n % self.temporal, 0)])
-        gt, gh, gw, p, m, T = len(x) // self.temporal, th // self.patch, tw // self.patch, self.patch, self.merge, self.temporal
-        x = x.reshape(gt, T, 3, gh // m, m, p, gw // m, m, p).transpose(0, 3, 6, 4, 7, 2, 1, 5, 8)
-        times = [idx[i] / fps for i in range(0, len(idx), self.temporal)][:gt]
-        return x.reshape(gt * gh * gw, 3 * T * p * p).astype(np.float32), (gt, gh, gw), times
+        return th, tw, max(1, min(th, math.floor(height * scale))), max(1, min(tw, math.floor(width * scale)))
 
     def read_video(self, frames, fps, max_tokens=None):
         """A video's frames read: a list of (`Image`, time in seconds) a pair of frames — each pair the tower reads on its

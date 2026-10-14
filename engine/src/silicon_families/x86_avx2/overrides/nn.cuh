@@ -133,8 +133,34 @@ static __thread float*  x86_avx2__zzprivate_xd = 0;
 static __thread int8_t* x86_avx2__zzprivate_xq = 0;
 static __thread float*  x86_avx2__zzprivate_xs = 0;
 static __thread uint64_t x86_avx2__zzprivate_x_room = 0;
+static __thread float*   x86_avx2__zzprivate_rows_room = 0;
+static __thread uint64_t x86_avx2__zzprivate_rows_room_n = 0;
+
+/* ⛔ AND GIVEN BACK WHEN ITS THREAD ENDS. The engine runs a launch's blocks on threads it starts for that launch and joins
+ *   after it (`eng__launch__spread`), so a scratch a thread keeps lasts one launch, and kept past it is lost: `MEASURED`
+ *   2026-10-14 on node03 (measurements/2026-10-14_v080rc1_on_node03.md), the 35B with its experts on the CPU lost 4.6 MB a
+ *   prompt's chunk and 37 KB a token, without end. A key's destructor frees a thread's scratch as the thread ends; the
+ *   family is never unloaded, so the destructor outlives every thread that names it. */
+static pthread_key_t  x86_avx2__zzprivate_scratch_key;
+static pthread_once_t x86_avx2__zzprivate_scratch_once = PTHREAD_ONCE_INIT;
+static void x86_avx2__zzprivate_scratch_free(void* held) {
+    (void)held;
+    free(x86_avx2__zzprivate_xf); free(x86_avx2__zzprivate_xd); free(x86_avx2__zzprivate_xq); free(x86_avx2__zzprivate_xs);
+    free(x86_avx2__zzprivate_rows_room);
+    x86_avx2__zzprivate_xf = 0; x86_avx2__zzprivate_xd = 0; x86_avx2__zzprivate_xq = 0; x86_avx2__zzprivate_xs = 0;
+    x86_avx2__zzprivate_x_room = 0; x86_avx2__zzprivate_rows_room = 0; x86_avx2__zzprivate_rows_room_n = 0;
+}
+static void x86_avx2__zzprivate_scratch_key_make(void) {
+    (void)pthread_key_create(&x86_avx2__zzprivate_scratch_key, x86_avx2__zzprivate_scratch_free);
+}
+static inline void x86_avx2__zzprivate_scratch_held(void) {
+    pthread_once(&x86_avx2__zzprivate_scratch_once, x86_avx2__zzprivate_scratch_key_make);
+    (void)pthread_setspecific(x86_avx2__zzprivate_scratch_key, (void*)1);
+}
+
 static inline bool x86_avx2__zzprivate_x_room_for(uint64_t cols) {
     if (cols <= x86_avx2__zzprivate_x_room) return true;
+    x86_avx2__zzprivate_scratch_held();
     free(x86_avx2__zzprivate_xf); free(x86_avx2__zzprivate_xd); free(x86_avx2__zzprivate_xq); free(x86_avx2__zzprivate_xs);
     x86_avx2__zzprivate_xf = (float*)aligned_alloc(64, ((cols * 4u + 63u) / 64u) * 64u);
     x86_avx2__zzprivate_xd = (float*)aligned_alloc(64, ((cols * 4u + 63u) / 64u) * 64u);
@@ -149,10 +175,9 @@ static inline bool x86_avx2__zzprivate_x_room_for(uint64_t cols) {
  *   of 32,768 columns are 768 KiB, no size for a stack frame — one is probed a page at a time on every call where GCC's
  *   stack-clash protection is on (by default here), and an array sized at run time is not portable C++. Null when there is
  *   no room, and the tile then takes its rows from the codes. */
-static __thread float*   x86_avx2__zzprivate_rows_room = 0;
-static __thread uint64_t x86_avx2__zzprivate_rows_room_n = 0;
 static inline float* x86_avx2__zzprivate_rows_scratch(uint64_t floats) {
     if (floats > x86_avx2__zzprivate_rows_room_n) {
+        x86_avx2__zzprivate_scratch_held();
         free(x86_avx2__zzprivate_rows_room);
         x86_avx2__zzprivate_rows_room = (float*)aligned_alloc(64, ((floats * 4u + 63u) / 64u) * 64u);
         x86_avx2__zzprivate_rows_room_n = x86_avx2__zzprivate_rows_room ? floats : 0u;

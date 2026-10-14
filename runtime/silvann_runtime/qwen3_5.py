@@ -24,6 +24,7 @@ import pickle
 import numpy as np
 
 from . import experts_file, expert_tier, sampling
+from .vision import video_ram
 from .generate import Generates
 from .model_folder import NL, Refused
 
@@ -150,7 +151,7 @@ class Qwen35(Generates):
             raise Refused("a card's tier of experts does not take a mask yet")
         self._plan()
         if self.CPU_EXPERTS:
-            self.EXPERTS_FROM = experts_file.choose(experts_from, self.cpu_arena)
+            self.EXPERTS_FROM = experts_file.choose(experts_from, self.cpu_arena, video_ram(folder.config))
             self.experts_dir = experts_dir or os.path.join(folder.path, "experts")
         # a card's tier copies an expert from its place in the CPU's memory, which only the experts loaded into RAM have
         # (`SRC`): from the disk or mapped it would ask for experts and never hold one — `MEASURED` 2026-10-12 from the disk
@@ -1003,13 +1004,14 @@ class Qwen35(Generates):
     # on what the one before handed on: the first machine starts from the token, the last ends with the head.
     def forward(self, pos, token=None, x=None, head=False):
         """Position `pos` through this machine's layers, from `token` (the first machine) or the residual row `x` (the
-        bytes the machine before answered). Answers the next token when `head`, else this machine's residual row."""
+        bytes the machine before answered). Answers the next token when `head` — the greedy head, or the head expression
+        it is (a sampler's draw, `sampling.head`; `(head_logits)`) — else this machine's residual row."""
         if token is not None:
             start = "(embed %d)" % token
         else:
             self.m.write(self.X_AT, x)
             start = ""
-        end = "(head)" if head else "(type x)"
+        end = (head if isinstance(head, str) else "(head)") if head else "(type x)"
         got = self._run("(begin %s (nn__rope__angles cs %d THETA ROTARY) (layers %d) %s)" % (start, pos, pos, end),
                         "position %d" % pos)
         return got if head else self.m.read(self.X_AT, self.H * 2)
@@ -1051,8 +1053,8 @@ class Qwen35(Generates):
                % ("(< 0 1)" if positions is not None else "(< 1 0)", start, first, n), "the rows from %d" % first)
         if not head:
             return m.read(self.XS_AT, n * H * 2)
-        return m.must("(begin (nn__vector__add (nn__vector__range xs %d %d) zero_h x %d) (head))" % ((n - 1) * H, H, H),
-                      "the chunk's last row")
+        return m.must("(begin (nn__vector__add (nn__vector__range xs %d %d) zero_h x %d) %s)"
+                      % ((n - 1) * H, H, H, head if isinstance(head, str) else "(head)"), "the chunk's last row")
 
     def logits(self):
         return np.frombuffer(self.m.read(self.LOGITS_AT, self.VOCAB * 2), dtype="<f2").astype(np.float32)
@@ -1123,12 +1125,13 @@ class Qwen35(Generates):
             self.m.write_from(at, pointer, n)
 
     # ── ⑥ a conversation's state, for putting it away ─────────────────────────────────────────────────────────
-    def state_regions(self, length):
+    def state_regions(self, length, where=None):
         """(address, bytes) of everything a conversation of `length` positions has written: each DeltaNet layer's
-        state and window whole, each attention layer's key and value rows `0..length`."""
+        state and window whole, each attention layer's key and value rows `0..length`. `where`: each layer's state's
+        address — the load's by default; a table of zeros answers the sizes before the boot."""
         out = []
         for l in self.run_layers:
-            at = self.state_at[l]
+            at = (self.state_at if where is None else where)[l]
             if self.kinds[l] == "d":
                 out += [(at + self.SPLAN.at_up_data, self.S_BYTES), (at + self.SPLAN.at_down_data, self.W_BYTES)]
             elif self.TIERED:

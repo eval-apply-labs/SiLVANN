@@ -1,4 +1,5 @@
-# the build reads two files of the release from its context; everything else comes through install.sh
+# the build reads three files of the release from its context; everything else comes through install.sh
 *
 !install.sh
 !docker/image_notices.py
+!docker/entrypoint.sh

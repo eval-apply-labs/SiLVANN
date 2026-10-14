@@ -124,9 +124,11 @@ class Runtime:
             return
         m = self.model
         t0 = time.time()
-        if self.active is not None:                   # the one on the card is put away, its state read off
+        if self.active is not None and getattr(m, "PARKS", True):    # the one on the card is put away, its state read off
             regions = m.state_regions(self.active.length)
             self.active.state = [m.m.read(at, n) for at, n in regions if n]
+        elif self.active is not None:                 # a state that cannot be read off (a ring's): its tokens read again
+            self.active.state, self.active.length, self.active.lag = None, 0, 0
         self.stats["park_seconds"] += time.time() - t0
         want = c.lora["name"] if c.lora else None
         if want != m.active_lora:
@@ -187,7 +189,7 @@ class Runtime:
         # ⭐ DRAWN ON THE CARD where the model has the procedure and the sampler fits it — only the token comes back
         card = not greedy and t.sampler.card(m)
         if card and t.sampler.repetition_penalty != 1.0:
-            sampling.remember(m.m, c.tokens)
+            m.remember(c.tokens) if hasattr(m, "remember") else sampling.remember(m.m, c.tokens)
         # ⭐ PICTURES: their pads' rows are the tower's. A Qwen model's positions from the first picture on are M-RoPE's —
         #   its three a token, and a token's position no longer its place (▶ vision.positions), `lag` carrying the
         #   difference; GLM's tokens keep their places (▶ vision_glm.py), and only the rows go in
@@ -249,7 +251,9 @@ class Runtime:
             tok = out if greedy or card else t.sampler(m.logits(), c.tokens)
 
     def save(self, c, path, with_state=True):
-        """A cartridge to disk; the one on the card has its state read first, and stays on the card."""
+        """A cartridge to disk; the one on the card has its state read first, and stays on the card — where the model's
+        state can be read off (a ring's cannot: its tokens are read again)."""
+        with_state = with_state and getattr(self.model, "PARKS", True)
         if c is self.active and with_state:
             c.state = [self.model.m.read(at, n) for at, n in self.model.state_regions(c.length) if n]
             c.save(path, with_state)

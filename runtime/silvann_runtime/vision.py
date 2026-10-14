@@ -42,6 +42,9 @@ HOST_MAX_PIXELS = 1 << 20
 # the repositories' video_preprocessor_config.json (the pixels of all the frames together) and Hugging Face's
 # Qwen3VLVideoProcessor (the rate and the number of frames)
 VIDEO = {"fps": 2.0, "min_frames": 4, "max_frames": 768, "min_pixels": 4096, "max_pixels": 25165824}
+# ⚖ 2026-10-14 *"make the video tokens 8k for glm so we stay under 1gb, ideally this should be a config in the file,
+# max_tokens_per_video"*: the most tokens a video becomes, either family's, unless the server's config says otherwise
+MAX_VIDEO_TOKENS = 8192
 
 
 def smart_resize(height, width, factor, min_pixels, max_pixels):
@@ -87,6 +90,7 @@ class Image:
 
 class Vision:
     mrope = True                    # its tokens' positions are M-RoPE's three (▶ `positions`)
+    max_video_tokens = MAX_VIDEO_TOKENS   # the server's `max_tokens_per_video` where its config says one
 
     def __init__(self, folder, card=None):
         config = json.load(open(os.path.join(folder.path, "config.json")))
@@ -202,7 +206,8 @@ class Vision:
 
     def read(self, data):
         """A file's bytes read: a still picture as an `Image`; an animated picture or a video file as a `Video`."""
-        video = None if hasattr(data, "convert") else frames_of(data)
+        fit = lambda n, height, width: self.video_canvas(n, height, width, self.video_tokens)[::-1]    # noqa: E731
+        video = None if hasattr(data, "convert") else frames_of(data, self.sample_frames, fit)
         if video is not None:
             return Video(self.read_video(*video, max_tokens=self.video_tokens))
         pixel_values, grid = self.patches(data)
@@ -210,9 +215,10 @@ class Vision:
 
     @property
     def video_tokens(self):
-        """The most tokens a video is made into here: half the boot's context, or four of the host's pictures."""
+        """The most tokens a video is made into here: `max_video_tokens`, and at most half the boot's context, or four of
+        the host's pictures."""
         per_picture = HOST_MAX_PIXELS // (self.patch * self.merge) ** 2
-        return max(16, self.card.max_context // 2 if self.card is not None else 4 * per_picture)
+        return max(16, min(self.max_video_tokens, self.card.max_context // 2 if self.card is not None else 4 * per_picture))
 
     # ── a video: frames sampled, two frames a temporal patch, each pair read as a picture of its own ──────────────
     @staticmethod
@@ -233,24 +239,31 @@ class Vision:
         idx = self.sample_frames(len(frames), fps)
         if not idx:
             raise Refused("a video of %d frames is too short to read a frame from" % len(frames))
-        pics = [f if hasattr(f, "convert") else PILImage.fromarray(np.asarray(f)) for f in (frames[i] for i in idx)]
-        pics = [p.convert("RGB") for p in pics]
-        n, factor, T = len(pics), self.patch * self.merge, self.temporal
+        height, width = frames.size if isinstance(frames, Frames) else as_picture(frames[idx[0]]).size[::-1]
+        n, T = len(idx), self.temporal
         t = math.ceil(n / T) * T
-        limit = min(VIDEO["max_pixels"], t * self.max_pixels, (max_tokens or VIDEO["max_pixels"]) * T * factor ** 2)
-        h, w = smart_resize_video(n, pics[0].height, pics[0].width, T, factor, VIDEO["min_pixels"], limit)
-        x = np.stack([np.asarray(p if (p.height, p.width) == (h, w) else p.resize((w, h), PILImage.BICUBIC), np.float32)
-                      for p in pics])
-        mean, std = (np.asarray(PROCESSOR[k], np.float32) for k in ("image_mean", "image_std"))
-        x = (x / 255.0 - mean) / std
-        x = x.transpose(0, 3, 1, 2)                                                   # frames, channels, h, w
-        if n % T:
-            x = np.concatenate([x, np.repeat(x[-1:], T - n % T, 0)])
-        gt, gh, gw, p, m = len(x) // T, h // self.patch, w // self.patch, self.patch, self.merge
-        x = x.reshape(gt, T, 3, gh // m, m, p, gw // m, m, p).transpose(0, 3, 6, 4, 7, 2, 1, 5, 8)
+        h, w = self.video_canvas(n, height, width, max_tokens)
+        # one array, filled a frame at a time and scaled in place — the last frame repeated to make their number even
+        x = np.empty((t, h, w, 3), np.float32)
+        for k, i in enumerate(idx):
+            f = as_picture(frames[i])
+            x[k] = np.asarray(f if (f.height, f.width) == (h, w) else f.resize((w, h), PILImage.BICUBIC), np.float32)
+        x[n:] = x[n - 1]
+        x /= 255.0
+        x -= np.asarray(PROCESSOR["image_mean"], np.float32)
+        x /= np.asarray(PROCESSOR["image_std"], np.float32)
+        gt, gh, gw, p, m = t // T, h // self.patch, w // self.patch, self.patch, self.merge
+        x = x.reshape(gt, T, gh // m, m, p, gw // m, m, p, 3).transpose(0, 2, 5, 3, 6, 8, 1, 4, 7)   # one copy, below
         at = idx + [idx[-1]] * (-len(idx) % T)
         times = [(at[k] + at[k + T - 1]) / 2 / fps for k in range(0, len(at), T)]
-        return x.reshape(gt * gh * gw, 3 * T * p * p).astype(np.float32), (gt, gh, gw), times
+        return x.reshape(gt * gh * gw, 3 * T * p * p), (gt, gh, gw), times
+
+    def video_canvas(self, n, height, width, max_tokens=None):
+        """(h, w): the canvas `n` frames of `height` x `width` are each resized to (▶ `video_patches`)."""
+        factor, T = self.patch * self.merge, self.temporal
+        t = math.ceil(n / T) * T
+        limit = min(VIDEO["max_pixels"], t * self.max_pixels, (max_tokens or VIDEO["max_pixels"]) * T * factor ** 2)
+        return smart_resize_video(n, height, width, T, factor, VIDEO["min_pixels"], limit)
 
     def read_video(self, frames, fps, max_tokens=None):
         """A video's frames read: a list of (`Image`, time in seconds) a pair of frames — each pair the tower reads on its
@@ -270,10 +283,60 @@ class Video:
         self.grid = pairs[0][0].grid if pairs else (1, 0, 0)
 
 
-def frames_of(data):
+def video_ram(config, video_tokens=None):
+    """What reading a video of `video_tokens` holds of RAM at its peak (`MAX_VIDEO_TOKENS` by default), from the model's
+    config — 0 for a model that reads none. A token holds its patch values twice, as float32 (the canvas, and the patches
+    cut from it), its row (float32, the tower's output width) and its share of the frames kept at the canvas's size
+    (uint8): the 35B's token 62 KB, the 122B's 66, the 27B's 74, GLM's 57. REASONED, and the measured peak is under it:
+    the 122B's server held 0.93 GiB more for a minute of 1080p, 11,400 tokens and their frames as decoded (0.37 GB) —
+    52 KB a token beside the frames, against 60 here (measurements/2026-10-14_v080rc1_on_node03.md)."""
+    vc = config.get("vision_config")
+    if not vc or "temporal_patch_size" not in vc:              # no tower, or one that reads no video (Ministral's)
+        return 0
+    pixels = vc["temporal_patch_size"] * (vc["patch_size"] * vc["spatial_merge_size"]) ** 2     # a token's, over its frames
+    width = vc.get("out_hidden_size") or (config.get("text_config") or config)["hidden_size"]
+    return (MAX_VIDEO_TOKENS if video_tokens is None else int(video_tokens)) * (2 * pixels * 3 * 4 + width * 4 + pixels * 3)
+
+
+def as_picture(frame):
+    """A frame (an array h x w x 3 of uint8, or a PIL image) as a PIL image in RGB."""
+    from PIL import Image as PILImage
+    return (frame if hasattr(frame, "convert") else PILImage.fromarray(np.asarray(frame))).convert("RGB")
+
+
+class Frames:
+    """A video's frames as a sequence of all `total` of them, holding only those `kept` ({index: frame}) — the ones its
+    processor samples. A frame is an array h x w x 3 of uint8, or a frame as PyAV decoded it (its own pixel format, half
+    the size of RGB's), made an array when it is read. `size`: the video's own (height, width), which a frame kept
+    already fitted to its canvas no longer says."""
+
+    def __init__(self, total, kept, size=None):
+        self.total, self.kept, self.size = total, kept, size
+
+    def __len__(self):
+        return self.total
+
+    def __getitem__(self, i):
+        if not 0 <= i < self.total:
+            raise IndexError(i)
+        f = self.kept[i]
+        return f if isinstance(f, np.ndarray) else f.to_ndarray(format="rgb24")
+
+
+def frames_of(data, pick=None, fit=None):
     """A file's frames and their rate when it is moving pictures — an animated GIF, WebP or PNG through Pillow, any other
-    video through PyAV where it is installed (requirements-nonfree.txt) — or None for a still picture."""
+    video through PyAV where it is installed (requirements-nonfree.txt) — or None for a still picture. `pick(total, fps)`
+    names the frames the processor samples, and only those are kept; without it, every one. `fit(n, height, width)` ->
+    (width, height): the canvas its processor puts `n` frames of that size on, and each kept frame is made that size as
+    it is read (Pillow's bicubic, as the processor's step makes it later) — so what is held is the video's tokens' worth
+    whatever its resolution and length: a minute of 1080p at 30 a second is 11 GB as pictures, 0.4 GB as its sampled
+    frames decoded, a few MB fitted. The video is read once, to its last picked frame: its frames are counted by the
+    container where it says (as Hugging Face's PyAV reader counts them), else by its packets."""
     from PIL import Image as PILImage, UnidentifiedImageError
+
+    def made(picture, target):
+        return np.asarray(picture if target is None or picture.size == target else picture.resize(target, PILImage.BICUBIC))
+
     try:
         img = PILImage.open(io.BytesIO(data))
     except UnidentifiedImageError:
@@ -282,12 +345,18 @@ def frames_of(data):
         n = getattr(img, "n_frames", 1)
         if n <= 1:
             return None
-        frames, ms = [], 0.0
+        ms = 0.0
         for i in range(n):
             img.seek(i)
-            frames.append(np.asarray(img.convert("RGB")))
             ms += float(img.info.get("duration") or 100)
-        return frames, n / (ms / 1000.0)
+        fps = n / (ms / 1000.0)
+        want = list(pick(n, fps)) if pick else list(range(n))
+        target = fit(len(want), img.height, img.width) if fit and pick else None
+        kept = {}
+        for i in sorted(set(want)):
+            img.seek(i)
+            kept[i] = made(img.convert("RGB"), target)
+        return Frames(n, kept, (img.height, img.width)), fps
     try:
         import av
     except ImportError:
@@ -296,10 +365,28 @@ def frames_of(data):
     with av.open(io.BytesIO(data)) as container:
         stream = container.streams.video[0]
         fps = float(stream.average_rate or stream.guessed_rate or 24)
-        frames = [f.to_ndarray(format="rgb24") for f in container.decode(stream)]
-    if not frames:
-        raise Refused("a video with no frames")
-    return frames, fps
+        total = stream.frames or sum(1 for p in container.demux(stream) if p.size)
+    while True:
+        picked = list(pick(total, fps)) if pick and total else None   # None: every frame, counted as it is decoded
+        want = set(picked) if picked is not None else None
+        last, kept, n, size, target = max(want, default=-1) if want is not None else None, {}, 0, None, None
+        with av.open(io.BytesIO(data)) as container:
+            for f in container.decode(container.streams.video[0]):
+                if size is None:
+                    size = (f.height, f.width)
+                    target = fit(len(picked), f.height, f.width) if fit and picked is not None else None
+                if want is None or n in want:
+                    kept[n] = f if target is None else made(PILImage.fromarray(f.to_ndarray(format="rgb24")), target)
+                n += 1
+                if last is not None and n > last:
+                    break
+        if n == 0:
+            raise Refused("a video with no frames")
+        if want is None:
+            return Frames(n, kept, size), fps
+        if want <= set(kept):
+            return Frames(total, kept, size), fps
+        total = n                                   # fewer frames than the container said: sampled again from those
 
 
 def decoded(rec):

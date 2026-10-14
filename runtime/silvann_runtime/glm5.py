@@ -36,6 +36,7 @@ import pickle
 import numpy as np
 
 from . import experts_file, expert_tier, sampling
+from .vision import video_ram
 from .generate import Generates
 from .model_folder import NL, Refused
 
@@ -131,7 +132,7 @@ class Glm5(Generates):
         self.SOURCE = fused
         self.CPUS = [dict(w=CPU + i, dev=(1 + i) if sockets > 1 else 0, part=i) for i in range(sockets)]
         self._plan()
-        self.EXPERTS_FROM = experts_file.choose(experts_from, self.cpu_arena)
+        self.EXPERTS_FROM = experts_file.choose(experts_from, self.cpu_arena, video_ram(folder.config))
         if self.CARD_EXCLUSIVE and self.EXPERTS_FROM != "ram":
             raise Refused("an exclusive tier moves experts between the card and the sockets' memory — experts_from 'ram', "
                           "not %r" % self.EXPERTS_FROM)
@@ -1291,8 +1292,8 @@ class Glm5(Generates):
         else:
             m.write(self.STREAMS_AT, x)
         m.grid("(layers_f %d)" % pos)
-        if head:
-            return m.must("(head)", "the head at %d" % pos)
+        if head:                                     # the greedy head, or the head expression it is (`sampling.head`)
+            return m.must(head if isinstance(head, str) else "(head)", "the head at %d" % pos)
         return m.read(self.STREAMS_AT, self.MULT * self.H * 2)
 
     def forward_rows(self, first, tokens=None, xs=None, n=None, head=False, greedy=True, sample=None, rows=None):
@@ -1329,7 +1330,7 @@ class Glm5(Generates):
         last = (n - 1) * M * H
         m.must("(begin %s (type streams))" % " ".join("(nn__vector__add %s zero_h %s %d)" % (
             self.rng("srows", last + j * H, H), self.rng("streams", j * H, H), H) for j in range(M)), "the prompt's last row")
-        return m.must(sample or ("(head)" if greedy else "(head_logits)"), "the head")
+        return m.must(head if isinstance(head, str) else sample or ("(head)" if greedy else "(head_logits)"), "the head")
 
     def logits(self):
         return np.frombuffer(self.m.read(self.LOGITS_AT, self.VOCAB * 2), dtype="<f2").astype(np.float32)
@@ -1365,12 +1366,13 @@ class Glm5(Generates):
     def lora_identity(self):
         return None
 
-    def state_regions(self, length):
+    def state_regions(self, length, where=None):
         """(address, bytes) of everything a conversation of `length` positions has written: each KDA layer's state
-        and window whole, each MLA layer's latents `0..length`."""
+        and window whole, each MLA layer's latents `0..length`. `where`: each layer's state's address — the load's by
+        default; a table of zeros answers the sizes before the boot."""
         out = []
         for l in self.run_layers:
-            at = self.state_at[l]
+            at = (self.state_at if where is None else where)[l]
             if self.kinds[l] == "d":
                 out += [(at + self.SPLAN.at_up_data, self.S_BYTES), (at + self.SPLAN.at_down_data, self.W_BYTES)]
             else:

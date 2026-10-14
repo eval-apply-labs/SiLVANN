@@ -49,9 +49,11 @@ RUNTIME = Path(os.environ.get("SILVANN_RUNTIME", ROOT / "runtime" if (ROOT / "ru
                               else ROOT.parent / "backstage" / "python"))
 sys.path.insert(0, str(RUNTIME))
 import silvann_runtime as SR                                              # noqa: E402
+from silvann_runtime import autotune, experts_file                       # noqa: E402
 from silvann_runtime.chat import Chat                                     # noqa: E402
 from silvann_runtime.fetch import ensure_model                            # noqa: E402
 from silvann_runtime.session import Busy, Cartridge, Runtime, sampler     # noqa: E402
+from silvann_runtime.vision import MAX_VIDEO_TOKENS                       # noqa: E402
 
 IDLE_EVICTION_SECONDS = 120.0
 EVICTION_TICK_SECONDS = 30.0
@@ -178,6 +180,24 @@ async def _put_away(cid, persist=True):
     S.runtime.cartridges.pop(cid, None)
 
 
+async def _room_for(c):
+    """Before `c` takes the card: the conversation on it is read off into RAM when another takes the card, and is put
+    away to its folder instead — as the idle eviction puts one away — when RAM has no room for two of the largest
+    beside the spare. ⚖ 2026-10-14: *"put it away when another conversation opens if there is no free space in ram to
+    hold two (each conv is supposed to be the same max size), this is mainly a single player setup"* — the largest is a
+    conversation at the full context (`state_regions(max_context)`), what any of them may grow to."""
+    a = S.runtime.active
+    if a is None or a is c or S.runtime.busy():
+        return
+    largest = sum(n for _, n in S.model.state_regions(S.model.max_context))
+    room = experts_file.free()
+    if room >= 2 * largest + experts_file.SPARE:
+        return
+    print("[put away] %s: %.1f GB free, no room for two conversations of %.1f GB" % (a.id, room / 2**30, largest / 2**30),
+          flush=True)
+    await _put_away(a.id)
+
+
 def _load(cid):
     """A cartridge from its folder into the runtime, refused if it belongs to another model."""
     c = S.runtime.cartridges.get(cid)
@@ -218,8 +238,58 @@ def _boot(args):
     cfg = json.load(open(p))
     S.config = cfg
     t0 = time.time()
-    S.model = SR.open_model(str(folder), lora=cfg.get("lora"), max_context=int(cfg.get("max_context", 32768)),
-                            **cfg.get("options", {}))
+    # the card this machine runs on, where it has several: its index among them (`"auto"`: the first); `"cpu"` none —
+    #   the CPU's cores and RAM run it, as a machine without a card would (a ring's stage in RAM beside one on the card)
+    card = cfg.get("card", "auto")
+    if card not in (None, "auto"):
+        for name in ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES"):
+            os.environ[name] = "-1" if str(card).lower() == "cpu" else str(card)
+    # ⭐ THE SETUP FOR THIS MACHINE (NN-83): what the config leaves out — where the experts sit, the card's tier of them,
+    #   the context the card holds — chosen by trying it on the card, or as chosen before (`autotune.json`)
+    asked = cfg.get("max_context", 32768)       # a number, or "auto" ("max"): what the card holds, to the model's length
+    asked = "max" if str(asked).lower() in ("max", "auto") else int(asked)
+    # a video's tokens at most, and what reading one holds of RAM beside the experts (▶ vision.MAX_VIDEO_TOKENS)
+    S.video_tokens = int(cfg.get("max_tokens_per_video", MAX_VIDEO_TOKENS))
+    options = dict(cfg.get("options", {}))
+    # ⭐ A RING OF MACHINES (▶ silvann_runtime/pipeline.py): this one runs its run of the layers; the one that begins at
+    #   layer 0 is the first, and answers the UI — every other is a stage, and serves the ring until it is taken down
+    ring = str(cfg.get("pipeline_parallelism", "no")).lower() in ("yes", "true", "1")
+    if ring:
+        from silvann_runtime import pipeline
+        from silvann_runtime.model_folder import ModelFolder
+        total = pipeline.model_layers(ModelFolder(str(folder)))
+        layers = pipeline.layers_of(cfg.get("pipeline_parallelism_layers", ""), total)
+        if not cfg.get("pipeline_parallelism_next"):
+            raise SR.Refused("pipeline_parallelism_next names the machine after this one in the ring, as host:port")
+        if asked == "max":
+            raise SR.Refused("a ring's machines share one context: max_context is the same number in each one's config, "
+                             "not \"auto\"")
+        options["layers"] = layers
+    options, max_context, why = autotune.choose(str(folder), asked, options, video_tokens=S.video_tokens)
+    S.why = why
+    print("[silvann_server] the setup: %s" % why, flush=True)
+    try:
+        S.model = SR.open_model(str(folder), lora=cfg.get("lora"), max_context=max_context, **options)
+    except Exception as ex:                                   # noqa: BLE001 — the engine's refusal is a plain error
+        if "kept in autotune.json" not in why or not autotune.refused_by_card(ex):
+            raise
+        options, max_context, why = autotune.choose(str(folder), asked, options, fresh=True, video_tokens=S.video_tokens)
+        print("[silvann_server] the card refused the setup kept for it; chosen again: %s" % why, flush=True)
+        S.model = SR.open_model(str(folder), lora=cfg.get("lora"), max_context=max_context, **options)
+    if ring:
+        if not hasattr(S.model, "forward"):
+            raise SR.Refused("%s runs on one machine only: its model has no stages" % folder.name)
+        link = pipeline.Link(int(cfg.get("pipeline_parallelism_port", pipeline.DEFAULT_PORT)),
+                             cfg["pipeline_parallelism_next"])
+        say = lambda text: print("[silvann_server] " + text.replace("[pipeline] ", ""), flush=True)   # noqa: E731
+        if layers[0] != 0:
+            say("a stage of the ring: layers %d-%d of %d%s" % (layers[0], layers[-1], total,
+                                                                ", the head" if layers[-1] == total - 1 else ""))
+            pipeline.stage(S.model, link, layers[-1] == total - 1, say)
+            S.model.m.shutdown()
+            raise SystemExit(0)
+        say("the first machine of the ring: layers %d-%d of %d" % (layers[0], layers[-1], total))
+        S.model = pipeline.Pipeline(S.model, link, say)
     S.runtime = Runtime(S.model)
     S.chat = Chat(S.model.folder)
     S.model_id = folder.name
@@ -516,8 +586,13 @@ async def upload_image(cid: str, file: UploadFile = File(...), x_cart_password: 
         return {"image_id": image_id, "kind": "document", "merged_thw": [], "n_placeholders": 0, "chars": len(doc.text)}
     if not hasattr(S.model, "vision"):
         raise HTTPException(415, "%s reads no pictures" % S.model_id)
+    def read(data):
+        vision = S.model.vision()
+        vision.max_video_tokens = S.video_tokens
+        return vision.read(data)
+
     try:
-        image = await asyncio.to_thread(lambda: S.model.vision().read(data))
+        image = await asyncio.to_thread(read, data)
     except SR.Refused as ex:
         raise HTTPException(415, str(ex))
     except Exception as ex:                                   # not a picture Pillow reads
@@ -608,6 +683,8 @@ async def post_message(cid: str, req: MessageReq, x_cart_password: Optional[str]
         delta, shown[0] = text[len(shown[0]):], text
         loop.call_soon_threadsafe(queue.put_nowait, ("token", json.dumps({"token_id": tok, "text": delta})))
 
+    async with S.lock:
+        await _room_for(c)
     try:
         turn = S.runtime.turn(c, new, min(req.max_new_tokens, room), sampler=_sampler(), stop=S.chat.stop, on_token=on_token,
                               images=placed)
@@ -646,10 +723,18 @@ def main():
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8765)          # the port the UI looks for by default
     args = p.parse_args()
+    # ⛔ A BOOT THAT CANNOT BE MADE IS SAID IN ONE LINE, `⛔ not started:` and why — the UI that started this server shows
+    #   it in its status (▶ silvann_ui.py, `ServerProcess.failure`)
     try:
         _boot(args)
-    except SR.Refused as ex:                                  # a model not here, a config not found: said, not traced
-        raise SystemExit(str(ex))
+    except SR.Refused as ex:                                  # a model not here, a config not found, a card too small
+        raise SystemExit("[silvann_server] ⛔ not started: %s" % ex)
+    except Exception as ex:                                   # noqa: BLE001 — the engine's refusal is a plain error
+        if not autotune.refused_by_card(ex):
+            raise
+        raise SystemExit("[silvann_server] ⛔ not started: the card has no room for this setup (%s) — in the config, set "
+                         "experts_on and experts_from to \"auto\" in its options, and lower max_context or set it to "
+                         "\"auto\", as long as the card holds" % getattr(S, "why", ""))
     import uvicorn
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
 

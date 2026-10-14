@@ -351,6 +351,10 @@ class ServerProcess:
         self.cmd: Optional[list] = None
         self.lines: deque[str] = deque(maxlen=2000)
         self.lock = threading.Lock()
+        self.setup: Optional[str] = None       # what the server said it chose for this machine (its "the setup:" line)
+        self.failure: Optional[str] = None     # why the last server it started ended on its own, if it did
+        self.started = False                   # whether it had booted when it ended (else it never started)
+        self.stopping = False                  # `stop` asked it to end: not a failure
 
     def is_running(self) -> bool:
         return self.proc is not None and self.proc.poll() is None
@@ -366,6 +370,8 @@ class ServerProcess:
         if not SERVER_SCRIPT.exists():
             raise FileNotFoundError(f"server script not found at {SERVER_SCRIPT}")
         self.lines.clear()
+        self.setup = self.failure = None
+        self.started = self.stopping = False
         # The packed-models launch contract: --model <folder> + a config that overrides default_config.
         self.cmd = [sys.executable, str(SERVER_SCRIPT), "--model", str(model_dir),
                     config_name, "--port", str(int(port))]
@@ -380,6 +386,7 @@ class ServerProcess:
     def stop(self):
         if not self.is_running():
             return
+        self.stopping = True
         # Persist conversations BEFORE killing. On Windows proc.terminate() is a hard kill
         # (TerminateProcess), so the server's graceful-shutdown save never runs — ask it to save
         # every bound conversation's KV first (blocking; big windows take a while). Best-effort:
@@ -407,13 +414,28 @@ class ServerProcess:
             self.cmd = None
 
     def _drain(self):
+        proc, said = self.proc, None
         try:
-            for line in iter(self.proc.stdout.readline, ""):
+            for line in iter(proc.stdout.readline, ""):
                 if not line:
                     break
-                self._log(line.rstrip())
+                line = line.rstrip()
+                self._log(line)
+                if "[silvann_server] the setup: " in line:
+                    self.setup = line.split("[silvann_server] ", 1)[1]
+                if "⛔ not started:" in line:
+                    said = line.split("⛔ not started: ", 1)[1]
+                if "[silvann_server]" in line and " booted in " in line:
+                    self.started = True
         finally:
             self._log("[ui] subprocess output stream closed.")
+        # a server that ended on its own — not one `stop` ended (it clears `proc` first): why, in a line
+        rc = proc.wait()
+        if not self.stopping and rc != 0:
+            last = next((l for l in reversed(self.snapshot()) if l.strip() and not l.startswith("[ui]")), "")
+            self.failure = said or ("killed (exit %d) — the machine may have run out of memory" % rc if rc < 0
+                                    else "ended (exit %d): %s" % (rc, last[-300:]))
+            self.setup = None
 
     def _log(self, line: str):
         with self.lock:
@@ -1217,6 +1239,8 @@ async def page():
                               on_click=lambda: delete_config(config_select.value)
                               ).props("dense outline color=negative")
                 status_lbl = ui.label("status: ...").classes("font-mono text-sm")
+                # what the server chose for this machine, or why it did not start — said here, not only in the log
+                setup_lbl = ui.label("").classes("text-sm whitespace-pre-wrap")
                 with ui.row().classes("gap-2"):
                     start_btn = ui.button("start", icon="play_arrow"
                                           ).props("color=positive")
@@ -1915,8 +1939,22 @@ async def page():
                 external = f"alive at {client.endpoint} (model={h.get('model_id', '?')})"
             except Exception:
                 external = None
+            if SERVER.failure and not SERVER.is_running():
+                if state.get("failure_shown") != SERVER.failure:
+                    state["failure_shown"] = SERVER.failure
+                    safe_notify(("the server ended: " if SERVER.started else "not started: ") + SERVER.failure,
+                                type="negative")
+                setup_lbl.text = ("⛔ the server ended: " if SERVER.started else "⛔ not started: ") + SERVER.failure
+                setup_lbl.classes(replace="text-sm whitespace-pre-wrap text-red-700")
+            elif SERVER.setup:
+                setup_lbl.text = SERVER.setup
+                setup_lbl.classes(replace="text-sm whitespace-pre-wrap text-slate-700")
+            else:
+                setup_lbl.text = ""
             if SERVER.is_running():
                 status_lbl.text = f"status: {SERVER.status_text()}"
+            elif SERVER.failure:
+                status_lbl.text = "status: ended" if SERVER.started else "status: not started"
             elif external:
                 status_lbl.text = (f"status: external server {external} — not under UI control "
                                    f"(kill it from the box that started it)")
@@ -2171,9 +2209,12 @@ A config is `models/<name>/configs/<config>.json`:
 { "max_context": 100000, "thinking": true, "lora": null, "sampler": "generation", "options": { } }
 ```
 
-`max_context` is the longest conversation, in tokens; `options` is the model's own — the conversation cache's
-tiers for the Qwen models, where the experts live and how a prompt is read for the ones that can run them on the
-CPU. **Running SiLVANN**, in the list above, has every option.
+`max_context` is the longest conversation, in tokens — or `"auto"`, as long as the card holds beside the model, up to
+the model's own length; `max_tokens_per_video` the most tokens a video becomes (8,192); `options` is the model's own —
+the conversation cache's tiers for the Qwen models, where the experts live and how a prompt is read for the ones that
+can run them on the CPU. What a config leaves out the server chooses for the machine when it starts, and says under
+**status**; a server that cannot start says why there too — a card too small for the config, say — and what to change.
+**Running SiLVANN**, in the list above, has every option.
 
 ## Where things are
 

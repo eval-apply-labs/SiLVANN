@@ -178,10 +178,10 @@ SYS__ENGINE__ABI__BRIDGE(nn__vector__zzabi_adapter_draw,        nn__vector__zzab
  * says when a tensor crosses, and this is the crossing: the source's device bound and waited for (its work may
  * still be running), its bytes read into RAM, this worker's device bound again and the bytes written. On node03's
  * MI50s, which have no peer access, RAM is the only way between two cards anyway.
- * ⛳ THROUGH A BOUNCE THE CALLING THREAD KEEPS, grown to the largest copy it has made. */
-static __thread unsigned char* nn__buffer__zzprivate_bounce = 0;
-static __thread uint64_t       nn__buffer__zzprivate_bounce_room = 0ull;
-static sys__heap_node nn__buffer__zzabi_apply_copy(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx) {
+ * ⛔ THROUGH A BOUNCE OF ITS OWN, allocated for the copy and freed after it. A launch's blocks run on threads the
+ *   engine starts for that launch and joins after it (`eng__launch__spread`), so a bounce kept by the thread would be
+ *   lost with the thread, one a launch: `MEASURED` 2026-10-14 on node03 (measurements/2026-10-14_v080rc1_on_node03.md),
+ *   the 35B with its experts on the CPU grew 37 KB a token and 12 KB a prompt's position, without end. */static sys__heap_node nn__buffer__zzabi_apply_copy(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx) {
     if (argc != 4u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
     uint64_t from = 0, from_room = 0, to = 0, to_room = 0;
     if (!nn__primitives__room_of_any(&argv[0], &from, &from_room) || argv[1].dtype != SYS__KIND__VALUE_INT
@@ -195,17 +195,15 @@ static sys__heap_node nn__buffer__zzabi_apply_copy(const sys__heap_node* argv, u
     if (owner != 0ull && owner != argv[1].args[0] + 1ull) return sys__engine__abi__error(NN__BUFFER__FAULT_OWNER);
     const sys__engine__ctx* src = sys__engine__ctx_of((unsigned int)argv[1].args[0]);
     if (src == 0 || src->fault_word == 0 || nn__doors_for(ctx) == 0) return sys__engine__abi__error(NN__PRIMITIVES__FAULT_NO_DEVICE);
-    if (bytes > nn__buffer__zzprivate_bounce_room) {
-        unsigned char* grown = (unsigned char*)realloc(nn__buffer__zzprivate_bounce, (size_t)bytes);
-        if (grown == 0) return sys__engine__abi__error(NN__PRIMITIVES__FAULT_NO_DEVICE);
-        nn__buffer__zzprivate_bounce = grown; nn__buffer__zzprivate_bounce_room = bytes;
-    }
+    unsigned char* bounce = (unsigned char*)malloc((size_t)bytes);
+    if (bounce == 0) return sys__engine__abi__error(NN__PRIMITIVES__FAULT_NO_DEVICE);
     const bool elsewhere = src->family != ctx->family || src->device != ctx->device;
     bool ok = !elsewhere || sys__silicon__bind_device(src->family, src->device);
     ok = ok && sys__gpu__compute_completed(src->family)
-            && sys__gpu__memory_read(src->family, nn__buffer__zzprivate_bounce, (const void*)(uintptr_t)from, (size_t)bytes);
+            && sys__gpu__memory_read(src->family, bounce, (const void*)(uintptr_t)from, (size_t)bytes);
     if (elsewhere) ok = sys__silicon__bind_device(ctx->family, ctx->device) && ok;
-    ok = ok && sys__gpu__memory_write(ctx->family, (void*)(uintptr_t)to, nn__buffer__zzprivate_bounce, (size_t)bytes);
+    ok = ok && sys__gpu__memory_write(ctx->family, (void*)(uintptr_t)to, bounce, (size_t)bytes);
+    free(bounce);
     if (!ok) return sys__engine__abi__error(NN__PRIMITIVES__FAULT_NO_DEVICE);
     return nn__doors_answer(&argv[2]);
 }

@@ -32,7 +32,20 @@ from silvann_runtime.model_folder import Refused                   # noqa: E402
 DATA = Path(os.environ.get("SILVANN_DATA") or ROOT)
 MODELS = DATA / "models"
 TOKEN_FILE = DATA / ".huggingface_token"
-DEFAULT_CONFIG = {"max_context": 32768, "lora": None, "thinking": True, "sampler": "generation", "options": {}}
+DEFAULT_CONFIG = {"max_context": 32768, "max_tokens_per_video": 8192, "card": "auto", "lora": None, "thinking": True,
+                  "sampler": "generation", "options": {},
+                  "pipeline_parallelism": "no", "pipeline_parallelism_layers": "", "pipeline_parallelism_next": "192.0.2.2:8766",
+                  "pipeline_parallelism_port": 8766}
+PIPELINE_NOTE = ("pipeline_parallelism \"yes\" runs the model over several machines in a ring, each holding a run of its "
+                 "layers (pipeline_parallelism_layers, first-last, as \"0-23\") and naming the machine after it "
+                 "(pipeline_parallelism_next, host:port — the last machine names the first). The machine whose layers "
+                 "begin at 0 answers the UI; start every machine's server the same way, with the same max_context. "
+                 "card: which of this machine's cards to run on (0, 1, ...), \"auto\" the first, \"cpu\" none: its CPU and "
+                 "RAM.")
+VIDEO_NOTE = ("max_tokens_per_video is the most tokens a video attached to a message becomes: more sees a longer video "
+              "in more detail and takes as many positions of the conversation. Reading a video holds 57-74 KB of RAM "
+              "a token, depending on the model (0.45-0.58 GB at 8,192), and the server counts it when it chooses "
+              "whether the experts fit in RAM.")
 
 # how many more positions of a conversation 100 MB of the card holds, past the first 4,352 (kept at 16 bits);
 # measured from the cache each model sizes at two contexts
@@ -50,15 +63,7 @@ TOKENS_PER_100MB = {
 MAX_CONTEXT = {
     "Ministral-3-14B_silvann_tq_D4": 32768,
     "Ministral-3-14B_silvann_tq_D8": 8192,
-}
-
-
-# the runtime options a model boots with unless its config says otherwise: the 122B's experts (54 GB) and the 397B's do not fit a card
-# it is meant for, so they start on the CPU, in RAM or read from the disk by the memory there is
-OPTIONS = {
-    "Qwen3.5-122B-A10B_silvann_tq_D8E4": {"experts_on": "cpu", "experts_from": "auto"},
-    "Qwen3.5-122B-A10B_silvann_tq_D4E4": {"experts_on": "cpu", "experts_from": "auto"},
-    "Qwen3.5-397B-A17B_silvann_tq_D4E4": {"experts_on": "cpu", "experts_from": "auto"},
+    "Qwen3.8-27B_silvann_tq_D4": "auto",           # as long as the card holds, to its 262,144 (⚖ 2026-10-14)
 }
 
 
@@ -66,14 +71,24 @@ def default_config(folder):
     """`configs/default.json` in a model folder, written when it has none."""
     cfg = Path(folder) / "configs" / "default.json"
     if not cfg.exists():
-        config = dict(DEFAULT_CONFIG, options=dict(OPTIONS.get(Path(folder).name, {})))
+        # no options: where the experts sit and how much of the card holds them are chosen for the machine at each boot
+        # (silvann_runtime/autotune.py), unless the config is edited to name them
+        config = dict(DEFAULT_CONFIG, options={})
         if Path(folder).name in MAX_CONTEXT:
             config["max_context"] = MAX_CONTEXT[Path(folder).name]
         per = TOKENS_PER_100MB.get(Path(folder).name)
         if per:
             config = {"_note": "max_context is the longest conversation, and its cache is on the card from boot: "
                                "every 100 MB of the card's memory holds about %d positions of it. Lower it if "
-                               "the model does not fit, raise it if there is room." % per, **config}
+                               "the model does not fit, raise it if there is room — or \"auto\": as many as the card "
+                               "holds beside the model, up to the model's own length." % per, **config}
+        config = {"_note_video": VIDEO_NOTE, "_note_pipeline": PIPELINE_NOTE, **config}
+        if not config.get("pipeline_parallelism_layers"):
+            try:
+                c = json.loads((Path(folder) / "config.json").read_text())
+                config["pipeline_parallelism_layers"] = "0-%d" % ((c.get("text_config") or c)["num_hidden_layers"] - 1)
+            except (OSError, ValueError, KeyError):
+                pass
         cfg.parent.mkdir(parents=True, exist_ok=True)
         cfg.write_text(json.dumps(config, indent=2) + "\n")
     return cfg

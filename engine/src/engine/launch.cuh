@@ -64,14 +64,20 @@ static inline void eng__launch__set_worker(unsigned int w, sys__silicon_family__
 }
 static inline void eng__launch__forget_workers(void) { eng__launch__zzprivate_workers = 0u; }
 
-static void* eng__launch__zzprivate_enter(void* at) {
-    const eng__launch__runner_start* start = (const eng__launch__runner_start*)at;
+/* A runner's block, run: what a fresh thread starts with — its block, acting as no other worker — and its worker's device
+ * bound, then the body. */
+static void eng__launch__zzprivate_begin(const eng__launch__runner_start* start) {
     sys__silicon__host_become_runner(start->block);
+    sys__silicon__host_act_as(-1);
     if (eng__launch__zzprivate_workers != 0u) {
         const unsigned int w = sys__silicon__worker();
         (void)sys__silicon__bind_device(eng__launch__zzprivate_worker_family[w], eng__launch__zzprivate_worker_device[w]);
     }
     start->run(start->args);
+}
+
+static void* eng__launch__zzprivate_enter(void* at) {
+    eng__launch__zzprivate_begin((const eng__launch__runner_start*)at);
     return 0;
 }
 
@@ -83,13 +89,60 @@ static void eng__launch__zzprivate_refuse(unsigned int block) {
     abort();
 }
 
-/* ⛳ ONE RUNNER PER BLOCK, STARTED TOGETHER AND JOINED. The count is published before any of them runs
- * so that a block asking `sys__silicon__block_count()` inside the body gets the real answer rather than
- * a count that grows as the pool fills.
- * ⛔ AND `n <= 1` TAKES THE CALLER'S OWN THREAD RATHER THAN SPAWNING ONE. Not for speed: a one-block
- * machine is the shape every host suite runs, and a thread that must be joined turns a debugger session
+/* ══ ⭐⭐ THE RUNNERS ARE KEPT, PARKED BETWEEN LAUNCHES ═══════════════════════════════════════════════════
+ * A many-block launch hands its blocks to runner threads started once and parked between launches, not to a thread a
+ * block started for the launch and joined after it: what a thread is given by the libraries it calls is not always
+ * given back when it ends. `MEASURED` 2026-10-14 on node03 (measurements/2026-10-14_v080rc1_on_node03.md): with a
+ * thread a block every launch, the 35B with its experts on the CPU grew ~10 KB a launch without end — HIP's state for a
+ * thread that binds a card — beside the scratch nn and the x86 family kept a thread, since given back.
+ * ⛳ WHAT A FRESH THREAD HAD, A PARKED RUNNER IS GIVEN AT EACH LAUNCH (`eng__launch__zzprivate_begin`): its block, its
+ *   worker's device bound, acting as no other worker. Block-local storage outlives a launch either way, which is what
+ *   the base cache's rule is for (▶ `sys__heap__zzprivate_base_cache`, `scripts/src_base_cache_gate.py`).
+ * ⛳ ONE LAUNCH AT A TIME GOES THROUGH THE RUNNERS. A launch that finds them busy — started from inside a runner, or
+ *   from another host thread — starts threads of its own for its blocks and joins them (`eng__launch__zzprivate_fresh`),
+ *   so neither waits on the other. A launch is synchronous either way: it returns when every block has. */
+static pthread_mutex_t     eng__launch__zzprivate_pool_one   = PTHREAD_MUTEX_INITIALIZER;   /* held for a launch */
+static pthread_mutex_t     eng__launch__zzprivate_pool_lock  = PTHREAD_MUTEX_INITIALIZER;   /* guards the words below */
+static pthread_cond_t      eng__launch__zzprivate_pool_go    = PTHREAD_COND_INITIALIZER;
+static pthread_cond_t      eng__launch__zzprivate_pool_done  = PTHREAD_COND_INITIALIZER;
+static pthread_t           eng__launch__zzprivate_pool_thread[SYS__SILICON__HOST_MAX_RUNNERS];
+static unsigned long long  eng__launch__zzprivate_pool_born[SYS__SILICON__HOST_MAX_RUNNERS];   /* the launch it started at */
+static unsigned int        eng__launch__zzprivate_pool_size  = 0u;     /* runners started */
+static unsigned long long  eng__launch__zzprivate_pool_round = 0ull;   /* launches handed to them */
+static unsigned int        eng__launch__zzprivate_pool_n     = 0u;     /* this launch's blocks */
+static unsigned int        eng__launch__zzprivate_pool_left  = 0u;     /* its blocks not yet finished */
+static eng__launch__runner eng__launch__zzprivate_pool_run   = 0;
+static const void*         eng__launch__zzprivate_pool_args  = 0;
+
+/* A parked runner: it waits for a launch it has not run, runs its block where the launch has one, says so, and waits
+ * again. A runner past the launch's blocks sits it out. */
+static void* eng__launch__zzprivate_parked(void* at) {
+    const unsigned int b = (unsigned int)(uintptr_t)at;
+    pthread_mutex_lock(&eng__launch__zzprivate_pool_lock);
+    unsigned long long seen = eng__launch__zzprivate_pool_born[b];
+    for (;;) {
+        while (eng__launch__zzprivate_pool_round == seen)
+            pthread_cond_wait(&eng__launch__zzprivate_pool_go, &eng__launch__zzprivate_pool_lock);
+        seen = eng__launch__zzprivate_pool_round;
+        if (b >= eng__launch__zzprivate_pool_n) continue;
+        eng__launch__runner_start start;
+        start.block = b; start.run = eng__launch__zzprivate_pool_run; start.args = eng__launch__zzprivate_pool_args;
+        pthread_mutex_unlock(&eng__launch__zzprivate_pool_lock);
+        eng__launch__zzprivate_begin(&start);
+        pthread_mutex_lock(&eng__launch__zzprivate_pool_lock);
+        if (--eng__launch__zzprivate_pool_left == 0u) pthread_cond_signal(&eng__launch__zzprivate_pool_done);
+    }
+    return 0;
+}
+
+/* ⛳ A RUNNER PER BLOCK, ALL OF THEM GIVEN THE LAUNCH TOGETHER AND WAITED FOR. The count is published before any of
+ * them runs so that a block asking `sys__silicon__block_count()` inside the body gets the real answer rather than a
+ * count that grows as the runners start. A runner is started the first time a launch has its block, and kept.
+ * ⛔ AND `n <= 1` TAKES THE CALLER'S OWN THREAD RATHER THAN A RUNNER. Not for speed: a one-block
+ * machine is the shape every host suite runs, and a runner thread turns a debugger session
  * into two stacks for no reason. It is also the arm that keeps `become_runner(0)` on the path that a
  * single-block build exercises. */
+static inline void eng__launch__zzprivate_fresh(unsigned int n, eng__launch__runner run, const void* args);
 static inline void eng__launch__spread(unsigned int n, eng__launch__runner run, const void* args) {
     if (n <= 1u) {
         sys__silicon__host_set_runner_count(1u);
@@ -97,6 +150,30 @@ static inline void eng__launch__spread(unsigned int n, eng__launch__runner run, 
         run(args);
         return;
     }
+    if (n > SYS__SILICON__HOST_MAX_RUNNERS || pthread_mutex_trylock(&eng__launch__zzprivate_pool_one) != 0) {
+        eng__launch__zzprivate_fresh(n, run, args);
+        return;
+    }
+    sys__silicon__host_set_runner_count(n);
+    pthread_mutex_lock(&eng__launch__zzprivate_pool_lock);
+    for (; eng__launch__zzprivate_pool_size < n; ++eng__launch__zzprivate_pool_size) {
+        const unsigned int b = eng__launch__zzprivate_pool_size;
+        eng__launch__zzprivate_pool_born[b] = eng__launch__zzprivate_pool_round;
+        if (pthread_create(&eng__launch__zzprivate_pool_thread[b], 0, eng__launch__zzprivate_parked, (void*)(uintptr_t)b) != 0)
+            eng__launch__zzprivate_refuse(b);
+    }
+    eng__launch__zzprivate_pool_n = n; eng__launch__zzprivate_pool_run = run; eng__launch__zzprivate_pool_args = args;
+    eng__launch__zzprivate_pool_left = n;
+    ++eng__launch__zzprivate_pool_round;
+    pthread_cond_broadcast(&eng__launch__zzprivate_pool_go);
+    while (eng__launch__zzprivate_pool_left != 0u)
+        pthread_cond_wait(&eng__launch__zzprivate_pool_done, &eng__launch__zzprivate_pool_lock);
+    pthread_mutex_unlock(&eng__launch__zzprivate_pool_lock);
+    pthread_mutex_unlock(&eng__launch__zzprivate_pool_one);
+}
+
+/* A launch the runners cannot take: a thread a block, started together and joined. */
+static inline void eng__launch__zzprivate_fresh(unsigned int n, eng__launch__runner run, const void* args) {
     sys__silicon__host_set_runner_count(n);
     pthread_t*                    pool   = (pthread_t*)malloc(n * sizeof(pthread_t));
     eng__launch__runner_start* starts =

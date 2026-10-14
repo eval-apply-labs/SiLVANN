@@ -46,6 +46,24 @@ def limit():
     return available()
 
 
+def free():
+    """What this process may still take: its cgroup's limit less what the cgroup holds and cannot give back — its
+    anonymous memory, with no swap to give it to — else what the system says is available."""
+    try:
+        with open("/proc/self/cgroup") as f:
+            path = next(l.strip().split(":", 2)[2] for l in f if l.startswith("0::"))
+        base = os.path.join("/sys/fs/cgroup", path.lstrip("/"))
+        with open(os.path.join(base, "memory.max")) as f:
+            said = f.read().strip()
+        if said != "max":
+            with open(os.path.join(base, "memory.stat")) as f:
+                anon = next(int(l.split()[1]) for l in f if l.startswith("anon "))
+            return min(int(said) - anon, available())
+    except (OSError, StopIteration, ValueError):
+        pass
+    return available()
+
+
 def cache_bytes(total, ram_gb=None):
     """How much of `total` bytes of experts a cache in memory holds: `ram_gb` when a config says so, else what the process
     may hold less a quarter of it, at least 3 GB and at most 8, for everything else. `MEASURED` on node03, the 35B under
@@ -57,14 +75,29 @@ def cache_bytes(total, ram_gb=None):
     return max(0, min(total, held - min(8 << 30, max(3 << 30, held // 4))))
 
 
-def choose(experts_from, need):
-    """`"ram"`, `"disk"` or `"mapped"` for `experts_from` as a config says it: `"auto"` is the disk when the experts would
-    leave less than a fifth of what is available — `REASONED`: the rest is the system's. `"disk"` is a cache of experts in
-    memory, read from the file as they are wanted; `"mapped"` maps the file and lets the system's page cache be the cache."""
+# what the experts in RAM leave beside them: the process's own memory and the system's spare
+OWN = 2 << 30            # MEASURED on node03 (measurements/2026-10-14_v080rc1_on_node03.md): beside its experts the
+                         # server holds 1.2-1.7 GiB booted (the 122B; the bench's process 1.0 the 35B, 1.3 the 122B, 1.5
+                         # GLM), 2.0 with a Word file, a GIF and an MP4 answered — and, while a video is read, what that
+                         # holds (`vision.video_ram`: the config's `max_tokens_per_video` of the model's tokens)
+SPARE = 500 << 20        # what is left to the system — ⚖ 2026-10-14, "a flat 500mb of spare ram"
+
+
+def in_ram(need, held=None, video=0):
+    """Whether `need` bytes of experts go in RAM: they, the server's own memory beside them (`OWN`, and `video`, what
+    reading a video holds — `vision.video_ram`) and the system's spare fit in what this process may hold (`held`, by
+    default `limit`: a container's or a capped scope's cgroup limit, else what the system has available)."""
+    return need + OWN + video + SPARE <= (limit() if held is None else held)
+
+
+def choose(experts_from, need, video=0):
+    """`"ram"`, `"disk"` or `"mapped"` for `experts_from` as a config says it: `"auto"` is RAM where the experts fit in it
+    (`in_ram`), else the disk. `"disk"` is a cache of experts in memory, read from the file as they are wanted;
+    `"mapped"` maps the file and lets the system's page cache be the cache."""
     if experts_from not in ("auto", "ram", "disk", "mapped"):
         raise Refused("experts_from is 'auto', 'ram', 'disk' or 'mapped', not %r" % (experts_from,))
     if experts_from == "auto":
-        return "disk" if need > 0.8 * available() else "ram"
+        return "ram" if in_ram(need, video=video) else "disk"
     return experts_from
 
 

@@ -149,6 +149,8 @@ its 10th token on, and on a short prompt from the check against Hugging Face's a
 | Qwen 3.6 35B-A3B `D8E4` | the dense part on the card, the experts on the CPU in RAM, 8 GB of the card the tier, 28 GB of RAM | 106 positions/s | 55.9 tokens/s |
 | Qwen 3.5 122B-A10B `D4E4` | the dense part on the card, the experts on the CPU, read from the disk, 28 GB of RAM | 19.0 positions/s | 7.8 tokens/s — 85% from memory |
 | GLM 5.3 Flash `D8E4` | the same, 28 GB of RAM | 10.7 positions/s | 2.2 tokens/s — 62% from memory |
+| Qwen 3.6 35B-A3B `D8E4` | 7.5 GB of the card held (an 8 GB card's room), 32 GB of RAM: the dense part on the card, the experts on the CPU in RAM, 2 GB of the card the tier | 92.4 positions/s | 42.2 tokens/s |
+| Ministral 3 14B `D4` | the same card's room: on the card, a 4,096-token context | 954 positions/s | 39.2 tokens/s |
 
 Against one MI50 the 27B reads a prompt 5.4 times as fast here (549 positions a second against 101) — the card's tensor
 cores run the prompt's matrix products — and answers more slowly (23.6 tokens a second against 30.5): a token reads every
@@ -168,7 +170,9 @@ The 28 GB rows were measured with v0.7.0 the same way, the process allowed no sw
 two answers within 1% of each other (the 35B's prompts within 3.4%). With 28 GB the 122B answers 5% more slowly than
 with 32 GB (v0.5.1's row) and GLM 3% more slowly. The 35B keeps every expert in RAM beside the card's tier; which
 experts the tier holds follows when its copies land, so its rate varies from run to run (51.9 tokens/s with v0.5.0 and
-62 GB, 55.9 here).
+62 GB, 55.9 here). The two rows with 7.5 GB of the card held were measured with v0.8.0, each in the setup its autotune
+chose there: a small program holds the 7.5 GB, and the 7.83 GB left is what a headless 8 GB card leaves; Ministral `D4`
+at 4,096 positions holds 7.7 GB of the card, so on an 8 GB card that also drives a display it does not start.
 
 ## What limits the experts on the disk: the drive
 

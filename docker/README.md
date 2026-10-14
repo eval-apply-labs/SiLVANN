@@ -26,8 +26,8 @@ WSL 2, with the chat UI in the browser.
 3. **NVIDIA's Windows driver**, the ordinary one. Nothing is installed inside Linux for the card.
 4. **The scripts:** this folder's `windows/`. Double-click `silvann_install.cmd`. It checks the above, offers WSL 2
    more of the PC's memory (WSL 2 takes half by default, and a model with its experts in RAM needs more), pulls the
-   image, checks that a container sees the card, and puts two shortcuts on the desktop: **SiLVANN** starts it and opens
-   the browser, **SiLVANN - stop** stops it.
+   image, checks that a container sees the card, and puts three shortcuts on the desktop: **SiLVANN** starts it and
+   opens the browser, **SiLVANN - stop** stops it, **SiLVANN data** opens its models and conversations in Explorer.
 
 | script | what it does |
 |---|---|
@@ -40,9 +40,23 @@ WSL 2, with the chat UI in the browser.
 | `silvann_export` | stops it and writes the image and the volume, the models included, into a folder: a portable copy |
 | `silvann_import` | loads such a folder on this PC or another, which then starts as it was — refused where SiLVANN is installed already: export that one first, or delete it |
 | `silvann_install_nonfree` | fetches what the image leaves out, `requirements-nonfree.txt` (below), from PyPI into the volume: a container started for it, then stopped; a running app is restarted |
+| `silvann_open_data` | opens the volume in Explorer — `models`, `user_sessions` — through WSL's share (the desktop's **SiLVANN data**) |
+| `silvann_reclaim_space` | gives Windows back the room of what was deleted: asks for an administrator, then after a yes stops SiLVANN (the conversations saved), Docker Desktop and WSL, compacts Docker Desktop's disk file and starts Docker Desktop again |
 
 ⚠ Shared means every machine that reaches this PC on port 8080 reaches the UI, and the UI has no login: a
 conversation's password is its only lock.
+
+**A model from a folder:** a model downloaded on another machine — its folder as Hugging Face's `eval-apply/<name>`
+holds it — is pasted into `models` in **SiLVANN data**, and the UI's Options list it. A model pasted while SiLVANN runs
+is the app's from its next start (stop and start it): files pasted through Explorer come in as root's, and the image
+gives everything in the volume to the app's user each time it starts. If Explorer does not reach the folder, Docker
+Desktop shows it as well — *Volumes → silvann-data → Stored data* — and copies files to and from the PC there.
+
+**The disk:** deleting a model (in **SiLVANN data**) frees its room for Docker at once — the next download reuses it —
+but Docker Desktop's disk file on Windows (`docker_data.vhdx`) keeps its size: it grows and does not shrink by itself.
+`silvann_reclaim_space` gives the room back to Windows: it marks the free room unused inside Docker's machine
+(`fstrim`), stops SiLVANN, Docker Desktop and WSL, and compacts the file — `Optimize-VHD` on Windows Pro, `diskpart`'s
+`compact vdisk` on Home — then starts Docker Desktop again. A large disk takes minutes.
 
 A Hugging Face token makes the downloads faster: Hugging Face serves a client that is not signed in more slowly. Save
 one in the UI's Options (it is kept in the volume, so an export carries it: **forget** it before giving an export to
@@ -55,7 +69,7 @@ Docker Engine or Podman, and for the card NVIDIA's container toolkit
 
 ```bash
 bash docker/silvann_docker.sh install          # also: update, start, start_shared, stop, delete, export <dir>, import <dir>,
-                                               # install_nonfree
+                                               # install_nonfree, open_data
 ```
 
 Or by hand:

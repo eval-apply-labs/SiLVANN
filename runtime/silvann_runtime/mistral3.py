@@ -386,7 +386,8 @@ class Ministral3(Generates):
     def lora_identity(self):
         return None
 
-    def state_regions(self, length):
-        """(address, bytes) of everything a conversation of `length` positions has written: each layer's keys and values."""
-        p, n = self.KVPLAN, length * self.KVW * 2
-        return [r for l in self.run_layers for r in ((self.kv_at[l] + p.at_up_data, n), (self.kv_at[l] + p.at_down_data, n))]
+    def state_regions(self, length, where=None):
+        """(address, bytes) of everything a conversation of `length` positions has written: each layer's keys and values.
+        `where`: each layer's address — the load's by default; a table of zeros answers the sizes before the boot."""
+        p, n, kv = self.KVPLAN, length * self.KVW * 2, self.kv_at if where is None else where
+        return [r for l in self.run_layers for r in ((kv[l] + p.at_up_data, n), (kv[l] + p.at_down_data, n))]

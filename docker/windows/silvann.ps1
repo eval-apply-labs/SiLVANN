@@ -16,11 +16,19 @@ SiLVANN's Docker image as an app on Windows. Each action has a .cmd beside this 
   silvann.ps1 install_nonfree requirements-nonfree.txt (PyAV, for video files) from PyPI into the volume: a
                               container started for it, then stopped; a running app restarted. Again after an
                               update that changes the image's Python
+  silvann.ps1 open_data       the volume's folder (models, user_sessions) in Explorer: a model's folder pasted into
+                              models is listed by the UI's Options, and is the app's from the next start. The
+                              desktop's 'SiLVANN data' runs it
+  silvann.ps1 reclaim_space   gives Windows back the room of what was deleted (a model, say): Docker Desktop's disk
+                              file grows and does not shrink by itself. As administrator, after a yes: SiLVANN,
+                              Docker Desktop and WSL stopped, the file compacted, Docker Desktop started again
 
   SILVANN_IMAGE   the image        default ghcr.io/eval-apply-labs/silvann:main, the nightly built from main.
                                    From v1.0 a major version has its tag (:1), which its minor and patch releases
                                    update in place
   SILVANN_PORT    the UI's port    default 8080
+  SILVANN_NAME    the container    default silvann
+  SILVANN_VOLUME  the volume       default silvann-data; another name keeps a second SiLVANN beside the first
   SILVANN_ENGINE  docker | podman  default whichever is installed, docker first
   HF_TOKEN        a Hugging Face token, handed to the container at start: its client downloads faster signed in
 
@@ -36,11 +44,11 @@ $ErrorActionPreference = "Continue"
 $DefaultImage = "ghcr.io/eval-apply-labs/silvann:main"
 $Image = if ($env:SILVANN_IMAGE) { $env:SILVANN_IMAGE } else { $DefaultImage }
 $Port = if ($env:SILVANN_PORT) { [int]$env:SILVANN_PORT } else { 8080 }
-$Name = "silvann"
-$Volume = "silvann-data"
+$Name = if ($env:SILVANN_NAME) { $env:SILVANN_NAME } else { "silvann" }
+$Volume = if ($env:SILVANN_VOLUME) { $env:SILVANN_VOLUME } else { "silvann-data" }
 $StopSeconds = 300          # the UI saves every conversation before it stops; a long one takes a while to write
 $AppDir = Join-Path $env:LOCALAPPDATA "SiLVANN"
-$Actions = @("install", "update", "start", "start_shared", "stop", "delete", "export", "import", "install_nonfree")
+$Actions = @("install", "update", "start", "start_shared", "stop", "delete", "export", "import", "install_nonfree", "open_data", "reclaim_space")
 
 function Say($m)  { Write-Host $m -ForegroundColor Cyan }
 function Note($m) { Write-Host "   $m" }
@@ -131,26 +139,48 @@ function Offer-Memory {
     Note "written to $cfg. It applies once WSL restarts: quit Docker Desktop, run 'wsl --shutdown', start Docker Desktop."
 }
 
+$Shortcuts = @(@("SiLVANN", "start"), @("SiLVANN - stop", "stop"), @("SiLVANN data", "open_data"))
+
+function Write-Cmd($a) {
+    $pause = if ($a -in @("start", "start_shared", "stop", "open_data")) { "if errorlevel 1 pause" } else { "pause" }
+    Set-Content -Path (Join-Path $AppDir "silvann_$a.cmd") -Encoding ASCII -Value @(
+        "@echo off",
+        "powershell -NoProfile -ExecutionPolicy Bypass -File `"%~dp0silvann.ps1`" $a %*",
+        $pause)
+}
+
+function Write-Shortcut($s) {
+    $shell = New-Object -ComObject WScript.Shell
+    $lnk = $shell.CreateShortcut((Join-Path ([Environment]::GetFolderPath("Desktop")) "$($s[0]).lnk"))
+    $lnk.TargetPath = Join-Path $AppDir "silvann_$($s[1]).cmd"
+    $lnk.WorkingDirectory = $AppDir
+    $lnk.Save()
+}
+
 function Add-Shortcuts {
     New-Item -ItemType Directory -Force -Path $AppDir | Out-Null
     $here = $PSCommandPath
     if ((Split-Path $here -Parent) -ne $AppDir) { Copy-Item $here (Join-Path $AppDir "silvann.ps1") -Force }
-    foreach ($a in $Actions) {
-        $pause = if ($a -in @("start", "start_shared", "stop")) { "if errorlevel 1 pause" } else { "pause" }
-        Set-Content -Path (Join-Path $AppDir "silvann_$a.cmd") -Encoding ASCII -Value @(
-            "@echo off",
-            "powershell -NoProfile -ExecutionPolicy Bypass -File `"%~dp0silvann.ps1`" $a %*",
-            $pause)
-    }
-    $shell = New-Object -ComObject WScript.Shell
-    $desktop = [Environment]::GetFolderPath("Desktop")
-    foreach ($s in @(@("SiLVANN", "start"), @("SiLVANN - stop", "stop"))) {
-        $lnk = $shell.CreateShortcut((Join-Path $desktop "$($s[0]).lnk"))
-        $lnk.TargetPath = Join-Path $AppDir "silvann_$($s[1]).cmd"
-        $lnk.WorkingDirectory = $AppDir
-        $lnk.Save()
-    }
-    Note "the scripts are in $AppDir; on the desktop: 'SiLVANN' starts it, 'SiLVANN - stop' stops it"
+    foreach ($a in $Actions) { Write-Cmd $a }
+    foreach ($s in $Shortcuts) { Write-Shortcut $s }
+    Set-Content -Path (Join-Path $AppDir "shortcuts.txt") -Encoding ASCII -Value ($Shortcuts | ForEach-Object { $_[0] })
+    Note "the scripts are in $AppDir; on the desktop: 'SiLVANN' starts it, 'SiLVANN - stop' stops it, 'SiLVANN data' opens its models and conversations"
+}
+
+# The scripts' folder made whole by the silvann.ps1 in it, at each run: an install by an older one, or scripts an update
+# copied from an image, may lack an action's .cmd beside the others or a desktop shortcut a newer one makes (SiLVANN data,
+# say) - each is made. The shortcuts made are listed in shortcuts.txt, so one taken off the desktop stays off.
+function Ensure-Scripts {
+    if ($PSVersionTable.PSEdition -eq "Core" -and -not $IsWindows) { return }
+    if ((Split-Path $PSCommandPath -Parent) -ne $AppDir) { return }
+    foreach ($a in $Actions) { if (-not (Test-Path (Join-Path $AppDir "silvann_$a.cmd"))) { Write-Cmd $a } }
+    $list = Join-Path $AppDir "shortcuts.txt"
+    $made = if (Test-Path $list) { @(Get-Content $list) } else { @() }
+    $new = @($Shortcuts | Where-Object { $made -notcontains $_[0] })
+    if ($new.Count -eq 0) { return }
+    foreach ($s in $new) { Write-Shortcut $s }
+    Set-Content -Path $list -Encoding ASCII -Value ($Shortcuts | ForEach-Object { $_[0] })
+    Note ("on the desktop now: " + (($new | ForEach-Object { "'" + $_[0] + "'" }) -join ", ") + " (the scripts in $AppDir)")
 }
 
 function Do-Install {
@@ -241,6 +271,99 @@ function Do-InstallNonfree {
     }
     if (Is-Running) { Say "the app restarted, to read it"; Restart-App }
     Say "installed: a video file (MP4 and the like) is read now"
+}
+
+# the volume as Explorer reaches it, through WSL's share: Docker Desktop keeps it in its own distribution, at a path that
+# has moved between its versions, and Podman in its machine's. The first that answers is opened.
+function Do-OpenData {
+    Need-Engine
+    if (-not (Q volume inspect $Volume)) { Fail "there is no volume ${Volume}: run install first" }
+    $tails = @(
+        "docker-desktop\mnt\docker-desktop-disk\data\docker\volumes",
+        "docker-desktop-data\data\docker\volumes",
+        "docker-desktop-data\version-pack-data\community\docker\volumes",
+        "podman-machine-default\home\user\.local\share\containers\storage\volumes",
+        "podman-machine-default\var\lib\containers\storage\volumes")
+    foreach ($root in @("\\wsl.localhost", "\\wsl$")) {
+        foreach ($t in $tails) {
+            $d = "$root\$t\$Volume\_data"
+            if (Test-Path -LiteralPath $d) {
+                Say "the data - models and user_sessions - is $d"
+                Note "a model's folder pasted into models is listed by the UI's Options, and is the app's from the next start"
+                Note "(stop and start SiLVANN after pasting one while it runs)"
+                Start-Process explorer.exe -ArgumentList $d
+                return
+            }
+        }
+    }
+    Fail ("the volume's folder was not found through WSL's share. Docker Desktop shows it too: Volumes -> $Volume -> " +
+          "Stored data, which copies files to and from the PC")
+}
+
+# Docker Desktop's disk file (a VHDX) grows as the volume fills and keeps its size when a model is deleted: the room is
+# free inside Docker, not on the PC. Compacting it gives the room back. Docker Desktop and WSL must be stopped, and the
+# compaction needs an administrator: Optimize-VHD where Hyper-V's module is (Windows Pro), diskpart elsewhere.
+function Find-DockerDisk {
+    $dirs = @((Join-Path $env:LOCALAPPDATA "Docker\wsl"))
+    foreach ($f in @("settings-store.json", "settings.json")) {
+        $p = Join-Path $env:APPDATA "Docker\$f"
+        if (Test-Path -LiteralPath $p) {
+            $j = Get-Content -LiteralPath $p -Raw | ConvertFrom-Json
+            foreach ($k in @("CustomWslDistroDir", "customWslDistroDir", "DataFolder", "dataFolder")) {
+                if ($j.PSObject.Properties.Name -contains $k -and $j.$k) { $dirs += [string]$j.$k }
+            }
+        }
+    }
+    foreach ($d in $dirs) {
+        if (-not (Test-Path -LiteralPath $d)) { continue }
+        foreach ($n in @("docker_data.vhdx", "ext4.vhdx")) {
+            $hit = Get-ChildItem -LiteralPath $d -Recurse -Depth 3 -Filter $n -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($hit) { return $hit.FullName }
+        }
+    }
+    return $null
+}
+
+function Do-ReclaimSpace {
+    if ($PSVersionTable.PSEdition -eq "Core" -and -not $IsWindows) { Fail "reclaim_space is for Windows: on Linux a deleted model's room is free at once" }
+    $me = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
+    if (-not $me.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+        Say "reclaim_space needs an administrator: Windows asks, then it runs in a window of its own"
+        Start-Process powershell -Verb RunAs -ArgumentList @("-NoExit", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "`"$PSCommandPath`"", "reclaim_space")
+        return
+    }
+    if ($Engine -ne "docker") { Fail "reclaim_space compacts Docker Desktop's disk; Podman's machine is not handled" }
+    $vhdx = Find-DockerDisk
+    if (-not $vhdx) { Fail "Docker Desktop's disk file (docker_data.vhdx or ext4.vhdx) was not found under $env:LOCALAPPDATA\Docker\wsl or its disk image location" }
+    $before = (Get-Item -LiteralPath $vhdx).Length
+    Say ("Docker Desktop's disk: $vhdx, {0:N1} GB on this PC" -f ($before / 1e9))
+    Note "SiLVANN, Docker Desktop and WSL stop while it is compacted (minutes for a large one); the conversations are saved first"
+    if (-not (YesTo "Compact it now?")) { Say "nothing done"; return }
+    if (Q info) {
+        Say "the free room inside Docker's disk marked unused (fstrim)"
+        if (-not (E run --rm --user 0:0 --privileged --pid=host --entrypoint nsenter $Image -t 1 -m -- fstrim -av)) {
+            Note "fstrim did not run: the compaction goes on, and may give back less"
+        }
+        Do-Stop
+    }
+    Say "Docker Desktop and WSL stopped"
+    Get-Process -Name "Docker Desktop", "com.docker.backend", "com.docker.build" -ErrorAction SilentlyContinue | Stop-Process -Force
+    Start-Sleep -Seconds 5
+    & wsl.exe --shutdown
+    Say "compacting (do not start Docker Desktop until it is done)"
+    if (Get-Command Optimize-VHD -ErrorAction SilentlyContinue) {
+        Optimize-VHD -Path $vhdx -Mode Full
+    } else {
+        $script = Join-Path $env:TEMP "silvann_compact.txt"
+        Set-Content -Path $script -Encoding ASCII -Value @(
+            "select vdisk file=`"$vhdx`"", "attach vdisk readonly", "compact vdisk", "detach vdisk")
+        & diskpart.exe /s $script
+        Remove-Item $script -ErrorAction SilentlyContinue
+    }
+    $after = (Get-Item -LiteralPath $vhdx).Length
+    Say ("compacted: {0:N1} GB -> {1:N1} GB, {2:N1} GB given back to Windows" -f ($before / 1e9), ($after / 1e9), (($before - $after) / 1e9))
+    $dd = Join-Path $env:ProgramFiles "Docker\Docker\Docker Desktop.exe"
+    if (Test-Path -LiteralPath $dd) { Start-Process $dd; Note "Docker Desktop is starting: start SiLVANN from the desktop when it is up" }
 }
 
 function Do-Start([string]$Bind) {
@@ -342,6 +465,7 @@ function Do-Import {
     Say "imported: start SiLVANN from the desktop"
 }
 
+if ($Action -in $Actions -and $Action -notin @("install", "import", "delete")) { Ensure-Scripts }
 switch ($Action) {
     "install"      { Do-Install }
     "update"       { Do-Update }
@@ -352,5 +476,7 @@ switch ($Action) {
     "export"       { Do-Export }
     "import"       { Do-Import }
     "install_nonfree" { Do-InstallNonfree }
+    "open_data"    { Do-OpenData }
+    "reclaim_space" { Do-ReclaimSpace }
     default        { foreach ($l in (Get-Content $PSCommandPath | Select-Object -Skip 1)) { if ($l -eq "#>") { break }; $l }; exit 2 }
 }

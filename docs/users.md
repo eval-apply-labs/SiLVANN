@@ -108,8 +108,9 @@ is, any other video file (MP4 and the like) through PyAV, which `install.sh` ins
 (the Docker image leaves it out, and its scripts' `install_nonfree` adds it). Its frames are taken
 at 2 a second, two frames read together as one picture, each pair's time written into the message as the model's own
 processor writes it (Qwen's before the pair, the middle of its two frames: "<1.2 seconds>"; GLM's after it, its first
-frame's: "1.0 seconds"); a video is made at most half the conversation's context in tokens, and the Qwen models also keep
-it within 25 megapixels over all its frames, as their processor does.
+frame's: "1.0 seconds"); a video is made at most half the conversation's context in tokens, the Qwen models also keep
+it within 25 megapixels over all its frames, as their processor does — and every video within the config's
+`max_tokens_per_video` (8,192 by default, below).
 
 **Files**, for every model: a Word document (`.docx`), a PDF (its text, through pypdf, which `install.sh` installs) or
 a text file (Markdown, CSV, JSON, code) attached with the same button is read when it is attached, and its text goes
@@ -119,7 +120,9 @@ and `/health` says `files`.
 
 The UI is a web page on port 8090 that talks to the server on port 8765; it can also start a server itself (Options). Conversations are saved under `user_sessions/` and
 can be exported and imported. One conversation runs at a time; a second request while one is running is
-answered `503` with `Retry-After: 5`, and the UI retries.
+answered `503` with `Retry-After: 5`, and the UI retries. The card holds one conversation's cache: when another takes
+the card, the one on it is kept in RAM — or, when RAM has no room for two conversations at the full context beside 500
+MB, put away to its folder, as one left idle for two minutes is, and **Activate** brings it back.
 
 On a machine with no card the model runs on the CPU's own cores (the `x86_avx2` family, which needs AVX2, FMA and F16C:
 Intel from Haswell, 2013, AMD from Excavator, 2015; an older processor has no family to run on). The pack made for
@@ -146,11 +149,27 @@ first argument.
 
 | key | what it sets |
 |---|---|
-| `max_context` | the longest conversation, in positions, 32,768 by default; the cache is sized for it at boot, and the `_note` beside it says how many positions 100 MB of the card holds for this model — lower it if the model does not fit on your card, raise it if there is room |
+| `max_context` | the longest conversation, in positions, 32,768 by default (the 27B's config: `"auto"`); the cache is sized for it at boot, and the `_note` beside it says how many positions 100 MB of the card holds for this model — lower it if the model does not fit on your card, raise it if there is room. `"auto"` (or `"max"`): as many as the card holds beside the model, up to the model's own length (262,144 for the Qwen models and Ministral, 1,048,576 for GLM) — the card's tier of experts then gets only what is left once the context is that whole length |
+| `max_tokens_per_video` | the most tokens a video attached to a message becomes, 8,192 by default: its frames share them, so a longer video is seen as smaller pictures of each frame; more sees it in more detail and takes as many positions of the conversation. Reading a video holds 57-74 KB of RAM a token, depending on the model — its patches twice and its row (0.45 GB at 8,192 for GLM, 0.58 for the 27B) — and the server counts it when it chooses whether the experts fit in RAM |
 | `thinking` | whether the model reasons before it answers, by default |
 | `lora` | an adapter from the model's folder to load at boot, or `null` |
 | `sampler` | how the next token is chosen: `"generation"` (the model's own `generation_config.json`), `null` (the most likely, greedy), or `{"temperature", "top_k", "top_p", "repetition_penalty"}`. It is drawn on the card — only the token comes back — when `temperature` is above 0 and `top_k` 1 to 64, and on the host over the logits otherwise |
 | `options` | handed to the model's runtime, below |
+
+**What the config leaves out is chosen for the machine** (`runtime/silvann_runtime/autotune.py`). A model whose
+`options` name no placement — `experts_on`, `experts_from`, `card_experts` — has it tried on the card when the server
+starts, fastest first: the experts on the card, if it holds them; else on the CPU — in RAM when they fit in what the
+server may hold with about 3 GB to spare — the server's own 2 GB, what reading a video holds (`max_tokens_per_video`,
+below: 0.45-0.58 GB at its 8,192) and 500 MB more (a container's or a capped service's memory
+limit counts), else read from the disk — and, with them in RAM, the largest tier of the card it boots with beside the
+context's cache, in steps of 256 MB, one step left free. The cache for the whole context comes first: a tier a little
+smaller costs a little speed, a cache too small refuses a conversation. If nothing boots, the context is halved, down
+to 4,096. A trial the card cannot hold is refused at once, so the trials take seconds. The
+server's log says what was chosen and why; the choice is kept in the model's folder, `autotune.json`, and a start on
+the same machine with the same config takes it without trying (delete the file to choose again). What the config names
+of the placement is kept and the rest is chosen around it — `"auto"` names nothing, so `{"experts_on": "cpu",
+"experts_from": "auto"}` has where from and the tier chosen, and `"card_experts": "no"` asks for no tier — and its other
+options are kept in every trial. A machine with no card of its own (the CPU alone, an integrated GPU) is not tried.
 
 The Qwen models' `options`:
 
@@ -159,9 +178,9 @@ The Qwen models' `options`:
 | `kv` | `"tiered"` (default), `"fp16"` | the conversation's cache: tiered keeps the first 256 and the latest positions in halves and the rest at 8 bits |
 | `tiers` | `[sink, hot, warm]` | the tiers' sizes; `warm` may be `"rest"`. `[256, 4096, "rest"]` is the default; `[256, 4096, N]` puts what is older than `N` at 4 bits, for small cards |
 | `chunk` | positions, 1 to 256, default 256 | how many positions of a prompt go through a layer at once |
-| `experts_on` | `"card"` (default), `"cpu"` | the routed experts on the card, or on the CPU — the setup for a card too small to hold them; the 122B's `default.json` starts with `"cpu"` |
+| `experts_on` | `"card"`, `"cpu"` | the routed experts on the card, or on the CPU — the setup for a card too small to hold them; chosen at boot when the config does not say (above) |
 | `experts_from` | `"auto"`, `"ram"`, `"disk"`, `"mapped"` | with the experts on the CPU: copied into RAM, or read from a file on the disk as they are needed — `disk` keeps the ones used in the engine's own memory, as much of it as there is (`experts_ram_gb` to set it), `mapped` leaves that to the system's page cache and is slower; `auto` chooses by the memory there is |
-| `card_experts_gb` | gigabytes, default `0` | with the experts on the CPU from RAM (`experts_from: "ram"`): the card's own tier of them, below |
+| `card_experts` | `"yes"` (default), `"no"` | with the experts on the CPU from RAM: the card's own tier of them (the L1), sized at boot to what the card holds beside the context — or none. `card_experts_gb` pins a size instead, in gigabytes, below |
 | `experts_int8` | `false` (default), `true` | with the experts on the CPU: a generated token's experts multiplied in integers, faster on the CPU and slightly less exact — ▶ the quantisation table |
 | `picture_pixels` | pixels, default `4194304` (2048 x 2048) | the largest picture the boot makes room for on the card, about 23 KB of the card's memory a 16 x 16 patch (0.37 GB at the default); a larger picture is made smaller. `0` keeps none and reads pictures on the CPU instead (1.8 GB of RAM, at most a megapixel) |
 | `picture_weights` | `"auto"` (default), `"card"`, `"ram"` | the vision tower's weights, 0.6 GB: on the card, or in RAM and written to the card a block at a time as a picture is read (about 0.1 s more a picture); `auto` puts them on the card when the experts are on the CPU and in RAM otherwise |
@@ -170,15 +189,16 @@ GLM 5.3 Flash's `options`:
 
 | option | values | |
 |---|---|---|
-| `experts_from` | `"auto"`, `"ram"`, `"disk"`, `"mapped"` | its routed experts (142 GB) in RAM, or read from a file on the disk as they are needed — `disk` keeps the ones used in the engine's own memory (`experts_ram_gb` to set how much), `mapped` leaves that to the system's page cache; `auto` puts them in RAM when they leave a fifth of the available memory free — about 180 GB available |
+| `experts_from` | `"auto"`, `"ram"`, `"disk"`, `"mapped"` | its routed experts (142 GB) in RAM, or read from a file on the disk as they are needed — `disk` keeps the ones used in the engine's own memory (`experts_ram_gb` to set how much), `mapped` leaves that to the system's page cache; `auto` puts them in RAM when the available memory holds them with about 3 GB to spare (above) — about 145 GB available |
 | `chunk` | positions, default 256 | how many positions of a prompt go through a layer at once; with the experts on the disk, 1024 reads a prompt faster |
 | `sockets` | `1`, `2` | the CPU sockets the experts are split over; by default, all of them |
-| `card_experts_gb` | gigabytes, default `0` | with the experts in RAM (`experts_from: "ram"`): the card's own tier of experts, below |
+| `card_experts` | `"yes"` (default), `"no"` | with the experts in RAM: the card's own tier of experts (the L1), sized at boot — or none; `card_experts_gb` pins a size, in gigabytes, below |
 | `card_exclusive` | `false` (default), `true` | with `experts_from: "ram"`: what the card's tier holds is not also kept in RAM, below |
 
 ### The card's tier of experts
 
-With the experts on the CPU, `card_experts_gb` gives that much of the card's memory to the experts used most, and
+With the experts on the CPU, the card's tier (`card_experts`, on by default; `card_experts_gb` a size of your own) gives
+the card's memory the context leaves to the experts used most, and
 the card computes those while the CPU computes the rest. It starts empty and fills as the model is used — the first
 prompt fills most of it. An expert moves to the card when it has been used three times more recently than the one
 it would replace; the CPU copies it over while the card computes, so a token never waits on one. In a prompt, the
@@ -206,6 +226,27 @@ as the memory there is allows — the process's own limit when it has one — le
 
 ## 6. A model over several machines
 
-A model can be split by layers over machines, each holding a run of them (`silvann_runtime/pipeline.py`). This
-is tested — the 27B as three stages answers exactly as it does in one process — but has no launcher yet; the
-module's docstring shows how a stage is started.
+A model can run over several machines in a ring, each holding a run of its layers — two gaming PCs with 96 GB of RAM
+each, say, holding half of GLM's experts apiece (`silvann_runtime/pipeline.py`). Every machine has the model and starts
+its server the same way; its config (`configs/default.json`) says its part:
+
+| setting | |
+|---|---|
+| `pipeline_parallelism` | `"no"` (the default) or `"yes"` |
+| `pipeline_parallelism_layers` | this machine's run of the layers, first-last — GLM has 45 (0-44), the 122B 48, the 35B 40, the 27B 64 |
+| `pipeline_parallelism_next` | the machine after this one, `host:port`; the last machine names the first |
+| `pipeline_parallelism_port` | where this machine listens for the one before it, 8766 by default |
+| `max_context` | the same number on every machine (not `"auto"`) |
+| `card` | which of the machine's cards to run on (`0`, `1`, …), `"auto"` the first, `"cpu"` none — its CPU and RAM. Two cards in one PC are two machines of the ring, on ports of their own; so are a card and the CPU beside it |
+
+The machine whose layers begin at 0 is the first: it answers the UI and holds the conversations. The one whose layers end
+at the model's last runs its head, draws the next token there, and hands it back to the first. Each machine chooses its
+own setup for its layers (▶ section 4) — where its experts sit, its card's tier. For GLM over two machines:
+```
+  PC A (192.0.2.2):  "pipeline_parallelism": "yes", "pipeline_parallelism_layers": "0-22",  "pipeline_parallelism_next": "192.0.2.3:8766"
+  PC B (192.0.2.3):  "pipeline_parallelism": "yes", "pipeline_parallelism_layers": "23-44", "pipeline_parallelism_next": "192.0.2.2:8766"
+```
+Start both servers (in either order: each waits for the other); the UI talks to PC A. What crosses the network is one row
+of numbers a position (GLM's 32 KB) — a gigabit link is enough. Text, files and GLM's pictures and videos go round the
+ring; a Qwen model's pictures are read on one machine only, for now. A conversation's caches are spread over the
+machines, so one taken up again after another ran reads its tokens again.
