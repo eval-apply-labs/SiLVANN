@@ -146,6 +146,9 @@ its 10th token on, and on a short prompt from the check against Hugging Face's a
 | Qwen 3.5 122B-A10B `D4E4` | the dense part on the card, the experts on the CPU, read from the disk, 32 GB of RAM | 19.0 positions/s | 8.2 tokens/s — 87% from memory |
 | GLM 5.3 Flash `D8E4` | the same, 60 GB of RAM | 10.0 positions/s | 3.0 tokens/s — 80% from memory |
 | GLM 5.3 Flash `D8E4` | the same, 32 GB of RAM | 10.6 positions/s | 2.3 tokens/s — 65% from memory |
+| Qwen 3.6 35B-A3B `D8E4` | the dense part on the card, the experts on the CPU in RAM, 8 GB of the card the tier, 28 GB of RAM | 106 positions/s | 55.9 tokens/s |
+| Qwen 3.5 122B-A10B `D4E4` | the dense part on the card, the experts on the CPU, read from the disk, 28 GB of RAM | 19.0 positions/s | 7.8 tokens/s — 85% from memory |
+| GLM 5.3 Flash `D8E4` | the same, 28 GB of RAM | 10.7 positions/s | 2.2 tokens/s — 62% from memory |
 
 Against one MI50 the 27B reads a prompt 5.4 times as fast here (549 positions a second against 101) — the card's tensor
 cores run the prompt's matrix products — and answers more slowly (23.6 tokens a second against 30.5): a token reads every
@@ -155,11 +158,17 @@ experts). The tier run is one run: which experts the card holds follows when its
 run to run. Before v0.5.0's kernels, through the library's generic ones, the 27B read a prompt at 19 positions a second
 and answered at 7.8 tokens a second; Ministral `D4` read its prompt a position at a time at 34.
 
-The three rows with the disk were measured with v0.5.1, as the R730's were: a prompt of about 1,000 positions from a cold
-start, then 128 tokens, the process held to the RAM it names, the experts read from an NVMe disk reading 5 GB/s.
-Holding the disk to 5 GB/s changed neither model's answer rate; holding it to 2.5 GB/s slowed GLM's by 16% and the
-122B's prompt by 25%. GLM's answer here is limited by reading its experts from RAM: the two channels give the four
-cores at most 36 GB/s, and its rate follows that bandwidth from one core to four.
+The rows with the disk and 32 or 60 GB were measured with v0.5.1, as the R730's were: a prompt of about 1,000 positions
+from a cold start, then 128 tokens, the process held to the RAM it names, the experts read from an NVMe disk reading 5
+GB/s. Holding the disk to 5 GB/s changed neither model's answer rate; holding it to 2.5 GB/s slowed GLM's by 16% and the
+122B's prompt by 25%. GLM's answer here is limited by reading its experts from RAM: the two channels give the four cores
+at most 36 GB/s, and its rate follows that bandwidth from one core to four.
+
+The 28 GB rows were measured with v0.7.0 the same way, the process allowed no swap, two rounds interleaved, each model's
+two answers within 1% of each other (the 35B's prompts within 3.4%). With 28 GB the 122B answers 5% more slowly than
+with 32 GB (v0.5.1's row) and GLM 3% more slowly. The 35B keeps every expert in RAM beside the card's tier; which
+experts the tier holds follows when its copies land, so its rate varies from run to run (51.9 tokens/s with v0.5.0 and
+62 GB, 55.9 here).
 
 ## What limits the experts on the disk: the drive
 

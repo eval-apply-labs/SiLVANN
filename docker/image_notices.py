@@ -38,7 +38,8 @@ def main():
     print("# What this image holds, and each part's licence\n")
     print("> Written when the image was built, from what is installed in it. Not legal advice.\n")
     print("## SiLVANN\n")
-    print("The release at commit `%s` of %s, under the GNU Affero General Public License, version 3 (`LICENSE`); "
+    print("The release at commit `%s` of %s, under the GNU Affero General Public License, version 3 (`LICENSE`), "
+          "with the additional permission to convey it linked with NVIDIA's CUDA runtime (`ATTRIBUTION.md` §1); "
           "`ATTRIBUTION.md` names the third-party code in its source. Its source is in this image, in `/opt/silvann` "
           "(`engine/`, `runtime/`, `lisp/`, the entry points), and at that commit of that repository.\n"
           % (commit.strip(), source.strip() or "its repository"))
