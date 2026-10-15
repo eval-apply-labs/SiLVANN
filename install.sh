@@ -177,6 +177,7 @@ silvann download <model>            a model into \$HERE/models
 silvann token [--set | --forget]    the Hugging Face token the downloads use (faster than none)
 silvann serve <model> [config]      the server, on port 8765 (--port to change it)
 silvann ui                          the chat in a browser, on port 8090, talking to the server
+silvann_cli                         the chat in this terminal (--notools, --nothink), talking to the server
 silvann build                       build again — after installing CUDA or ROCm, say
 silvann update                      the newest release, then build — stop the server first
 silvann where                       the folder it is installed in
@@ -185,8 +186,16 @@ HELP
 esac
 EOF
     chmod +x "$DIR/silvann"
+    # `silvann_cli`: the chat in a terminal, a command of its own
+    cat > "$DIR/silvann_cli" <<EOF
+#!/usr/bin/env bash
+# \`silvann_cli\`, written by install.sh for the release in this folder: the chat in this terminal (silvann_cli.py).
+exec "$DIR/venv/bin/python" "$DIR/silvann_cli.py" "\$@"
+EOF
+    chmod +x "$DIR/silvann_cli"
     mkdir -p "$BIN"
     ln -sf "$DIR/silvann" "$BIN/silvann"
+    ln -sf "$DIR/silvann_cli" "$BIN/silvann_cli"
 }
 
 main() {
@@ -211,9 +220,10 @@ main() {
     [ $only_build -eq 1 ] || cat <<EOF
 
    silvann list                                       the models, and what each needs (README.md's table)
-   silvann download Qwen3.6-35B-A3B_silvann_tq_D8E4   one of them
-   silvann serve Qwen3.6-35B-A3B_silvann_tq_D8E4      the server
+   silvann download silvann_tq_D8E4_qwen3.6_35b_a3b   one of them
+   silvann serve silvann_tq_D8E4_qwen3.6_35b_a3b      the server
    silvann ui                                         the chat, at http://localhost:8090
+   silvann_cli                                        or the chat in this terminal
 EOF
 }
 

@@ -35,7 +35,14 @@ TOKEN_FILE = DATA / ".huggingface_token"
 DEFAULT_CONFIG = {"max_context": 32768, "max_tokens_per_video": 8192, "card": "auto", "lora": None, "thinking": True,
                   "sampler": "generation", "options": {},
                   "pipeline_parallelism": "no", "pipeline_parallelism_layers": "", "pipeline_parallelism_next": "192.0.2.2:8766",
-                  "pipeline_parallelism_port": 8766}
+                  "pipeline_parallelism_port": 8766, "tools": "chill"}
+TOOLS_NOTE = ("tools gives a conversation a tool: a Lisp REPL on this machine the model opens in its answer, to list "
+              "folders, read and write files, run commands and read web pages (it asks with (help) what it can do). "
+              "It starts in the workspace folder beside the conversations (tools_folder to name another). tools is "
+              "what it may do in a new conversation without asking you: \"ask\" — read in the workspace and in "
+              "folders you allowed (tools.json beside the conversations keeps them); \"chill\" — read anywhere; "
+              "\"full-auto\" — everything. Anything else it asks you in the UI, where a conversation's switch turns "
+              "its tool off and its own mode is chosen. \"no\" turns the tool off for every conversation.")
 PIPELINE_NOTE = ("pipeline_parallelism \"yes\" runs the model over several machines in a ring, each holding a run of its "
                  "layers (pipeline_parallelism_layers, first-last, as \"0-23\") and naming the machine after it "
                  "(pipeline_parallelism_next, host:port — the last machine names the first). The machine whose layers "
@@ -50,20 +57,20 @@ VIDEO_NOTE = ("max_tokens_per_video is the most tokens a video attached to a mes
 # how many more positions of a conversation 100 MB of the card holds, past the first 4,352 (kept at 16 bits);
 # measured from the cache each model sizes at two contexts
 TOKENS_PER_100MB = {
-    "Qwen3.6-35B-A3B_silvann_tq_D8E4": 10000,
-    "Qwen3.8-27B_silvann_tq_D4": 3200,
-    "GLM-5.3-Flash_silvann_tq_D4E4": 8800,
-    "GLM-5.3-Flash_silvann_tq_D8E4": 8800,         # the same cache: a pack's widths are its weights', not its cache's
-    "Ministral-3-14B_silvann_tq_D4": 625,          # every position in halves: 40 layers' keys and values
-    "Ministral-3-14B_silvann_tq_D8": 625,
+    "silvann_tq_D8E4_qwen3.6_35b_a3b": 10000,
+    "silvann_tq_D4_qwen3.8_27b": 3200,
+    "silvann_tq_D4E4_glm_5.3_flash": 8800,
+    "silvann_tq_D8E4_glm_5.3_flash": 8800,         # the same cache: a pack's widths are its weights', not its cache's
+    "silvann_tq_D4_ministral_3_14b": 625,          # every position in halves: 40 layers' keys and values
+    "silvann_tq_D8_ministral_3_14b": 625,
 }
 
 # a model's context unless its config says otherwise, where the release's default does not suit it: Mistral 3's cache
 # is every position in halves, so on a 16 GB card its D4 leaves room for 32k positions and its D8 for 8k
 MAX_CONTEXT = {
-    "Ministral-3-14B_silvann_tq_D4": 32768,
-    "Ministral-3-14B_silvann_tq_D8": 8192,
-    "Qwen3.8-27B_silvann_tq_D4": "auto",           # as long as the card holds, to its 262,144 (⚖ 2026-10-14)
+    "silvann_tq_D4_ministral_3_14b": 32768,
+    "silvann_tq_D8_ministral_3_14b": 8192,
+    "silvann_tq_D4_qwen3.8_27b": "auto",           # as long as the card holds, to its 262,144 (⚖ 2026-10-14)
 }
 
 
@@ -82,7 +89,7 @@ def default_config(folder):
                                "every 100 MB of the card's memory holds about %d positions of it. Lower it if "
                                "the model does not fit, raise it if there is room — or \"auto\": as many as the card "
                                "holds beside the model, up to the model's own length." % per, **config}
-        config = {"_note_video": VIDEO_NOTE, "_note_pipeline": PIPELINE_NOTE, **config}
+        config = {"_note_video": VIDEO_NOTE, "_note_pipeline": PIPELINE_NOTE, "_note_tools": TOOLS_NOTE, **config}
         if not config.get("pipeline_parallelism_layers"):
             try:
                 c = json.loads((Path(folder) / "config.json").read_text())

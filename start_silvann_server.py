@@ -30,10 +30,11 @@ import secrets
 import shutil
 import sys
 import tarfile
+import tempfile
 import threading
 import time
 import uuid
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from typing import Optional
 
@@ -47,10 +48,13 @@ DATA = Path(os.environ.get("SILVANN_DATA") or ROOT)
 # the runtime beside this file in a release, or the development tree's
 RUNTIME = Path(os.environ.get("SILVANN_RUNTIME", ROOT / "runtime" if (ROOT / "runtime").is_dir()
                               else ROOT.parent / "backstage" / "python"))
+# the silvann_core.py beside this file, imported before the runtime leads the path: the development tree's runtime
+# folder holds another package of that name
+from silvann_core import default_config                                   # noqa: E402
 sys.path.insert(0, str(RUNTIME))
 import silvann_runtime as SR                                              # noqa: E402
-from silvann_runtime import autotune, experts_file                       # noqa: E402
-from silvann_runtime.chat import Chat                                     # noqa: E402
+from silvann_runtime import autotune, experts_file, tools              # noqa: E402
+from silvann_runtime.chat import Chat, ToolMarkup                         # noqa: E402
 from silvann_runtime.fetch import ensure_model                            # noqa: E402
 from silvann_runtime.session import Busy, Cartridge, Runtime, sampler     # noqa: E402
 from silvann_runtime.vision import MAX_VIDEO_TOKENS                       # noqa: E402
@@ -82,6 +86,13 @@ class MessageReq(BaseModel):
 class UpdateReq(BaseModel):
     name: Optional[str] = None
     enable_thinking: Optional[bool] = None
+    tools: Optional[bool] = None            # the model's tool: on or off, as the thinking switch (▶ _tools_on)
+    tools_mode: Optional[str] = None        # what its commands may do unasked: "ask", "chill" or "full-auto"
+
+
+class AnswerReq(BaseModel):
+    choice: str                             # one of the ask's choices: "folder", "once", "refuse"
+    max_new_tokens: int = 2048
 
 
 class SaveReq(BaseModel):
@@ -118,6 +129,11 @@ class State:
         self.busy_cart = None
         self.images = {}                    # cartridge id -> {image id: a picture read, waiting for its message}
         self.lock = asyncio.Lock()          # the endpoints that touch the card, one at a time
+        self.tools = "chill"                # the config's tools: a new conversation's mode for its tool, or "no"
+        self.classifier = None              # tools.json's folders, every conversation's (each its own mode)
+        self.workspace = DATA / "workspace"
+        self.tool_sessions = {}             # cartridge id -> its REPL
+        self.asks = {}                      # cartridge id -> its answer, waiting on the user's answer to an ask
 
 
 S = State()
@@ -220,12 +236,41 @@ def _describe(cid, x_web_user_id=None):
     return {"id": cid, "name": side.get("name", cid), "history": extra.get("history", []),
             "next_pos": c.length if c else int(meta.get("current_pos", 0)),
             "enable_thinking": extra.get("enable_thinking", S.config.get("thinking", True)),
+            "tools": _tools_on(extra), "tools_mode": _tools_mode(extra),
+            "ask": S.asks[cid].ask if cid in S.asks else None,
             "protected": bool(side.get("password")), "lora": (meta.get("lora") or {}).get("name"),
             "bound": c is not None, "bound_by_self": owner is not None and owner == x_web_user_id,
             "bound_by_other": owner is not None and owner != x_web_user_id}
 
 
 # ── boot ────────────────────────────────────────────────────────────────────────────────────────────────────
+@contextmanager
+def _one_boot_at_a_time():
+    """Held from the setup's trials to the model on the card: two servers started together on one machine each try the
+    card as the other leaves it, not both an empty card (a lock file in the machine's temporary folder; none on a system
+    without `fcntl`, which runs one server)."""
+    try:
+        import fcntl
+    except ImportError:
+        yield
+        return
+    path = os.path.join(tempfile.gettempdir(), "silvann_boot.lock")
+    try:
+        f = open(path, "a")
+    except OSError:
+        f = open(path)                                # another user's lock file: a lock on it reads as well
+    with f:
+        try:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            print("[silvann_server] another server on this machine is booting: this one boots after it", flush=True)
+            fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
+
+
 def _boot(args):
     folder = Path(ensure_model(args.model))
     if args.config:
@@ -233,8 +278,7 @@ def _boot(args):
         if not p.exists():
             p = folder / "configs" / args.config
     else:
-        from silvann_core import default_config                              # the folder's own, written if absent
-        p = default_config(folder)
+        p = default_config(folder)                                           # the folder's own, written if absent
     cfg = json.load(open(p))
     S.config = cfg
     t0 = time.time()
@@ -251,6 +295,11 @@ def _boot(args):
     # a video's tokens at most, and what reading one holds of RAM beside the experts (▶ vision.MAX_VIDEO_TOKENS)
     S.video_tokens = int(cfg.get("max_tokens_per_video", MAX_VIDEO_TOKENS))
     options = dict(cfg.get("options", {}))
+    # the model's tool (▶ the classifier): what its commands may do unasked in a new conversation — or "no", no
+    #   conversation has it
+    S.tools = str(cfg.get("tools", "chill")).lower()
+    if S.tools not in ("no",) + tools.MODES:
+        raise SR.Refused("tools is \"no\" or one of %s, not %r" % (", ".join(tools.MODES), cfg.get("tools")))
     # ⭐ A RING OF MACHINES (▶ silvann_runtime/pipeline.py): this one runs its run of the layers; the one that begins at
     #   layer 0 is the first, and answers the UI — every other is a stage, and serves the ring until it is taken down
     ring = str(cfg.get("pipeline_parallelism", "no")).lower() in ("yes", "true", "1")
@@ -265,17 +314,21 @@ def _boot(args):
             raise SR.Refused("a ring's machines share one context: max_context is the same number in each one's config, "
                              "not \"auto\"")
         options["layers"] = layers
-    options, max_context, why = autotune.choose(str(folder), asked, options, video_tokens=S.video_tokens)
-    S.why = why
-    print("[silvann_server] the setup: %s" % why, flush=True)
-    try:
-        S.model = SR.open_model(str(folder), lora=cfg.get("lora"), max_context=max_context, **options)
-    except Exception as ex:                                   # noqa: BLE001 — the engine's refusal is a plain error
-        if "kept in autotune.json" not in why or not autotune.refused_by_card(ex):
-            raise
-        options, max_context, why = autotune.choose(str(folder), asked, options, fresh=True, video_tokens=S.video_tokens)
-        print("[silvann_server] the card refused the setup kept for it; chosen again: %s" % why, flush=True)
-        S.model = SR.open_model(str(folder), lora=cfg.get("lora"), max_context=max_context, **options)
+    with _one_boot_at_a_time():
+        named = options                                   # the config's own: what a second choice is made around
+        options, max_context, why = autotune.choose(str(folder), asked, named, video_tokens=S.video_tokens)
+        S.why = why
+        print("[silvann_server] the setup: %s" % why, flush=True)
+        try:
+            S.model = SR.open_model(str(folder), lora=cfg.get("lora"), max_context=max_context, **options)
+        except Exception as ex:                               # noqa: BLE001 — the engine's refusal is a plain error
+            if "kept in autotune.json" not in why or not autotune.refused_by_card(ex):
+                raise
+            options, max_context, why = autotune.choose(str(folder), asked, named, fresh=True,
+                                                        video_tokens=S.video_tokens)
+            S.why = why
+            print("[silvann_server] the card refused the setup kept for it; chosen again: %s" % why, flush=True)
+            S.model = SR.open_model(str(folder), lora=cfg.get("lora"), max_context=max_context, **options)
     if ring:
         if not hasattr(S.model, "forward"):
             raise SR.Refused("%s runs on one machine only: its model has no stages" % folder.name)
@@ -292,6 +345,11 @@ def _boot(args):
         S.model = pipeline.Pipeline(S.model, link, say)
     S.runtime = Runtime(S.model)
     S.chat = Chat(S.model.folder)
+    # the model's REPL starts in the workspace, where it reads unasked (▶ the classifier); tools.json keeps the folders
+    #   allowed since
+    S.workspace = Path(cfg.get("tools_folder") or DATA / "workspace")
+    S.classifier = tools.Classifier(str(DATA / "tools.json"), "ask" if S.tools == "no" else S.tools,
+                                    allowed=[str(S.workspace)])
     S.model_id = folder.name
     S.dir = DATA / "user_sessions" / folder.name
     S.dir.mkdir(parents=True, exist_ok=True)
@@ -492,6 +550,8 @@ async def delete_cartridge(cid: str, x_cart_password: Optional[str] = Header(def
         await _put_away(cid, persist=False)
         if (S.dir / cid).exists():
             shutil.rmtree(S.dir / cid)
+        S.tool_sessions.pop(cid, None)                        # its REPL, and an ask it left waiting
+        S.asks.pop(cid, None)
     return {"deleted": cid}
 
 
@@ -503,8 +563,23 @@ async def update_cartridge(cid: str, req: UpdateReq, x_cart_password: Optional[s
         side["name"] = req.name
     if req.enable_thinking is not None:
         side.setdefault("extra", {})["enable_thinking"] = bool(req.enable_thinking)
+    if req.tools is not None:
+        extra = side.setdefault("extra", {})
+        if req.tools and S.tools == "no":
+            raise HTTPException(409, "this server's config turns the model's tool off (\"tools\": \"no\")")
+        if req.tools and extra.get("history") and not extra.get("tools_declared"):
+            raise HTTPException(409, "this conversation began without the tool, which is declared in a conversation's "
+                                     "first turn: a new conversation has it")
+        extra["tools"] = bool(req.tools)
+    if req.tools_mode is not None:
+        if req.tools_mode not in tools.MODES:
+            raise HTTPException(422, "the mode is one of %s" % ", ".join(tools.MODES))
+        side.setdefault("extra", {})["tools_mode"] = req.tools_mode
+        if cid in S.tool_sessions:
+            S.tool_sessions[cid].classifier.mode = req.tools_mode
     _write_sidecar(cid, side)
-    return {"id": cid, "name": req.name, "enable_thinking": req.enable_thinking}
+    return {"id": cid, "name": req.name, "enable_thinking": req.enable_thinking, "tools": req.tools,
+            "tools_mode": req.tools_mode}
 
 
 @app.get("/cartridges/{cid}/export")
@@ -627,7 +702,8 @@ async def save_cartridge(cid: str, req: SaveReq, x_cart_password: Optional[str] 
 @app.post("/cartridges/{cid}/messages")
 async def post_message(cid: str, req: MessageReq, x_cart_password: Optional[str] = Header(default=None),
                        x_web_user_id: Optional[str] = Header(default=None)):
-    """The answer as text/event-stream: `event: token` {"token_id", "text"} a token, then `event: done` or `event: error`.
+    """The answer as text/event-stream: `event: token` {"token_id", "text"} a token, then `event: done` or `event: error`
+    — and in a conversation with the model's tool, `event: tool` a call and `event: ask` an ask (▶ `_Answer`).
     Where the prompt opened the answer's think block (a thinking Qwen's, GLM's), the first token's text begins with its
     `<think>`, so the answer's text is whole: its thinking, `</think>`, the answer.
     ⛔ A turn already on the card answers 503 with `Retry-After: 5`; the caller asks again."""
@@ -662,58 +738,259 @@ async def post_message(cid: str, req: MessageReq, x_cart_password: Optional[str]
                 S.chat.tok.decode(ids[:share]) + "\n[… the rest of %s did not fit the conversation]" % d.name)
             framed.append(d.framed(body))
         text = "".join(framed) + req.text
+    first = not c.tokens
+    if first:                                                 # the tool is declared in the first turn, or never
+        extra["tools_declared"] = _tools_on(extra)
+        _write_sidecar(cid, side)
     try:
         new = S.chat.turn(c.tokens, text, extra.get("system_prompt"),
                           extra.get("enable_thinking", S.config.get("thinking", True)), images=[im.tokens for im in pics],
-                          videos=[[(im.tokens, t) for im, t in v.pairs] for v in vids])
+                          videos=[[(im.tokens, t) for im, t in v.pairs] for v in vids],
+                          tools=first and extra["tools_declared"])
     except SR.Refused as ex:
         raise HTTPException(415, str(ex))
     images = pics + [im for v in vids for im, _ in v.pairs]
     placed = list(zip(S.chat.image_starts(new, S.model.vision().pads), images)) if images else []
+    if c.tokens and c.tokens[-1] == S.chat.call_end:         # a call left unanswered (a stopped answer): closed
+        new = S.chat.close_call() + new
+        placed = [(at + len(S.chat.close_call()), im) for at, im in placed]
     room = S.model.max_context - len(c.tokens) - len(new)
     if room <= 0:
         raise HTTPException(413, "the conversation has reached the context of %d" % S.model.max_context)
-    queue, loop = asyncio.Queue(), asyncio.get_running_loop()
-    answer, shown = [], [""]
-    opened = S.chat.opened(new)                               # the answer begins inside the think block the prompt opened
-
-    def on_token(tok):
-        answer.append(tok)
-        text = opened + S.chat.decode(answer)
-        delta, shown[0] = text[len(shown[0]):], text
-        loop.call_soon_threadsafe(queue.put_nowait, ("token", json.dumps({"token_id": tok, "text": delta})))
-
+    if cid in S.asks:
+        raise HTTPException(409, "the model waits on an answer to its ask: %s" % S.asks[cid].ask["question"])
+    a = _Answer(cid, c, req.max_new_tokens, {"role": "user", "content": req.text, "images": len(req.images)})
     async with S.lock:
         await _room_for(c)
     try:
-        turn = S.runtime.turn(c, new, min(req.max_new_tokens, room), sampler=_sampler(), stop=S.chat.stop, on_token=on_token,
-                              images=placed)
+        a.begin(new, placed)
     except Busy:
         raise HTTPException(503, "busy — another conversation's turn is on the card", headers={"Retry-After": "5"})
-    S.turns[cid], S.busy_cart = turn, cid
     for i in req.images:                                      # a picture is the message's now, in the conversation
         waiting.pop(i, None)
+    return StreamingResponse(a.stream(), media_type="text/event-stream")
 
-    def finish():
-        try:
-            turn.wait()
-            extra.setdefault("history", []).append({"role": "user", "content": req.text, "images": len(req.images)})
-            extra["history"].append({"role": "assistant", "content": opened + S.chat.decode(answer)})
-            _write_sidecar(cid, side)
-            loop.call_soon_threadsafe(queue.put_nowait, ("done", "{}"))
-        except Exception as ex:
-            loop.call_soon_threadsafe(queue.put_nowait, ("error", json.dumps({"error": str(ex)})))
-        finally:
-            S.busy_cart = None
-    threading.Thread(target=finish, daemon=True).start()
 
-    async def stream():
+# ── the model's tool (NN-88) ────────────────────────────────────────────────────────────────────────────────
+# ⭐ A CONVERSATION BEGUN WITH THE TOOL (the config's "tools" anything but "no", or the conversation's own switch
+#   before its first message) has a Lisp REPL (▶ silvann_runtime/tools.py): the answer stops where the model calls it,
+#   the form runs here, and its value is read back in as the template frames a tool's answer — the answer goes on from
+#   there. A command the classifier stops is asked of the user: the stream ends with `event: ask`, and `/tools/answer`
+#   runs the user's answer in the same REPL and streams the rest. What the UI is shown of a call is the same for every
+#   model: `<tool_call>FORM</tool_call><tool_response>VALUE</tool_response>` in the answer's text, an ask and the user's
+#   answer between them as `<tool_ask>QUESTION</tool_ask><tool_answer>CHOICE</tool_answer>`.
+TOOL_CALLS_MAX = 64                       # the calls one message's answer may make
+
+
+def _tools_on(extra):
+    """The conversation's switch, as the thinking switch: on unless turned off, where the config does not say "no" —
+    and, once the conversation has begun, only if its first turn declared the tool."""
+    if S.tools == "no" or extra.get("history") and not extra.get("tools_declared"):
+        return False
+    return bool(extra.get("tools", True))
+
+
+def _tools_mode(extra):
+    """What the conversation's commands may do unasked: its own choice, or the config's."""
+    return extra.get("tools_mode") or (S.tools if S.tools in tools.MODES else "ask")
+
+
+def _tool_session(cid):
+    s = S.tool_sessions.get(cid)
+    if s is None:
+        S.workspace.mkdir(parents=True, exist_ok=True)
+        mode = _tools_mode(_sidecar(cid).get("extra", {}))
+        s = S.tool_sessions[cid] = tools.Session(str(S.workspace), S.classifier.conversation(mode))
+    return s
+
+
+class _Answer:
+    """One message's answer in the making: the model's stretches of answer, the calls between them run and answered,
+    streamed as text/event-stream — `event: token` {"token_id", "text"} a token, `event: tool` {"form", "answer",
+    "text"} a call, then `event: done`, `event: ask` {"question", "choices"} (and done) or `event: error`."""
+
+    def __init__(self, cid, c, budget, user):
+        self.cid, self.c, self.budget, self.user = cid, c, budget, user
+        self.extra = _sidecar(cid).get("extra", {})
+        self.thinking = self.extra.get("enable_thinking", S.config.get("thinking", True))
+        # a conversation that declared the tool stops at every call; one switched off since answers it "off"
+        self.declared, self.tools = bool(self.extra.get("tools_declared")), _tools_on(self.extra)
+        self.stop = set(S.chat.stop) | ({S.chat.call_end} if self.declared and S.chat.call_end is not None else set())
+        self.text = ""                         # what the UI has been shown of the answer
+        self.written = False                   # whether the history holds this answer yet
+        self.calls = 0
+        self.forms, self.answers = [], []      # the stretch's calls, and the values of those run
+        self.ask = None
+        self.queue = self.loop = None
+
+    # the stream
+    def _emit(self, kind, payload):
+        self.loop.call_soon_threadsafe(self.queue.put_nowait, (kind, json.dumps(payload)))
+
+    def _show(self, kind, text, **payload):
+        self.text += text
+        self._emit(kind, dict(payload, text=text))
+
+    async def stream(self):
         while True:
-            kind, payload = await queue.get()
+            kind, payload = await self.queue.get()
             yield "event: %s\ndata: %s\n\n" % (kind, payload)
             if kind in ("done", "error"):
                 return
-    return StreamingResponse(stream(), media_type="text/event-stream")
+
+    # a stretch of answer on the card
+    def _turn(self, new, images=(), retry=False):
+        room = S.model.max_context - len(self.c.tokens) - len(new)
+        if room <= 0:
+            raise SR.Refused("the conversation has reached the context of %d" % S.model.max_context)
+        self.answer, self.held, self.shown = [], False, ""
+        self.opened = S.chat.opened(new)       # the stretch begins inside the think block its prompt opened
+        while True:
+            try:
+                t = S.runtime.turn(self.c, new, min(self.budget, room), sampler=_sampler(), stop=self.stop,
+                                   on_token=self._on_token, images=images)
+                break
+            except Busy:
+                if not retry:
+                    raise
+                time.sleep(0.2)
+        S.turns[self.cid], S.busy_cart = t, self.cid
+        return t
+
+    def _on_token(self, tok):
+        self.answer.append(tok)
+        if self.declared and tok == S.chat.call_start:
+            self.held = True                   # a call: shown as every model's is, once it is read
+        if self.held:
+            return
+        text = self.opened + S.chat.decode(self.answer)
+        delta, self.shown = text[len(self.shown):], text
+        self._show("token", delta, token_id=tok)
+
+    def begin(self, new, placed):
+        """The first stretch on the card now (`Busy` where another turn has it); the rest in a thread of its own."""
+        self.queue, self.loop = asyncio.Queue(), asyncio.get_running_loop()
+        t = self._turn(new, placed)
+        threading.Thread(target=self._go, args=(t,), daemon=True).start()
+
+    def resume(self, choice, value):
+        """The user's answer to the ask: its value is the waiting call's, and the answer goes on."""
+        self.queue, self.loop = asyncio.Queue(), asyncio.get_running_loop()
+        self._show("tool", "<tool_answer>%s</tool_answer>" % choice, choice=choice)
+        threading.Thread(target=self._go, args=(None, value), daemon=True).start()
+
+    def _go(self, t, value=None):
+        try:
+            if t is None:                      # after an ask: the waiting call's value, then the rest of the stretch
+                S.asks.pop(self.cid, None)
+                self.ask = None
+                pending = _tool_session(self.cid).pending
+                if pending is not None:        # the form, run again, asked again
+                    self._ask(pending[1])
+                    return
+                self._answered(value)
+                if self._calls() is not None:
+                    return
+                t = self._turn(S.chat.tool_response(self.answers, self.thinking), retry=True)
+            while True:
+                t.wait()
+                self.budget -= len(self.answer)
+                forms = S.chat.tool_calls(self.answer) if self.declared and not t.cancelled else []
+                if not forms or self.budget <= 0:
+                    if self.held:              # a call never made, shown as the model wrote it
+                        self._show("token", (self.opened + S.chat.decode(self.answer))[len(self.shown):], token_id=-1)
+                    break
+                self.forms, self.answers = forms, []
+                if self._calls() is not None:
+                    return
+                t = self._turn(S.chat.tool_response(self.answers, self.thinking), retry=True)
+            self._write()
+            self._emit("done", {})
+        except Exception as ex:                # noqa: BLE001 — said to the UI
+            if self.written or self.calls:     # an answer that made calls keeps what it did
+                self._write()
+            self._emit("error", {"error": str(ex)})
+        finally:
+            S.busy_cart = None
+
+    def _calls(self):
+        """Run the stretch's calls not yet answered; the ask, where one stops — the answer then waits for the user."""
+        session = _tool_session(self.cid)
+        while len(self.answers) < len(self.forms):
+            form = self.forms[len(self.answers)]
+            self.calls += 1
+            shown = ";; a call that does not read" if isinstance(form, ToolMarkup) else form
+            self._show("tool", "<tool_call>%s</tool_call>" % shown, form=str(form))
+            if isinstance(form, ToolMarkup):
+                value = tools.write([tools.Sym("error"), tools.Text(str(form))])
+            elif not self.tools:
+                value = tools.write([tools.Sym("error"), tools.Text("the tool is off: the user turned it off — answer "
+                                                                    "without it")])
+            elif self.calls > TOOL_CALLS_MAX:
+                value = tools.write([tools.Sym("error"), tools.Text("%d calls in one answer: answer the user now"
+                                                                    % TOOL_CALLS_MAX)])
+            else:
+                value = session.run(form)
+                if session.pending is not None:
+                    return self._ask(session.pending[1])
+            self._answered(value)
+        return None
+
+    def _ask(self, asked):
+        """The answer waits on the user: the ask said, the history written, the stream ended."""
+        self.ask = {"question": asked.question, "choices": list(asked.choices)}
+        S.asks[self.cid] = self
+        self._show("tool", "<tool_ask>%s</tool_ask>" % asked.question, ask=asked.question)
+        self._write()
+        self._emit("ask", self.ask)
+        self._emit("done", {})
+        return self.ask
+
+    def _answered(self, value):
+        self.answers.append(value)
+        self._show("tool", "<tool_response>%s</tool_response>" % value, answer=value)
+
+    def _write(self):
+        """The conversation's history: the user's message and the answer so far."""
+        side = _sidecar(self.cid)
+        history = side.setdefault("extra", {}).setdefault("history", [])
+        if not self.written:
+            history += [self.user, {"role": "assistant", "content": self.text}]
+            self.written = True
+        elif history and history[-1].get("role") == "assistant":
+            history[-1]["content"] = self.text
+        _write_sidecar(self.cid, side)
+
+
+@app.post("/cartridges/{cid}/tools/answer")
+async def answer_ask(cid: str, req: AnswerReq, x_cart_password: Optional[str] = Header(default=None),
+                     x_web_user_id: Optional[str] = Header(default=None)):
+    """The user's answer to the model's ask — "folder", "once" or "refuse" — run in the conversation's REPL as the
+    user's; the rest of the answer streamed as `/messages` streams it."""
+    _check_password(cid, x_cart_password)
+    a = S.asks.get(cid)
+    if a is None:
+        raise HTTPException(409, "the model is not waiting on an answer")
+    owner = S.owner.get(cid)
+    if owner and owner != x_web_user_id:
+        raise HTTPException(423, "in use by another session")
+    if req.choice not in a.ask["choices"]:
+        raise HTTPException(422, "the answer is one of %s" % ", ".join(a.ask["choices"]))
+    a.c = S.runtime.cartridges.get(cid)                       # the conversation as it is now (put away and back)
+    if a.c is None:
+        raise HTTPException(409, "not bound — call /bind first")
+    value = _tool_session(cid).run("(answer '%s)" % req.choice, user=True)
+    a.budget = req.max_new_tokens
+    a.resume(req.choice, value)
+    return StreamingResponse(a.stream(), media_type="text/event-stream")
+
+
+@app.get("/tools")
+def tools_settings():
+    """The config's tools — a new conversation's mode ("ask", "chill", "full-auto"), or "no": no conversation has the
+    tool — the modes, the folders every conversation reads unasked, and where its REPL starts."""
+    return {"tools": S.tools, "modes": list(tools.MODES), "allowed": S.classifier.allowed,
+            "workspace": str(S.workspace)}
 
 
 def main():

@@ -66,7 +66,34 @@ SURFACE = {
 # implies.
 LOWERED = {"let": "let", "set!": "set", "defun": "defun", "if": "if", "=>": "thread"}
 
-_TOKENS = re.compile(r"""\(|\)|'|[^\s()']+""")
+# a text literal (a tool form's: ▶ tools.py), a lone `"` (a text never closed), the parentheses, the quote, a name
+_TOKENS = re.compile(r""""(?:[^"\\]|\\.)*"|"|\(|\)|'|[^\s()'"]+""", re.S)
+# the same, and a comment — `;` to the end of its line — which only a source file carries
+_SOURCE = re.compile(r""""(?:[^"\\]|\\.)*"|;[^\n]*|"|\(|\)|'|[^\s()'";]+""", re.S)
+_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "\"": "\"", "\\": "\\"}
+
+
+class Text(str):
+    """A text literal as read — `"…"` — which a name never is: a tool form carries them (▶ tools.py); a model's
+    program does not."""
+
+
+def _unescape(body):
+    out, i = [], 0
+    while i < len(body):
+        ch = body[i]
+        if ch == "\\" and i + 1 < len(body):
+            nxt = body[i + 1]
+            out.append(_ESCAPES.get(nxt, "\\" + nxt))           # an escape it does not know is kept as written
+            i += 2
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _escape(text):
+    return text.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\t", "\\t")
 
 
 class ComposerError(Exception):
@@ -98,6 +125,10 @@ def read(text):
                 out.append(one())
         if tok == ")":
             raise ComposerError("a form is closed that was never opened")
+        if tok.startswith('"'):
+            if len(tok) < 2 or not tok.endswith('"'):
+                raise ComposerError("a text is never closed")
+            return Text(_unescape(tok[1:-1]))
         try:
             return int(tok)
         except ValueError:
@@ -116,9 +147,9 @@ def read(text):
 
 
 def read_all(text):
-    """A source file -> its top-level forms, in order. A `;` starts a comment that runs to the end of its line."""
-    lines = [line.split(";", 1)[0] for line in text.split("\n")]
-    tokens = _TOKENS.findall("\n".join(lines))
+    """A source file -> its top-level forms, in order. A `;` starts a comment that runs to the end of its line (not
+    one inside a text)."""
+    tokens = [t for t in _SOURCE.findall(text) if not t.startswith(";")]
     forms, depth, start = [], 0, 0
     for i, tok in enumerate(tokens):
         if tok == "(":
@@ -128,7 +159,7 @@ def read_all(text):
             if depth < 0:
                 raise ComposerError("a form is closed that was never opened")
         if depth == 0 and tok != "'":
-            forms.append(read(" ".join(tokens[start:i + 1]).replace("' ", "'")))
+            forms.append(read("".join(t if t == "'" else t + " " for t in tokens[start:i + 1])))   # a quote joined to its form
             start = i + 1
     if depth != 0:
         raise ComposerError("the source ends inside a form")
@@ -141,6 +172,8 @@ def to_text(node):
         return "'" + to_text(node[1])
     if isinstance(node, list):
         return "(" + " ".join(to_text(n) for n in node) + ")"
+    if isinstance(node, Text):
+        return '"' + _escape(node) + '"'
     return repr(node) if isinstance(node, float) else str(node)
 
 
@@ -278,6 +311,8 @@ class Composer:
             return self._cell_int(node)
         if isinstance(node, float):
             return self._cell_float(node)
+        if isinstance(node, Text):
+            raise ComposerError("a text reaches the engine only where a tool form lowers it (▶ tools.py), not in a program")
         if isinstance(node, str):
             return self._cell_name(node)
         if isinstance(node, tuple) and node and node[0] == "quote":

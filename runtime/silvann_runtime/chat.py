@@ -25,14 +25,52 @@ each pair of frames framed as Hugging Face's processor frames it in place of the
 `<|video_pad|>` a token, `<|vision_end|>` a pair, then `<|vision_end|>`; GLM's `<|begin_of_video|>`, then a pair's
 `<|begin_of_image|>`, an `<|image|>` a token, `<|end_of_image|>` and its time "0.0 seconds" (its first frame's), then
 `<|end_of_video|>`.
+
+⭐ THE MODEL'S TOOL (NN-88, ▶ `tools.py`): a conversation begun with tools has one declared in its first turn's system
+prompt, as the template declares a tool — `lisp`, its one argument a form. The model calls it in its own markup, and the
+call is answered as the template frames a tool's answer:
+```
+  Qwen 3.5    <tool_call>\n<function=lisp>\n<parameter=form>\n(ls)\n</parameter>\n</function>\n</tool_call>   (it stops there)
+              <|im_end|>\n<|im_start|>user\n<tool_response>\n…\n</tool_response><|im_end|>\n<|im_start|>assistant\n<think>\n
+  GLM 5.3     <tool_call>lisp<arg_key>form</arg_key><arg_value>(ls)</arg_value></tool_call>                  (it stops there)
+              <|observation|><tool_response>…</tool_response><|assistant|><think>
+  Mistral 3   [TOOL_CALLS]lisp[ARGS]{"form": "(ls)"}</s>
+              [TOOL_RESULTS]…[/TOOL_RESULTS]
+```
+A Qwen or GLM answer stops at `</tool_call>` (`call_end`, one token), so a call is answered before the model writes on.
 """
 import datetime
+import json
 import os
 import re
 
 import numpy as np
 
 from .model_folder import Refused
+
+TOOL = {"type": "function", "function": {
+    "name": "lisp",
+    "description": "A Lisp REPL on the user's machine, in a working folder the user gave it: one form a call, and its "
+                   "value is the answer. Start with (help), which lists the commands; a path is absolute, or relative to "
+                   "the working folder. A command that reads elsewhere or writes may be asked of the user first: call it, and the "
+                   "answer comes back once the user has allowed it, or refused.",
+    "parameters": {"type": "object", "properties": {"form": {
+        "type": "string", "description": "one Lisp form, such as (help) or (ls \"docs\")"}}, "required": ["form"]}}}
+
+_QWEN_TOOLS = ("# Tools\n\nYou have access to the following functions:\n\n<tools>\n%s\n</tools>\n\nIf you choose to call a "
+               "function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>"
+               "\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value "
+               "for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n"
+               "<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> "
+               "block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You "
+               "may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT "
+               "after\n- If there is no function call available, answer the question like normal with your current "
+               "knowledge and do not tell the user about function calls\n</IMPORTANT>")
+_GLM_TOOLS = ("<|system|>\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are "
+              "provided with function signatures within <tools></tools> XML tags:\n<tools>\n%s\n</tools>\n\nFor each "
+              "function call, output the function name and arguments within the following XML format:\n<tool_call>"
+              "{function-name}<arg_key>{arg-key-1}</arg_key><arg_value>{arg-value-1}</arg_value><arg_key>{arg-key-2}"
+              "</arg_key><arg_value>{arg-value-2}</arg_value>...</tool_call>")
 
 
 class Chat:
@@ -52,6 +90,10 @@ class Chat:
         else:
             raise Refused("no chat framing for a %r model" % self.arch)
         self.stop.discard(None)
+        # a call's first token, and the one it ends on where that is not the turn's end (Mistral's ends on `</s>`)
+        mistral = self.arch.startswith("ministral3")
+        self.call_start = self.tok.token_to_id("[TOOL_CALLS]" if mistral else "<tool_call>")
+        self.call_end = None if mistral else self.tok.token_to_id("</tool_call>")
 
     def encode(self, text):
         return self.tok.encode(text, add_special_tokens=False).ids
@@ -72,11 +114,14 @@ class Chat:
         at = tail.rfind("<think>")
         return tail[at:] if at >= 0 and "</think>" not in tail[at:] else ""
 
-    def turn(self, seen, text, system=None, thinking=True, images=(), videos=()):
+    def turn(self, seen, text, system=None, thinking=True, images=(), videos=(), tools=False):
         """The tokens a turn adds to a conversation that has seen `seen`; `images` the token counts of the pictures the
         user's message carries before its text, `videos` its videos after them, each a list of (tokens, time in seconds)
-        a pair of frames."""
+        a pair of frames; `tools`, in a first turn, declares the model's tool."""
         first = not seen
+        tools = tools and first
+        if tools and self.call_start is None:
+            raise Refused("a %r model's tokenizer has no tool call" % self.arch)
         if images and not self.arch.startswith(("qwen3_5", "glm5")):
             raise Refused("a %r model is not given pictures here" % self.arch)
         if videos and not self.arch.startswith(("qwen3_5", "glm5")):
@@ -95,6 +140,8 @@ class Chat:
         if self.arch.startswith("qwen3_5"):
             if first:
                 system = system or "You are a helpful AI assistant."
+                if tools:
+                    system = _QWEN_TOOLS % json.dumps(TOOL, ensure_ascii=False) + "\n\n" + system
                 if thinking and self.reasoning:
                     system = self.reasoning + "\n\n" + system
                 s = ("<|im_start|>system\n%s<|im_end|>\n<|im_start|>user\n%s<|im_end|>\n<|im_start|>assistant\n"
@@ -111,16 +158,80 @@ class Chat:
                     system = self.default_system.replace("{today}", today.isoformat()).replace(
                         "{yesterday}", (today - datetime.timedelta(days=1)).isoformat())
                 s = "<s>" + ("[SYSTEM_PROMPT]%s[/SYSTEM_PROMPT]" % system if system else "")
+                if tools:
+                    s += "[AVAILABLE_TOOLS]%s[/AVAILABLE_TOOLS]" % json.dumps([TOOL], ensure_ascii=False)
             return self.encode(s + "[INST]%s[/INST]" % text)
         # GLM 5.3
         s = ""
         if first:
             s = "[gMASK]<sop><|system|>Reasoning Effort: %s" % ("Max" if thinking else "Low")
+            if tools:
+                s += _GLM_TOOLS % json.dumps(TOOL["function"], ensure_ascii=False)
             if system:
                 s += "<|system|>" + system
         if first or seen[-1] != self.user:
             s += "<|user|>"
         return self.encode(s + text + "<|assistant|><think>")
+
+    def tool_calls(self, answer):
+        """The forms an answer's last stretch calls the tool with, in order — [] where it ended without a call. Its one
+        argument is the form whatever the model named it. A call that cannot be read is a `ToolMarkup`, said back to the
+        model in place of an answer."""
+        if self.call_start is None or self.call_start not in answer:
+            return []
+        if answer[-1] != self.call_end and (self.call_end is not None or answer[-1] not in self.stop):
+            return []                                  # a call ends the stretch: at `</tool_call>`, or Mistral's `</s>`
+        at = len(answer) - 1 - answer[::-1].index(self.call_start)
+        if self.call_end is None:                      # Mistral's: every call since the answer's last text
+            at = answer.index(self.call_start)
+        text = self.tok.decode(answer[at:], skip_special_tokens=False)
+        if self.arch.startswith("ministral3"):
+            calls = []
+            for part in text.split("[TOOL_CALLS]")[1:]:
+                name, _, args = part.partition("[ARGS]")
+                args = args.split("</s>")[0]
+                try:
+                    got = json.loads(args)
+                    one = got["form"] if "form" in got else next(iter(got.values())) if len(got) == 1 else got["form"]
+                    form = one if name.strip() == "lisp" else ToolMarkup("the one tool is lisp, not %s" % name.strip())
+                except (ValueError, KeyError, TypeError, AttributeError):
+                    form = ToolMarkup("the call's arguments do not read as {\"form\": \"…\"}: %s" % args[:200])
+                calls.append(form if isinstance(form, ToolMarkup) else str(form))
+            return calls
+        if self.arch.startswith("glm5"):
+            got = re.match(r"<tool_call>\s*([^<]*?)\s*<arg_key>[^<]*</arg_key><arg_value>(.*)</arg_value>\s*</tool_call>$",
+                           text, re.S)
+            name, form = (got.group(1), got.group(2)) if got else (None, None)
+        else:
+            got = re.match(r"<tool_call>\s*<function=([^>]*)>\s*<parameter=[^>]*>\n?(.*?)\n?</parameter>\s*</function>"
+                           r"\s*</tool_call>$", text, re.S)
+            name, form = (got.group(1), got.group(2)) if got else (None, None)
+        if form is None:
+            return [ToolMarkup("the call does not read as the tool lisp with its one argument, form: %s" % text[:200])]
+        if name.strip() != "lisp":
+            return [ToolMarkup("the one tool is lisp, not %s" % name.strip())]
+        return [form]
+
+    def close_call(self):
+        """The tokens that end a turn after a call left unanswered (an answer stopped there), where the template has the
+        turn end after the call: Qwen's `<|im_end|>` — the next turn's framing follows it."""
+        return self.encode("<|im_end|>") if self.arch.startswith("qwen3_5") else []
+
+    def tool_response(self, answers, thinking=True):
+        """The tokens that answer a stretch's calls, `answers` the value of each, written — and open the model's turn
+        again, as the template's generation prompt does."""
+        if self.arch.startswith("ministral3"):
+            return self.encode("".join("[TOOL_RESULTS]%s[/TOOL_RESULTS]" % a for a in answers))
+        if self.arch.startswith("glm5"):
+            return self.encode("<|observation|>" + "".join("<tool_response>%s</tool_response>" % a for a in answers)
+                               + "<|assistant|><think>")
+        return self.encode("<|im_end|>\n<|im_start|>user" + "".join("\n<tool_response>\n%s\n</tool_response>" % a
+                                                                  for a in answers)
+                           + "<|im_end|>\n<|im_start|>assistant\n" + ("<think>\n" if thinking else "<think>\n\n</think>\n\n"))
+
+
+class ToolMarkup(str):
+    """A call the model wrote that cannot be read: what to say back to it."""
 
 
 def _reasoning(path):

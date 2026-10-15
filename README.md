@@ -1,6 +1,6 @@
 # SiLVANN
 
-> **Developer preview, v0.8.0.** It runs the models below well on the hardware it was tested on, and it is shared
+> **Developer preview, v0.9.0.** It runs the models below well on the hardware it was tested on, and it is shared
 > for people who can find their way around a build and a stack trace. NVIDIA cards are tested on one, a GeForce
 > RTX 5060 Ti; Apple silicon is not tested yet.
 
@@ -20,18 +20,18 @@ One model a kind of machine — the one that suits it best, measured:
 
 | Your machine | Model | Answer |
 |---|---|---|
-| No graphics card, 12 GB of RAM, an NVMe disk | [Qwen 3.6 35B-A3B](https://huggingface.co/eval-apply/Qwen3.6-35B-A3B_silvann_tq_D4E4) (`D4E4`) on the CPU alone, its experts read from the disk | 11.7 tokens/s |
-| An 8 GB card | [Ministral 3 14B](https://huggingface.co/eval-apply/Ministral-3-14B_silvann_tq_D4) (`D4`) on the card, at a 4,096-token context | 42 tokens/s ◦ |
-| A 16 GB card | [Qwen 3.8 27B](https://huggingface.co/eval-apply/Qwen3.8-27B_silvann_tq_D4) on the card | 31.5 tokens/s |
-| A 16 GB card — alt | [Ministral 3 14B](https://huggingface.co/eval-apply/Ministral-3-14B_silvann_tq_D8) (`D8`) on the card, at an 8,192-token context | 30.6 tokens/s ◦ |
-| A 24 GB card | [Qwen 3.6 35B-A3B](https://huggingface.co/eval-apply/Qwen3.6-35B-A3B_silvann_tq_D8E4) on the card | 90 tokens/s |
-| An 8 GB card, 32 GB of RAM | [Qwen 3.6 35B-A3B](https://huggingface.co/eval-apply/Qwen3.6-35B-A3B_silvann_tq_D8E4) (`D8E4`) — the dense part on the card, the experts on the CPU in RAM, and 2 GB of the card the tier of experts used most | 42 tokens/s § |
-| An 8 GB card, 32 GB of RAM, an NVMe disk | [Qwen 3.5 122B-A10B](https://huggingface.co/eval-apply/Qwen3.5-122B-A10B_silvann_tq_D4E4) (`D4E4`) — the dense part on the card, the experts on the CPU | 4.7 tokens/s ◦ |
-| A 16 GB card, 28 GB of RAM | [Qwen 3.6 35B-A3B](https://huggingface.co/eval-apply/Qwen3.6-35B-A3B_silvann_tq_D8E4) (`D8E4`) — the dense part on the card, the experts on the CPU in RAM, and 8 GB of the card the tier of experts used most | 55.9 tokens/s ‡ |
-| A 16 GB card, 28 GB of RAM, an NVMe disk | [GLM 5.3 Flash](https://huggingface.co/eval-apply/GLM-5.3-Flash_silvann_tq_D8E4) (`D8E4`) — the dense part on the card, the experts on the CPU, read from the disk | 2.2 tokens/s ‡ |
+| No graphics card, 12 GB of RAM, an NVMe disk | [Qwen 3.6 35B-A3B](https://huggingface.co/eval-apply/silvann_tq_D4E4_qwen3.6_35b_a3b) (`D4E4`) on the CPU alone, its experts read from the disk | 11.7 tokens/s |
+| An 8 GB card | [Ministral 3 14B](https://huggingface.co/eval-apply/silvann_tq_D4_ministral_3_14b) (`D4`) on the card, at a 4,096-token context | 42 tokens/s ◦ |
+| A 16 GB card | [Qwen 3.8 27B](https://huggingface.co/eval-apply/silvann_tq_D4_qwen3.8_27b) on the card | 31.5 tokens/s |
+| A 16 GB card — alt | [Ministral 3 14B](https://huggingface.co/eval-apply/silvann_tq_D8_ministral_3_14b) (`D8`) on the card, at an 8,192-token context | 30.6 tokens/s ◦ |
+| A 24 GB card | [Qwen 3.6 35B-A3B](https://huggingface.co/eval-apply/silvann_tq_D8E4_qwen3.6_35b_a3b) on the card | 90 tokens/s |
+| An 8 GB card, 32 GB of RAM | [Qwen 3.6 35B-A3B](https://huggingface.co/eval-apply/silvann_tq_D8E4_qwen3.6_35b_a3b) (`D8E4`) — the dense part on the card, the experts on the CPU in RAM, and 2 GB of the card the tier of experts used most | 42 tokens/s § |
+| An 8 GB card, 32 GB of RAM, an NVMe disk | [Qwen 3.5 122B-A10B](https://huggingface.co/eval-apply/silvann_tq_D4E4_qwen3.5_122b_a10b) (`D4E4`) — the dense part on the card, the experts on the CPU | 4.7 tokens/s ◦ |
+| A 16 GB card, 28 GB of RAM | [Qwen 3.6 35B-A3B](https://huggingface.co/eval-apply/silvann_tq_D8E4_qwen3.6_35b_a3b) (`D8E4`) — the dense part on the card, the experts on the CPU in RAM, and 8 GB of the card the tier of experts used most | 55.9 tokens/s ‡ |
+| A 16 GB card, 28 GB of RAM, an NVMe disk | [GLM 5.3 Flash](https://huggingface.co/eval-apply/silvann_tq_D8E4_glm_5.3_flash) (`D8E4`) — the dense part on the card, the experts on the CPU, read from the disk | 2.2 tokens/s ‡ |
 | A 32 GB card, 80 GB of RAM | Qwen 3.5 122B-A10B, its experts in RAM and 24 GB of them on the card | 19.9 tokens/s |
-| A 16 GB card, 150 GB of RAM | [GLM 5.3 Flash](https://huggingface.co/eval-apply/GLM-5.3-Flash_silvann_tq_D4E4), its experts in RAM and 6 GB of them on the card | 7.5 tokens/s |
-| A 32 GB card, 256 GB of RAM | [Qwen 3.5 397B-A17B](https://huggingface.co/eval-apply/Qwen3.5-397B-A17B_silvann_tq_D4E4), its experts in RAM and 24 GB of them on the card | 9.0 tokens/s |
+| A 16 GB card, 150 GB of RAM | [GLM 5.3 Flash](https://huggingface.co/eval-apply/silvann_tq_D4E4_glm_5.3_flash), its experts in RAM and 6 GB of them on the card | 7.5 tokens/s |
+| A 32 GB card, 256 GB of RAM | [Qwen 3.5 397B-A17B](https://huggingface.co/eval-apply/silvann_tq_D4E4_qwen3.5_397b_a17b), its experts in RAM and 24 GB of them on the card | 9.0 tokens/s |
 
 On AMD Instinct MI50 cards in a Dell R730, each process held to the memory its row names — except the rows with experts
 on the card, which ran on the machine's 256 GB and name what the model needs. ◦ Ran on a 32 GB card: the model fits the
@@ -51,52 +51,64 @@ positions and then the answer:
 
 | Model | How it runs | Prompt | Answer |
 |---|---|---|---|
-| [Ministral 3 14B](https://huggingface.co/eval-apply/Ministral-3-14B_silvann_tq_D4) (`D4`) | on the card | 958 positions/s | 39 tokens/s (46 on a short prompt) |
-| [Ministral 3 14B](https://huggingface.co/eval-apply/Ministral-3-14B_silvann_tq_D8) (`D8`) | on the card | 873 positions/s | 25 tokens/s (27 on a short prompt) |
-| [Qwen 3.8 27B](https://huggingface.co/eval-apply/Qwen3.8-27B_silvann_tq_D4) | on the card | 549 positions/s | 23.6 tokens/s (24.4 on a short prompt) |
-| [Qwen 3.6 35B-A3B](https://huggingface.co/eval-apply/Qwen3.6-35B-A3B_silvann_tq_D8E4) (`D8E4`) | the dense part on the card, the experts on the CPU, and 8 GB of the card the tier of experts used most | 117 positions/s | 52 tokens/s |
+| [Ministral 3 14B](https://huggingface.co/eval-apply/silvann_tq_D4_ministral_3_14b) (`D4`) | on the card | 958 positions/s | 39 tokens/s (46 on a short prompt) |
+| [Ministral 3 14B](https://huggingface.co/eval-apply/silvann_tq_D8_ministral_3_14b) (`D8`) | on the card | 873 positions/s | 25 tokens/s (27 on a short prompt) |
+| [Qwen 3.8 27B](https://huggingface.co/eval-apply/silvann_tq_D4_qwen3.8_27b) | on the card | 549 positions/s | 23.6 tokens/s (24.4 on a short prompt) |
+| [Qwen 3.6 35B-A3B](https://huggingface.co/eval-apply/silvann_tq_D8E4_qwen3.6_35b_a3b) (`D8E4`) | the dense part on the card, the experts on the CPU, and 8 GB of the card the tier of experts used most | 117 positions/s | 52 tokens/s |
 | the same | without the tier | 55 positions/s | 28 tokens/s |
 | the same | on the CPU alone | 21 positions/s | 8.6 tokens/s |
 
-**New in v0.8.0:** pipeline parallelism, and a model's setup chosen for the machine it starts on.
+**New in v0.9.0:** tool calling — a model opens a Lisp REPL on the machine it runs on, in its answer.
 
-A ring of machines: a model's layers split over several PCs, each holding a run of them, each server started from its
-own config — `pipeline_parallelism` "yes", its `pipeline_parallelism_layers` and `pipeline_parallelism_next`, the
-machine after it; the one whose layers begin at 0 answers the UI, the one with the last layers runs the head
-([`docs/users.md`](docs/users.md)). A model larger than one machine's RAM or card runs over several: GLM 5.3 Flash over
-two stages, its experts in their RAM, gives the whole model's tokens, 33 of 33, at 6.95 tokens a second on two MI50s;
-the 27B over two stages the same, 33 of 33. A config's `card` picks a machine's card, or `"cpu"` its CPU and RAM — so a
-card and the CPU beside it are two machines of one ring: on the RTX 5060 Ti, the 35B-A3B half on the card and half in
-RAM answers as Hugging Face's does (7 of 8 tokens, then its second at its own near-tie) at 13.8 tokens a second. What
-crosses the network is a row of numbers a position. A Qwen model's pictures are read on one machine for now.
+The model calls one tool, `lisp`, in the format it was trained on — Qwen's and GLM's `<tool_call>`, Ministral's
+`[TOOL_CALLS]` — with a form to evaluate: the answer stops where the call ends, the form runs in a REPL beside the
+server, and its value is read back in as the model's chat template frames a tool's answer, the answer going on from
+there. `(help)` lists the commands: `ls`, `read`, `write`, `cd` and `pwd` for the folders; `bash`, a shell command in
+the working folder (stopped, with what it started, after 60 seconds — up to 600 when the form asks — or after 1 MB of
+output); `fetch`, a web page's words without its markup; and Lisp to put them together — `define`, `let`, `lambda`,
+`map`, `filter`, text and lists. The UI shows a run of calls as one `<!tools>` block ([`docs/users.md`](docs/users.md#the-models-tool)).
 
-A config that names no placement — where the experts sit, how much of the card holds the ones used most, how long a
-conversation the card has room for — gets one when the server starts: the setups are tried on the card fastest first
-(one the card cannot hold is refused in about 2 seconds), the RAM is measured — a container's or a service's memory
-limit counts, and 500 MB is left spare beside what the server holds — and the choice is kept in the model's folder,
-`autotune.json`, so the next start takes it without trying ([`docs/users.md`](docs/users.md#4-the-models-settings)).
-`max_context` "auto" fills the card, up to the model's own length; `card_experts` "yes" or "no" keeps or leaves out the
-card's tier, sized in 256 MB steps; a placement the config names is started as it is. On an MI50 it gives the 122B with
-80 GB of RAM a 25 GB tier — 24.6 tokens a second, as the 24 GB given by hand — and GLM with 150 GB a 21 GB tier, 9.2-9.4
-against 7.9-8.1; on an RTX 5060 Ti with 28 GB of RAM, the 35B-A3B an 11 GB tier, 57 tokens a second, and the 122B and
-GLM their experts from the disk, as their rows of the list. A server that cannot start says why, in one line in the UI's
-Options, with the setting to change. When RAM cannot hold two conversations at the full context, the one put aside is
-saved to its folder and read back when it returns.
+What a command may do without asking you is the conversation's, chosen beside its **tools** switch: ask first — reads in
+the workspace and in folders you allowed; reads unasked — every read, the default (a config's `tools`, `"chill"`); full
+auto — everything. Anything else stops the answer with a question under it — allow the folder, allow once, or refuse —
+and a refusal is said to the model, which answers without it. The switch works as the thinking switch does: off, the
+model's calls are answered that the tool is off; a conversation's first message declares the tool, so one begun without
+it does not take it on later. `"tools": "no"` in a config turns it off for every conversation on that server. The REPL
+starts in `workspace/` beside the conversations (`tools_folder` names another) and runs as the server's user — in the
+Docker image, the container's.
 
-A video is read to its budget: the frames the processor samples, each fitted as it is read — a minute of 1080p held 0.39
-GB at the peak, from 10.48 — and `max_tokens_per_video` (8,192 by default) sets how many tokens one becomes. With the
-experts on the CPU the server no longer grows as it answers (40 rounds had added half a gigabyte; now flat), and its
-answers are the same to the bit.
+In a terminal, `silvann_cli` (`silvann_cli.py`, in the release from this one) has the conversation the UI has — over
+ssh, say: the answer written as it comes, its thinking dimmed, the tool's calls and their values shown, and an ask
+answered at a prompt — `y` once, `f` the folder (a read), `n` or Enter refuses. It takes the server's defaults unless
+`--notools` or `--nothink` says otherwise, and `/mode` chooses what the tool may do
+([`docs/users.md`](docs/users.md#3-serve-it-and-chat)).
 
-The Docker image keeps what it holds across an update: a test updates a running app from one image to a newer one of the
-same tag, over the same volume, and checks that the model answers, that the conversations — a picture's and a video's
-among them — come back with their history and go on, and that the video reader and the token are still there; it passed
-from v0.7.0's image to this one, and runs before every release. Its data is a folder: the desktop's **SiLVANN data**
-(`silvann_open_data`) opens it in Explorer, and a model downloaded on another machine is pasted into its `models`; the
-image gives everything in it to the app's user each time it starts. `silvann_reclaim_space` gives Windows back the room
-a deleted model leaves in Docker Desktop's disk file. The Windows scripts make their folder whole at each run — an
-action or a desktop shortcut an older install lacks. `SILVANN_NAME` and `SILVANN_VOLUME` keep a second SiLVANN beside
-the first.
+Checked through the server's API on two MI50s: the 27B, the 35B-A3B, the 122B (`D4E4`), GLM 5.3 Flash and Ministral 3
+14B (`D8`) each found a word in a note in its workspace through the tool; the 27B, the 35B-A3B, the 122B and GLM asked
+before reading a file outside it and went on once allowed; the 27B told the user of a write refused, and the 122B's
+`(bash "wc -l list.md")` ran once allowed. A call and its answer are framed as each model's chat template frames them,
+to the token. The terminal's chat, on the 35B-A3B: a read outside the workspace unasked in "chill", a `bash` asked
+and allowed with `y`, a read asked and refused with `n`, an answer stopped with Ctrl-C, and a conversation put away
+after two idle minutes answering again. On an RTX 5060 Ti the same through the server for the 27B, the 35B-A3B, the
+122B and GLM, and for the 27B and the 35B-A3B a `fetch` and a write asked too; the terminal's chat the same on the
+35B-A3B; the UI's switch, its selector and the three answers to an ask clicked in a browser; and inside the Docker
+image, the tool on the volume's `workspace/` and `docker exec -it silvann silvann_cli`.
+
+⚠ The models have new names — `silvann_tq_<bits>_<model>`, the model's name in lowercase:
+`silvann_tq_D8E4_qwen3.6_35b_a3b`, `silvann_tq_D4_qwen3.8_27b`, `silvann_tq_D4E4_glm_5.3_flash`,
+`silvann_tq_D8_ministral_3_14b` and the rest (`silvann list`). A model downloaded with an earlier release keeps its
+folder and its old name, and runs as before, its conversations with it; but `silvann list` and a download know only the
+new names, and a later release's new program files reach a model under its new name alone — download it again under
+that name when you can (the conversations stay with the old folder). The repositories on Hugging Face were renamed, and
+their old names lead to the new ones, so an earlier release still downloads.
+
+Also: two servers started on one machine boot one after the other, each trying the card as the other leaves it. A setup
+kept in `autotune.json` is chosen again when the card holds 1 GB less than when it was chosen, and on an AMD card a kept
+setup is taken at the next start again — the card's memory in use, which changes from one boot to the next, had kept it
+from matching; one the card refuses is chosen again around the config's own settings. An integrated GPU
+(`khronos_opencl1_igpu`) reads pictures on the CPU unless the config's `picture_pixels` gives them room in its pool. The
+UI starts again the model it last started only when that start booted. An install's `.gitignore` leaves out the Hugging
+Face token, the UI's last start and the tool's files.
 
 Every release before this one, and this one's notes again: [`release_logs/v0.md`](release_logs/v0.md).
 
@@ -109,6 +121,7 @@ Every release before this one, and this one's notes again: [`release_logs/v0.md`
 | **Not yet** | Apple silicon |
 
 Pictures and videos are read by the Qwen models and GLM 5.3 Flash (v0.7.0: [`release_logs/v0.md`](release_logs/v0.md#v070)); Ministral 3 does not read them.
+Every model calls the tool, a Lisp REPL on the machine, in its own trained format (v0.9.0: [`docs/users.md`](docs/users.md#the-models-tool)).
 
 ## Quick start
 
@@ -122,8 +135,8 @@ conversations and their settings stay.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/eval-apply-labs/SiLVANN/HEAD/install.sh | bash   # into ./silvann, and a `silvann` command
-silvann download Qwen3.6-35B-A3B_silvann_tq_D8E4
-silvann serve Qwen3.6-35B-A3B_silvann_tq_D8E4                       # on port 8765
+silvann download silvann_tq_D8E4_qwen3.6_35b_a3b
+silvann serve silvann_tq_D8E4_qwen3.6_35b_a3b                       # on port 8765
 silvann ui                                                          # a chat in the browser, at http://localhost:8090
 ```
 
@@ -132,8 +145,8 @@ Or by hand, from this folder:
 ```bash
 python3 -m venv venv && venv/bin/pip install -r requirements.txt
 SILVANN_PYTHON=venv/bin/python ./build.sh                        # needs g++; ROCm's hipcc for AMD cards, CUDA's nvcc for NVIDIA
-venv/bin/python silvann_core.py download-model Qwen3.6-35B-A3B_silvann_tq_D8E4
-venv/bin/python start_silvann_server.py --model models/Qwen3.6-35B-A3B_silvann_tq_D8E4   # on port 8765
+venv/bin/python silvann_core.py download-model silvann_tq_D8E4_qwen3.6_35b_a3b
+venv/bin/python start_silvann_server.py --model models/silvann_tq_D8E4_qwen3.6_35b_a3b   # on port 8765
 venv/bin/python silvann_ui.py --port 8090                          # a chat in the browser, on the server above
 ```
 
@@ -186,7 +199,7 @@ engine/src/         the interpreter (engine, sys), the library (nn), the models 
 runtime/            the Python side: a model folder booted onto the machine, conversations, the chat framing
 lisp/               each model family's program, in Lisp — a model folder carries its family's in its own lisp/
 silvann_core.py     download-model · list-models
-start_silvann_server.py, silvann_ui.py
+start_silvann_server.py, silvann_ui.py, silvann_cli.py     the server, the chat in a browser, the chat in a terminal
 models/             where downloaded models go
 release_logs/       v0.md — what each 0.x release brought, newest first
 docs/               users.md — running it; models.md — every model and what it needs; results.md — every measurement;

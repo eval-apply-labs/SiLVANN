@@ -4,7 +4,7 @@
 can avoid bundling the model in the github code release"*. The release carries the code; a model folder is fetched the
 first time it is named:
 ```
-  ensure_model("models/Qwen3.6-35B-A3B_silvann_tq_D8E4")     # there: answers the path · not there: asks, then downloads
+  ensure_model("models/silvann_tq_D8E4_qwen3.6_35b_a3b")     # there: answers the path · not there: asks, then downloads
 ```
 The folder's name picks the repository (`KNOWN`), or `repo=` names one. A name says its widths: `D` the dense layer
 matrices, `E` the routed experts — `D8E4` is 8 bits and 4. Nothing is downloaded without a yes; with no
@@ -16,16 +16,16 @@ import sys
 from .model_folder import Refused
 
 KNOWN = {
-    "Qwen3.6-35B-A3B_silvann_tq_D8E4": ("eval-apply/Qwen3.6-35B-A3B_silvann_tq_D8E4", "20 GB"),
-    "Qwen3.6-35B-A3B_silvann_tq_D4E4": ("eval-apply/Qwen3.6-35B-A3B_silvann_tq_D4E4", "19 GB"),
-    "Qwen3.5-122B-A10B_silvann_tq_D8E4": ("eval-apply/Qwen3.5-122B-A10B_silvann_tq_D8E4", "67 GB"),
-    "Qwen3.5-122B-A10B_silvann_tq_D4E4": ("eval-apply/Qwen3.5-122B-A10B_silvann_tq_D4E4", "65 GB"),
-    "Qwen3.5-397B-A17B_silvann_tq_D4E4": ("eval-apply/Qwen3.5-397B-A17B_silvann_tq_D4E4", "207 GB"),
-    "Qwen3.8-27B_silvann_tq_D4": ("eval-apply/Qwen3.8-27B_silvann_tq_D4", "16 GB"),
-    "GLM-5.3-Flash_silvann_tq_D4E4": ("eval-apply/GLM-5.3-Flash_silvann_tq_D4E4", "162 GB"),
-    "GLM-5.3-Flash_silvann_tq_D8E4": ("eval-apply/GLM-5.3-Flash_silvann_tq_D8E4", "166 GB"),
-    "Ministral-3-14B_silvann_tq_D4": ("eval-apply/Ministral-3-14B_silvann_tq_D4", "7.4 GB"),
-    "Ministral-3-14B_silvann_tq_D8": ("eval-apply/Ministral-3-14B_silvann_tq_D8", "13.5 GB"),
+    "silvann_tq_D8E4_qwen3.6_35b_a3b": ("eval-apply/silvann_tq_D8E4_qwen3.6_35b_a3b", "20 GB"),
+    "silvann_tq_D4E4_qwen3.6_35b_a3b": ("eval-apply/silvann_tq_D4E4_qwen3.6_35b_a3b", "19 GB"),
+    "silvann_tq_D8E4_qwen3.5_122b_a10b": ("eval-apply/silvann_tq_D8E4_qwen3.5_122b_a10b", "67 GB"),
+    "silvann_tq_D4E4_qwen3.5_122b_a10b": ("eval-apply/silvann_tq_D4E4_qwen3.5_122b_a10b", "65 GB"),
+    "silvann_tq_D4E4_qwen3.5_397b_a17b": ("eval-apply/silvann_tq_D4E4_qwen3.5_397b_a17b", "207 GB"),
+    "silvann_tq_D4_qwen3.8_27b": ("eval-apply/silvann_tq_D4_qwen3.8_27b", "16 GB"),
+    "silvann_tq_D4E4_glm_5.3_flash": ("eval-apply/silvann_tq_D4E4_glm_5.3_flash", "162 GB"),
+    "silvann_tq_D8E4_glm_5.3_flash": ("eval-apply/silvann_tq_D8E4_glm_5.3_flash", "166 GB"),
+    "silvann_tq_D4_ministral_3_14b": ("eval-apply/silvann_tq_D4_ministral_3_14b", "7.4 GB"),
+    "silvann_tq_D8_ministral_3_14b": ("eval-apply/silvann_tq_D8_ministral_3_14b", "13.5 GB"),
 }
 
 

@@ -1,4 +1,5 @@
 # what a build, a download or a conversation leaves behind
+/build.log
 /lib/
 /engine/build/
 /models/*/
@@ -6,3 +7,12 @@
 /venv/
 __pycache__/
 *.pyc
+# the commands install.sh writes
+/silvann
+/silvann_cli
+# what a user keeps beside the release: the Hugging Face token, the UI's last start, the model's tool's folder and the
+# folders it reads unasked
+/.huggingface_token
+/ui_last_start.json
+/workspace/
+/tools.json

@@ -72,7 +72,7 @@ tried it yet: tell us in Discussions if you do. ROCm inside WSL supports recent 
 
 ```bash
 venv/bin/python silvann_core.py list-models
-venv/bin/python silvann_core.py download-model Qwen3.6-35B-A3B_silvann_tq_D8E4
+venv/bin/python silvann_core.py download-model silvann_tq_D8E4_qwen3.6_35b_a3b
 ```
 
 A model lands in `models/<name>/` with a `configs/default.json` and its program in `lisp/` — the Lisp the evaluator
@@ -86,9 +86,17 @@ first.
 ## 3. Serve it, and chat
 
 ```bash
-venv/bin/python start_silvann_server.py --model models/Qwen3.6-35B-A3B_silvann_tq_D8E4 [--port 8765]
+venv/bin/python start_silvann_server.py --model models/silvann_tq_D8E4_qwen3.6_35b_a3b [--port 8765]
 venv/bin/python silvann_ui.py --port 8090
+venv/bin/python silvann_cli.py [--notools] [--nothink]     # or the chat in this terminal
 ```
+
+**In a terminal**, `silvann_cli` (`silvann_cli.py`) talks to the server as the UI does — over ssh, say: the answer
+written as it comes, its thinking dimmed, the model's tool calls and their values shown. A new conversation takes the
+server's defaults, its thinking and its tool in the config's mode, unless `--notools` or `--nothink` says otherwise; an
+ask stops the answer at a prompt — `y` allows it once, `f` the folder (a read), `n` or Enter refuses. In the
+conversation: `/new`, `/sys <prompt>` (a new conversation with it), `/mode ask|chill|full-auto`, `/quit`; Ctrl-C stops
+an answer. `--endpoint` names another server (`http://localhost:8765` by default).
 
 **Pictures** (the Qwen models): the UI's 📎 button attaches one to the next message — it is read when it is attached,
 and the message carries it; the server reads one at `POST /cartridges/<id>/images` and a message names it in `images`.
@@ -126,10 +134,44 @@ MB, put away to its folder, as one left idle for two minutes is, and **Activate*
 
 On a machine with no card the model runs on the CPU's own cores (the `x86_avx2` family, which needs AVX2, FMA and F16C:
 Intel from Haswell, 2013, AMD from Excavator, 2015; an older processor has no family to run on). The pack made for
-that is `Qwen3.6-35B-A3B_silvann_tq_D4E4`: its dense part at 4 bits, about 15 tokens a second on the test machine's
+that is `silvann_tq_D4E4_qwen3.6_35b_a3b`: its dense part at 4 bits, about 15 tokens a second on the test machine's
 two Xeons. On a processor with AVX-512 (F, BW, VL and DQ) the family's matrix products use it: on a four-core Xeon
 W-2123 with two DDR4-2400 sticks the 35B D8E4 alone ran at 9.0 tokens a second against 1.7 with AVX2, and with its
 experts on the CPU beside a card at 27-29 against 15-17. `SILVANN_CPU_AVX512=0` keeps the AVX2 code.
+
+### The model's tool
+
+A conversation has the model's tool unless its **tools** switch is off, or the config says `"tools": "no"`: the model
+can open a Lisp REPL on the server's machine in its answer: it sends one form at a time — `(help)` lists the commands —
+and reads each value back before it writes on. The commands list folders, read files and write them, run a shell
+command and read a web page: `(ls "notes")`, `(read "notes/a.md" 140 20)`, `(write "out.txt" "…")`,
+`(bash "git log -3")` (in the working folder, stopped after 60 seconds or `(bash "…" 300)`), `(fetch "https://…")` (the
+page's words, without its markup), `(cd "…")`, `(pwd)`; and Lisp to put them together — `define`, `let`, `lambda`,
+`map`, `filter`, text and lists. The UI shows a run of calls as one block:
+```
+<!tools>
+> (ls "notes")
+("secret.txt")
+> (read "notes/secret.txt")
+"The secret word is PERIWINKLE.\n"
+</tools>
+```
+The REPL starts in the workspace folder (`tools_folder`). What its commands may do without asking you is chosen beside
+the tools switch, for that conversation — a new one starts with the config's `tools`. The folders you allowed are
+every conversation's, kept in `tools.json` beside the conversations.
+
+| the UI's setting (`tools`) | reads | writes, commands, web pages |
+|---|---|---|
+| ask first (`"ask"`) | in the workspace, and in folders you allowed: unasked; elsewhere asked — allow the folder, allow once, or refuse | asked — allow once, or refuse |
+| reads unasked (`"chill"`, the default) | unasked, anywhere the server's user can read | asked |
+| full auto (`"full-auto"`) | unasked | unasked |
+
+An ask stops the answer: its buttons are under it, and the answer goes on once you choose — a refusal is said to the
+model, which answers without it. The switch works as the thinking switch does, between messages: turned off, the
+model's calls are answered that the tool is off; turned on, only in a conversation that began with it, as the tool is
+declared in a conversation's first message. ⚠ The REPL runs as the server's user, with its files and its network: in a
+Docker container, the container's. A command allowed once runs as written — read it before you allow it; "full auto"
+runs every command the model writes.
 
 ## 4. The model's settings
 
@@ -152,6 +194,8 @@ first argument.
 | `max_context` | the longest conversation, in positions, 32,768 by default (the 27B's config: `"auto"`); the cache is sized for it at boot, and the `_note` beside it says how many positions 100 MB of the card holds for this model — lower it if the model does not fit on your card, raise it if there is room. `"auto"` (or `"max"`): as many as the card holds beside the model, up to the model's own length (262,144 for the Qwen models and Ministral, 1,048,576 for GLM) — the card's tier of experts then gets only what is left once the context is that whole length |
 | `max_tokens_per_video` | the most tokens a video attached to a message becomes, 8,192 by default: its frames share them, so a longer video is seen as smaller pictures of each frame; more sees it in more detail and takes as many positions of the conversation. Reading a video holds 57-74 KB of RAM a token, depending on the model — its patches twice and its row (0.45 GB at 8,192 for GLM, 0.58 for the 27B) — and the server counts it when it chooses whether the experts fit in RAM |
 | `thinking` | whether the model reasons before it answers, by default |
+| `tools` | `"chill"` (default), `"ask"` or `"full-auto"`: what the model's tool, a Lisp REPL on the server's machine, may do without asking you in a new conversation — the UI chooses a conversation's own (section 3, the model's tool); `"no"`: no conversation has the tool |
+| `tools_folder` | where the model's REPL starts and reads unasked; by default `workspace/` beside the conversations |
 | `lora` | an adapter from the model's folder to load at boot, or `null` |
 | `sampler` | how the next token is chosen: `"generation"` (the model's own `generation_config.json`), `null` (the most likely, greedy), or `{"temperature", "top_k", "top_p", "repetition_penalty"}`. It is drawn on the card — only the token comes back — when `temperature` is above 0 and `top_k` 1 to 64, and on the host over the logits otherwise |
 | `options` | handed to the model's runtime, below |
@@ -166,7 +210,9 @@ context's cache, in steps of 256 MB, one step left free. The cache for the whole
 smaller costs a little speed, a cache too small refuses a conversation. If nothing boots, the context is halved, down
 to 4,096. A trial the card cannot hold is refused at once, so the trials take seconds. The
 server's log says what was chosen and why; the choice is kept in the model's folder, `autotune.json`, and a start on
-the same machine with the same config takes it without trying (delete the file to choose again). What the config names
+the same machine with the same config takes it without trying (delete the file to choose again); a card that holds
+1 GB less than when the choice was made — another program, or another server, held it then — has it chosen again. Two
+servers started on one machine boot one after the other, each trying the card as the other leaves it. What the config names
 of the placement is kept and the rest is chosen around it — `"auto"` names nothing, so `{"experts_on": "cpu",
 "experts_from": "auto"}` has where from and the tier chosen, and `"card_experts": "no"` asks for no tier — and its other
 options are kept in every trial. A machine with no card of its own (the CPU alone, an integrated GPU) is not tried.
@@ -182,7 +228,7 @@ The Qwen models' `options`:
 | `experts_from` | `"auto"`, `"ram"`, `"disk"`, `"mapped"` | with the experts on the CPU: copied into RAM, or read from a file on the disk as they are needed — `disk` keeps the ones used in the engine's own memory, as much of it as there is (`experts_ram_gb` to set it), `mapped` leaves that to the system's page cache and is slower; `auto` chooses by the memory there is |
 | `card_experts` | `"yes"` (default), `"no"` | with the experts on the CPU from RAM: the card's own tier of them (the L1), sized at boot to what the card holds beside the context — or none. `card_experts_gb` pins a size instead, in gigabytes, below |
 | `experts_int8` | `false` (default), `true` | with the experts on the CPU: a generated token's experts multiplied in integers, faster on the CPU and slightly less exact — ▶ the quantisation table |
-| `picture_pixels` | pixels, default `4194304` (2048 x 2048) | the largest picture the boot makes room for on the card, about 23 KB of the card's memory a 16 x 16 patch (0.37 GB at the default); a larger picture is made smaller. `0` keeps none and reads pictures on the CPU instead (1.8 GB of RAM, at most a megapixel) |
+| `picture_pixels` | pixels, default `4194304` (2048 x 2048) | the largest picture the boot makes room for on the card, about 23 KB of the card's memory a 16 x 16 patch (0.37 GB at the default); a larger picture is made smaller. `0` keeps none and reads pictures on the CPU instead (1.8 GB of RAM, at most a megapixel) — the default on an integrated GPU (OpenCL 1.2), whose pool is refused the 4 MP room |
 | `picture_weights` | `"auto"` (default), `"card"`, `"ram"` | the vision tower's weights, 0.6 GB: on the card, or in RAM and written to the card a block at a time as a picture is read (about 0.1 s more a picture); `auto` puts them on the card when the experts are on the CPU and in RAM otherwise |
 
 GLM 5.3 Flash's `options`:
@@ -237,7 +283,7 @@ its server the same way; its config (`configs/default.json`) says its part:
 | `pipeline_parallelism_next` | the machine after this one, `host:port`; the last machine names the first |
 | `pipeline_parallelism_port` | where this machine listens for the one before it, 8766 by default |
 | `max_context` | the same number on every machine (not `"auto"`) |
-| `card` | which of the machine's cards to run on (`0`, `1`, …), `"auto"` the first, `"cpu"` none — its CPU and RAM. Two cards in one PC are two machines of the ring, on ports of their own; so are a card and the CPU beside it |
+| `card` | which of the machine's cards to run on (`0`, `1`, …), `"auto"` the first, `"cpu"` none — its CPU and RAM. Two cards in one PC are two machines of the ring, on ports of their own; so are a card and the CPU beside it. Two on one card boot one after the other, and the first takes what its setup chooses of it: give each its share, `card_experts_gb` in its options |
 
 The machine whose layers begin at 0 is the first: it answers the UI and holds the conversations. The one whose layers end
 at the model's last runs its head, draws the next token there, and hands it back to the first. Each machine chooses its

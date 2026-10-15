@@ -34,6 +34,32 @@ from nicegui import ui, app
 
 
 THINK_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL)
+# the model's tool (NN-88): the server writes every model's calls the same way in the answer's text
+TOOL_RE = re.compile(r"<tool_(call|response|ask|answer)>(.*?)</tool_\1>", re.DOTALL)
+ASK_LABELS = {"folder": "allow the folder", "once": "allow once", "refuse": "refuse"}
+
+
+def tools_markdown(content: str) -> str:
+    """An answer's calls to the model's tool as one `<!tools> … </tools>` block a run of them: a form after `>`, its
+    value under it, an ask and the user's answer as comments."""
+    parts, block, pos = [], [], 0
+
+    def flush():
+        if block:
+            parts.append("\n\n```lisp\n<!tools>\n%s\n</tools>\n```\n\n" % "\n".join(block))
+            block.clear()
+    for m in TOOL_RE.finditer(content):
+        gap = content[pos:m.start()]
+        if gap.strip():
+            flush()
+            parts.append(gap)
+        kind, body = m.group(1), m.group(2)
+        block.append({"call": "> " + body, "response": body, "ask": ";; asked: " + body,
+                      "answer": ";; you answered: " + ASK_LABELS.get(body, body)}[kind])
+        pos = m.end()
+    flush()
+    parts.append(content[pos:])
+    return "".join(parts)
 
 
 # ---------- HTTP client ----------
@@ -206,6 +232,31 @@ class Client:
         r.raise_for_status()
         return r.json()
 
+    async def set_tools(self, cart_id: str, enable: bool):
+        r = await self.http.patch(f"{self.endpoint}/cartridges/{cart_id}", json={"tools": bool(enable)},
+                                  headers=self._hdr(cart_id))
+        r.raise_for_status()
+        return r.json()
+
+    async def set_tools_mode(self, cart_id: str, mode: str):
+        """What the conversation's tool may do unasked: "ask", "chill" or "full-auto"."""
+        r = await self.http.patch(f"{self.endpoint}/cartridges/{cart_id}", json={"tools_mode": mode},
+                                  headers=self._hdr(cart_id))
+        r.raise_for_status()
+        return r.json()
+
+    async def tools_settings(self):
+        """The server config's tools — a new conversation's mode, or "no" — and the folders (▶ /tools)."""
+        r = await self.http.get(f"{self.endpoint}/tools")
+        r.raise_for_status()
+        return r.json()
+
+    async def stream_answer(self, cart_id: str, choice: str, max_new_tokens: int):
+        """The user's answer to the model's ask, then the rest of the answer — as `stream_message` yields it."""
+        async for kind, payload in self._stream(f"{self.endpoint}/cartridges/{cart_id}/tools/answer",
+                                                {"choice": choice, "max_new_tokens": max_new_tokens}, cart_id):
+            yield kind, payload
+
     async def stream_message(self, cart_id: str, text: str, max_new_tokens: int,
                               images: Optional[list] = None):
         """Yield (event_kind, payload_dict) tuples from the server's SSE stream until done|error.
@@ -217,6 +268,10 @@ class Client:
         body = {"text": text, "max_new_tokens": max_new_tokens}
         if images:
             body["images"] = list(images)
+        async for kind, payload in self._stream(url, body, cart_id):
+            yield kind, payload
+
+    async def _stream(self, url: str, body: dict, cart_id: str):
         # ⚖ A turn already on the card is answered 503 with Retry-After: 5, and the caller asks again — this is the
         # caller, so it does: a ("waiting", {}) event each time, then another ask 5 s later.
         while True:
@@ -355,6 +410,7 @@ class ServerProcess:
         self.failure: Optional[str] = None     # why the last server it started ended on its own, if it did
         self.started = False                   # whether it had booted when it ended (else it never started)
         self.stopping = False                  # `stop` asked it to end: not a failure
+        self.remember: Optional[dict] = None   # the start written to LAST_START once the server has booted
 
     def is_running(self) -> bool:
         return self.proc is not None and self.proc.poll() is None
@@ -364,7 +420,7 @@ class ServerProcess:
             return "stopped"
         return f"running (pid {self.proc.pid}, cmd: {' '.join(self.cmd or [])})"
 
-    def start(self, model_dir: str, config_name: str, port: int):
+    def start(self, model_dir: str, config_name: str, port: int, remember: Optional[dict] = None):
         if self.is_running():
             raise RuntimeError("already running — stop first")
         if not SERVER_SCRIPT.exists():
@@ -372,6 +428,7 @@ class ServerProcess:
         self.lines.clear()
         self.setup = self.failure = None
         self.started = self.stopping = False
+        self.remember = remember
         # The packed-models launch contract: --model <folder> + a config that overrides default_config.
         self.cmd = [sys.executable, str(SERVER_SCRIPT), "--model", str(model_dir),
                     config_name, "--port", str(int(port))]
@@ -427,6 +484,11 @@ class ServerProcess:
                     said = line.split("⛔ not started: ", 1)[1]
                 if "[silvann_server]" in line and " booted in " in line:
                     self.started = True
+                    if self.remember:             # a start that never booted is not the one to start again
+                        try:
+                            LAST_START.write_text(json.dumps(self.remember))
+                        except OSError as ex:
+                            self._log(f"[ui] the last start not kept: {ex}")
         finally:
             self._log("[ui] subprocess output stream closed.")
         # a server that ended on its own — not one `stop` ended (it clears `proc` first): why, in a line
@@ -742,6 +804,12 @@ async def page():
             display: flex; flex-direction: column;
             overflow-x: hidden;
         }
+        /* The conversation is as wide as its view: a line longer than a bubble — a tool's value, a model's code —
+           scrolls sideways inside its own code block. A bubble's text is a flex item, which would otherwise grow to
+           its longest line and carry the whole conversation, the user's messages with it, off to the right. */
+        .silvann-chat .q-scrollarea__content { width: 100%; }
+        .silvann-chat .q-message-container > div { min-width: 0; }
+        .silvann-chat .q-message-text pre { overflow-x: auto; }
 
         /* Menu rows in the drawer. In mini mode (60px wide drawer) only the leading icon shows;
            when the drawer expands on hover (overflow-x: visible), labels/chevrons reappear. */
@@ -893,6 +961,17 @@ async def page():
             show_think_toggle = ui.switch("show thinking",
                                            value=state.get("show_thinking", False)
                                            ).props("dense").classes("text-xs")
+            # the model's tool (NN-88): a Lisp REPL on the server's machine, switched as thinking is — declared in a
+            # conversation's first turn, so a conversation begun without it cannot turn it on — and what its commands
+            # may do unasked, the conversation's (a new one's the server config's tools, whose "no" turns it off)
+            tools_toggle = ui.switch("tools", value=False).props("dense").classes("text-xs").tooltip(
+                "The model may use a Lisp REPL on the server's machine — list folders, read and write files, run "
+                "commands, read web pages. Off: its calls are refused.")
+            tools_mode = ui.select({"ask": "ask first", "chill": "reads unasked", "full-auto": "full auto"},
+                                   value=None).props("dense options-dense borderless").classes("text-xs").tooltip(
+                "What this conversation's tool may do without asking you: 'ask first' reads in its workspace and "
+                "asks for anything else; 'reads unasked' reads anywhere and asks to write, run or fetch; 'full auto' "
+                "asks nothing.")
             # Lock icon is the password control: click to set / change / remove the password for
             # the active conversation. lock_open = unprotected, lock = protected. Since saves
             # happen automatically after each turn, there's no separate "save" button.
@@ -914,6 +993,31 @@ async def page():
                 state["show_thinking"] = bool(e.value)
                 render_chat()
             show_think_toggle.on_value_change(on_show_thinking)
+
+            async def on_tools(e):
+                if not state["active_id"] or bool(e.value) == state.get("active_tools", False):
+                    return
+                try:
+                    await client.set_tools(state["active_id"], bool(e.value))
+                    state["active_tools"] = bool(e.value)
+                except httpx.HTTPStatusError as ex:
+                    tools_toggle.set_value(state.get("active_tools", False))
+                    safe_notify(ex.response.json().get("detail", str(ex)) if ex.response.status_code == 409
+                                else f"couldn't set the tool: {ex}", type="warning")
+                except Exception as ex:
+                    safe_notify(f"couldn't set the tool: {ex}", type="negative")
+            tools_toggle.on_value_change(on_tools)
+
+            async def on_tools_mode(e):
+                if not e.value or not state["active_id"] or e.value == state.get("tools_mode"):
+                    return
+                try:
+                    await client.set_tools_mode(state["active_id"], e.value)
+                    state["tools_mode"] = e.value
+                except Exception as ex:
+                    tools_mode.set_value(state.get("tools_mode"))
+                    safe_notify(f"couldn't set what the tool may do: {ex}", type="negative")
+            tools_mode.on_value_change(on_tools_mode)
         # Banner shown when the active cart is loaded into UI memory but NOT bound to VRAM.
         # User must click Activate to /bind. Hidden once bound; reappears after server eviction.
         with ui.row().classes("w-full items-center gap-2 p-3 rounded bg-amber-50 border border-amber-300"
@@ -924,7 +1028,7 @@ async def page():
                                           ).classes("text-sm flex-grow")
             bind_btn = ui.button("Activate", icon="play_arrow"
                                  ).props("color=primary unelevated")
-        chat_scroll = ui.scroll_area().classes("w-full flex-grow min-h-0 border rounded")
+        chat_scroll = ui.scroll_area().classes("silvann-chat w-full flex-grow min-h-0 border rounded")
         with chat_scroll:
             chat_history_col = ui.column().classes("w-full p-4 gap-3")
         # Attached-image chip row. Rendered into by render_pending_images() whenever
@@ -1348,6 +1452,8 @@ async def page():
                 content = m["content"] or ""
                 if m["role"] == "assistant" and not show_think:
                     content = THINK_RE.sub("", content)
+                if m["role"] == "assistant":
+                    content = tools_markdown(content)
                 _sent = (m["role"] == "user")
                 # sent=user gives the bubble its style; self-end/self-start does the actual L/R
                 # alignment (the column's align-items:flex-start otherwise keeps both on the left),
@@ -1358,6 +1464,14 @@ async def page():
                     ui.markdown(content or "_(empty)_")
             if state["streaming"]:
                 ui.label("…").classes("opacity-50 self-center animate-pulse")
+            elif state.get("ask"):                       # the model's command waits on the user
+                with ui.card().classes("self-start bg-amber-50 border border-amber-300"):
+                    ui.label("The model asks to %s" % state["ask"]["question"]).classes("text-sm font-mono")
+                    with ui.row().classes("gap-2"):
+                        for choice in state["ask"]["choices"]:
+                            ui.button(ASK_LABELS.get(choice, choice),
+                                      on_click=lambda _, c=choice: answer_ask(c)
+                                      ).props("dense " + ("flat color=negative" if choice == "refuse" else "color=primary"))
         chat_scroll.scroll_to(percent=1.0)
 
     async def activate_cart(cart_id: str):
@@ -1404,6 +1518,17 @@ async def page():
             new_thinking = bool(resp.get("enable_thinking", True))
             state["active_thinking_mode"] = new_thinking
             thinking_mode_toggle.set_value(new_thinking)
+            state["active_tools"] = bool(resp.get("tools", False))
+            tools_toggle.set_value(state["active_tools"])
+            state["ask"] = resp.get("ask")
+            state["tools_mode"] = resp.get("tools_mode")
+            tools_mode.set_value(state["tools_mode"])
+            try:
+                off = (await client.tools_settings())["tools"] == "no"    # the server's config turns it off
+                tools_toggle.set_enabled(not off)
+                tools_mode.set_enabled(not off)
+            except Exception:
+                pass                                       # a server before the tool
             state["protected_active"] = bool(resp.get("protected", False))
             protected_icon.props(f"icon={'lock' if state['protected_active'] else 'lock_open'}")
             # bound_by_self happens if the cart is already bound to OUR session (e.g., we
@@ -1802,6 +1927,9 @@ async def page():
         attached = list(_cart_pending())
         if not txt and not attached:
             return
+        if state.get("ask"):
+            safe_notify("The model waits on your answer to its ask — the buttons under its answer", type="warning")
+            return
         # Explicit set_value pushes the empty string back to the client. Plain assignment doesn't
         # always trigger the value-update event for q-input/textarea, hence the explicit call.
         input_box.set_value("")
@@ -1857,12 +1985,12 @@ async def page():
                         rate = (n_tokens - 1) / elapsed   # exclude the first token from the divisor
                         speed_label.text = f"{rate:.1f} tok/s"
                     render_chat()
-                elif kind == "error":
-                    state["history"][-1]["content"] += (
-                        f"\n\n_[server error: {payload.get('error')}]_")
+                elif not on_tool_event(kind, payload):
                     break
         except httpx.HTTPStatusError as ex:
-            if ex.response.status_code == 409:
+            if ex.response.status_code == 409 and state.get("ask"):
+                state["history"][-1]["content"] += "\n\n_[the model waits on your answer to its ask]_"
+            elif ex.response.status_code == 409:
                 # Server says cart isn't bound anymore — almost certainly evicted (we went idle
                 # past the heartbeat window). Drop the assistant placeholder, flip back to
                 # banner-mode, and let the user re-Activate.
@@ -1895,6 +2023,45 @@ async def page():
                 if cart_id:
                     state["pending_images"][cart_id] = []
                 render_pending_images()
+            render_chat()
+
+    def on_tool_event(kind, payload):
+        """An answer's event other than a token, into the conversation's last message: a call to the model's tool and
+        its value, the ask that stops it, or the server's error. False where the stream is over."""
+        if kind == "tool":
+            state["history"][-1]["content"] += payload.get("text", "")
+            render_chat()
+        elif kind == "ask":
+            state["ask"] = payload
+        elif kind == "error":
+            state["history"][-1]["content"] += f"\n\n_[server error: {payload.get('error')}]_"
+            return False
+        return True
+
+    async def answer_ask(choice: str):
+        """The user's answer to the model's ask, then the rest of its answer, into the conversation's last message."""
+        if state["streaming"] or not state.get("ask") or not state["active_id"]:
+            return
+        state["ask"] = None
+        state["streaming"] = True
+        set_send_btn(True)
+        if not state["history"] or state["history"][-1]["role"] != "assistant":
+            state["history"].append({"role": "assistant", "content": ""})
+        render_chat()
+        try:
+            async for kind, payload in client.stream_answer(state["active_id"], choice, int(max_in.value or 2048)):
+                if kind == "token":
+                    state["history"][-1]["content"] += payload.get("text", "")
+                    render_chat()
+                elif not on_tool_event(kind, payload):
+                    break
+        except httpx.HTTPStatusError as ex:
+            state["history"][-1]["content"] += f"\n\n_[stream error: HTTP {ex.response.status_code}]_"
+        except Exception as e:
+            state["history"][-1]["content"] += f"\n\n_[stream error: {e}]_"
+        finally:
+            state["streaming"] = False
+            set_send_btn(False)
             render_chat()
 
     async def stop():
@@ -1972,10 +2139,10 @@ async def page():
                 return
             try:
                 model_dir = str(MODELS_DIR / model_select.value)
-                SERVER.start(model_dir, config_select.value, int(port_in.value))
-                if LOCAL_APP:                     # started again when the app is next started
-                    LAST_START.write_text(json.dumps({"model": model_select.value, "config": config_select.value,
-                                                      "port": int(port_in.value)}))
+                # a --local app starts it again when it is next started, once it has booted
+                SERVER.start(model_dir, config_select.value, int(port_in.value),
+                             remember={"model": model_select.value, "config": config_select.value,
+                                       "port": int(port_in.value)} if LOCAL_APP else None)
                 state["server_port"] = int(port_in.value)
                 state["selected_model"] = model_select.value
                 state["selected_config"] = config_select.value

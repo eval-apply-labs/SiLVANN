@@ -35,7 +35,8 @@ and the next boot on the same takes it without trying; a boot the card refuses a
 A config's options win: what it names of the placement (`experts_on`, `experts_from`, `card_experts_gb`) is kept and the
 rest chosen around it — `"auto"` names nothing, so `{"experts_on": "cpu", "experts_from": "auto"}` chooses where from and
 the tier — and its other options are kept in every candidate; a placement it names in full is booted as it is. A machine with no card is not tried — its "card" is the CPU's memory — nor an
-integrated GPU (`khronos_opencl1_igpu`), whose memory is the PC's RAM.
+integrated GPU (`khronos_opencl1_igpu`), whose memory is the PC's RAM — where pictures are read on the CPU unless the config's
+`picture_pixels` gives them room.
 """
 import collections
 import datetime
@@ -54,13 +55,16 @@ PLACEMENT = ("experts_on", "experts_from", "card_experts_gb")
 STEP_GB = 0.25           # ⚖ 2026-10-14 "128/256mb is good": the tier's step
 MARGIN_GB = 0.25         # what the card keeps free — ⚖ 2026-10-14 "we already have the video card occupation when we
                          # load, leave 200mb extra there and it will be fine (one 256mb step)": a trial boots beside
-                         # whatever else holds the card then
+                         # whatever else holds the card then, and ⚖ 2026-10-15 "the 256 is to avoid a graphic request to
+                         # oom the card, i think it is necessary when normal users use their main gpu for these things" —
+                         # kept where "max" chooses the context too, though it costs the 27B 3,072 of 32,768 on 16 GB
 CTX_STEP = 1024          # the context's step, where it takes what the card holds (`"max"`)
 MIN_CONTEXT = 4096
 NO_CARD_CONTEXT = 32768  # `"max"` on a machine with no card of its own, and a model that names no length
 NOT_A_CARD = ("x86_avx2", "host", "khronos_opencl1_igpu")   # silicon whose pool is the PC's RAM: never tried
 TIER_MAX_GB = 128        # the binary search's ceiling, past any card's memory
 DISK_CHUNK = 1024        # GLM's prompt rows a step with its experts on the disk (Qwen's chunk is at most 256)
+FREED_GB = 1             # a card this much emptier than when a kept choice was made chooses again (`_freed`)
 RULES = 4                # the rules' version, in what a kept choice was made for: a change to them chooses again
 
 
@@ -125,16 +129,35 @@ class _Prober:
 
 
 def _vendor_cards():
-    """The cards' names and memory as their vendor's tool says them, or "" where there is none."""
-    for cmd in (["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader"],
+    """(the cards' names and memory as their vendor's tool says them, "" where there is none; the bytes each card holds
+    now, [] where the tool does not say) — what a card holds now is not in what a choice is kept under, which a card's
+    own idle memory would change from one boot to the next."""
+    for cmd in (["nvidia-smi", "--query-gpu=name,memory.total,memory.used", "--format=csv,noheader,nounits"],
                 ["rocm-smi", "--showproductname", "--showmeminfo", "vram", "--csv"]):
         if shutil.which(cmd[0]):
             try:
                 out = subprocess.run(cmd, capture_output=True, text=True, timeout=20).stdout
-                return " | ".join(l.strip() for l in out.splitlines() if l.strip())
             except (OSError, subprocess.SubprocessError):
-                pass
-    return ""
+                continue
+            rows = [[c.strip() for c in l.split(",")] for l in out.splitlines() if l.strip()]
+            if cmd[0] == "nvidia-smi":                 # name, total MiB, used MiB
+                col, scale = 2, 2**20
+            else:                                      # a header, then a card a row; the used memory in bytes
+                head, rows = rows[0] if rows else [], rows[1:]
+                col, scale = next((i for i, h in enumerate(head) if "Used" in h), None), 1
+                rows = [head] + rows if col is None else rows
+            try:
+                used = [int(r[col]) * scale for r in rows] if col is not None else []
+            except (IndexError, ValueError):
+                used = []
+            return " | ".join(", ".join(c for i, c in enumerate(r) if i != col) for r in rows), used
+    return "", []
+
+
+def _freed(then, now):
+    """Whether a card holds FREED_GB less now than when a kept choice was made — another program, or another server,
+    held it then — so the choice is made again for the card as it is."""
+    return bool(then and now and len(then) == len(now) and any(a - b > FREED_GB * 2**30 for a, b in zip(then, now)))
 
 
 def _ram_gb():
@@ -173,10 +196,10 @@ def _remembered(folder, key):
     return None
 
 
-def _remember(folder, key, options, max_context, why):
+def _remember(folder, key, options, max_context, why, used):
     try:
         with open(os.path.join(folder.path, "autotune.json"), "w") as f:
-            json.dump({"key": key, "options": options, "max_context": max_context, "why": why,
+            json.dump({"key": key, "options": options, "max_context": max_context, "why": why, "card_used": used,
                        "chosen": datetime.datetime.now().isoformat(timespec="seconds")}, f, indent=2)
     except OSError:
         pass                          # a read-only folder chooses again at each boot
@@ -210,9 +233,20 @@ def choose(path, max_context, options=None, silicon=None, fresh=False, log=print
     where = machine.silicon
     if where in NOT_A_CARD:
         ctx = min(top, NO_CARD_CONTEXT) if most else top
-        return options, ctx, "%s, not a card of its own: the model's own defaults, the context %d" % (where, ctx)
-    key = _key(where, [c["card"] for c in machine.e.cards()] + [_vendor_cards()], max_context, options, video_tokens)
+        why = "%s, not a card of its own: the model's own defaults, the context %d" % (where, ctx)
+        # an integrated GPU's pool is refused the pictures' room the model sets aside by default (`MEASURED` 2026-10-14
+        #   on the precision: the 27B through OpenCL 1.2 boots with picture_pixels 0, and not with its 4 MP — since
+        #   v0.7.0): pictures there are read on the CPU unless the config gives them room
+        if where == "khronos_opencl1_igpu" and "picture_pixels" in takes and "picture_pixels" not in options:
+            options = dict(options, picture_pixels=0)
+            why += ", pictures read on the CPU (picture_pixels in the config's options gives them room in the pool)"
+        return options, ctx, why
+    names, used = _vendor_cards()
+    key = _key(where, [c["card"] for c in machine.e.cards()] + [names], max_context, options, video_tokens)
     got = None if fresh else _remembered(folder, key)
+    if got and _freed(got.get("card_used"), used):
+        log("[autotune] the card holds less than when its setup was chosen (%s): chosen again" % got["chosen"])
+        got = None
     if got:
         return got["options"], got["max_context"], "%s — as chosen %s, kept in autotune.json" % (got["why"], got["chosen"])
     p = _Prober(folder, arch, silicon, log)
@@ -241,7 +275,7 @@ def choose(path, max_context, options=None, silicon=None, fresh=False, log=print
                               % (folder.path, ctx, how))
             ctx = max(MIN_CONTEXT, ctx // 2)
     why = "%s (%d boots tried)" % (why, p.tried)
-    _remember(folder, key, chosen, ctx, why)
+    _remember(folder, key, chosen, ctx, why, used)
     return chosen, ctx, why
 
 

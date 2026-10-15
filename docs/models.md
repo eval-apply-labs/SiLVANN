@@ -7,16 +7,16 @@ machine; this page has the rest.
 
 | Model | Pack | Weights | Download |
 |---|---|---|---|
-| Ministral 3 14B (dense, Mistral AI) | `D4`, for 8 GB cards | 7.4 GB — 4 bits | [eval-apply/Ministral-3-14B_silvann_tq_D4](https://huggingface.co/eval-apply/Ministral-3-14B_silvann_tq_D4) |
-| Ministral 3 14B | `D8`, for 16 GB cards | 13.5 GB — 8 bits | [eval-apply/Ministral-3-14B_silvann_tq_D8](https://huggingface.co/eval-apply/Ministral-3-14B_silvann_tq_D8) |
-| Qwen 3.8 27B (dense) | `D4` | 15 GB — 4 bits | [eval-apply/Qwen3.8-27B_silvann_tq_D4](https://huggingface.co/eval-apply/Qwen3.8-27B_silvann_tq_D4) |
-| Qwen 3.6 35B-A3B (mixture of experts, 3B active) | `D8E4` | 19 GB — experts 4 bits, the rest 8 | [eval-apply/Qwen3.6-35B-A3B_silvann_tq_D8E4](https://huggingface.co/eval-apply/Qwen3.6-35B-A3B_silvann_tq_D8E4) |
-| Qwen 3.6 35B-A3B | `D4E4`, for the CPU alone | 19 GB — 4 bits | [eval-apply/Qwen3.6-35B-A3B_silvann_tq_D4E4](https://huggingface.co/eval-apply/Qwen3.6-35B-A3B_silvann_tq_D4E4) |
-| Qwen 3.5 122B-A10B (mixture of experts, 10B active) | `D8E4`, for 12 GB cards | 67 GB — experts 4 bits, the rest 8 | [eval-apply/Qwen3.5-122B-A10B_silvann_tq_D8E4](https://huggingface.co/eval-apply/Qwen3.5-122B-A10B_silvann_tq_D8E4) |
-| Qwen 3.5 122B-A10B | `D4E4`, for 8 GB cards | 65 GB — 4 bits | [eval-apply/Qwen3.5-122B-A10B_silvann_tq_D4E4](https://huggingface.co/eval-apply/Qwen3.5-122B-A10B_silvann_tq_D4E4) |
-| Qwen 3.5 397B-A17B (mixture of experts, 17B active) | `D4E4` | 207 GB — 4 bits | [eval-apply/Qwen3.5-397B-A17B_silvann_tq_D4E4](https://huggingface.co/eval-apply/Qwen3.5-397B-A17B_silvann_tq_D4E4) |
-| GLM 5.3 Flash (288 experts, 8 active) | `D4E4` | 162 GB — 4 bits | [eval-apply/GLM-5.3-Flash_silvann_tq_D4E4](https://huggingface.co/eval-apply/GLM-5.3-Flash_silvann_tq_D4E4) |
-| GLM 5.3 Flash | `D8E4` | 166 GB — experts 4 bits, the rest 8 | [eval-apply/GLM-5.3-Flash_silvann_tq_D8E4](https://huggingface.co/eval-apply/GLM-5.3-Flash_silvann_tq_D8E4) |
+| Ministral 3 14B (dense, Mistral AI) | `D4`, for 8 GB cards | 7.4 GB — 4 bits | [eval-apply/silvann_tq_D4_ministral_3_14b](https://huggingface.co/eval-apply/silvann_tq_D4_ministral_3_14b) |
+| Ministral 3 14B | `D8`, for 16 GB cards | 13.5 GB — 8 bits | [eval-apply/silvann_tq_D8_ministral_3_14b](https://huggingface.co/eval-apply/silvann_tq_D8_ministral_3_14b) |
+| Qwen 3.8 27B (dense) | `D4` | 15 GB — 4 bits | [eval-apply/silvann_tq_D4_qwen3.8_27b](https://huggingface.co/eval-apply/silvann_tq_D4_qwen3.8_27b) |
+| Qwen 3.6 35B-A3B (mixture of experts, 3B active) | `D8E4` | 19 GB — experts 4 bits, the rest 8 | [eval-apply/silvann_tq_D8E4_qwen3.6_35b_a3b](https://huggingface.co/eval-apply/silvann_tq_D8E4_qwen3.6_35b_a3b) |
+| Qwen 3.6 35B-A3B | `D4E4`, for the CPU alone | 19 GB — 4 bits | [eval-apply/silvann_tq_D4E4_qwen3.6_35b_a3b](https://huggingface.co/eval-apply/silvann_tq_D4E4_qwen3.6_35b_a3b) |
+| Qwen 3.5 122B-A10B (mixture of experts, 10B active) | `D8E4`, for 12 GB cards | 67 GB — experts 4 bits, the rest 8 | [eval-apply/silvann_tq_D8E4_qwen3.5_122b_a10b](https://huggingface.co/eval-apply/silvann_tq_D8E4_qwen3.5_122b_a10b) |
+| Qwen 3.5 122B-A10B | `D4E4`, for 8 GB cards | 65 GB — 4 bits | [eval-apply/silvann_tq_D4E4_qwen3.5_122b_a10b](https://huggingface.co/eval-apply/silvann_tq_D4E4_qwen3.5_122b_a10b) |
+| Qwen 3.5 397B-A17B (mixture of experts, 17B active) | `D4E4` | 207 GB — 4 bits | [eval-apply/silvann_tq_D4E4_qwen3.5_397b_a17b](https://huggingface.co/eval-apply/silvann_tq_D4E4_qwen3.5_397b_a17b) |
+| GLM 5.3 Flash (288 experts, 8 active) | `D4E4` | 162 GB — 4 bits | [eval-apply/silvann_tq_D4E4_glm_5.3_flash](https://huggingface.co/eval-apply/silvann_tq_D4E4_glm_5.3_flash) |
+| GLM 5.3 Flash | `D8E4` | 166 GB — experts 4 bits, the rest 8 | [eval-apply/silvann_tq_D8E4_glm_5.3_flash](https://huggingface.co/eval-apply/silvann_tq_D8E4_glm_5.3_flash) |
 
 The name says the bits: `D8E4` is the dense matrices at 8 and the experts at 4; `D4` a dense model at 4. The 8-bit dense
 part is the one that pays — ▶ [`compression.md`](compression.md), and how close each pack comes to the original weights
