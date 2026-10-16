@@ -26,6 +26,7 @@ import hmac
 import io
 import json
 import os
+import re
 import secrets
 import shutil
 import sys
@@ -56,7 +57,9 @@ import silvann_runtime as SR                                              # noqa
 from silvann_runtime import autotune, experts_file, tools              # noqa: E402
 from silvann_runtime.chat import Chat, ToolMarkup                         # noqa: E402
 from silvann_runtime.fetch import ensure_model                            # noqa: E402
-from silvann_runtime.session import Busy, Cartridge, Runtime, sampler     # noqa: E402
+from silvann_runtime.session import Busy, Cartridge, Runtime, sampler, state_bytes     # noqa: E402
+from silvann_runtime import image_session                                 # noqa: E402
+from silvann_runtime.qwen_image import Stopped, image_pack                 # noqa: E402
 from silvann_runtime.vision import MAX_VIDEO_TOKENS                       # noqa: E402
 
 IDLE_EVICTION_SECONDS = 120.0
@@ -134,6 +137,7 @@ class State:
         self.workspace = DATA / "workspace"
         self.tool_sessions = {}             # cartridge id -> its REPL
         self.asks = {}                      # cartridge id -> its answer, waiting on the user's answer to an ask
+        self.image = False                  # the model is a picture model (▶ `_boot_image`): a message makes a picture
 
 
 S = State()
@@ -201,11 +205,11 @@ async def _room_for(c):
     away to its folder instead — as the idle eviction puts one away — when RAM has no room for two of the largest
     beside the spare. ⚖ 2026-10-14: *"put it away when another conversation opens if there is no free space in ram to
     hold two (each conv is supposed to be the same max size), this is mainly a single player setup"* — the largest is a
-    conversation at the full context (`state_regions(max_context)`), what any of them may grow to."""
+    conversation at the full context (`state_bytes` at `max_context`), what any of them may grow to."""
     a = S.runtime.active
     if a is None or a is c or S.runtime.busy():
         return
-    largest = sum(n for _, n in S.model.state_regions(S.model.max_context))
+    largest = state_bytes(S.model, S.model.max_context)
     room = experts_file.free()
     if room >= 2 * largest + experts_file.SPARE:
         return
@@ -288,6 +292,8 @@ def _boot(args):
     if card not in (None, "auto"):
         for name in ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES"):
             os.environ[name] = "-1" if str(card).lower() == "cpu" else str(card)
+    if image_pack(str(folder)):
+        return _boot_image(folder, cfg, t0)
     # ⭐ THE SETUP FOR THIS MACHINE (NN-83): what the config leaves out — where the experts sit, the card's tier of them,
     #   the context the card holds — chosen by trying it on the card, or as chosen before (`autotune.json`)
     asked = cfg.get("max_context", 32768)       # a number, or "auto" ("max"): what the card holds, to the model's length
@@ -357,6 +363,24 @@ def _boot(args):
           % (folder.name, S.model.folder.architecture, time.time() - t0, S.model.max_context, cfg.get("lora")), flush=True)
 
 
+def _boot_image(folder, cfg, t0):
+    """⭐ A PICTURE MODEL (v0.10.0, ▶ silvann_runtime/image_session.py): a conversation's message is a prompt and its
+    answer a picture, made a boot at a time when the message comes — nothing is on the card until then. The config's
+    `image` holds a picture's settings (`width`, `height`, `steps`, `seed`); the model has no tool."""
+    S.image = True
+    S.tools = "no"
+    S.model = image_session.ImageModel(str(folder), settings=cfg.get("image"))
+    S.runtime = image_session.ImageRuntime(S.model)
+    threading.Thread(target=S.runtime.start, daemon=True).start()     # the picture worker, ready before the first prompt
+    S.workspace = Path(cfg.get("tools_folder") or DATA / "workspace")
+    S.classifier = tools.Classifier(str(DATA / "tools.json"), "ask", allowed=[str(S.workspace)])
+    S.model_id = folder.name
+    S.dir = DATA / "user_sessions" / folder.name
+    S.dir.mkdir(parents=True, exist_ok=True)
+    print("[silvann_server] %s (a picture model, %s) ready in %.0f s — a picture %s"
+          % (folder.name, S.model.folder.architecture, time.time() - t0, S.model.settings), flush=True)
+
+
 def _sampler():
     s = S.config.get("sampler", "generation")
     if s is None:
@@ -409,8 +433,10 @@ def health():
             "lora": m.active_lora if m else None, "loras": m.folder.loras() if m else [],
             "tenants_loaded": len(S.runtime.cartridges) if S.runtime else 0,
             "active": S.runtime.active.id if S.runtime and S.runtime.active else None,
-            "model_dir": m.folder.path if m else None, "pp_slice": "all", "num_gpus": 1, "max_context": m.max_context if m else 0,
-            "adapter": "silvann_runtime", "images": _reads_pictures(), "files": True}
+            "model_dir": m.folder.path if m else None, "pp_slice": "all", "num_gpus": getattr(m, "CARDS", 1),
+            "max_context": m.max_context if m else 0,
+            "adapter": "silvann_runtime", "images": _reads_pictures(), "files": not S.image, "pictures": S.image,
+            "picture_settings": S.model.settings if S.image else None}
 
 
 def _reads_pictures():
@@ -484,8 +510,9 @@ async def estimate_cartridge(req: EstimateReq):
     every conversation — only the one being served is on it — so a new conversation costs the card nothing; put away,
     it costs its state in RAM, up to the figure here."""
     m = S.model
-    total = sum(n for _, n in m.state_regions(m.max_context))
-    return {"mode": "flat", "bytes": int(total), "gb": total / 2 ** 30, "breakdown": {"state": int(total)}, "num_gpus": 1,
+    total = state_bytes(m, m.max_context)
+    return {"mode": "flat", "bytes": int(total), "gb": total / 2 ** 30, "breakdown": {"state": int(total)},
+            "num_gpus": getattr(m, "CARDS", 1),
             "defaults": dict(chunk_tokens=m.max_context, hot_chunks=1, warm_chunks=0, cold_chunks=0, system_chunks=0),
             "max_tokens": int(m.max_context), "page_size": 1}
 
@@ -649,6 +676,8 @@ async def upload_image(cid: str, file: UploadFile = File(...), x_cart_password: 
     _check_password(cid, x_cart_password)
     if S.runtime.cartridges.get(cid) is None:
         raise HTTPException(409, "not bound — call /bind first")
+    if S.image:
+        raise HTTPException(415, "%s makes pictures from a prompt; reference pictures come with a later release" % S.model_id)
     data = await file.read()
     from silvann_runtime import documents
     if documents.is_document(data, file.filename):
@@ -716,6 +745,8 @@ async def post_message(cid: str, req: MessageReq, x_cart_password: Optional[str]
         raise HTTPException(423, "in use by another session")
     if x_web_user_id:
         S.last_ping[x_web_user_id] = time.time()
+    if S.image:
+        return _picture_message(cid, req)
     side = _sidecar(cid)
     extra = side.setdefault("extra", {})
     waiting = S.images.get(cid, {})
@@ -769,6 +800,96 @@ async def post_message(cid: str, req: MessageReq, x_cart_password: Optional[str]
     for i in req.images:                                      # a picture is the message's now, in the conversation
         waiting.pop(i, None)
     return StreamingResponse(a.stream(), media_type="text/event-stream")
+
+
+# ── a picture model's message (v0.10.0) ─────────────────────────────────────────────────────────────────────
+def _picture_message(cid, req):
+    """A message to a picture model: the picture its prompt asks for, as text/event-stream — `event: progress`
+    {"stage", "done", "total", "text"} as it is made (the prompt read, a step at a time, the decode), then `event: token`
+    {"text"} the answer's text, which names the picture (`![picture](picture:NAME)` and what made it), then `event:
+    done`; `event: error` where it fails. The picture is in the conversation's folder, `pictures/NAME`
+    (▶ `/cartridges/{cid}/pictures/{name}`). ⛔ A picture already being made answers 503 with `Retry-After: 5`."""
+    if S.runtime.busy():
+        raise HTTPException(503, "busy — another picture is being made", headers={"Retry-After": "5"})
+    prompt, settings = S.runtime.settings(req.text)
+    if not prompt:
+        raise HTTPException(422, "a picture needs a prompt")
+    queue, loop = asyncio.Queue(), asyncio.get_running_loop()
+
+    def emit(kind, payload):
+        loop.call_soon_threadsafe(queue.put_nowait, (kind, json.dumps(payload)))
+
+    def progress(stage, done, total):
+        text = {"encode": "reading the prompt", "step": "step %d of %d" % (done, total), "decode": "decoding"}[stage]
+        emit("progress", {"stage": stage, "done": done, "total": total, "text": text})
+
+    def make():
+        try:
+            name, seconds = S.runtime.picture(prompt, settings, str(S.dir / cid / "pictures"), progress)
+            answer = image_session.caption(name, settings, seconds)
+            emit("token", {"token_id": -1, "text": answer})
+        except Stopped as ex:
+            answer = "_[the picture was stopped: %s]_" % ex
+            emit("token", {"token_id": -1, "text": answer})
+        except Exception as ex:                       # noqa: BLE001 — said to the UI
+            emit("error", {"error": str(ex)})
+            return
+        finally:
+            S.busy_cart = None
+        side = _sidecar(cid)
+        history = side.setdefault("extra", {}).setdefault("history", [])
+        history += [{"role": "user", "content": req.text},
+                    {"role": "assistant", "content": answer, "picture": dict(settings, prompt=prompt)}]
+        _write_sidecar(cid, side)
+        emit("done", {})
+
+    S.busy_cart = cid
+    job = threading.Thread(target=make, daemon=True)
+    job.start()
+    S.turns[cid] = _PictureTurn()
+
+    async def stream():
+        while True:
+            kind, payload = await queue.get()
+            yield "event: %s\ndata: %s\n\n" % (kind, payload)
+            if kind in ("done", "error"):
+                return
+    return StreamingResponse(stream(), media_type="text/event-stream")
+
+
+class _PictureTurn:
+    """What `/stop` asks of a turn, for a picture: its job's stop."""
+
+    @property
+    def done(self):
+        job = S.runtime._job
+        return job.done if job is not None else threading.Event()
+
+    @property
+    def cancelled(self):
+        return S.runtime._job is not None and S.runtime._job.cancelled
+
+    @cancelled.setter
+    def cancelled(self, value):
+        if S.runtime._job is not None:
+            S.runtime._job.cancelled = value
+
+
+@app.get("/cartridges/{cid}/pictures/{name}")
+async def get_picture(cid: str, name: str, format: str = "png", x_cart_password: Optional[str] = Header(default=None)):
+    """A picture a conversation's answer made: the PNG, or `?format=jpeg` a smaller copy to show."""
+    _check_password(cid, x_cart_password)
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+\.png", name):
+        raise HTTPException(404, "no picture %r" % name)
+    p = S.dir / cid / "pictures" / name
+    if not p.exists():
+        raise HTTPException(404, "no picture %r in this conversation" % name)
+    if format == "jpeg":
+        from PIL import Image
+        buf = io.BytesIO()
+        Image.open(p).convert("RGB").save(buf, "JPEG", quality=88)
+        return Response(content=buf.getvalue(), media_type="image/jpeg")
+    return Response(content=p.read_bytes(), media_type="image/png")
 
 
 # ── the model's tool (NN-88) ────────────────────────────────────────────────────────────────────────────────

@@ -32,6 +32,27 @@ from .model_folder import Refused
 GENERATE_CALL = 8            # the tokens of an answer one `generate` makes, where the model generates on the card
 
 
+def _state_read(m, length):
+    """A conversation's state off the card, as one card holds it — a model over several cards stitches its cards' shares
+    (▶ qwen3_5's `state_read`)."""
+    if hasattr(m, "state_read"):
+        return m.state_read(length)
+    return [m.m.read(at, n) for at, n in m.state_regions(length) if n]
+
+
+def state_bytes(m, length):
+    """What a conversation of `length` positions holds of state, every card's share of it."""
+    return sum(n for _, n in m.state_regions(length)) * getattr(m, "CARDS", 1)
+
+
+def _state_write(m, length, blobs):
+    if hasattr(m, "state_write"):
+        return m.state_write(length, blobs)
+    live = [(at, n) for at, n in m.state_regions(length) if n]
+    for (at, _), blob in zip(live, blobs):
+        m.m.write(at, blob)
+
+
 class Busy(Exception):
     """A turn is on the card; ask again later."""
 
@@ -125,8 +146,7 @@ class Runtime:
         m = self.model
         t0 = time.time()
         if self.active is not None and getattr(m, "PARKS", True):    # the one on the card is put away, its state read off
-            regions = m.state_regions(self.active.length)
-            self.active.state = [m.m.read(at, n) for at, n in regions if n]
+            self.active.state = _state_read(m, self.active.length)
         elif self.active is not None:                 # a state that cannot be read off (a ring's): its tokens read again
             self.active.state, self.active.length, self.active.lag = None, 0, 0
         self.stats["park_seconds"] += time.time() - t0
@@ -137,9 +157,7 @@ class Runtime:
         if c.lora is not None:
             c.lora = m.lora_identity()                # the weights it runs under, recorded
         if c.state is not None:
-            live = [(at, n) for at, n in m.state_regions(c.length) if n]
-            for (at, _), blob in zip(live, c.state):
-                m.m.write(at, blob)
+            _state_write(m, c.length, c.state)
             c.state = None
         else:
             m.reset()                                 # without its state, every token it has seen is run again
@@ -255,7 +273,7 @@ class Runtime:
         state can be read off (a ring's cannot: its tokens are read again)."""
         with_state = with_state and getattr(self.model, "PARKS", True)
         if c is self.active and with_state:
-            c.state = [self.model.m.read(at, n) for at, n in self.model.state_regions(c.length) if n]
+            c.state = _state_read(self.model, c.length)
             c.save(path, with_state)
             c.state = None
         else:

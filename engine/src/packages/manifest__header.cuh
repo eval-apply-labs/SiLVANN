@@ -163,7 +163,8 @@
     X(0, sys, "sys") \
     X(1, nn, "nn") \
     X(2, ai_qwen_3, "ai_qwen_3") \
-    X(3, ai_glm_5_3, "ai_glm_5_3")
+    X(3, ai_glm_5_3, "ai_glm_5_3") \
+    X(4, ai_qwen_image, "ai_qwen_image")
 
 /* The ids, generated, so that nobody writes a number twice.
  *

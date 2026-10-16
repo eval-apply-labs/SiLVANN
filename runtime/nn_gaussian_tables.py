@@ -33,6 +33,7 @@ external check available and the reason that one width is transcribed below.
 """
 
 import argparse
+import functools
 import math
 import struct
 import sys
@@ -103,6 +104,7 @@ def _cdf(x):
     return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
 
 
+@functools.lru_cache(maxsize=None)     # a pure function of its arguments: the 8-bit table costs ~55 s of pure Python
 def lloyd_levels(d, tol=1e-14, cap=50000):
     """⭐⭐ ZERO-PINNED LLOYD-MAX FOR A UNIT GAUSSIAN, SOLVED ANALYTICALLY. Ascending, unnormalised.
 
@@ -161,7 +163,7 @@ def lloyd_levels(d, tol=1e-14, cap=50000):
         lev = new
         if moved < tol:
             break
-    return lev
+    return tuple(lev)                  # shared by every caller of the cache, so not one any of them can change
 
 
 def lloyd_k(d):

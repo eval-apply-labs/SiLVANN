@@ -24,7 +24,7 @@
  *     its columns in any order; what can differ is where the fp32 sum rounds.
  * The tile is 128 matrix rows by 64 pairs for a matrix many rows read (a dense projection over a chunk), by 32 or by 16
  * for the few rows each routed expert gets. Covers 4 and 8 bits over whole slices of 64 columns, codes on 8 bytes and `x`
- * on 4; anything else is the generic door. A row of `out` is written by the one lane holding its sum: nn's contract has a
+ * on 4, and 16 bits over any even number of columns (the halves' tile below); anything else is the generic door. A row of `out` is written by the one lane holding its sum: nn's contract has a
  * call's pairs name distinct out rows (the MoE's down: a pick's row is its own), so the weighted sum needs no guard.
  * ⛳ THE BARRIERS are the tile's own: the block waits once the levels are staged, once a slice has landed, and once more
  *   before the slice after next overwrites it — the lanes of one launch waiting for each other, as the family's fold does. */
@@ -206,16 +206,120 @@ static __global__ NVIDIA_CUDA12__ZZPRIVATE_BOUNDS void nvidia_cuda12__zzprivate_
     nvidia_cuda12__zzprivate_tile(&j, 2u, 8u, 2u);
 }
 
-/* A tile job for `count` matrices, each checked as the generic body would (4 or 8 bits, whole slices of 64 columns, codes
- * on 8 bytes) — false, and nothing launched, when one does not fit, for the caller's fallback. The matrices of each width
- * are one launch, on the tile its widest pairs want. */
+/* ⭐ THE SAME TILE FOR A MATRIX OF 16 BITS — nn's width of halves, no levels and no scale: a VAE's convolutions over a
+ * picture's pixels, a text encoder's exact layers over a prompt, a vision tower's MLP. A lane's 16 columns of a row are
+ * eight words, the A operands as they stand, loaded a slice ahead; the columns are any even number, a slice past them
+ * zeros in both operands (a 3 x 3 convolution of 96 channels is 864 columns, 13½ slices). `x` is staged a word at a time,
+ * its row on four bytes. A kernel of its own, so the codes' tiles are compiled as they were. */
+static __device__ __forceinline__ void nvidia_cuda12__zzprivate_halves_row(const uint16_t* row, uint64_t k0, uint64_t cols, uint32_t t,
+                                                                            uint32_t raw[8]) {
+#pragma unroll
+    for (uint32_t q = 0u; q < 8u; ++q) {
+        const uint64_t c = k0 + 16u * t + 2u * q;
+        raw[q] = row && c < cols ? *(const uint32_t*)(const void*)(row + c) : 0u;
+    }
+}
+static __device__ __forceinline__ void nvidia_cuda12__zzprivate_tile_halves(const nvidia_cuda12__tile_job* j, const uint32_t NT) {
+    __shared__ __align__(16) uint16_t xs[NVIDIA_CUDA12__ZZPRIVATE_NT_MAX * 8u][NVIDIA_CUDA12__ZZPRIVATE_XS];
+    const uint32_t lane = (uint32_t)nn__silicon__lane(), lanes = (uint32_t)nn__silicon__lanes();
+    const uint32_t warp = lane / NVIDIA_CUDA12__ZZPACKAGE_WARP, l = lane % NVIDIA_CUDA12__ZZPACKAGE_WARP, g = l / 4u, t = l % 4u;
+    const uint32_t TP = 8u * NT, KT = NVIDIA_CUDA12__ZZPRIVATE_KT;
+    for (uint64_t b = nn__silicon__block(); b < j->first[j->count]; b += nn__silicon__blocks()) {
+        uint64_t i = 0u;
+        while (b >= j->first[i + 1u]) ++i;
+        const uint64_t tiles_p = (j->pairs[i] + TP - 1u) / TP, local = b - j->first[i];
+        const uint64_t r0 = (local / tiles_p) * NVIDIA_CUDA12__ZZPRIVATE_ROWS + 16u * warp, p0 = (local % tiles_p) * TP;
+        const uint64_t out_rows = j->out_rows[i], pairs = j->pairs[i], cols = j->cols;
+        const uint16_t* w = (const uint16_t*)(uintptr_t)j->codes[i];
+        const uint32_t* pr = j->rows + 2u * j->pairs_at[i];
+        const uint16_t* lo = r0 + g < out_rows ? w + (r0 + g) * cols : 0;
+        const uint16_t* hi = r0 + g + 8u < out_rows ? w + (r0 + g + 8u) * cols : 0;
+        float acc[NVIDIA_CUDA12__ZZPRIVATE_NT_MAX][4];
+#pragma unroll
+        for (uint32_t n = 0u; n < NT; ++n) acc[n][0] = acc[n][1] = acc[n][2] = acc[n][3] = 0.0f;
+        uint32_t raw[2][8];
+        nvidia_cuda12__zzprivate_halves_row(lo, 0u, cols, t, raw[0]);
+        nvidia_cuda12__zzprivate_halves_row(hi, 0u, cols, t, raw[1]);
+        for (uint64_t k0 = 0u; k0 < cols; k0 += KT) {
+            /* the tile's slice of `x`: pair `p`'s columns `k0 .. k0 + 63` a word at a time, past the pairs or the columns
+             * zeros; the first wait is for the slice, the second keeps it until every warp has read it */
+            for (uint32_t e = lane; e < TP * (KT / 2u); e += lanes) {
+                const uint32_t p = e / (KT / 2u), c = e % (KT / 2u);
+                const uint64_t col = k0 + 2u * c;
+                ((uint32_t*)(void*)xs[p])[c] = p0 + p < pairs && col < cols
+                    ? *(const uint32_t*)(const void*)(j->x + (uint64_t)pr[2u * (p0 + p)] * cols + col) : 0u;
+            }
+            __syncthreads();
+            uint32_t now[2][8];
+#pragma unroll
+            for (uint32_t r = 0u; r < 2u; ++r)
+#pragma unroll
+                for (uint32_t q = 0u; q < 8u; ++q) now[r][q] = raw[r][q];
+            if (k0 + KT < cols) {
+                nvidia_cuda12__zzprivate_halves_row(lo, k0 + KT, cols, t, raw[0]);
+                nvidia_cuda12__zzprivate_halves_row(hi, k0 + KT, cols, t, raw[1]);
+            }
+#pragma unroll
+            for (uint32_t s2 = 0u; s2 < 2u; ++s2) {
+                /* steps 2·s2 and 2·s2 + 1: the lane's columns `16t + 8·s2 ..` four a step, rows g and g + 8 */
+                const uint32_t a0[4] = { now[0][4u * s2], now[1][4u * s2], now[0][4u * s2 + 1u], now[1][4u * s2 + 1u] };
+                const uint32_t a1[4] = { now[0][4u * s2 + 2u], now[1][4u * s2 + 2u], now[0][4u * s2 + 3u], now[1][4u * s2 + 3u] };
+#pragma unroll
+                for (uint32_t n = 0u; n < NT; ++n) {
+                    const uint4 q = *(const uint4*)(const void*)&xs[8u * n + g][16u * t + 8u * s2];
+                    nvidia_cuda12__zzpackage_mma(acc[n], a0[0], a0[1], a0[2], a0[3], q.x, q.y);
+                    nvidia_cuda12__zzpackage_mma(acc[n], a1[0], a1[1], a1[2], a1[3], q.z, q.w);
+                }
+            }
+            __syncthreads();
+        }
+#pragma unroll
+        for (uint32_t h = 0u; h < 2u; ++h) {
+            const uint64_t r = r0 + g + 8u * h;
+            if (r >= out_rows) continue;
+#pragma unroll
+            for (uint32_t n = 0u; n < NT; ++n)
+#pragma unroll
+                for (uint32_t e = 0u; e < 2u; ++e) {
+                    const uint64_t p = p0 + 8u * n + 2u * t + e;
+                    if (p >= pairs) continue;
+                    const uint64_t at = (uint64_t)pr[2u * p + 1u] * out_rows + r;
+                    const float v = acc[n][2u * h + e];
+                    if (j->out) (j->out + j->out_at[i])[at] = nn__kernels__zzabi_to_half(v, j->over);
+                    else j->acc[at] += v * nn__silicon__half_to_float(j->w[pr[2u * p]]);
+                }
+        }
+    }
+}
+static __global__ NVIDIA_CUDA12__ZZPRIVATE_BOUNDS void nvidia_cuda12__zzprivate_tile_64_16(nvidia_cuda12__tile_job j) {
+    nvidia_cuda12__zzprivate_tile_halves(&j, 8u);
+}
+static __global__ NVIDIA_CUDA12__ZZPRIVATE_BOUNDS void nvidia_cuda12__zzprivate_tile_32_16(nvidia_cuda12__tile_job j) {
+    nvidia_cuda12__zzprivate_tile_halves(&j, 4u);
+}
+static __global__ NVIDIA_CUDA12__ZZPRIVATE_BOUNDS void nvidia_cuda12__zzprivate_tile_16_16(nvidia_cuda12__tile_job j) {
+    nvidia_cuda12__zzprivate_tile_halves(&j, 2u);
+}
+
+/* A tile job for `count` matrices, each checked as the generic body would — every one 4 or 8 bits over whole slices of 64
+ * columns, codes on 8 bytes, or every one 16 bits over an even number of columns, on 4 bytes — false, and nothing launched,
+ * when one does not fit, for the caller's fallback. The matrices of each width are one launch, on the tile its widest
+ * pairs want. A token's few rows of 16 bits (16 pairs or fewer) stay nn's, as on AMD's family, where a tile made the 35B's
+ * answer slower. */
 static inline bool nvidia_cuda12__zzprivate_tiles(const nvidia_cuda12__tile_job* all) {
-    if (all->count == 0u || all->count > NN__EXPERT__GROUPS_MAX || all->cols == 0u || all->cols % NVIDIA_CUDA12__ZZPRIVATE_KT != 0u
-     || ((uint64_t)(uintptr_t)all->x) % 4u != 0u)
+    if (all->count == 0u || all->count > NN__EXPERT__GROUPS_MAX || all->cols == 0u || ((uint64_t)(uintptr_t)all->x) % 4u != 0u)
         return false;
-    for (uint64_t i = 0u; i < all->count; ++i)
-        if ((all->d[i] != 4u && all->d[i] != 8u) || all->out_rows[i] == 0u || ((uint64_t)(uintptr_t)all->codes[i]) % 8u != 0u) return false;
-    for (uint64_t D = 4u; D <= 8u; D += 4u) {
+    const bool halves = all->d[0] == 16u;
+    if (halves ? all->cols % 2u != 0u : all->cols % NVIDIA_CUDA12__ZZPRIVATE_KT != 0u) return false;
+    uint64_t widest = 0u;
+    for (uint64_t i = 0u; i < all->count; ++i) {
+        if (halves ? all->d[i] != 16u || ((uint64_t)(uintptr_t)all->codes[i]) % 4u != 0u
+                   : (all->d[i] != 4u && all->d[i] != 8u) || ((uint64_t)(uintptr_t)all->codes[i]) % 8u != 0u) return false;
+        if (all->out_rows[i] == 0u) return false;
+        if (all->pairs[i] > widest) widest = all->pairs[i];
+    }
+    if (halves && widest <= 16u) return false;
+    for (uint64_t D = 4u; D <= 16u; D *= 2u) {
         nvidia_cuda12__tile_job j = *all;
         j.count = 0u;
         uint64_t most = 0u;
@@ -237,8 +341,10 @@ static inline bool nvidia_cuda12__zzprivate_tiles(const nvidia_cuda12__tile_job*
         const size_t sizes[] = { sizeof j };
         const void* kernel = D == 4u ? (TP == 16u ? (const void*)nvidia_cuda12__zzprivate_tile_16_4
                                       : TP == 32u ? (const void*)nvidia_cuda12__zzprivate_tile_32_4 : (const void*)nvidia_cuda12__zzprivate_tile_64_4)
-                                     : (TP == 16u ? (const void*)nvidia_cuda12__zzprivate_tile_16_8
-                                      : TP == 32u ? (const void*)nvidia_cuda12__zzprivate_tile_32_8 : (const void*)nvidia_cuda12__zzprivate_tile_64_8);
+                           : D == 8u ? (TP == 16u ? (const void*)nvidia_cuda12__zzprivate_tile_16_8
+                                      : TP == 32u ? (const void*)nvidia_cuda12__zzprivate_tile_32_8 : (const void*)nvidia_cuda12__zzprivate_tile_64_8)
+                                     : (TP == 16u ? (const void*)nvidia_cuda12__zzprivate_tile_16_16
+                                      : TP == 32u ? (const void*)nvidia_cuda12__zzprivate_tile_32_16 : (const void*)nvidia_cuda12__zzprivate_tile_64_16);
         nn__silicon__launch(kernel, "nvidia_cuda12__zzprivate_tile", blocks, NVIDIA_CUDA12__ZZPRIVATE_WARPS * NVIDIA_CUDA12__ZZPACKAGE_WARP,
                             args, sizes, 1u);
     }
@@ -250,7 +356,7 @@ static inline bool nvidia_cuda12__zzprivate_tiles_one(uint16_t* out, float* acc,
                                                      const uint16_t* w, uint64_t count, uint64_t d, uint64_t out_rows, uint64_t cols,
                                                      unsigned int* over) {
     const uint64_t row_bytes = cols * d / 8u;
-    if (count == 0u || row_bytes == 0u || out_rows > w_room / row_bytes || out_rows > l_room / 2u) return false;
+    if (count == 0u || row_bytes == 0u || out_rows > w_room / row_bytes || (d != 16u && out_rows > l_room / 2u)) return false;
     nvidia_cuda12__tile_job j = {};
     j.codes[0] = (uint64_t)(uintptr_t)weights; j.luts[0] = (uint64_t)(uintptr_t)luts; j.out_rows[0] = out_rows; j.d[0] = d;
     j.out_at[0] = 0u; j.pairs_at[0] = 0u; j.pairs[0] = count; j.count = 1u; j.cols = cols;

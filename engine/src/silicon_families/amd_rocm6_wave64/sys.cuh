@@ -120,6 +120,43 @@ static inline uint32_t amd_rocm6_wave64__bound_device(void) {
     return mine;
 }
 
+/* The vendor's number for this family's device `index`, or -1. */
+static inline int amd_rocm6_wave64__zzprivate_ordinal(uint32_t index) {
+    uint32_t mine = 0u;
+    for (int ordinal = 0; ordinal < amd_rocm6_wave64__zzprivate_shown(); ++ordinal) {
+        if (!amd_rocm6_wave64__zzprivate_takes(ordinal)) continue;
+        if (mine++ == index) return ordinal;
+    }
+    return -1;
+}
+
+/* ── ⭐ ANOTHER CARD'S MEMORY, DIRECTLY ─────────────────────────────────────────────────────────────────
+ * `MEASURED` 2026-10-16 on gtasanandrea (four MI50s, PCIe 4, one root complex): every pair answers yes, and a kernel
+ * on one card adding 10 KB of another's takes 3.7 us a launch against 39 us for `hipMemcpyPeer` of the same bytes.
+ * node03's two MI50s answer no. Turning access on twice is not an error, so it is accepted. */
+static inline bool amd_rocm6_wave64__peer_access(uint32_t other) {
+    int here = -1;
+    const int there = amd_rocm6_wave64__zzprivate_ordinal(other);
+    if (hipGetDevice(&here) != hipSuccess || here < 0 || there < 0) return false;
+    if (here == there) return true;
+    int can = 0;
+    if (hipDeviceCanAccessPeer(&can, here, there) != hipSuccess || can == 0) return false;
+    const hipError_t on = hipDeviceEnablePeerAccess(there, 0);
+    if (on == hipErrorPeerAccessAlreadyEnabled) { (void)hipGetLastError(); return true; }
+    return on == hipSuccess;
+}
+
+/* ── MARKS: an event on stream 0, where nn launches everything. No timing: a mark is only waited for.
+ * `MEASURED` 2026-10-16 on gtasanandrea: `hipStreamWaitEvent` on another card's event costs ~25 us of the calling thread's
+ * time; a mark made of `hipStreamWriteValue64` / `hipStreamWaitValue64` on pinned RAM costs ~2 us, yet the 27B's token over
+ * two cards took the same 23.8-23.9 ms either way — the cards' time, not the threads', is what a token waits for. */
+static inline bool amd_rocm6_wave64__mark_open(void** mark) {
+    return hipEventCreateWithFlags((hipEvent_t*)mark, hipEventDisableTiming) == hipSuccess;
+}
+static inline void amd_rocm6_wave64__mark_close(void* mark) { if (mark) (void)hipEventDestroy((hipEvent_t)mark); }
+static inline bool amd_rocm6_wave64__mark_record(void* mark) { return hipEventRecord((hipEvent_t)mark, 0) == hipSuccess; }
+static inline bool amd_rocm6_wave64__mark_wait(void* mark) { return hipStreamWaitEvent(0, (hipEvent_t)mark, 0) == hipSuccess; }
+
 /* ⛳ THE FUNCTIONS ABOVE ARE THIS FAMILY'S OWN, prefixed with its name; `sys`'s door list names them
  * (`contracts/abi/gpu.cuh`), and the published `sys__gpu__*` names in `cpu/silicon/silicon_family.cuh`
  * reach them through the door table when a caller names this family. So the host side of the engine names

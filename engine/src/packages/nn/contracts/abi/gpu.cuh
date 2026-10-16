@@ -36,6 +36,15 @@ typedef struct nn__expert__groups {
     uint64_t count;
 } nn__expert__groups;
 
+/* ⭐ SEVERAL VECTORS OF ONE LENGTH, SUMMED — what `vector_sum` takes, by value: `count` addresses, each of `n` halves, in
+ * the order they are added. An address may be another device's memory where the family has turned direct access on
+ * (`sys__gpu__peer_access`), which is how a tensor-parallel group's partial sums meet. */
+#define NN__VECTOR__PARTS_MAX 8u
+typedef struct nn__vector__parts {
+    uint64_t at[NN__VECTOR__PARTS_MAX];
+    uint64_t count;
+} nn__vector__parts;
+
 /* ⭐⭐ HOW A SILICON LIKES ITS GEMM TILED — ⚖ *"the actual gemm primitive become a silicon capability over the
  * generic code. the point is that we can use methods to get the silicons preferred params for things like
  * gemm tiling size"*. The expert-major bodies (`kernels/kernels.cuh`) are written once against these numbers,
@@ -121,6 +130,12 @@ typedef struct nn__gemm__tile {
     X(PKG, void, vector_bias_rows,         nn__vector__zzabi_launch_bias_rows,         (uint16_t* o, const uint16_t* x, const uint16_t* b, uint64_t n, uint64_t rows, unsigned int* over)) \
     X(PKG, void, vector_gelu,              nn__vector__zzabi_launch_gelu,              (uint16_t* o, const uint16_t* x, uint64_t n, uint64_t exact, unsigned int* over)) \
     X(PKG, void, attention_set,            nn__attention__zzabi_launch_set,            (uint16_t* o, const uint16_t* qkv, uint64_t rows, uint64_t heads, uint64_t head_dim, unsigned int* over)) \
+    X(PKG, void, attention_limits,         nn__attention__zzabi_launch_limits,         (uint16_t* o, const uint16_t* q, const uint16_t* k, const uint16_t* v, const uint32_t* limits, uint64_t rows, uint64_t heads, uint64_t head_dim, uint64_t q_stride, uint64_t kv_stride, unsigned int* over)) \
+    X(PKG, void, vector_gated_add_rows,    nn__vector__zzabi_launch_gated_add_rows,    (uint16_t* o, const uint16_t* x, const uint16_t* y, const uint16_t* g, uint64_t n, uint64_t rows, unsigned int* over)) \
+    X(PKG, void, vector_tanh,              nn__vector__zzabi_launch_tanh,              (uint16_t* o, const uint16_t* x, uint64_t n, unsigned int* over)) \
+    X(PKG, void, vector_silu,              nn__vector__zzabi_launch_silu,              (uint16_t* o, const uint16_t* x, uint64_t n, unsigned int* over)) \
+    X(PKG, void, unfold_rows,              nn__conv__zzabi_launch_unfold_rows,         (uint16_t* o, const uint16_t* x, uint64_t H, uint64_t W, uint64_t C, uint64_t kh, uint64_t kw, uint64_t stride, uint64_t pad_top, uint64_t pad_left, uint64_t up, uint64_t Wo, uint64_t r0, uint64_t rows)) \
+    X(PKG, void, depth_to_space_rows,      nn__conv__zzabi_launch_depth_to_space_rows, (uint16_t* o, const uint16_t* x, uint64_t H, uint64_t W, uint64_t C, uint64_t f)) \
     X(PKG, void, hadamard_ladder_rows,     nn__hadamard__zzabi_launch_ladder_rows,     (uint16_t* out, const uint16_t* in, const uint16_t* sign, uint64_t cols, uint64_t rows, unsigned int* over)) \
     X(PKG, void, attention_causal_scores,  nn__attention__zzabi_launch_causal_scores,  (float* p, const uint16_t* q, const uint16_t* k, uint64_t q_heads, uint64_t kv_heads, uint64_t head_dim, uint64_t first, uint64_t rows)) \
     X(PKG, void, attention_causal_mix,     nn__attention__zzabi_launch_causal_mix,     (uint16_t* o, const float* p, const uint16_t* v, uint64_t q_heads, uint64_t kv_heads, uint64_t head_dim, uint64_t first, uint64_t rows, unsigned int* over)) \
@@ -164,7 +179,8 @@ typedef struct nn__gemm__tile {
     X(PKG, void, attention_weights_rows,   nn__attention__zzabi_launch_weights_rows,   (float* p, float* res, const uint16_t* q, const uint16_t* k, uint64_t q_heads, uint64_t kv_heads, uint64_t head_dim, uint64_t first, uint64_t rows)) \
     X(PKG, void, attention_residual_mix_rows, nn__attention__zzabi_launch_residual_mix_rows, (float* res, const float* p, const uint16_t* v, uint64_t q_heads, uint64_t kv_heads, uint64_t head_dim, uint64_t first, uint64_t rows)) \
     X(PKG, void, attention_weights_tq_rows, nn__attention__zzabi_launch_weights_tq_rows, (float* p, float* res, const uint16_t* q, const uint8_t* codes, const uint16_t* scales, uint64_t q_heads, uint64_t kv_heads, uint64_t head_dim, uint64_t length, uint64_t d, uint64_t rows)) \
-    X(PKG, void, attention_residual_mix_tq_rows, nn__attention__zzabi_launch_residual_mix_tq_rows, (float* res, const float* p, const uint8_t* codes, const uint16_t* scales, uint64_t q_heads, uint64_t kv_heads, uint64_t head_dim, uint64_t length, uint64_t d, uint64_t rows))
+    X(PKG, void, attention_residual_mix_tq_rows, nn__attention__zzabi_launch_residual_mix_tq_rows, (float* res, const float* p, const uint8_t* codes, const uint16_t* scales, uint64_t q_heads, uint64_t kv_heads, uint64_t head_dim, uint64_t length, uint64_t d, uint64_t rows)) \
+    X(PKG, void, vector_sum,               nn__vector__zzabi_launch_sum,               (uint16_t* out, nn__vector__parts parts, uint64_t n, unsigned int* over))
 
 /* ⛳ THE TABLE AND THE LAUNCH ARE THE HOST'S SIDE OF A FAMILY, so a family whose kernels are compiled as
  * OpenCL C does not see them there: that language has no function pointers, and `kernel` is a keyword. */

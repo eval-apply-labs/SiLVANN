@@ -76,10 +76,15 @@ FORMAT = "silvann-packed-v3"
 # FACT ABOUT THE CODE THAT WROTE THE FILE, SO READ IT FROM THE CODE, NOT FROM THE NUMBERS.
 #
 # ⛳ `src_old` DID EXACTLY THIS AND IS THE PRECEDENT: `composer.py` carries `self.rms_norm_offset`,
-# derived from `model_type.startswith("qwen3")`, and adds it while mapping each norm to VRAM — never to
+# derived from the model type, and adds it while mapping each norm to VRAM — never to
 # `linear_attn.norm.weight`. Its own comment records the bug this guards, hit once: *"omitting it scaled
 # Q/K by ~0 (raw delta) instead of ~1, collapsing attention scores in the 10 full_attention layers."*
 GAIN_EXEMPT = ("linear_attn.norm.weight",)      # the gated norm — plain `w`, ▶ `modeling_…:541`
+# ⭐ THE FAMILIES WHOSE NORMS ARE ZERO-CENTERED — Qwen 3.5's and Qwen3-Next's `(1 + w)·x` (`Qwen3_5RMSNorm`,
+# `Qwen3NextRMSNorm`); Qwen 3's and Qwen3-VL's are `w·x` (`Qwen3RMSNorm`, `Qwen3VLTextRMSNorm`), so `qwen3` alone as a
+# prefix would take in both. `MEASURED` 2026-10-15 from transformers' modeling files: Qwen3-VL's text model read with
+# `1 + w` answered its first layer 66× too large (Qwen-Image's encoder, NN-89).
+ZERO_CENTERED = ("qwen3_5", "qwen3_next")
 
 
 def is_norm(short_name):
@@ -160,7 +165,7 @@ class Bundle:
         right for every checkpoint this tree has ever seen and wrong for the first plain-convention one,
         with no symptom but a model that answers badly. ⇒ ★ A CONSTANT THAT IS RIGHT FOR EVERY INPUT SO
         FAR IS THE HARDEST KIND TO FIND WRONG. `None` here makes `gain_offset` REFUSE rather than guess.
-        ⛳ THE PREDICATE IS `src_old`'s, verbatim in effect: `model_type.startswith("qwen3")`.
+        ⛳ THE PREDICATE IS THE FAMILIES' (`ZERO_CENTERED`): Qwen 3.5's and Qwen3-Next's, not Qwen 3's or Qwen3-VL's.
         ⛔⛔ AND THE CONFIG IS THE BUNDLE'S OWN FIRST — the model's files are carried into it (`nn_pack_model.py`) — and the
         raw model's only when the bundle has none. `source.path` names a folder on the machine that packed it: it does not
         exist where a bundle is downloaded to, and is gone here once the raw weights are deleted, and reading only it
@@ -172,7 +177,7 @@ class Bundle:
             except (ValueError, OSError):
                 continue
             mt = str((man.get("text_config") or man).get("model_type") or man.get("model_type") or "")
-            return 1.0 if mt.startswith("qwen3") else 0.0
+            return 1.0 if mt.startswith(ZERO_CENTERED) else 0.0
         return None
 
     def gain_offset(self, short_name):

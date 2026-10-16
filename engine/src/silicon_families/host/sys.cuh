@@ -140,6 +140,18 @@ static inline uint32_t host__device_count(void) { return 1u; }
 static inline uint32_t host__bind_device(uint32_t index) { return index == 0u ? 1u : 0u; }
 static inline uint32_t host__bound_device(void) { return 0u; }
 
+/* ── DIRECT ACCESS AND MARKS — the one device is the process, and its work is done when the call
+ * that asked returns, so there is nothing to wait for. */
+static inline bool host__peer_access(uint32_t other) { return other < host__device_count(); }
+static inline bool host__mark_open(void** mark) {
+    if (mark == 0) return false;
+    *mark = (void*)&host__compute_completed;   /* a stable, non-null, never-dereferenced token */
+    return true;
+}
+static inline void host__mark_close(void* mark) { (void)mark; }
+static inline bool host__mark_record(void* mark) { return mark != 0; }
+static inline bool host__mark_wait(void* mark) { return mark != 0; }
+
 /* sys's doors, filled from sys's own list the way a loaded family fills them. */
 #define SYS__SILICON_FAMILY__THIS host
 #define HOST__ZZPRIVATE_DOOR(PKG, RET, NAME, FN, PARAMS)  FN,

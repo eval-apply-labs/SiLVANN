@@ -26,11 +26,33 @@ KNOWN = {
     "silvann_tq_D8E4_glm_5.3_flash": ("eval-apply/silvann_tq_D8E4_glm_5.3_flash", "166 GB"),
     "silvann_tq_D4_ministral_3_14b": ("eval-apply/silvann_tq_D4_ministral_3_14b", "7.4 GB"),
     "silvann_tq_D8_ministral_3_14b": ("eval-apply/silvann_tq_D8_ministral_3_14b", "13.5 GB"),
+    "silvann_tq_D8_qwen_image_2.1": ("eval-apply/silvann_tq_D8_qwen_image_2.1", "18 GB"),
 }
 
 
 def present(path):
-    return os.path.isfile(os.path.join(path, "pack.json")) and os.path.isfile(os.path.join(path, "config.json"))
+    """A model folder here: a text model's (its `config.json` and its pack's `pack.json`), or an image pack (diffusers'
+    `model_index.json`, its transformer packed — ▶ `qwen_image.image_pack`)."""
+    from .qwen_image import image_pack
+    return (os.path.isfile(os.path.join(path, "pack.json")) and os.path.isfile(os.path.join(path, "config.json"))
+            or image_pack(path))
+
+
+def programs(path):
+    """The program files a model folder carries: [(its folder, the names it reads)] — a text model's `lisp/`, its
+    family's runtime's `PROGRAM`; an image pack's `lisp/` (the transformer's) and its encoder's `text_encoder/lisp/`
+    (the encoder's family's). [] for a folder whose family this release does not know."""
+    import json
+    from . import ARCHITECTURES
+    from .qwen_image import QwenImage, image_pack
+    if image_pack(path):
+        return [(os.path.join(path, "lisp"), QwenImage.PROGRAM)] + programs(os.path.join(path, "text_encoder"))
+    try:
+        whole = json.load(open(os.path.join(path, "config.json")))
+    except (OSError, ValueError):
+        return []
+    cls = ARCHITECTURES.get(whole.get("text_config", whole).get("model_type", ""))
+    return [(os.path.join(path, "lisp"), cls.PROGRAM)] if cls is not None else []
 
 
 def ensure_model(path, repo=None, ask=input, yes=False):
@@ -59,19 +81,11 @@ def ensure_model(path, repo=None, ask=input, yes=False):
 
 
 def _lacks_program(path):
-    """Whether the folder lacks `lisp/`, or a file of it its family's runtime reads (▶ its `PROGRAM`) — a folder fetched
+    """Whether the folder lacks `lisp/`, or a file of it its family's runtime reads (▶ `programs`) — a folder fetched
     for an engine before that file was one of them."""
-    import json
-    from . import ARCHITECTURES
-    lisp = os.path.join(path, "lisp")
-    if not os.path.isdir(lisp):
+    if not os.path.isdir(os.path.join(path, "lisp")):
         return True
-    try:
-        whole = json.load(open(os.path.join(path, "config.json")))
-    except (OSError, ValueError):
-        return False
-    cls = ARCHITECTURES.get(whole.get("text_config", whole).get("model_type", ""))
-    return cls is not None and any(not os.path.isfile(os.path.join(lisp, n + ".lisp")) for n in cls.PROGRAM)
+    return any(not os.path.isfile(os.path.join(lisp, n + ".lisp")) for lisp, names in programs(path) for n in names)
 
 
 def _program(path, repo, ask, yes):
@@ -87,7 +101,7 @@ def _program(path, repo, ask, yes):
                % (path, repo)).strip().lower() in ("n", "no"):
             return
     from huggingface_hub import snapshot_download
-    snapshot_download(repo_id=repo, local_dir=path, allow_patterns=["lisp/*"])
+    snapshot_download(repo_id=repo, local_dir=path, allow_patterns=["lisp/*", "*/lisp/*"])     # an image pack's encoder's too
 
 
 def _download(repo, path):

@@ -10,6 +10,7 @@
 #include "attention.cuh"
 #include "result.cuh"
 #include "expert.cuh"
+#include "conv.cuh"
 
 /* Into nn's table, once, when the family is first asked for it. */
 static inline void nvidia_cuda12__override_doors(nn__doors* doors) {
@@ -18,6 +19,7 @@ static inline void nvidia_cuda12__override_doors(nn__doors* doors) {
     doors->turboquant_gemv_groups_sum = nvidia_cuda12__override_turboquant_gemv_groups_sum;
     doors->hadamard_rotate      = nvidia_cuda12__override_hadamard_rotate;
     doors->hadamard_blocks      = nvidia_cuda12__override_hadamard_blocks;
+    doors->hadamard_ladder_rows = nvidia_cuda12__override_hadamard_ladder_rows;
     doors->deltanet_steps       = nvidia_cuda12__override_deltanet_steps;
     doors->deltanet_step        = nvidia_cuda12__override_deltanet_step;
     doors->attention_causal_scores_grouped = nvidia_cuda12__override_attention_causal_scores_grouped;
@@ -34,10 +36,12 @@ static inline void nvidia_cuda12__override_doors(nn__doors* doors) {
     doors->attention_weights_tq_rows       = nvidia_cuda12__override_attention_weights_tq_rows;
     doors->attention_residual_mix_tq_rows  = nvidia_cuda12__override_attention_residual_mix_tq_rows;
     doors->attention_set                   = nvidia_cuda12__override_attention_set;
+    doors->attention_limits                = nvidia_cuda12__override_attention_limits;
     doors->argmax               = nvidia_cuda12__override_argmax;
     doors->expert_rows          = nvidia_cuda12__override_expert_rows;
     doors->expert_rows_sum      = nvidia_cuda12__override_expert_rows_sum;
     doors->expert_groups        = nvidia_cuda12__override_expert_groups;
+    doors->unfold_rows          = nvidia_cuda12__override_unfold_rows;
 }
 
 #endif /* SILVANN__SILICON_FAMILIES_NVIDIA_CUDA12_OVERRIDES_DOORS_CUH */

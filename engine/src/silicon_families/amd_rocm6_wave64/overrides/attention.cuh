@@ -628,4 +628,107 @@ static void amd_rocm6_wave64__override_attention_set(uint16_t* o, const uint16_t
                         args, sizes, 5u);
 }
 
+
+/* ⭐ ATTENTION WITH A KEY LIMIT A ROW — a diffusion transformer's sequence (nn's `attention_limits`): the set's kernel
+ *   above — a block 128 rows of one head, two lanes a row, the keys and values through shared memory 64 rows at a time
+ *   (STAGING), the same tile — with q, k and v apart, each on its own stride, and row r's keys `0 .. limits[r]`. A block
+ *   stages the tiles up to the largest limit among its rows — every lane reads them all, so every lane loops alike and
+ *   reaches every wait — and a lane scores a tile's keys up to its own row's limit, the whole tile without a bound in
+ *   sight where its row reads past it. A row's arithmetic is the same whichever rows share its block: the tiles start at
+ *   the same keys, so a later step's rows alone answer what they answer among every row. A row whose limit is 0 answers
+ *   zeros, as nn's. Heads of whole products of 8 columns, 128 at most; anything else is nn's. `MEASURED` (node03, a block
+ *   of Qwen-Image 2.1's transformer, test/src_qwen_image_time.py, measurements/2026-10-15_qwen_image_block_time_node03.md):
+ *   at 4,123 rows 0.41 s, where nn's took ≈ 11.5 s; at 2,331 rows 0.21 s against 3.76 s. */
+template <uint32_t D>
+static __device__ inline void amd_rocm6_wave64__zzprivate_attention_limits(uint16_t* o, const uint16_t* q, const uint16_t* k,
+                                                                           const uint16_t* v, const uint32_t* limits,
+                                                                           uint64_t rows, uint64_t heads, uint64_t q_stride,
+                                                                           uint64_t kv_stride, unsigned int* over) {
+    constexpr uint32_t HP = D / 4u, KW = (HP + 3u) & ~3u, HD = D / 2u;  /* a lane's half: pairs, padded words, elements */
+    constexpr uint32_t TILE = AMD_ROCM6_WAVE64__ZZPRIVATE_SET_TILE, ROWS = AMD_ROCM6_WAVE64__ZZPRIVATE_SET_ROWS;
+    constexpr uint32_t LANES = AMD_ROCM6_WAVE64__ZZPRIVATE_ROWS * AMD_ROCM6_WAVE64__ZZPRIVATE_WAVE;
+    __shared__ uint32_t keys[TILE * 2u * KW];                             /* key j's half h, pair w at (2j + h)·KW + w */
+    __shared__ uint32_t values[(TILE / 2u) * D];                          /* keys 2i and 2i+1's element d at i·D + d */
+    const uint64_t H = heads * D, groups = (rows + ROWS - 1u) / ROWS;
+    const uint32_t t = (uint32_t)nn__silicon__lane(), h = t & 1u;
+    const float scale = 1.4426950408889634f / nn__silicon__sqrtf((float)D);   /* log2(e) / sqrt(D): base-2 scores */
+    for (uint64_t item = nn__silicon__block(); item < heads * groups; item += nn__silicon__blocks()) {
+        const uint64_t e = item / groups, g0 = (item - e * groups) * ROWS, r = g0 + t / 2u;
+        const bool mine = r < rows;
+        const uint32_t limit = mine ? limits[r] : 0u;
+        const uint64_t here = rows - g0 < ROWS ? rows - g0 : ROWS;
+        uint32_t most = 0u;                                               /* the block's largest limit, the same in every lane */
+        for (uint64_t i = 0u; i < here; ++i) most = limits[g0 + i] > most ? limits[g0 + i] : most;
+        uint32_t qw[HP];
+        const uint32_t* qr = (const uint32_t*)(q + (mine ? r : 0ull) * q_stride + e * D + h * HD);
+#pragma unroll
+        for (uint32_t w = 0u; w < HP; ++w) qw[w] = mine ? qr[w] : 0u;
+        float acc[HD];
+#pragma unroll
+        for (uint32_t d = 0u; d < HD; ++d) acc[d] = 0.0f;
+        float m = -NN__KERNELS__INFINITY, l = 0.0f;
+        for (uint64_t base = 0ull; base < most; base += TILE) {
+            const uint32_t n = most - base < TILE ? (uint32_t)(most - base) : TILE;
+            for (uint32_t i = t; i < TILE * 2u * KW; i += LANES) {        /* the tile's keys, each half on whole loads */
+                const uint32_t j = i / (2u * KW), rest = i - j * 2u * KW, hh = rest / KW, w = rest - hh * KW;
+                keys[i] = j < n && w < HP ? ((const uint32_t*)(k + (base + j) * kv_stride + e * D + hh * HD))[w] : 0u;
+            }
+            for (uint32_t i = t; i < (TILE / 2u) * (D / 2u); i += LANES) { /* its values, two keys' same element a word */
+                const uint32_t jp = i / (D / 2u), w = i - jp * (D / 2u), j = 2u * jp;
+                const uint32_t a = j < n ? ((const uint32_t*)(v + (base + j) * kv_stride + e * D))[w] : 0u;
+                const uint32_t b = j + 1u < n ? ((const uint32_t*)(v + (base + j + 1u) * kv_stride + e * D))[w] : 0u;
+                values[jp * D + 2u * w] = (a & 0xFFFFu) | (b << 16);
+                values[jp * D + 2u * w + 1u] = (a >> 16) | (b & 0xFFFF0000u);
+            }
+            __syncthreads();                                              /* the tile, before any lane reads it */
+            const uint32_t c = limit <= base ? 0u : (limit - base < n ? (uint32_t)(limit - base) : n);
+            if (c == TILE)
+                amd_rocm6_wave64__zzprivate_set_tile<D, TILE>(acc, m, l, qw, keys + h * KW, values + h * HD, c, scale);
+            else if (c > 0u)
+                amd_rocm6_wave64__zzprivate_set_tile<D, 0u>(acc, m, l, qw, keys + h * KW, values + h * HD, c, scale);
+            __syncthreads();                                              /* every lane done with the tile */
+        }
+        if (mine) {
+            uint16_t* out = o + r * H + e * D + h * HD;
+#pragma unroll
+            for (uint32_t d = 0u; d < HD; ++d) out[d] = l > 0.0f ? amd_rocm6_wave64__zzpackage_to_half(acc[d] / l, over) : 0u;
+        }
+    }
+}
+template <uint32_t D>
+static __global__ AMD_ROCM6_WAVE64__ZZPRIVATE_SET_BOUNDS void amd_rocm6_wave64__zzprivate_attention_limits_head(
+        uint16_t* o, const uint16_t* q, const uint16_t* k, const uint16_t* v, const uint32_t* limits, uint64_t rows,
+        uint64_t heads, uint64_t q_stride, uint64_t kv_stride, unsigned int* over) {
+    amd_rocm6_wave64__zzprivate_attention_limits<D>(o, q, k, v, limits, rows, heads, q_stride, kv_stride, over);
+}
+/* What it takes: a head of whole products of 8 columns, 128 at most; q, k and v on four bytes and their strides even
+ * (their pairs' loads). */
+static void amd_rocm6_wave64__override_attention_limits(uint16_t* o, const uint16_t* q, const uint16_t* k, const uint16_t* v,
+                                                        const uint32_t* limits, uint64_t rows, uint64_t heads,
+                                                        uint64_t head_dim, uint64_t q_stride, uint64_t kv_stride,
+                                                        unsigned int* over) {
+    static const void* const kernels[16] = {           /* a head's width in 8s, less one */
+        (const void*)amd_rocm6_wave64__zzprivate_attention_limits_head<8u>,   (const void*)amd_rocm6_wave64__zzprivate_attention_limits_head<16u>,
+        (const void*)amd_rocm6_wave64__zzprivate_attention_limits_head<24u>,  (const void*)amd_rocm6_wave64__zzprivate_attention_limits_head<32u>,
+        (const void*)amd_rocm6_wave64__zzprivate_attention_limits_head<40u>,  (const void*)amd_rocm6_wave64__zzprivate_attention_limits_head<48u>,
+        (const void*)amd_rocm6_wave64__zzprivate_attention_limits_head<56u>,  (const void*)amd_rocm6_wave64__zzprivate_attention_limits_head<64u>,
+        (const void*)amd_rocm6_wave64__zzprivate_attention_limits_head<72u>,  (const void*)amd_rocm6_wave64__zzprivate_attention_limits_head<80u>,
+        (const void*)amd_rocm6_wave64__zzprivate_attention_limits_head<88u>,  (const void*)amd_rocm6_wave64__zzprivate_attention_limits_head<96u>,
+        (const void*)amd_rocm6_wave64__zzprivate_attention_limits_head<104u>, (const void*)amd_rocm6_wave64__zzprivate_attention_limits_head<112u>,
+        (const void*)amd_rocm6_wave64__zzprivate_attention_limits_head<120u>, (const void*)amd_rocm6_wave64__zzprivate_attention_limits_head<128u> };
+    if (rows == 0u || heads == 0u || head_dim == 0u || head_dim % 8u != 0u || head_dim > 128u
+     || ((uint64_t)(uintptr_t)q) % 4u != 0u || ((uint64_t)(uintptr_t)k) % 4u != 0u || ((uint64_t)(uintptr_t)v) % 4u != 0u
+     || q_stride % 2u != 0u || kv_stride % 2u != 0u || ((uint64_t)(uintptr_t)o) % 2u != 0u) {
+        nn__attention__zzabi_launch_limits(o, q, k, v, limits, rows, heads, head_dim, q_stride, kv_stride, over);
+        return;
+    }
+    const uint64_t lanes = AMD_ROCM6_WAVE64__ZZPRIVATE_ROWS * AMD_ROCM6_WAVE64__ZZPRIVATE_WAVE;
+    const uint64_t items = heads * ((rows + AMD_ROCM6_WAVE64__ZZPRIVATE_SET_ROWS - 1u) / AMD_ROCM6_WAVE64__ZZPRIVATE_SET_ROWS);
+    const uint32_t blocks = items < NN__KERNELS__BLOCKS_MAX ? (uint32_t)items : NN__KERNELS__BLOCKS_MAX;
+    void* args[] = { &o, &q, &k, &v, &limits, &rows, &heads, &q_stride, &kv_stride, &over };
+    const size_t sizes[] = { sizeof o, sizeof q, sizeof k, sizeof v, sizeof limits, sizeof rows, sizeof heads, sizeof q_stride,
+                             sizeof kv_stride, sizeof over };
+    nn__silicon__launch(kernels[head_dim / 8u - 1u], "amd_rocm6_wave64__zzprivate_attention_limits", blocks, (uint32_t)lanes,
+                        args, sizes, 10u);
+}
 #endif /* SILVANN__SILICON_FAMILIES_AMD_ROCM6_WAVE64_OVERRIDES_ATTENTION_CUH */

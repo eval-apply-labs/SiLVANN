@@ -415,5 +415,10 @@ static inline void sys__gpu__file_close(sys__silicon_family__id family, uint64_t
 static inline bool sys__gpu__file_read(sys__silicon_family__id family, uint64_t handle, uint64_t offset, uint64_t bytes, void* to);
 static inline bool sys__gpu__memory_map_file(sys__silicon_family__id family, void* at, size_t bytes, uint64_t handle, uint64_t offset);
 static inline bool sys__gpu__memory_prefetch(sys__silicon_family__id family, const void* at, size_t bytes);
+static inline bool sys__gpu__peer_access(sys__silicon_family__id family, uint32_t other);
+static inline bool sys__gpu__mark_open(sys__silicon_family__id family, void** mark);
+static inline void sys__gpu__mark_close(sys__silicon_family__id family, void* mark);
+static inline bool sys__gpu__mark_record(sys__silicon_family__id family, void* mark);
+static inline bool sys__gpu__mark_wait(sys__silicon_family__id family, void* mark);
 
 #endif /* SILVANN__PACKAGES_SYS_CPU_SILICON_SILICON__HEADER_CUH */

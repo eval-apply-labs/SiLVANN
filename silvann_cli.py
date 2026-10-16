@@ -13,6 +13,7 @@ n or Enter refuses. In the conversation: /new · /sys <prompt> (a new conversati
 """
 import argparse
 import json
+import os
 import re
 import sys
 import time
@@ -27,6 +28,7 @@ DIM, CYAN, GREEN, YELLOW, RED, RESET = "\033[2m", "\033[36m", "\033[32m", "\033[
 MODES = {"ask": "ask first", "chill": "reads unasked", "full-auto": "full auto"}
 TOOL = re.compile(r"<(tool_\w+)>(.*)</\1>", re.S)
 SHOWN_LINES = 12                                   # a value's lines shown; the model reads all of them
+PICTURE = re.compile(r"!\[[^\]]*\]\(picture:([A-Za-z0-9_.-]+)\)")    # a picture model's answer names its picture
 
 
 class Chat:
@@ -101,8 +103,15 @@ class Chat:
                             event = line[6:].strip()
                         elif line.startswith("data:"):
                             d = json.loads(line[5:])
-                            if event == "token":
-                                self.write(d.get("text", ""))
+                            if event == "progress":            # a picture model's, as its picture is made
+                                sys.stdout.write("\r%s[%s]%s\033[K" % (DIM, d.get("text", ""), RESET))
+                                sys.stdout.flush()
+                                self.fresh = False
+                            elif event == "token":
+                                if PICTURE.search(d.get("text", "")):
+                                    sys.stdout.write("\r\033[K")
+                                    self.fresh = True
+                                self.write(PICTURE.sub(lambda m: self.picture(m.group(1)), d.get("text", "")))
                             elif event == "tool":
                                 self.tool(d.get("text", ""))
                             elif event == "ask":
@@ -117,6 +126,15 @@ class Chat:
                 print("%s[stopped]%s" % (DIM, RESET))
                 return None
         return None
+
+    def picture(self, name):
+        """A picture a picture model made, saved in the working folder: the text that says where."""
+        r = self.http.get("/cartridges/%s/pictures/%s" % (self.cid, name))
+        if r.status_code != 200:
+            return "[the picture %s could not be read: %s]" % (name, _detail(r))
+        with open(name, "wb") as f:
+            f.write(r.content)
+        return "[the picture: %s]" % os.path.abspath(name)
 
     def write(self, text):
         """The answer's text: its thinking dimmed, without the tags that open and close it."""

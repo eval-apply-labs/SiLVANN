@@ -245,6 +245,10 @@
     X(PKG, 67, "nn__mlp__rows",       nn__mlp__zzabi_adapter_rows,                 NN__MLP__ROWS) \
     /* ⭐ A PROMPT'S ROWS THROUGH A GROUPED-QUERY ATTENTION, ITS NORM AND ITS RESIDUAL, OVER A PLANE TABLE — the many-row    */ \
     /* form of a plain attention's one-position words: Ministral's. ▶ `cpu/opcodes/attention__abi.cuh`.                */ \
-    X(PKG, 68, "nn__attention__rows", nn__attention__zzabi_adapter_rows,           NN__ATTENTION__ROWS)
+    X(PKG, 68, "nn__attention__rows", nn__attention__zzabi_adapter_rows,           NN__ATTENTION__ROWS) \
+    /* ⭐ A TENSOR-PARALLEL GROUP'S PARTIAL SUMS — a worker joins a group as one of its ranks, and every rank's partial is  */ \
+    /* added up a tree onto rank 0 and the sum sent back down it, over the cards' own memory. ▶ `contracts/objects/partials.cuh`. */ \
+    X(PKG, 69, "nn__partials__join",  nn__partials__zzabi_adapter_join,            NN__PARTIALS__JOIN) \
+    X(PKG, 70, "nn__partials__reduce", nn__partials__zzabi_adapter_reduce,         NN__PARTIALS__REDUCE)
 
 #endif /* SILVANN__PACKAGES_NN_CONTRACTS_MACROS_LANGUAGE_CONTRACT__VERBS_CUH */

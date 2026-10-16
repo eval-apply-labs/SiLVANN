@@ -49,6 +49,11 @@ PIPELINE_NOTE = ("pipeline_parallelism \"yes\" runs the model over several machi
                  "begin at 0 answers the UI; start every machine's server the same way, with the same max_context. "
                  "card: which of this machine's cards to run on (0, 1, ...), \"auto\" the first, \"cpu\" none: its CPU and "
                  "RAM.")
+IMAGE_NOTE = ("A picture model: each message is a prompt and its answer a picture. image holds a picture's settings — "
+              "width and height (multiples of 32, 256-2048), steps (more is finer and slower: 40 is the model's own), "
+              "seed (null: a new one each picture, said under it). A message may set them for itself: --size 768x1024, "
+              "--steps 20, --seed 7. card: which of this machine's cards to run on (0, 1, ...), \"auto\" the first.")
+IMAGE_CONFIG = {"card": "auto", "image": {"width": 1024, "height": 1024, "steps": 40, "seed": None}}
 VIDEO_NOTE = ("max_tokens_per_video is the most tokens a video attached to a message becomes: more sees a longer video "
               "in more detail and takes as many positions of the conversation. Reading a video holds 57-74 KB of RAM "
               "a token, depending on the model (0.45-0.58 GB at 8,192), and the server counts it when it chooses "
@@ -77,6 +82,9 @@ MAX_CONTEXT = {
 def default_config(folder):
     """`configs/default.json` in a model folder, written when it has none."""
     cfg = Path(folder) / "configs" / "default.json"
+    if not cfg.exists() and (Path(folder) / "model_index.json").exists():       # a picture model's (▶ IMAGE_NOTE)
+        cfg.parent.mkdir(parents=True, exist_ok=True)
+        cfg.write_text(json.dumps({"_note": IMAGE_NOTE, **IMAGE_CONFIG}, indent=2) + "\n")
     if not cfg.exists():
         # no options: where the experts sit and how much of the card holds them are chosen for the machine at each boot
         # (silvann_runtime/autotune.py), unless the config is edited to name them

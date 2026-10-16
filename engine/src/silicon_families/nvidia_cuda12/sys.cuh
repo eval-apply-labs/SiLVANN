@@ -13,7 +13,17 @@
 #include "includes.cuh"   /* which cards are this family's */
 
 
-static inline bool nvidia_cuda12__memory_allocate(void** at, size_t bytes) { return cudaMalloc(at, bytes) == cudaSuccess; }
+/* ⭐ NO MORE THAN THE CARD HAS FREE. Windows' driver — and WSL2's, through it — lets `cudaMalloc` succeed past the card's
+ *   own memory by default (its "sysmem fallback"), the rest in the PC's RAM, read over PCIe at every use: a boot that does
+ *   not fit then boots, and a setup that tries boots until one fits puts on the card what belongs on the CPU (SHIP-10: the
+ *   35B D8E4's experts on a 16 GB card under WSL2, ~6 tokens/s). So an allocation past what `cudaMemGetInfo` says is free
+ *   is refused here, as the card itself refuses it on Linux. A boot's allocations are megabytes and more; the few bytes a
+ *   top k lands in, a call at a time where the heap is not registered with the card, are not asked about. */
+static inline bool nvidia_cuda12__memory_allocate(void** at, size_t bytes) {
+    size_t free_bytes = 0, total_bytes = 0;
+    if (bytes >= ((size_t)1 << 20) && cudaMemGetInfo(&free_bytes, &total_bytes) == cudaSuccess && bytes > free_bytes) return false;
+    return cudaMalloc(at, bytes) == cudaSuccess;
+}
 static inline void nvidia_cuda12__memory_free(void* at)           { if (at) (void)cudaFree(at); }
 static inline bool nvidia_cuda12__memory_zerofill(void* at, size_t bytes) { return cudaMemset(at, 0, bytes) == cudaSuccess; }
 
@@ -117,6 +127,38 @@ static inline uint32_t nvidia_cuda12__bound_device(void) {
         if (nvidia_cuda12__zzprivate_takes(ordinal)) ++mine;
     return mine;
 }
+
+/* The vendor's number for this family's device `index`, or -1. */
+static inline int nvidia_cuda12__zzprivate_ordinal(uint32_t index) {
+    uint32_t mine = 0u;
+    for (int ordinal = 0; ordinal < nvidia_cuda12__zzprivate_shown(); ++ordinal) {
+        if (!nvidia_cuda12__zzprivate_takes(ordinal)) continue;
+        if (mine++ == index) return ordinal;
+    }
+    return -1;
+}
+
+/* ── ANOTHER CARD'S MEMORY, DIRECTLY — the ROCm family's door under CUDA's names. ⚠ ASSUMED: written without a CUDA
+ * compiler or two NVIDIA cards to run it on; a consumer card commonly answers no, and the caller then refuses. */
+static inline bool nvidia_cuda12__peer_access(uint32_t other) {
+    int here = -1;
+    const int there = nvidia_cuda12__zzprivate_ordinal(other);
+    if (cudaGetDevice(&here) != cudaSuccess || here < 0 || there < 0) return false;
+    if (here == there) return true;
+    int can = 0;
+    if (cudaDeviceCanAccessPeer(&can, here, there) != cudaSuccess || can == 0) return false;
+    const cudaError_t on = cudaDeviceEnablePeerAccess(there, 0);
+    if (on == cudaErrorPeerAccessAlreadyEnabled) { (void)cudaGetLastError(); return true; }
+    return on == cudaSuccess;
+}
+
+/* ── MARKS: an event on stream 0, where nn launches everything. */
+static inline bool nvidia_cuda12__mark_open(void** mark) {
+    return cudaEventCreateWithFlags((cudaEvent_t*)mark, cudaEventDisableTiming) == cudaSuccess;
+}
+static inline void nvidia_cuda12__mark_close(void* mark) { if (mark) (void)cudaEventDestroy((cudaEvent_t)mark); }
+static inline bool nvidia_cuda12__mark_record(void* mark) { return cudaEventRecord((cudaEvent_t)mark, 0) == cudaSuccess; }
+static inline bool nvidia_cuda12__mark_wait(void* mark) { return cudaStreamWaitEvent(0, (cudaEvent_t)mark, 0) == cudaSuccess; }
 
 /* ⛳ THE FUNCTIONS ABOVE ARE THIS FAMILY'S OWN, prefixed with its name; `sys`'s door list names them
  * (`contracts/abi/gpu.cuh`), and the published `sys__gpu__*` names in `cpu/silicon/silicon_family.cuh`

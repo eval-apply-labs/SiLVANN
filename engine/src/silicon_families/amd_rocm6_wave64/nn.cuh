@@ -56,15 +56,44 @@ static __device__ inline uint32_t nn__silicon__lanes(void) { return (uint32_t)bl
 static __device__ inline uint32_t nn__silicon__block(void)  { return (uint32_t)blockIdx.x; }
 static __device__ inline uint32_t nn__silicon__blocks(void) { return (uint32_t)gridDim.x; }
 
-/* The block's sums or largests, handed to every lane: each lane's parts go into block-shared memory, eight at a time,
- * each is folded pairwise in a fixed order (so a run is repeatable, and a value's answer is the same folded alone or
- * with others), and every lane reads the results.
+/* The block's sums or largests, handed to every lane: each part is folded pairwise in a fixed order (so a run is
+ * repeatable, and a value's answer is the same folded alone or with others), and every lane reads the results. In a
+ * block of whole waves, a power of two of them, the folds inside a wave are its lanes' exchanges — lane `me` and lane
+ * `me + w` added as the block-shared tree adds them, the same two floats in the same order on the lanes the tree keeps —
+ * and only the waves' sums go through block-shared memory, eight parts at a time, with one wait; any other block folds
+ * every level through block-shared memory, a wait a level.
  * ⛳ THE LAST WAIT IS WHAT LETS THE NEXT CALL REUSE THE SAME MEMORY: without it a fast lane could write
  * its next part before a slow one had read this answer. */
 #define AMD_ROCM6_WAVE64__ZZPRIVATE_FOLDS 8u
+#define AMD_ROCM6_WAVE64__ZZPRIVATE_FOLD_WAVE 64u
+#define AMD_ROCM6_WAVE64__ZZPRIVATE_FOLD_WAVES 16u     /* the waves of the largest block this family launches, 1024 lanes */
 static __device__ inline void amd_rocm6_wave64__zzprivate_fold(float* part, uint32_t n, bool largest) {
     __shared__ float parts[AMD_ROCM6_WAVE64__ZZPRIVATE_FOLDS][NN__SILICON__LANES_MAX];
     const uint32_t me = (uint32_t)threadIdx.x, lanes = (uint32_t)blockDim.x;
+    const uint32_t W = AMD_ROCM6_WAVE64__ZZPRIVATE_FOLD_WAVE, waves = lanes / W;
+    if (lanes % W == 0u && (waves & (waves - 1u)) == 0u && waves <= AMD_ROCM6_WAVE64__ZZPRIVATE_FOLD_WAVES) {
+        for (uint32_t k0 = 0u; k0 < n; k0 += AMD_ROCM6_WAVE64__ZZPRIVATE_FOLDS) {
+            const uint32_t m = n - k0 < AMD_ROCM6_WAVE64__ZZPRIVATE_FOLDS ? n - k0 : AMD_ROCM6_WAVE64__ZZPRIVATE_FOLDS;
+            for (uint32_t k = 0u; k < m; ++k) {
+                float x = part[k0 + k];
+                for (uint32_t w = 1u; w < W; w <<= 1) {
+                    const float y = __shfl_xor(x, (int)w);
+                    x = largest ? fmaxf(x, y) : x + y;
+                }
+                if (me % W == 0u) parts[k][me / W] = x;
+            }
+            __syncthreads();
+            for (uint32_t k = 0u; k < m; ++k) {
+                float v[AMD_ROCM6_WAVE64__ZZPRIVATE_FOLD_WAVES];
+                for (uint32_t i = 0u; i < waves; ++i) v[i] = parts[k][i];
+                for (uint32_t w = 1u; w < waves; w <<= 1)
+                    for (uint32_t i = 0u; i + w < waves; i += 2u * w) v[i] = largest ? fmaxf(v[i], v[i + w]) : v[i] + v[i + w];
+                part[k0 + k] = v[0];
+            }
+            __syncthreads();
+        }
+        return;
+    }
     for (uint32_t k0 = 0u; k0 < n; k0 += AMD_ROCM6_WAVE64__ZZPRIVATE_FOLDS) {
         const uint32_t m = n - k0 < AMD_ROCM6_WAVE64__ZZPRIVATE_FOLDS ? n - k0 : AMD_ROCM6_WAVE64__ZZPRIVATE_FOLDS;
         for (uint32_t k = 0u; k < m; ++k) parts[k][me] = part[k0 + k];

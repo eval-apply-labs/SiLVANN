@@ -143,6 +143,18 @@ static inline bool sys__gpu__memory_map_file(sys__silicon_family__id family, voi
     { SYS__SILICON__ZZPRIVATE_DOOR(memory_map_file, false)          return d->memory_map_file(at, bytes, handle, offset); }
 static inline bool sys__gpu__memory_prefetch(sys__silicon_family__id family, const void* at, size_t bytes)
     { SYS__SILICON__ZZPRIVATE_DOOR(memory_prefetch, true)           return d->memory_prefetch(at, bytes); }
+/* ⭐ DIRECT ACCESS AND MARKS — what several devices of one family need to share work without the host between
+ * them. A family without the doors answers false, so a caller that needs them refuses. */
+static inline bool sys__gpu__peer_access(sys__silicon_family__id family, uint32_t other)
+    { SYS__SILICON__ZZPRIVATE_DOOR(peer_access, false)              return d->peer_access(other); }
+static inline bool sys__gpu__mark_open(sys__silicon_family__id family, void** mark)
+    { SYS__SILICON__ZZPRIVATE_DOOR(mark_open, false)                return d->mark_open(mark); }
+static inline void sys__gpu__mark_close(sys__silicon_family__id family, void* mark)
+    { SYS__SILICON__ZZPRIVATE_DOOR(mark_close, )                    d->mark_close(mark); }
+static inline bool sys__gpu__mark_record(sys__silicon_family__id family, void* mark)
+    { SYS__SILICON__ZZPRIVATE_DOOR(mark_record, false)              return d->mark_record(mark); }
+static inline bool sys__gpu__mark_wait(sys__silicon_family__id family, void* mark)
+    { SYS__SILICON__ZZPRIVATE_DOOR(mark_wait, false)                return d->mark_wait(mark); }
 
 /* How many devices of a family this machine has, as its family counts them; zero with no family. */
 static inline uint32_t sys__silicon__device_count(sys__silicon_family__id family)

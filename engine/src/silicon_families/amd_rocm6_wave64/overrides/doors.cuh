@@ -39,6 +39,7 @@ static inline void amd_rocm6_wave64__override_doors(nn__doors* doors) {
     doors->attention_weights_tq      = amd_rocm6_wave64__override_attention_weights_tq;
     doors->attention_residual_mix_tq = amd_rocm6_wave64__override_attention_residual_mix_tq;
     doors->attention_set             = amd_rocm6_wave64__override_attention_set;
+    doors->attention_limits          = amd_rocm6_wave64__override_attention_limits;
     doors->hadamard_ladder_rows      = amd_rocm6_wave64__override_hadamard_ladder_rows;
 }
 

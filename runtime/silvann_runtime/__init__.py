@@ -20,7 +20,7 @@ from .qwen3_5 import Qwen35
 from .glm5 import Glm5
 from .mistral3 import Ministral3
 
-ARCHITECTURES = {"qwen3_5_text": Qwen35, "qwen3_5_moe_text": Qwen35, "glm5_next_text": Glm5, "ministral3": Ministral3}
+ARCHITECTURES = {"qwen3_5_text": Qwen35, "qwen3_5_moe_text": Qwen35, "qwen3_vl_text": Qwen35, "glm5_next_text": Glm5, "ministral3": Ministral3}
 
 
 def open_model(path, lora=None, max_context=4096, silicon=None, **options):
@@ -37,7 +37,7 @@ def open_model(path, lora=None, max_context=4096, silicon=None, **options):
     machine.programs_file = (path, key)
     params = model.device_params()
     if isinstance(params, dict):          # a section a worker: the card and the CPU's
-        machine.boot(params[0], workers=model.workers(), worker_params=params)
+        machine.boot(params[0], workers=model.workers(), worker_params=params, bindings=getattr(model, "BINDINGS", 512))
     else:
         machine.boot(params)
     model.load()

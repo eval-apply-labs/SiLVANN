@@ -277,4 +277,12 @@ static inline bool khronos_opencl2__file_read(uint64_t handle, uint64_t offset, 
     return sys__file__zzabi_read_through(handle, offset, bytes, to, khronos_opencl2__memory_write);
 }
 
+/* ── DIRECT ACCESS AND MARKS — not answered by this family: no device reads another's memory here, and a caller that
+ * needs either refuses. */
+static inline bool khronos_opencl2__peer_access(uint32_t other) { (void)other; return false; }
+static inline bool khronos_opencl2__mark_open(void** mark) { (void)mark; return false; }
+static inline void khronos_opencl2__mark_close(void* mark) { (void)mark; }
+static inline bool khronos_opencl2__mark_record(void* mark) { (void)mark; return false; }
+static inline bool khronos_opencl2__mark_wait(void* mark) { (void)mark; return false; }
+
 #endif /* SILVANN__SILICON_FAMILIES_KHRONOS_OPENCL2_SYS_CUH */

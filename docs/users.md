@@ -45,6 +45,16 @@ the scripts: `silvann_install`, `silvann_start`, `silvann_stop`, and `silvann_ex
 models and all, to another drive or PC. It has been run on Linux (Docker, an RTX 5060 Ti: the 27B and the 35B against
 Hugging Face as outside it, at the same speed) and not yet on Windows.
 
+**A model larger than the card, on Windows.** NVIDIA's Windows driver lets a program use more memory than the card has,
+the rest in the PC's RAM ("shared GPU memory" in Task Manager), so a model too large for the card starts on it all the
+same and then reads that rest over PCIe at every token. On one PC (an RTX 4060 Ti 16 GB) the Qwen 3.6 35B-A3B `D8E4`
+started with all its experts on the card, 4 GB of them in shared memory, and answered at 6 tokens a second. Until the
+setup checks for this, name the placement in the model's config (the Options view): the experts on the CPU, and a tier
+of them on the card that leaves Task Manager's shared GPU memory near 0 —
+`"options": {"kv": "tiered", "tiers": [256, 4096, "rest"], "experts_on": "cpu", "experts_from": "ram",
+"card_experts_gb": 6}` answered at 16 tokens a second there. The driver's "CUDA - Sysmem Fallback Policy" set to
+"Prefer No Sysmem Fallback" left CUDA in WSL 2 without the card on that PC: keep it at its default.
+
 ### On Windows: Linux on a USB SSD
 
 SiLVANN runs on Linux: it loads its libraries, pins its threads and reads the experts from the disk through Linux's own
@@ -98,10 +108,15 @@ ask stops the answer at a prompt — `y` allows it once, `f` the folder (a read)
 conversation: `/new`, `/sys <prompt>` (a new conversation with it), `/mode ask|chill|full-auto`, `/quit`; Ctrl-C stops
 an answer. `--endpoint` names another server (`http://localhost:8765` by default).
 
+**In the browser**, a model with no conversation saved opens one as its server starts, and a message typed brings the
+open conversation online, as **Activate** does. While the model thinks the answer says "thinking…"; **show thinking**
+shows the thought itself, in a section of its own. A run of the model's tool calls is a section, "tool · 3 calls", closed
+until you open it.
+
 **Pictures** (the Qwen models): the UI's 📎 button attaches one to the next message — it is read when it is attached,
 and the message carries it; the server reads one at `POST /cartridges/<id>/images` and a message names it in `images`.
 The model's vision tower runs on the card: a picture is made at most 4 megapixels (`picture_pixels`; its tokens: a
-1024 x 1024 picture is 1,024, a 2048 x 2048 one 4,096), and takes from a quarter of a second (a small one) to about 15 s (the
+1024 x 1024 picture is 1,024, a 2048 x 2048 one 4,096), and takes from a tenth of a second (a small one) to about 6.5 s (the
 largest) on the test machine's RTX 5060 Ti, and from 0.13 s to about 8.5 s on an MI50 — every patch of a picture attends
 every other, so its time grows with the
 square of its size. A folder fetched before
@@ -147,7 +162,7 @@ and reads each value back before it writes on. The commands list folders, read f
 command and read a web page: `(ls "notes")`, `(read "notes/a.md" 140 20)`, `(write "out.txt" "…")`,
 `(bash "git log -3")` (in the working folder, stopped after 60 seconds or `(bash "…" 300)`), `(fetch "https://…")` (the
 page's words, without its markup), `(cd "…")`, `(pwd)`; and Lisp to put them together — `define`, `let`, `lambda`,
-`map`, `filter`, text and lists. The UI shows a run of calls as one block:
+`map`, `filter`, text and lists. The UI shows a run of calls as one section, which opens to:
 ```
 <!tools>
 > (ls "notes")
@@ -172,6 +187,34 @@ model's calls are answered that the tool is off; turned on, only in a conversati
 declared in a conversation's first message. ⚠ The REPL runs as the server's user, with its files and its network: in a
 Docker container, the container's. A command allowed once runs as written — read it before you allow it; "full auto"
 runs every command the model writes.
+
+### A picture model: Qwen-Image 2.1
+
+`silvann_tq_D8_qwen_image_2.1` makes pictures. Started as a server's model, each message is a prompt and its answer a
+picture:
+
+```bash
+venv/bin/python silvann_core.py download-model silvann_tq_D8_qwen_image_2.1
+venv/bin/python start_silvann_server.py --model models/silvann_tq_D8_qwen_image_2.1
+```
+
+In the UI a message typed is a prompt: beside the box the picture's progress — the prompt read, each step, the decode —
+and then the picture in the conversation, kept as a PNG in the conversation's `pictures/` folder. A message sets its own
+picture's size, steps and seed — `A lighthouse at dusk, oil painting --size 768x1024 --steps 20 --seed 7` — and
+otherwise takes the config's `image` settings: 1,024 x 1,024, 40 steps, a new seed each picture, which the answer says
+under it. Sides are made multiples of 32, from 256 to 2,048; steps from 1 to 100, fewer faster and coarser. `card` in
+the config picks which of the machine's cards it runs on (`"auto"`: the first). The model has no thinking and no tool,
+and the UI hides those switches for it; reference pictures (the 📎 button) come with a later release.
+`silvann_cli` shows the progress on one line and saves the picture in its working folder, saying where. Through the API
+the answer's text names the picture — `![picture](picture:NAME)` — served at `GET /cartridges/<id>/pictures/NAME` (a
+PNG; `?format=jpeg` for a JPEG), and the message's stream tells its stages as `progress` events.
+
+The card holds one of the model's parts at a time — the text encoder to read the prompt, the transformer for the
+steps, then the picture decoder. A 1,024 x 1,024 picture at 40 steps took 146 s on the test machine's RTX 5060 Ti
+16 GB (3 s a step) and 572 s on an MI50; a 512 x 512 one at 12 steps, 35 s in the UI. Checked against diffusers'
+pipeline from the same prompt and seed: the pictures are nearer its float32 picture than its own bfloat16 pipeline's.
+⚠ Qwen-Image 2.1 is under the Qwen Research License Agreement, in the model's folder: research and other
+non-commercial use only.
 
 ## 4. The model's settings
 

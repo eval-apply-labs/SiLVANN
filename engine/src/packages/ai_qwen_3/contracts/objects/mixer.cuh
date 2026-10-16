@@ -127,4 +127,10 @@
 #define AI_QWEN_3__DN__MASK         30u
 #define AI_QWEN_3__AT__MASK         48u
 
+/* ⭐ QWEN 3's ATTENTION, NO OUTPUT GATE — an optional cell past the mask's three: 1 when q_proj gives each head's query
+ * alone (Qwen 3, Qwen3-VL's text layers: `attn_output_gate` false or absent) rather than its query and gate interleaved.
+ * `ai_qwen_3__attention_rows` reads such a table, its answers unscaled by any gate; the one-position and the tiered verbs
+ * refuse it. A table that stops short of it, or has a 0 there, is gated (Qwen 3.5). */
+#define AI_QWEN_3__AT__UNGATED      51u
+
 #endif /* SILVANN__PACKAGES_AI_QWEN_3_CONTRACTS_OBJECTS_MIXER_CUH */

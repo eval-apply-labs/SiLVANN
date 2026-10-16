@@ -2,7 +2,7 @@
 #define SILVANN__SILICON_FAMILIES_NVIDIA_CUDA12_OVERRIDES_HADAMARD_CUH
 /* ══ hadamard's DOORS, RUN FASTER — nvidia_cuda12 ═════════════════════════════════════════════════════════════════════
  * nn's hadamard doors (`nn/cpu/opcodes/hadamard__abi.cuh`), where this family covers them: the rotation over blocks of
- * 512, and over blocks of 128, 256 or 512 at a head's width. */
+ * 512, over blocks of 128, 256 or 512 at a head's width, and row by row in the pack's ladder. */
 
 /* What this file needs, named where a reader — and an editor — can follow it. */
 #include <stdint.h>
@@ -21,15 +21,12 @@
 #define NVIDIA_CUDA12__ZZPRIVATE_ROT_WARPS  8u       /* blocks of the rotation a launch's block takes, a warp each */
 #define NVIDIA_CUDA12__ZZPRIVATE_ROT_BOUNDS __launch_bounds__(256)
 
-static __device__ __forceinline__ void nvidia_cuda12__zzprivate_rotation(uint16_t* out, const uint16_t* in, const uint16_t* sign,
-                                                                          uint64_t blocks, uint64_t inverse, unsigned int* over,
-                                                                          const uint32_t E) {
+/* One block of `E · 32` at `at`, by the whole warp: its shuffles need every lane. */
+static __device__ __forceinline__ void nvidia_cuda12__zzprivate_rotation_at(uint16_t* out, const uint16_t* in, uint64_t at,
+                                                                             const uint16_t* sign, uint64_t inverse,
+                                                                             unsigned int* over, const uint32_t E) {
     const uint32_t lane = (uint32_t)nn__silicon__lane() % NVIDIA_CUDA12__ZZPACKAGE_WARP;
-    const uint64_t block = (uint64_t)nn__silicon__block() * NVIDIA_CUDA12__ZZPRIVATE_ROT_WARPS
-                         + (uint32_t)nn__silicon__lane() / NVIDIA_CUDA12__ZZPACKAGE_WARP;
-    if (block >= blocks) return;                     /* the whole warp, so its shuffles below have every lane */
     const uint32_t B = E * NVIDIA_CUDA12__ZZPACKAGE_WARP;
-    const uint64_t at = block * B;
     float v[NVIDIA_CUDA12__ZZPRIVATE_ROT_E_MAX];
     uint16_t sh[NVIDIA_CUDA12__ZZPRIVATE_ROT_E_MAX];
 #pragma unroll
@@ -66,6 +63,14 @@ static __device__ __forceinline__ void nvidia_cuda12__zzprivate_rotation(uint16_
         if (inverse != 0u) r *= nn__silicon__half_to_float(sh[e]);
         out[at + lane + NVIDIA_CUDA12__ZZPACKAGE_WARP * e] = nn__kernels__zzabi_to_half(r, over);
     }
+}
+static __device__ __forceinline__ void nvidia_cuda12__zzprivate_rotation(uint16_t* out, const uint16_t* in, const uint16_t* sign,
+                                                                          uint64_t blocks, uint64_t inverse, unsigned int* over,
+                                                                          const uint32_t E) {
+    const uint64_t block = (uint64_t)nn__silicon__block() * NVIDIA_CUDA12__ZZPRIVATE_ROT_WARPS
+                         + (uint32_t)nn__silicon__lane() / NVIDIA_CUDA12__ZZPACKAGE_WARP;
+    if (block >= blocks) return;                     /* the whole warp, so its shuffles have every lane */
+    nvidia_cuda12__zzprivate_rotation_at(out, in, block * E * NVIDIA_CUDA12__ZZPACKAGE_WARP, sign, inverse, over, E);
 }
 
 static __global__ NVIDIA_CUDA12__ZZPRIVATE_ROT_BOUNDS void nvidia_cuda12__zzprivate_rotation_128(uint16_t* out, const uint16_t* in, const uint16_t* sign,
@@ -119,6 +124,46 @@ static void nvidia_cuda12__override_hadamard_blocks(uint16_t* out, const uint16_
         return;
     }
     nvidia_cuda12__zzprivate_rotate(out, in, sign, n, block, inverse, over);
+}
+
+/* ⭐ THE PACK'S LADDER, ROW BY ROW — `hadamard_ladder_rows`: each row of `cols` rotated in blocks of 512, then a 256 when
+ *   at least that much is left, then a 128 (a row of 1152: 512 · 512 · 128), each block's signs from the vector's start,
+ *   as the packer rotated a matrix that wide. nn's generic body sums each output's whole block directly, a lane an output
+ *   — `MEASURED` (nsys, the precision, Qwen-Image 2.1's block 0 over a 1024² picture's 4,123 rows): 13.6 ms a call and
+ *   65% of the block. Here a warp takes a block of a row, the butterfly above. Rows whose width is whole 128s, `out`
+ *   either `in` or apart from it; anything else is nn's. */
+static __global__ NVIDIA_CUDA12__ZZPRIVATE_ROT_BOUNDS void nvidia_cuda12__zzprivate_ladder(uint16_t* out, const uint16_t* in,
+                                                                                            const uint16_t* sign, uint64_t cols,
+                                                                                            uint64_t rows, unsigned int* over) {
+    const uint64_t whole = cols / 512u, rest = cols - whole * 512u;
+    const uint64_t units = whole + (rest >= 256u ? 1u : 0u) + (rest % 256u != 0u ? 1u : 0u);
+    for (uint64_t u = (uint64_t)nn__silicon__block() * NVIDIA_CUDA12__ZZPRIVATE_ROT_WARPS
+                    + (uint32_t)nn__silicon__lane() / NVIDIA_CUDA12__ZZPACKAGE_WARP;
+         u < rows * units; u += (uint64_t)nn__silicon__blocks() * NVIDIA_CUDA12__ZZPRIVATE_ROT_WARPS) {
+        const uint64_t row = u / units, j = u - row * units, at = row * cols;
+        if (j < whole)
+            nvidia_cuda12__zzprivate_rotation_at(out, in, at + j * 512u, sign, 0u, over, 16u);
+        else if (rest >= 256u && j == whole)
+            nvidia_cuda12__zzprivate_rotation_at(out, in, at + whole * 512u, sign, 0u, over, 8u);
+        else
+            nvidia_cuda12__zzprivate_rotation_at(out, in, at + whole * 512u + (rest >= 256u ? 256u : 0u), sign, 0u, over, 4u);
+    }
+}
+static void nvidia_cuda12__override_hadamard_ladder_rows(uint16_t* out, const uint16_t* in, const uint16_t* sign, uint64_t cols,
+                                                         uint64_t rows, unsigned int* over) {
+    const uint64_t n = cols * rows;
+    const bool apart = out == in || out + n <= in || in + n <= out;
+    if (cols == 0u || rows == 0u || cols % 128u != 0u || !apart) {
+        nn__hadamard__zzabi_launch_ladder_rows(out, in, sign, cols, rows, over);
+        return;
+    }
+    const uint64_t units = rows * (cols / 512u + (cols % 512u >= 256u ? 1u : 0u) + (cols % 256u != 0u ? 1u : 0u));
+    const uint64_t want = (units + NVIDIA_CUDA12__ZZPRIVATE_ROT_WARPS - 1u) / NVIDIA_CUDA12__ZZPRIVATE_ROT_WARPS;
+    const uint32_t launch = want < NN__KERNELS__BLOCKS_MAX ? (uint32_t)want : NN__KERNELS__BLOCKS_MAX;
+    void* args[] = { &out, &in, &sign, &cols, &rows, &over };
+    const size_t sizes[] = { sizeof out, sizeof in, sizeof sign, sizeof cols, sizeof rows, sizeof over };
+    nn__silicon__launch((const void*)nvidia_cuda12__zzprivate_ladder, "nvidia_cuda12__zzprivate_ladder", launch,
+                        NVIDIA_CUDA12__ZZPRIVATE_ROT_WARPS * NVIDIA_CUDA12__ZZPACKAGE_WARP, args, sizes, 6u);
 }
 
 #endif /* SILVANN__SILICON_FAMILIES_NVIDIA_CUDA12_OVERRIDES_HADAMARD_CUH */

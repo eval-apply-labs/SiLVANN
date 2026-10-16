@@ -790,4 +790,158 @@ static void nvidia_cuda12__override_attention_set(uint16_t* o, const uint16_t* q
                         NVIDIA_CUDA12__ZZPRIVATE_ATT_WARPS * NVIDIA_CUDA12__ZZPACKAGE_WARP, args, sizes, 6u);
 }
 
+/* ── ⭐ ATTENTION WITH A KEY LIMIT A ROW ───────────────────────────────────────────────────────────────────────────────
+ * nn's `attention_limits`: query row r attends the key rows `0 .. limits[r]` — a diffusion transformer's sequence, its
+ * prompt causal, a reference picture's rows their whole block, the generated picture's every row; and a later step's
+ * picture rows alone against the prompt's keys kept from the first. The set's warp above, with q, k and v apart, each on
+ * its own stride: a warp's 16 queries walk the keys 16 at a time up to the largest of their limits, and a key past a
+ * row's own limit scores as no key for that row. A row's arithmetic is the same whichever rows share its warp — its
+ * scores and its products are its own, every warp's tiles start at key 0, and a tile past its limit leaves its largest,
+ * its sum and its values as they were — so a later step's rows alone answer what they answer among every row. A row whose
+ * limit is 0 answers zeros, as nn's. `MEASURED` (precision, an RTX 5060 Ti; a block's attention of Qwen-Image 2.1 at
+ * 1024²: 4,123 rows, 27 of them causal, 24 heads of 128, q, k and v planes of their own): 0.031 s, where nn's took 2.28 s;
+ * 2.6e-4 of the largest from nn's, and a later step's 4,096 rows alone the whole run's to the bit. */
+static __global__ NVIDIA_CUDA12__ZZPRIVATE_ATT_BOUNDS void nvidia_cuda12__zzprivate_limits(uint16_t* o, const uint16_t* q, const uint16_t* k,
+                                                                                           const uint16_t* v, const uint32_t* limits,
+                                                                                           uint64_t rows, uint64_t heads, uint64_t head_dim,
+                                                                                           uint64_t q_stride, uint64_t kv_stride,
+                                                                                           unsigned int* over) {
+    const uint32_t lane = (uint32_t)nn__silicon__lane() % NVIDIA_CUDA12__ZZPACKAGE_WARP, g = lane / 4u, t = lane % 4u;
+    const uint64_t H = heads * head_dim, q_tiles = (rows + 15u) / 16u, items = heads * q_tiles;
+    const uint32_t steps = (uint32_t)((head_dim + 15u) / 16u), tiles = (uint32_t)(head_dim / 8u);
+    const float scale = 1.4426950408889634f / nn__silicon__sqrtf((float)(uint32_t)head_dim);    /* log2(e) / √d */
+    for (uint64_t it = (uint64_t)nn__silicon__block() * NVIDIA_CUDA12__ZZPRIVATE_ATT_WARPS + nn__silicon__lane() / NVIDIA_CUDA12__ZZPACKAGE_WARP;
+         it < items; it += (uint64_t)nn__silicon__blocks() * NVIDIA_CUDA12__ZZPRIVATE_ATT_WARPS) {
+        const uint64_t e = it / q_tiles, ra = (it % q_tiles) * 16u + g, rb = ra + 8u;
+        const uint16_t* qh = q + e * head_dim;                /* row r's query head at `qh + r · q_stride`, key and value */
+        const uint16_t* kh = k + e * head_dim;                /* rows `kv_stride` apart */
+        const uint16_t* vh = v + e * head_dim;
+        const uint32_t la = ra < rows ? limits[ra] : 0u, lb = rb < rows ? limits[rb] : 0u;   /* rows g and g + 8's */
+        uint32_t most = la > lb ? la : lb;                    /* the warp's largest, the same in every lane */
+        most = max(most, __shfl_xor_sync(0xFFFFFFFFu, most, 4));
+        most = max(most, __shfl_xor_sync(0xFFFFFFFFu, most, 8));
+        most = max(most, __shfl_xor_sync(0xFFFFFFFFu, most, 16));
+        uint32_t a[NVIDIA_CUDA12__ZZPRIVATE_SET_STEPS][4];
+#pragma unroll
+        for (uint32_t s = 0u; s < NVIDIA_CUDA12__ZZPRIVATE_SET_STEPS; ++s) {
+            const uint64_t c0 = 16u * s + 2u * t, c1 = c0 + 8u;
+            a[s][0] = nvidia_cuda12__zzprivate_pair(qh + ra * q_stride + c0, ra < rows && c0 < head_dim);
+            a[s][1] = nvidia_cuda12__zzprivate_pair(qh + rb * q_stride + c0, rb < rows && c0 < head_dim);
+            a[s][2] = nvidia_cuda12__zzprivate_pair(qh + ra * q_stride + c1, ra < rows && c1 < head_dim);
+            a[s][3] = nvidia_cuda12__zzprivate_pair(qh + rb * q_stride + c1, rb < rows && c1 < head_dim);
+        }
+        float acc[NVIDIA_CUDA12__ZZPRIVATE_SET_TILES][4];
+#pragma unroll
+        for (uint32_t j = 0u; j < NVIDIA_CUDA12__ZZPRIVATE_SET_TILES; ++j) acc[j][0] = acc[j][1] = acc[j][2] = acc[j][3] = 0.0f;
+        float top[2] = { -NN__KERNELS__INFINITY, -NN__KERNELS__INFINITY }, sum[2] = { 0.0f, 0.0f };   /* rows g, g + 8 */
+        for (uint64_t k0 = 0u; k0 < most; k0 += 16u) {
+            /* ① the scores of 16 keys, two products of 8: lane `4g + t` holds keys `2t, 2t + 1` of each, rows g and g + 8 */
+            float sc[2][4];
+#pragma unroll
+            for (uint32_t n = 0u; n < 2u; ++n) {
+                sc[n][0] = sc[n][1] = sc[n][2] = sc[n][3] = 0.0f;
+                const uint64_t key = k0 + 8u * n + g;
+                const uint16_t* kr = kh + key * kv_stride;
+#pragma unroll
+                for (uint32_t s = 0u; s < NVIDIA_CUDA12__ZZPRIVATE_SET_STEPS; ++s) {
+                    if (s < steps) {
+                        const uint64_t c0 = 16u * s + 2u * t, c1 = c0 + 8u;
+                        nvidia_cuda12__zzpackage_mma(sc[n], a[s][0], a[s][1], a[s][2], a[s][3],
+                                                     nvidia_cuda12__zzprivate_pair(kr + c0, key < most && c0 < head_dim),
+                                                     nvidia_cuda12__zzprivate_pair(kr + c1, key < most && c1 < head_dim));
+                    }
+                }
+            }
+            /* ② each row's largest so far, over the four lanes that hold it, its keys past its limit none; what came
+             *   before scaled down to it — from 0 while a row has seen no key, so its sums stay zeros */
+            float best[2] = { top[0], top[1] };
+#pragma unroll
+            for (uint32_t n = 0u; n < 2u; ++n)
+#pragma unroll
+                for (uint32_t c = 0u; c < 4u; ++c) {
+                    const uint64_t key = k0 + 8u * n + 2u * t + (c & 1u);
+                    sc[n][c] = key < (c < 2u ? la : lb) ? sc[n][c] * scale : -NN__KERNELS__INFINITY;
+                    best[c >> 1] = fmaxf(best[c >> 1], sc[n][c]);
+                }
+#pragma unroll
+            for (uint32_t h = 0u; h < 2u; ++h) {
+                best[h] = fmaxf(best[h], __shfl_xor_sync(0xFFFFFFFFu, best[h], 1));
+                best[h] = fmaxf(best[h], __shfl_xor_sync(0xFFFFFFFFu, best[h], 2));
+            }
+            const float ref0 = best[0] > -NN__KERNELS__INFINITY ? best[0] : 0.0f;
+            const float ref1 = best[1] > -NN__KERNELS__INFINITY ? best[1] : 0.0f;
+            const float keep0 = exp2f(top[0] - ref0), keep1 = exp2f(top[1] - ref1);
+            top[0] = best[0];
+            top[1] = best[1];
+            sum[0] *= keep0;
+            sum[1] *= keep1;
+#pragma unroll
+            for (uint32_t j = 0u; j < NVIDIA_CUDA12__ZZPRIVATE_SET_TILES; ++j) {
+                acc[j][0] *= keep0; acc[j][1] *= keep0; acc[j][2] *= keep1; acc[j][3] *= keep1;
+            }
+            float w[2][4];
+#pragma unroll
+            for (uint32_t n = 0u; n < 2u; ++n)
+#pragma unroll
+                for (uint32_t c = 0u; c < 4u; ++c) {
+                    w[n][c] = exp2f(sc[n][c] - (c < 2u ? ref0 : ref1));
+                    sum[c >> 1] += w[n][c];
+                }
+            /* ③ the weights as a product's A, times the values' 8 columns a product, as the set's */
+            const uint32_t p0 = nvidia_cuda12__zzprivate_halves(w[0][0], w[0][1]), p1 = nvidia_cuda12__zzprivate_halves(w[0][2], w[0][3]);
+            const uint32_t p2 = nvidia_cuda12__zzprivate_halves(w[1][0], w[1][1]), p3 = nvidia_cuda12__zzprivate_halves(w[1][2], w[1][3]);
+            const uint64_t ka = k0 + 2u * t, kb = ka + 8u;
+#pragma unroll
+            for (uint32_t j = 0u; j < NVIDIA_CUDA12__ZZPRIVATE_SET_TILES; ++j) {
+                if (j < tiles) {
+                    const uint16_t* vc = vh + 8u * j + g;
+                    const uint32_t b0 = (uint32_t)(ka < most ? vc[ka * kv_stride] : 0u) | ((uint32_t)(ka + 1u < most ? vc[(ka + 1u) * kv_stride] : 0u) << 16);
+                    const uint32_t b1 = (uint32_t)(kb < most ? vc[kb * kv_stride] : 0u) | ((uint32_t)(kb + 1u < most ? vc[(kb + 1u) * kv_stride] : 0u) << 16);
+                    nvidia_cuda12__zzpackage_mma(acc[j], p0, p1, p2, p3, b0, b1);
+                }
+            }
+        }
+#pragma unroll
+        for (uint32_t h = 0u; h < 2u; ++h) {
+            sum[h] += __shfl_xor_sync(0xFFFFFFFFu, sum[h], 1);
+            sum[h] += __shfl_xor_sync(0xFFFFFFFFu, sum[h], 2);
+        }
+#pragma unroll
+        for (uint32_t j = 0u; j < NVIDIA_CUDA12__ZZPRIVATE_SET_TILES; ++j) {
+            if (j < tiles) {
+                const uint64_t d = e * head_dim + 8u * j + 2u * t;
+                if (ra < rows) {
+                    o[ra * H + d] = sum[0] > 0.0f ? nn__kernels__zzabi_to_half(acc[j][0] / sum[0], over) : 0u;
+                    o[ra * H + d + 1u] = sum[0] > 0.0f ? nn__kernels__zzabi_to_half(acc[j][1] / sum[0], over) : 0u;
+                }
+                if (rb < rows) {
+                    o[rb * H + d] = sum[1] > 0.0f ? nn__kernels__zzabi_to_half(acc[j][2] / sum[1], over) : 0u;
+                    o[rb * H + d + 1u] = sum[1] > 0.0f ? nn__kernels__zzabi_to_half(acc[j][3] / sum[1], over) : 0u;
+                }
+            }
+        }
+    }
+}
+
+/* What it takes: a head of whole products of 8 columns, 128 at most; q, k and v on four bytes and their strides even
+ * (their pairs' loads). */
+static void nvidia_cuda12__override_attention_limits(uint16_t* o, const uint16_t* q, const uint16_t* k, const uint16_t* v,
+                                                     const uint32_t* limits, uint64_t rows, uint64_t heads, uint64_t head_dim,
+                                                     uint64_t q_stride, uint64_t kv_stride, unsigned int* over) {
+    if (rows == 0u || heads == 0u || head_dim == 0u || head_dim % 8u != 0u || head_dim > 16u * NVIDIA_CUDA12__ZZPRIVATE_SET_STEPS
+     || ((uint64_t)(uintptr_t)q) % 4u != 0u || ((uint64_t)(uintptr_t)k) % 4u != 0u || ((uint64_t)(uintptr_t)v) % 4u != 0u
+     || q_stride % 2u != 0u || kv_stride % 2u != 0u || ((uint64_t)(uintptr_t)o) % 2u != 0u) {
+        nn__attention__zzabi_launch_limits(o, q, k, v, limits, rows, heads, head_dim, q_stride, kv_stride, over);
+        return;
+    }
+    const uint64_t items = heads * ((rows + 15u) / 16u);
+    const uint64_t want = (items + NVIDIA_CUDA12__ZZPRIVATE_ATT_WARPS - 1u) / NVIDIA_CUDA12__ZZPRIVATE_ATT_WARPS;
+    const uint32_t blocks = want < 65535u ? (uint32_t)want : 65535u;
+    void* args[] = { &o, &q, &k, &v, &limits, &rows, &heads, &head_dim, &q_stride, &kv_stride, &over };
+    const size_t sizes[] = { sizeof o, sizeof q, sizeof k, sizeof v, sizeof limits, sizeof rows, sizeof heads, sizeof head_dim,
+                             sizeof q_stride, sizeof kv_stride, sizeof over };
+    nn__silicon__launch((const void*)nvidia_cuda12__zzprivate_limits, "nvidia_cuda12__zzprivate_limits", blocks,
+                        NVIDIA_CUDA12__ZZPRIVATE_ATT_WARPS * NVIDIA_CUDA12__ZZPACKAGE_WARP, args, sizes, 11u);
+}
+
 #endif /* SILVANN__SILICON_FAMILIES_NVIDIA_CUDA12_OVERRIDES_ATTENTION_CUH */

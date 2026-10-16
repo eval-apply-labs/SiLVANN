@@ -9,7 +9,10 @@
  * matrices are TurboQuant's, each with its scales; its input rotated as the pack rotated their columns.
  * ⭐ UNDER TENSOR PARALLELISM a card holds INTER of the whole: its gate and up rows and the same columns of down — the
  * activation is rotated in whole blocks of 512 and every part's slice is whole blocks, so each part's product is exact —
- * and every part but one sums onto a zero residual, so the parts' outputs add up to the layer's. */
+ * and every part but one sums onto a zero residual, so the parts' outputs add up to the layer's. With a group as its last
+ * argument (`(nn__mlp__apply h1 table out residual group)`, `(nn__mlp__rows h1 table out rows group)`, ▶ `partials.cuh`)
+ * the verb does that sum itself: its product is a partial, and `out` the group's reduce of every card's, the residual
+ * added once on rank 0. */
 #define NN__MLP__NORM            0u
 #define NN__MLP__GATE            1u
 #define NN__MLP__GATE_SCALES     2u

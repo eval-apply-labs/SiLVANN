@@ -254,6 +254,8 @@ POLICY = [
                                                                       # over anything. ASSUMED.
     (r"(^|\.)(embed_tokens|lm_head)\.weight$",                DEFAULT_WIDTH),
     (r"norm\.weight$",                                        RAW),
+    (r"\.norm_[qk]\.weight$",                                 RAW),   # a diffusion transformer's per-head q/k
+                                                                      # norms (Qwen-Image's `attn.norm_q`), 128 values
     (r"\.(bias|dt_bias|A_log)$",                              RAW),
     (r"conv1d\.weight$",                                      RAW),   # [8192,1,4] — no axis to rotate
     # GLM 5.3 Flash: the router's per-expert bias (288 values between 7.4 and 7.8, whose DIFFERENCES pick the
@@ -773,10 +775,22 @@ _IDX = {}
 PER_EXPERT = "per_expert"    # a view's weight_map value: this stacked expert tensor is assembled from one tensor an expert
 
 
+# a checkpoint's index: transformers' name, or diffusers' for a model's component (Qwen-Image's transformer)
+INDEX_NAMES = ("model.safetensors.index.json", "diffusion_pytorch_model.safetensors.index.json")
+
+
+def index_file(raw):
+    """The checkpoint's index file — the first of `INDEX_NAMES` it has — or None."""
+    for n in INDEX_NAMES:
+        if os.path.isfile(os.path.join(raw, n)):
+            return os.path.join(raw, n)
+    return None
+
+
 def _index(raw):
-    """A checkpoint's `model.safetensors.index.json`, read once — the 397B heretic's holds 93,411 names."""
+    """A checkpoint's index (`INDEX_NAMES`), read once — the 397B heretic's holds 93,411 names."""
     if raw not in _IDX:
-        _IDX[raw] = json.load(open(os.path.join(raw, "model.safetensors.index.json")))
+        _IDX[raw] = json.load(open(index_file(raw)))
     return _IDX[raw]
 
 

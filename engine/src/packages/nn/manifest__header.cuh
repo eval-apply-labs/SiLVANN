@@ -34,6 +34,7 @@
 #include "cpu/opcodes/attention__abi__header.cuh"
 #include "cpu/opcodes/hyper__abi__header.cuh"
 #include "cpu/opcodes/mlp__abi__header.cuh"
+#include "cpu/opcodes/partials__abi__header.cuh"
 
 /* The package answering the roll call the registry takes after this phase. A row with no include says so
  * at the registry, naming this package, instead of somewhere further down. */

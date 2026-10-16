@@ -14,6 +14,7 @@ For local mode (Options view) to work, run from the silvann_v4 repo root so ./co
 """
 import argparse
 import asyncio
+import base64
 import json
 import os
 import re
@@ -33,33 +34,59 @@ import httpx
 from nicegui import ui, app
 
 
-THINK_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL)
+# an answer's think block: closed, or still open while the model thinks (the server sends the `<think>` its prompt opened)
+THINK_PART_RE = re.compile(r"<think>(.*?)(</think>|\Z)", re.DOTALL)
 # the model's tool (NN-88): the server writes every model's calls the same way in the answer's text
 TOOL_RE = re.compile(r"<tool_(call|response|ask|answer)>(.*?)</tool_\1>", re.DOTALL)
 ASK_LABELS = {"folder": "allow the folder", "once": "allow once", "refuse": "refuse"}
+# a picture model's answer names its picture (v0.10.0): `![picture](picture:NAME)`, drawn from the server's copy
+PICTURE_RE = re.compile(r"!\[([^\]]*)\]\(picture:([A-Za-z0-9_.-]+)\)")
 
 
-def tools_markdown(content: str) -> str:
-    """An answer's calls to the model's tool as one `<!tools> … </tools>` block a run of them: a form after `>`, its
-    value under it, an ask and the user's answer as comments."""
+def _tool_parts(text: str) -> list:
+    """Text outside a think block as ("text", markdown) and ("tools", lines) parts: a run of calls to the model's tool is
+    one part — a form after `>`, its value under it, an ask and the user's answer as comments."""
     parts, block, pos = [], [], 0
 
     def flush():
         if block:
-            parts.append("\n\n```lisp\n<!tools>\n%s\n</tools>\n```\n\n" % "\n".join(block))
+            parts.append(("tools", list(block)))
             block.clear()
-    for m in TOOL_RE.finditer(content):
-        gap = content[pos:m.start()]
+    for m in TOOL_RE.finditer(text):
+        gap = text[pos:m.start()]
         if gap.strip():
             flush()
-            parts.append(gap)
+            parts.append(("text", gap))
         kind, body = m.group(1), m.group(2)
         block.append({"call": "> " + body, "response": body, "ask": ";; asked: " + body,
                       "answer": ";; you answered: " + ASK_LABELS.get(body, body)}[kind])
         pos = m.end()
     flush()
-    parts.append(content[pos:])
-    return "".join(parts)
+    if text[pos:].strip():
+        parts.append(("text", text[pos:]))
+    return parts
+
+
+def answer_parts(content: str) -> list:
+    """An answer's text as the parts it is drawn in, in order: ("think", text, closed) a think block — `closed` False while
+    the model is still in it —, ("tools", lines) a run of calls to the model's tool, ("text", markdown) the rest. A
+    `</think>` with no `<think>` before it closes a block the answer began in (a conversation saved without the tag)."""
+    parts, pos = [], 0
+    first_open, first_close = content.find("<think>"), content.find("</think>")
+    if first_close >= 0 and (first_open < 0 or first_close < first_open):
+        parts.append(("think", content[:first_close], True))
+        pos = first_close + len("</think>")
+    for m in THINK_PART_RE.finditer(content, pos):
+        parts += _tool_parts(content[pos:m.start()])
+        parts.append(("think", m.group(1), m.group(2) == "</think>"))
+        pos = m.end()
+    parts += _tool_parts(content[pos:])
+    return parts
+
+
+def tools_block(lines: list) -> str:
+    """A run of tool calls as the markdown a tools section shows: one `<!tools> … </tools>` block."""
+    return "```lisp\n<!tools>\n%s\n</tools>\n```" % "\n".join(lines)
 
 
 # ---------- HTTP client ----------
@@ -100,6 +127,13 @@ class Client:
         r = await self.http.get(f"{self.endpoint}/health")
         r.raise_for_status()
         return r.json()
+
+    async def picture(self, cart_id: str, name: str) -> bytes:
+        """A picture a conversation's answer made, as a JPEG to show."""
+        r = await self.http.get(f"{self.endpoint}/cartridges/{cart_id}/pictures/{name}", params={"format": "jpeg"},
+                                headers=self._hdr(cart_id))
+        r.raise_for_status()
+        return r.content
 
     async def list_cartridges(self) -> list:
         r = await self.http.get(f"{self.endpoint}/cartridges")
@@ -502,6 +536,11 @@ class ServerProcess:
     def _log(self, line: str):
         with self.lock:
             self.lines.append(line)
+        # the UI's own output too, so a container's log (`docker logs`) carries the server's lines, its setup among them
+        try:
+            print(line, flush=True)
+        except (OSError, ValueError):
+            pass
 
     def snapshot(self) -> list:
         with self.lock:
@@ -1024,13 +1063,14 @@ async def page():
                               ).bind_visibility_from(state, "active_bound", lambda b: not b
                                                      ) as bind_banner:
             ui.icon("info", size="sm").classes("text-amber-700")
-            bind_banner_label = ui.label("Conversation loaded. Click Activate to bring the session online."
+            bind_banner_label = ui.label("Conversation loaded. Type a message, or click Activate, to bring the session online."
                                           ).classes("text-sm flex-grow")
             bind_btn = ui.button("Activate", icon="play_arrow"
                                  ).props("color=primary unelevated")
         chat_scroll = ui.scroll_area().classes("silvann-chat w-full flex-grow min-h-0 border rounded")
         with chat_scroll:
             chat_history_col = ui.column().classes("w-full p-4 gap-3")
+            chat_tail_col = ui.column().classes("w-full px-4 pb-4 gap-3")   # below the messages: "…", the model's ask
         # Attached-image chip row. Rendered into by render_pending_images() whenever
         # an image is uploaded; empty (and visually absent) otherwise.
         pending_images_row = ui.row().classes("w-full items-center gap-2 flex-wrap")
@@ -1422,10 +1462,15 @@ async def page():
                                f"gpus {h['num_gpus']} · tenants {h['tenants_loaded']}"
                                + (f" · active {h['active'][:8]}" if h['active'] else ""))
             attach_btn.set_visibility(bool(h.get("images") or h.get("files")))
+            # a picture model makes a picture of each message: it has no thinking and no tool to switch
+            for switch in (thinking_mode_toggle, show_think_toggle, tools_toggle, tools_mode):
+                switch.set_visibility(not h.get("pictures"))
         except Exception as e:
             status_dot.classes(replace="text-red-500").style("font-size: 12px")
             status_tip.text = f"down: {type(e).__name__}: {e}"
             attach_btn.set_visibility(False)
+            return
+        await first_conversation(h.get("model_id"))
 
     async def connect_clicked():
         state["endpoint"] = endpoint_in.value
@@ -1436,32 +1481,158 @@ async def page():
     connect_btn.on("click", connect_clicked)
 
     # ----- Chat helpers -----
-    def render_chat():
-        chat_history_col.clear()
-        if state["active_id"]:
-            chat_header.text = state.get("active_name") or state["active_id"]
-            chat_header.classes(replace="text-lg font-semibold flex-grow")
-        else:
-            chat_header.text = "(no conversation active — pick one from the menu or click '+ new')"
-            chat_header.classes(replace="text-sm opacity-60 flex-grow")
+    pictures: dict = {}                                # (conversation, picture) -> its data URI, or None while it loads
+
+    def picture_markdown(alt: str, name: str) -> str:
+        """A picture in an answer: drawn once the server's copy is here, fetched the first time it is wanted."""
+        key = (state["active_id"], name)
+        if key not in pictures:
+            pictures[key] = None
+            asyncio.create_task(load_picture(*key))
+        uri = pictures[key]
+        return "![%s](%s)" % (alt, uri) if uri else "_(the picture is loading…)_"
+
+    async def load_picture(cid: str, name: str):
+        try:
+            data = await client.picture(cid, name)
+            pictures[(cid, name)] = "data:image/jpeg;base64," + base64.b64encode(data).decode()
+        except Exception as ex:                         # noqa: BLE001 — said where the picture would be
+            pictures[(cid, name)] = None
+            safe_notify(f"the picture {name} could not be read: {ex}", type="warning")
+            return
+        if state["active_id"] != cid:
+            return
+        last = len(state["history"]) - 1
+        for index, m in enumerate(state["history"]):     # only the answers that name it drawn again
+            if index in answers and m["role"] == "assistant" and "(picture:%s)" % name in (m["content"] or ""):
+                refresh_answer(index, bool(state["streaming"]) and index == last)
+
+    # ⭐ AN ANSWER IS DRAWN AS ITS PARTS (`answer_parts`): its text; each run of tool calls a section that opens and closes,
+    #   closed at first; its thinking — with "show thinking" on a section of its own, open at first, and off nothing once
+    #   the block is closed and "thinking…" while the model is still in it. While an answer streams only its own message
+    #   is brought up to date, a part at a time and at most ten times a second: drawing the whole conversation again for
+    #   every token is what made the chat flicker.
+    opened: dict = {}                                  # (message, part) -> whether its section is open
+    answers: dict = {}                                 # an answer's index -> its message and its drawn parts
+    live_answer: dict = {}                             # the streaming answer's index, and whether its text has grown
+
+    def shown_parts(content: str, live: bool) -> list:
+        """What an answer shows, part by part: ("text", markdown), ("tools", title, markdown), ("thought", title,
+        markdown), ("thinking", label)."""
         show_think = bool(state.get("show_thinking", False))
-        with chat_history_col:
-            if not state["history"] and state["active_id"]:
-                ui.label("(empty — say hi)").classes("opacity-50 text-sm self-center")
-            for m in state["history"]:
-                content = m["content"] or ""
-                if m["role"] == "assistant" and not show_think:
-                    content = THINK_RE.sub("", content)
-                if m["role"] == "assistant":
-                    content = tools_markdown(content)
-                _sent = (m["role"] == "user")
-                # sent=user gives the bubble its style; self-end/self-start does the actual L/R
-                # alignment (the column's align-items:flex-start otherwise keeps both on the left),
-                # capped at 85% width so the bubbles don't span the whole row.
-                with ui.chat_message(name=m["role"], sent=_sent
-                                     ).classes("self-end" if _sent else "self-start"
-                                     ).style("max-width: 85%"):
-                    ui.markdown(content or "_(empty)_")
+        out = []
+        for part in answer_parts(content):
+            if part[0] == "text":
+                out.append(("text", PICTURE_RE.sub(lambda p: picture_markdown(p.group(1), p.group(2)), part[1])))
+            elif part[0] == "tools":
+                if out and out[-1][0] == "tools":       # runs apart only by thinking not shown: one section
+                    out[-1] = ("tools", out[-1][1] + part[1])
+                else:
+                    out.append(("tools", list(part[1])))
+            elif show_think:
+                out.append(("thought", "thinking" if part[2] else "thinking…", part[1].strip() or "…"))
+            elif not part[2]:
+                out.append(("thinking", "thinking…" if live else "(stopped while thinking)"))
+        if live and not out:
+            out.append(("thinking", "…"))
+        for i, part in enumerate(out):
+            if part[0] == "tools":
+                n = sum(1 for line in part[1] if line.startswith("> "))
+                out[i] = ("tools", "tool · %d call%s" % (n, "" if n == 1 else "s"), tools_block(part[1]))
+        return out
+
+    def draw_part(part, key) -> dict:
+        """One part's element in the current slot, and what a later update of it changes."""
+        kind = part[0]
+        if kind == "text":
+            md = ui.markdown(part[1])
+            return {"kind": kind, "el": md, "md": md}
+        if kind == "thinking":
+            label = ui.label(part[1]).classes("text-sm italic opacity-60 animate-pulse")
+            return {"kind": kind, "el": label, "md": label}
+        section = ui.expansion(part[1], icon="build" if kind == "tools" else "psychology",
+                               value=opened.get(key, kind == "thought"),
+                               on_value_change=lambda e, k=key: opened.__setitem__(k, bool(e.value))
+                               ).props("dense").classes("w-full silvann-part")
+        with section:
+            md = ui.markdown(part[2]).classes("text-sm" + (" opacity-70" if kind == "thought" else ""))
+        return {"kind": kind, "el": section, "md": md}
+
+    def update_part(drawn: dict, part):
+        if drawn["kind"] == "thinking":
+            drawn["md"].text = part[1]
+            return
+        if drawn["kind"] != "text":
+            drawn["el"].text = part[1]
+        content = part[1] if drawn["kind"] == "text" else part[2]
+        if drawn["md"].content != content:
+            drawn["md"].set_content(content)
+
+    def draw_answer(content: str, index: int, live: bool) -> list:
+        drawn = [draw_part(p, (index, i)) for i, p in enumerate(shown_parts(content, live))]
+        if not drawn:
+            drawn.append({"kind": "empty", "el": ui.markdown("_(empty)_"), "md": None})
+        return drawn
+
+    def refresh_answer(index: int, live: bool):
+        """An answer's message brought up to its text: each part's content changed in place, new parts added after it;
+        from the first part whose kind changed (a think block closing), the rest drawn again."""
+        msg, drawn = answers[index]["slot"], answers[index]["drawn"]
+        parts = shown_parts(state["history"][index]["content"] or "", live)
+        keep = 0
+        while keep < len(drawn) and keep < len(parts) and drawn[keep]["kind"] == parts[keep][0]:
+            update_part(drawn[keep], parts[keep])
+            keep += 1
+        for d in drawn[keep:]:
+            d["el"].delete()
+        del drawn[keep:]
+        with msg:
+            for i in range(keep, len(parts)):
+                drawn.append(draw_part(parts[i], (index, i)))
+            if not drawn and not live:
+                drawn.append({"kind": "empty", "el": ui.markdown("_(empty)_"), "md": None})
+        chat_scroll.scroll_to(percent=1.0)
+
+    def refresh_live(live: bool = True):
+        """The streaming answer brought up to its text; `live` False settles it as the answer it ended as."""
+        live_answer["dirty"] = False
+        index = live_answer.get("index")
+        if index is None or index not in answers or index != len(state["history"]) - 1:
+            render_chat()
+            return
+        refresh_answer(index, live)
+
+    def mark_live():
+        """The streaming answer's text has grown: drawn by the next tick of the live timer."""
+        live_answer["dirty"] = True
+
+    def finish_live():
+        """A turn over: its answer settled in place and the tail drawn — nothing above it drawn again."""
+        refresh_live(live=False)
+        live_answer.clear()
+        render_tail()
+
+    def draw_message(index: int, m: dict):
+        """One message of the conversation into the current slot; a streaming answer's is kept for its updates."""
+        _sent = (m["role"] == "user")
+        # sent=user gives the bubble its style; self-end/self-start does the actual L/R
+        # alignment (the column's align-items:flex-start otherwise keeps both on the left),
+        # capped at 85% width so the bubbles don't span the whole row.
+        with ui.chat_message(name=m["role"], sent=_sent
+                             ).classes("self-end" if _sent else "self-start"
+                             ).style("max-width: 85%") as msg:
+            if _sent:
+                ui.markdown(m["content"] or "_(empty)_")
+            else:
+                live = bool(state["streaming"]) and index == len(state["history"]) - 1
+                answers[index] = {"slot": msg, "drawn": draw_answer(m["content"] or "", index, live)}
+                if live:
+                    live_answer["index"] = index
+
+    def render_tail():
+        """Below the messages: "…" while an answer streams, else the model's ask waiting on the user's answer."""
+        chat_tail_col.clear()
+        with chat_tail_col:
             if state["streaming"]:
                 ui.label("…").classes("opacity-50 self-center animate-pulse")
             elif state.get("ask"):                       # the model's command waits on the user
@@ -1473,6 +1644,35 @@ async def page():
                                       on_click=lambda _, c=choice: answer_ask(c)
                                       ).props("dense " + ("flat color=negative" if choice == "refuse" else "color=primary"))
         chat_scroll.scroll_to(percent=1.0)
+
+    def add_messages(start: int):
+        """The conversation's messages from `start` on added below the others — a turn's, as it is sent."""
+        if empty_note.get("el") is not None:
+            empty_note.pop("el").delete()
+        with chat_history_col:
+            for index in range(start, len(state["history"])):
+                draw_message(index, state["history"][index])
+        render_tail()
+
+    empty_note: dict = {}                              # the "(empty — say hi)" line while the conversation has none
+
+    def render_chat():
+        chat_history_col.clear()
+        live_answer.clear()
+        answers.clear()
+        empty_note.clear()
+        if state["active_id"]:
+            chat_header.text = state.get("active_name") or state["active_id"]
+            chat_header.classes(replace="text-lg font-semibold flex-grow")
+        else:
+            chat_header.text = "(no conversation active — pick one from the menu or click '+ new')"
+            chat_header.classes(replace="text-sm opacity-60 flex-grow")
+        with chat_history_col:
+            if not state["history"] and state["active_id"]:
+                empty_note["el"] = ui.label("(empty — say hi)").classes("opacity-50 text-sm self-center")
+            for index, m in enumerate(state["history"]):
+                draw_message(index, m)
+        render_tail()
 
     async def activate_cart(cart_id: str):
         """Lazy activate — fetches metadata from the server (which is cheap, just reads the
@@ -1537,7 +1737,7 @@ async def page():
             if resp.get("bound_by_other"):
                 bind_banner_label.text = "Conversation is held by another session. Click Activate to take it over (will fail if they're still pinging)."
             else:
-                bind_banner_label.text = "Conversation loaded. Click Activate to bring the session online (~3s, allocates VRAM)."
+                bind_banner_label.text = "Conversation loaded. Type a message, or click Activate, to bring the session online (~3s, allocates VRAM)."
             render_chat()
             await render_convs()
         except httpx.HTTPStatusError as ex:
@@ -1548,6 +1748,39 @@ async def page():
                 safe_notify(f"activate failed: {ex}", type="negative")
         except Exception as e:
             safe_notify(f"activate failed: {e}", type="negative")
+
+    starting: dict = {"busy": False, "server": None}   # a first conversation in the making; the server it was looked for on
+
+    async def start_conversation(carts: Optional[list] = None) -> bool:
+        """A conversation made and opened without the dialog, named as '+ new' names it — the model's first when it has
+        none saved, or the one a message typed with none open goes to. True once it is the active one."""
+        if starting["busy"]:
+            return False
+        starting["busy"] = True
+        try:
+            carts = await client.list_cartridges() if carts is None else carts
+            resp = await client.create(name=f"chat {len(carts) + 1}")
+            await activate_cart(resp["id"])
+            return state["active_id"] == resp["id"]
+        except Exception as ex:
+            safe_notify(f"couldn't start a conversation: {ex}", type="negative")
+            return False
+        finally:
+            starting["busy"] = False
+
+    async def first_conversation(model: Optional[str]):
+        """⭐ A MODEL WITH NO CONVERSATION SAVED GETS ONE, OPEN, so a user's first instinct — to type — works: looked for
+        once a server answers (a model started here, the container's, one already up), again when the model changes."""
+        here = (state["endpoint"], model)
+        if state["active_id"] or state["streaming"] or starting["busy"] or starting["server"] == here:
+            return
+        try:
+            carts = await client.list_cartridges()
+        except Exception:
+            return
+        starting["server"] = here
+        if not carts:
+            await start_conversation(carts)
 
     async def bind_active():
         """Bring the active cartridge online — load it into VRAM, claim ownership. The
@@ -1917,16 +2150,18 @@ async def page():
     async def send():
         if state["streaming"]:
             return
-        if state["active_id"] is None:
-            safe_notify("Pick a conversation first (or click '+ new' under Chat)", type="warning")
-            return
-        if not state.get("active_bound"):
-            safe_notify("Click 'Activate' first to bring the session online", type="warning")
-            return
         txt = (input_box.value or "").strip()
-        attached = list(_cart_pending())
+        attached = list(_cart_pending()) if state["active_id"] else []
         if not txt and not attached:
             return
+        # a message typed with no conversation open goes to a new one, and one not online is brought online: typing is
+        # the user's say-so, as the Activate button is
+        if state["active_id"] is None and not await start_conversation():
+            return
+        if not state.get("active_bound"):
+            await bind_active()
+            if not state.get("active_bound"):
+                return
         if state.get("ask"):
             safe_notify("The model waits on your answer to its ask — the buttons under its answer", type="warning")
             return
@@ -1942,7 +2177,7 @@ async def page():
                 f"\n\n{txt}" if txt else "")
         state["history"].append({"role": "user", "content": display_user})
         state["history"].append({"role": "assistant", "content": ""})
-        render_chat()
+        add_messages(len(state["history"]) - 2)
         # The engine serializes turns, so if another conversation is mid-turn the server holds our
         # request until it frees up. Surface that as "waiting my turn" rather than a dead UI; the
         # first received event clears the placeholder. Cheap single poll — no busy-loop.
@@ -1953,7 +2188,7 @@ async def page():
             if b.get("busy") and other and other != state["active_id"]:
                 state["history"][-1]["content"] = "_⏳ waiting my turn…_"
                 waiting = True
-                render_chat()
+                mark_live()
         except Exception:
             pass
         # Speed counter: walltime starts at the *first* received token to exclude server prefill
@@ -1970,7 +2205,7 @@ async def page():
                         waiting = True
                         state["history"][-1]["content"] = "_⏳ waiting my turn…_"
                         speed_label.text = "queued…"
-                        render_chat()
+                        mark_live()
                     continue
                 if waiting:
                     waiting = False
@@ -1984,7 +2219,7 @@ async def page():
                     if elapsed > 0.3 and n_tokens > 1:
                         rate = (n_tokens - 1) / elapsed   # exclude the first token from the divisor
                         speed_label.text = f"{rate:.1f} tok/s"
-                    render_chat()
+                    mark_live()
                 elif not on_tool_event(kind, payload):
                     break
         except httpx.HTTPStatusError as ex:
@@ -1997,9 +2232,9 @@ async def page():
                 state["history"].pop()  # the empty assistant message
                 state["history"].pop()  # the user message they typed
                 state["active_bound"] = False
-                bind_banner_label.text = "Session evicted (idle). Click Activate to bring it back online."
+                bind_banner_label.text = "Session evicted (idle). Send again, or click Activate, to bring it back online."
                 input_box.set_value(txt)  # restore the typed message so it's not lost
-                safe_notify("Session was evicted while idle. Click Activate.", type="warning")
+                safe_notify("Session was evicted while idle — send again, or click Activate.", type="warning")
             elif ex.response.status_code == 423:
                 state["history"][-1]["content"] += "\n\n_[server: in use by another session]_"
             else:
@@ -2023,14 +2258,16 @@ async def page():
                 if cart_id:
                     state["pending_images"][cart_id] = []
                 render_pending_images()
-            render_chat()
+            finish_live()
 
     def on_tool_event(kind, payload):
         """An answer's event other than a token, into the conversation's last message: a call to the model's tool and
         its value, the ask that stops it, or the server's error. False where the stream is over."""
         if kind == "tool":
             state["history"][-1]["content"] += payload.get("text", "")
-            render_chat()
+            mark_live()
+        elif kind == "progress":                          # a picture model's, as the picture is made: said beside the box
+            speed_label.text = payload.get("text", "")
         elif kind == "ask":
             state["ask"] = payload
         elif kind == "error":
@@ -2052,7 +2289,7 @@ async def page():
             async for kind, payload in client.stream_answer(state["active_id"], choice, int(max_in.value or 2048)):
                 if kind == "token":
                     state["history"][-1]["content"] += payload.get("text", "")
-                    render_chat()
+                    mark_live()
                 elif not on_tool_event(kind, payload):
                     break
         except httpx.HTTPStatusError as ex:
@@ -2062,7 +2299,7 @@ async def page():
         finally:
             state["streaming"] = False
             set_send_btn(False)
-            render_chat()
+            finish_live()
 
     async def stop():
         if not state["streaming"] or not state["active_id"]:
@@ -2302,6 +2539,8 @@ async def page():
     render_chat()
     await ping()
     await render_convs()
+    # a streaming answer drawn at most ten times a second, whatever the tokens' rate
+    ui.timer(0.1, lambda: refresh_live() if live_answer.get("dirty") else None)
 
     # Keep the status dot live — re-ping every 5s.
     def _periodic_ping():

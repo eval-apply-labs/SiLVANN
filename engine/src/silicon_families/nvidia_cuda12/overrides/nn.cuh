@@ -9,6 +9,7 @@
 #include "attention.cuh"    /* a prompt's causal attention: the scores on the tensor cores */
 #include "result.cuh"       /* argmax */
 #include "expert.cuh"       /* the expert-major GEMM, on the tensor cores */
+#include "conv.cuh"         /* a convolution's rows */
 #include "doors.cuh"        /* into nn's table */
 
 /* ══ ⭐⭐ OVERRIDES — THE DOORS THIS FAMILY RUNS FASTER THAN THE GENERIC BODY ══════════════════════════

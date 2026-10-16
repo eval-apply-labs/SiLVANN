@@ -109,6 +109,19 @@ static __device__ inline void nn__vector__zzabi_body_add(uint16_t* z, const uint
     }
 }
 
+/* ⛳ `count` VECTORS ADDED IN THE ORDER GIVEN, in `float`, rounded once — so a group's sum is the same bits on every run,
+ * and the same whichever device runs it. An address may be another device's memory (`nn__vector__parts`). */
+static __device__ inline void nn__vector__zzabi_body_sum(uint16_t* out, nn__vector__parts parts, uint64_t n,
+                                                          unsigned int* over) {
+    for (uint64_t i = nn__kernels__zzprivate_first(); i < n; i += nn__kernels__zzprivate_stride()) {
+        float s = 0.0f;
+        for (uint64_t k = 0u; k < parts.count; ++k) s += nn__silicon__half_to_float(((const uint16_t*)(uintptr_t)parts.at[k])[i]);
+        bool hit = false;
+        out[i] = nn__primitives__zzpackage_float_to_half(s, &hit);
+        if (hit) *over = NN__KERNELS__OVERFLOWED;
+    }
+}
+
 static __device__ inline void nn__vector__zzabi_body_pointwise_mul(uint16_t* z, const uint16_t* x,
                                                                     const uint16_t* y, uint64_t n,
                                                                     unsigned int* over) {
@@ -1552,6 +1565,60 @@ static __device__ inline void nn__vector__zzabi_body_gelu(uint16_t* o, const uin
     }
 }
 
+/* tanh, element by element, from `expf` as `1 - 2/(e^{2x} + 1)` — GELU's tanh form's: a diffusion transformer's gates.
+ *   `o` may be `x`. */
+static __device__ inline void nn__vector__zzabi_body_tanh(uint16_t* o, const uint16_t* x, uint64_t n, unsigned int* over) {
+    for (uint64_t i = nn__kernels__zzprivate_first(); i < n; i += nn__kernels__zzprivate_stride()) {
+        const float v = nn__silicon__half_to_float(x[i]);
+        bool hit = false;
+        o[i] = nn__primitives__zzpackage_float_to_half(1.0f - 2.0f / (nn__silicon__expf(2.0f * v) + 1.0f), &hit);
+        if (hit) *over = NN__KERNELS__OVERFLOWED;
+    }
+}
+
+/* ⭐ A CONVOLUTION'S ROWS — a picture `x` kept a pixel a row (H x W pixels of C halves, row-major), and the rows a
+ *   convolution multiplies: output pixel `r0 + r` of an Ho x Wo raster (Wo given) gets the kh x kw window its kernel
+ *   reads, in the order (dy, dx, c) — so a matrix whose row is an output channel's kernel in that order is the
+ *   convolution, as an ordinary product over rows. The window starts at (oy·stride − pad_top, ox·stride − pad_left) of
+ *   the picture upsampled `up` times by its nearest pixel (1: as it is; 2: each pixel 2 x 2 — an upsampling layer and
+ *   the convolution after it in one), and what falls outside it is 0 — the padding. `rows` output pixels from `r0`, a
+ *   picture of any size a chunk at a time. */
+static __device__ inline void nn__conv__zzabi_body_unfold_rows(uint16_t* o, const uint16_t* x, uint64_t H, uint64_t W, uint64_t C,
+                                                             uint64_t kh, uint64_t kw, uint64_t stride, uint64_t pad_top,
+                                                             uint64_t pad_left, uint64_t up, uint64_t Wo, uint64_t r0,
+                                                             uint64_t rows) {
+    const uint64_t K = kh * kw * C, Hu = H * up, Wu = W * up;
+    for (uint64_t i = nn__kernels__zzprivate_first(); i < rows * K; i += nn__kernels__zzprivate_stride()) {
+        const uint64_t r = i / K, k = i - r * K, dy = k / (kw * C), dx = (k / C) % kw, c = k % C;
+        const uint64_t p = r0 + r, oy = p / Wo, ox = p - oy * Wo;
+        const uint64_t iy = oy * stride + dy, ix = ox * stride + dx;              /* in the padded picture */
+        const bool inside = iy >= pad_top && ix >= pad_left && iy - pad_top < Hu && ix - pad_left < Wu;
+        o[i] = inside ? x[(((iy - pad_top) / up) * W + (ix - pad_left) / up) * C + c] : (uint16_t)0u;
+    }
+}
+
+/* Channels to space: `x` (H x W pixels of f·f·C, channel (i·f + j)·C + c) to `o` (H·f x W·f pixels of C), pixel (y·f + i,
+ *   x·f + j)'s channel c being x's pixel (y, x)'s channel (i·f + j)·C + c — a sub-pixel layer's shuffle. */
+static __device__ inline void nn__conv__zzabi_body_depth_to_space_rows(uint16_t* o, const uint16_t* x, uint64_t H, uint64_t W,
+                                                                     uint64_t C, uint64_t f) {
+    const uint64_t Wf = W * f;
+    for (uint64_t n = nn__kernels__zzprivate_first(); n < H * f * Wf * C; n += nn__kernels__zzprivate_stride()) {
+        const uint64_t pix = n / C, c = n - pix * C, oy = pix / Wf, ox = pix - oy * Wf;
+        const uint64_t y = oy / f, i = oy - y * f, xx = ox / f, j = ox - xx * f;
+        o[n] = x[(y * W + xx) * f * f * C + (i * f + j) * C + c];
+    }
+}
+
+/* SiLU, element by element: x·sigmoid(x) = x / (1 + e^{-x}). `o` may be `x`. */
+static __device__ inline void nn__vector__zzabi_body_silu(uint16_t* o, const uint16_t* x, uint64_t n, unsigned int* over) {
+    for (uint64_t i = nn__kernels__zzprivate_first(); i < n; i += nn__kernels__zzprivate_stride()) {
+        const float v = nn__silicon__half_to_float(x[i]);
+        bool hit = false;
+        o[i] = nn__primitives__zzpackage_float_to_half(v / (1.0f + nn__silicon__expf(-v)), &hit);
+        if (hit) *over = NN__KERNELS__OVERFLOWED;
+    }
+}
+
 /* ⭐ ATTENTION OVER A SET — every row of it attends every row of it, no mask: a picture's patches. Each row of `qkv` is
  *   its query, key and value side by side (`[3][heads][head_dim]`); `o`'s row is the heads' answers. A block a (row,
  *   head): its lanes share the keys, each keeping its own running largest score, sum and weighted values (a softmax
@@ -1596,6 +1663,70 @@ static __device__ inline void nn__attention__zzabi_body_set(uint16_t* o, const u
             o[r * H + e * head_dim + d] = nn__primitives__zzpackage_float_to_half(acc[d] / total, &hit);
             if (hit) *over = NN__KERNELS__OVERFLOWED;
         }
+    }
+}
+
+/* ⭐ ATTENTION OVER ROWS, EACH ROW'S KEYS AS FAR AS ITS LIMIT — query row `r` attends the key rows `0 .. limits[r]`: a
+ *   diffusion transformer's sequence, its prompt causal (a row's limit itself plus one), a reference picture's rows its
+ *   whole block (the block's end), the generated picture's every row (the whole length); and in a later step, the
+ *   prompt's keys and values kept from the first, the picture's rows alone — `q` their rows, the keys every row. `q`, `k`
+ *   and `v` rows `q_stride` / `kv_stride` apart, a row's heads side by side; `o`'s row the heads' answers. As `set`: a block
+ *   a (row, head), its lanes keeping their own running largest score, sum and weighted values, merged at the end.
+ *   `head_dim` at most `NN__ATTENTION__SET_HEAD_MAX`; a row whose limit is 0 answers zeros. */
+static __device__ inline void nn__attention__zzabi_body_limits(uint16_t* o, const uint16_t* q, const uint16_t* k,
+                                                               const uint16_t* v, const uint32_t* limits, uint64_t rows,
+                                                               uint64_t heads, uint64_t head_dim, uint64_t q_stride,
+                                                               uint64_t kv_stride, unsigned int* over) {
+    const uint64_t H = heads * head_dim;
+    const uint64_t lane = nn__silicon__lane(), lanes = nn__silicon__lanes();
+    const float scale = 1.0f / nn__silicon__sqrtf((float)(uint32_t)head_dim), none = -3.0e38f;
+    for (uint64_t i = nn__silicon__block(); i < rows * heads; i += nn__silicon__blocks()) {
+        const uint64_t r = i / heads, e = i - r * heads, keys = (uint64_t)limits[r];
+        const uint16_t* qr = q + r * q_stride + e * head_dim;
+        float acc[NN__ATTENTION__SET_HEAD_MAX];
+        for (uint64_t d = 0ull; d < head_dim; ++d) acc[d] = 0.0f;
+        float m = none, s = 0.0f;
+        for (uint64_t j = lane; j < keys; j += lanes) {
+            const uint16_t* kr = k + j * kv_stride + e * head_dim;
+            float dot = 0.0f;
+            for (uint64_t d = 0ull; d < head_dim; ++d) dot += nn__silicon__half_to_float(qr[d]) * nn__silicon__half_to_float(kr[d]);
+            dot *= scale;
+            if (dot > m) {
+                const float f = nn__silicon__expf(m - dot);
+                s *= f;
+                for (uint64_t d = 0ull; d < head_dim; ++d) acc[d] *= f;
+                m = dot;
+            }
+            const float p = nn__silicon__expf(dot - m);
+            s += p;
+            const uint16_t* vr = v + j * kv_stride + e * head_dim;
+            for (uint64_t d = 0ull; d < head_dim; ++d) acc[d] += p * nn__silicon__half_to_float(vr[d]);
+        }
+        const float largest = nn__silicon__lanes_max(m);
+        const float f = m > none ? nn__silicon__expf(m - largest) : 0.0f;          /* a lane that had no key: nothing */
+        s *= f;
+        for (uint64_t d = 0ull; d < head_dim; ++d) acc[d] *= f;
+        const float total = nn__silicon__lanes_sum(s);
+        nn__silicon__lanes_sums(acc, (uint32_t)head_dim);
+        for (uint64_t d = lane; d < head_dim; d += lanes) {
+            bool hit = false;
+            o[r * H + e * head_dim + d] = nn__primitives__zzpackage_float_to_half(total > 0.0f ? acc[d] / total : 0.0f, &hit);
+            if (hit) *over = NN__KERNELS__OVERFLOWED;
+        }
+    }
+}
+
+/* Every row of `n` of `y`, scaled channel by channel by `g`, added to `x`'s: `o = x + g·y` — a diffusion transformer's
+ * gated residual, one gate a channel for every row. `o` may be `x`. */
+static __device__ inline void nn__vector__zzabi_body_gated_add_rows(uint16_t* o, const uint16_t* x, const uint16_t* y,
+                                                                    const uint16_t* g, uint64_t n, uint64_t rows,
+                                                                    unsigned int* over) {
+    for (uint64_t i = nn__kernels__zzprivate_first(); i < n * rows; i += nn__kernels__zzprivate_stride()) {
+        bool hit = false;
+        o[i] = nn__primitives__zzpackage_float_to_half(
+                   nn__silicon__half_to_float(x[i]) + nn__silicon__half_to_float(g[i % n]) * nn__silicon__half_to_float(y[i]),
+                   &hit);
+        if (hit) *over = NN__KERNELS__OVERFLOWED;
     }
 }
 

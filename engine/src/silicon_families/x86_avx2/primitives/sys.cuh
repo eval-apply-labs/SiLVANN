@@ -248,4 +248,16 @@ static inline bool x86_avx2__file_read(uint64_t handle, uint64_t offset, uint64_
     return sys__file__zzabi_read(handle, offset, bytes, to);
 }
 
+/* ── DIRECT ACCESS AND MARKS — every device of this family is RAM of the one machine, which each socket's
+ * cores read and write, and a launch is done when the call that asked returns, so there is nothing to wait for. */
+static inline bool x86_avx2__peer_access(uint32_t other) { return other < x86_avx2__device_count(); }
+static inline bool x86_avx2__mark_open(void** mark) {
+    if (mark == 0) return false;
+    *mark = (void*)&x86_avx2__compute_completed;   /* a stable, non-null, never-dereferenced token */
+    return true;
+}
+static inline void x86_avx2__mark_close(void* mark) { (void)mark; }
+static inline bool x86_avx2__mark_record(void* mark) { return mark != 0; }
+static inline bool x86_avx2__mark_wait(void* mark) { return mark != 0; }
+
 #endif /* SILVANN__SILICON_FAMILIES_X86_AVX2_PRIMITIVES_SYS_CUH */

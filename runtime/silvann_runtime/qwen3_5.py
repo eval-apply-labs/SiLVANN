@@ -15,7 +15,8 @@ The residual stream `x` never leaves the card; `head` answers the greedy token, 
 (▶ `sampling`), or `head_logits` leaves the logits for a sampler on the host.
 
 A conversation's STATE is the DeltaNet layers' recurrent state and conv window and the attention layers' keys and
-values up to its length — `state_regions` says where, so a conversation can be put away and brought back.
+values up to its length — `state_regions` says where, so a conversation can be put away and brought back; `state_read`
+and `state_write` take it whole, in one card's form however many cards hold it.
 """
 import json
 import os
@@ -30,7 +31,7 @@ from .model_folder import NL, Refused
 
 GU, DN = NL.GATE_UP, NL.DOWN
 CARD, CPU = 0, 1                  # the workers: the card, and — with the experts there — the CPU
-ARCHITECTURES = ("qwen3_5_text", "qwen3_5_moe_text")
+ARCHITECTURES = ("qwen3_5_text", "qwen3_5_moe_text", "qwen3_vl_text")
 
 
 def _half(a):
@@ -44,18 +45,23 @@ class Qwen35(Generates):
     def __init__(self, folder, machine, max_context=4096, fused_moe=True, kv="tiered", tiers=None, experts_on="card",
                  experts_from="auto", experts_dir=None, layers=None, chunk=256, experts_ram_gb=None, card_experts_gb=0,
                  card_landing=1, card_line=None, experts_int8=False, picture_pixels=1 << 22,
-                 picture_weights="auto"):
+                 picture_weights="auto", tensor_parallel=1):
         if folder.architecture not in ARCHITECTURES:
             raise Refused("%s is a %r model, not one of %s" % (folder.path, folder.architecture, ARCHITECTURES))
         c, b = folder.config, folder.bundle
         self.folder, self.m, self.b = folder, machine, b
         self.H, self.LAYERS = c["hidden_size"], c["num_hidden_layers"]
-        self.KH, self.VH, self.LH = c["linear_num_key_heads"], c["linear_num_value_heads"], c["linear_key_head_dim"]
-        if c["linear_value_head_dim"] != self.LH:
+        # ⭐ QWEN 3 (Qwen3-VL's text model, Qwen-Image's encoder) is this family's attention layers alone: no DeltaNet, every
+        #   head's rotary whole, no output gate (▶ ai_qwen_3's `AI_QWEN_3__AT__UNGATED`) — its prompt read as rows, one cache
+        self.KH, self.VH, self.LH = c.get("linear_num_key_heads", 0), c.get("linear_num_value_heads", 0), c.get("linear_key_head_dim", 0)
+        if c.get("linear_value_head_dim", 0) != self.LH:
             raise Refused("the DeltaNet's key and value heads differ in width (%d, %d)" % (self.LH, c["linear_value_head_dim"]))
         self.QH, self.KVH, self.AH = c["num_attention_heads"], c["num_key_value_heads"], c["head_dim"]
-        rope = c.get("rope_parameters") or {}
-        self.ROT = int(self.AH * (rope.get("partial_rotary_factor") or c["partial_rotary_factor"]))
+        rope = c.get("rope_parameters") or c.get("rope_scaling") or {}
+        self.ROT = int(self.AH * (rope.get("partial_rotary_factor") or c.get("partial_rotary_factor") or 1.0))
+        self.GATED = bool(c.get("attn_output_gate", folder.architecture.startswith("qwen3_5")))
+        if not self.GATED and kv != "fp16":
+            raise Refused("an attention without an output gate reads its prompt through one cache: kv 'fp16', not %r" % (kv,))
         # M-RoPE: a token's three positions (time, row, column), interleaved by frequency — the row's sections, then the
         #   column's, in nn's `rope_angles_mrope_rows` word; 0 when the model has none (its pictures are refused)
         section = rope.get("mrope_section") or []
@@ -95,12 +101,36 @@ class Qwen35(Generates):
         #   (▶ `pipeline`): the card is sized for these, and `layers` / `rows` run these
         self.run_layers = list(range(self.LAYERS)) if layers is None else sorted(layers)
         self.CHUNK_WANT = chunk          # a prompt's rows a layer at a time — at most ai_qwen_3's AI_QWEN_3__ROWS_MAX (256)
+        # ⭐ TENSOR PARALLEL (NN-87): every layer split over `tensor_parallel` cards — each its share of the heads and of
+        #   the MLP's 512-blocks, and the same columns of each projection back, so a card's mixer and MLP are partial sums
+        #   its verbs add over the cards' own memory (▶ lisp/qwen3_5_tp.lisp, nn's partials). From here on the head counts
+        #   are a card's; FULL keeps the model's. A dense model, the embedding and the head card 0's.
+        self.CARDS, self.GROUP = int(tensor_parallel or 1), 0
+        self.BINDINGS = 512 * self.CARDS            # every card's tables are names in the one environment
+        self.FULL = dict(KH=self.KH, VH=self.VH, QH=self.QH, KVH=self.KVH)
+        if self.CARDS > 1:
+            P = self.CARDS
+            if self.MOE or experts_on != "card" or layers is not None or card_experts_gb or b.mask is not None:
+                raise Refused("tensor parallelism is a dense model's, its every layer on the cards, without a mask")
+            if any(n % P for n in (self.KH, self.VH, self.QH, self.KVH)) or self.INTER % 512 or self.INTER // 512 < P:
+                raise Refused("%d cards do not split %s's heads (%d, %d, %d, %d) and 512-blocks evenly"
+                              % (P, folder.path, self.KH, self.VH, self.QH, self.KVH))
+            self.KH, self.VH, self.QH, self.KVH = self.KH // P, self.VH // P, self.QH // P, self.KVH // P
+            blocks = self.INTER // 512
+            each = [blocks // P + (1 if k < blocks % P else 0) for k in range(P)]
+            self.INTER_AT = [512 * sum(each[:k]) for k in range(P)]
+            self.INTER_OF = [512 * n for n in each]
+        else:
+            self.INTER_AT, self.INTER_OF = [0], [self.INTER]
         self.KV_WIDE = self.KVH * self.AH
         self.CONV_CH = self.KH * self.LH * 2 + self.VH * self.LH
         g = pickle.load(open(os.path.join(folder.path, "global.pkl"), "rb"))
         self.global_ = g
-        self.head_rec, self.emb_rec = g["lm_head.weight"], g["model.language_model.embed_tokens.weight"]
-        self.VOCAB = int(self.head_rec["rows"])
+        # ⭐ A MODEL WITHOUT ITS HEAD — an encoder, its pack made with the head left out (`nn_pack_model.py --leave-out`):
+        #   its rows are what it answers (`forward_rows`), and the head's words are never bound
+        self.head_rec, self.emb_rec = g.get("lm_head.weight"), g["model.language_model.embed_tokens.weight"]
+        self.HEADLESS = self.head_rec is None
+        self.VOCAB = int((self.emb_rec if self.HEADLESS else self.head_rec)["rows"])
         # ⭐ PICTURES' FORMS, a file of their own that a runtime before them never reads — so a pack's qwen3_5.lisp stays
         #   one every runtime runs; a folder without it reads text, and refuses pictures (▶ `vision`). Decided at the boot,
         #   as a boot that reads `programs.lisp` never calls `_procedures`; the file is in that file's key, so what it
@@ -111,6 +141,8 @@ class Qwen35(Generates):
         #   folder has the program's pictures file, the pack the tower, the model M-RoPE, and this machine the first layers
         self.VIS = bool(self.PICTURES and self.MROPE and picture_pixels and (layers is None or 0 in layers)
                         and "model.visual.blocks.0.attn.qkv.weight" in g)
+        if self.CARDS > 1:
+            self.VIS = False                # the vision tower is one card's: not under tensor parallelism yet
         self.PICTURE_PIXELS = int(picture_pixels or 0)
         if picture_weights not in ("auto", "card", "ram"):
             raise Refused("picture_weights is 'auto', 'card' or 'ram', not %r" % (picture_weights,))
@@ -170,15 +202,62 @@ class Qwen35(Generates):
                 raise Refused("%d experts is too few for a cache of them" % self.SLOTS)
             self.cpu_arena = self.SLOTS * self.EPLAN.slot_bytes
 
+    # ── tensor parallel: how card `s` cuts a matrix ───────────────────────────────────────────────────────────────
+    def _cut(self, n, s):
+        """Card `s`'s part of the matrix `n`: None for whole (a norm, one card), ("rows", runs) or ("cols", (first, end)).
+        Every cut is whole rows, or whole 512-blocks of a row — the blocks its input is rotated in — so no part pads."""
+        if self.CARDS == 1 or n.endswith("norm.weight"):
+            return None
+        F, LH, AH = self.FULL, self.LH, self.AH
+        kp, vp, qp, kvp = self.KH, self.VH, self.QH, self.KVH
+        i0, ip = self.INTER_AT[s], self.INTER_OF[s]
+        chans = [(s * kp * LH, kp * LH), (F["KH"] * LH + s * kp * LH, kp * LH), (2 * F["KH"] * LH + s * vp * LH, vp * LH)]
+        return {"linear_attn.in_proj_qkv.weight": ("rows", chans),
+                "linear_attn.conv1d.weight":      ("rows", chans),
+                "linear_attn.in_proj_z.weight":   ("rows", [(s * vp * LH, vp * LH)]),
+                "linear_attn.in_proj_a.weight":   ("rows", [(s * vp, vp)]),
+                "linear_attn.in_proj_b.weight":   ("rows", [(s * vp, vp)]),
+                "linear_attn.A_log":              ("cols", (s * vp, (s + 1) * vp)),
+                "linear_attn.dt_bias":            ("cols", (s * vp, (s + 1) * vp)),
+                "linear_attn.out_proj.weight":    ("cols", (s * vp * LH, (s + 1) * vp * LH)),
+                "self_attn.q_proj.weight":        ("rows", [(s * qp * 2 * AH, qp * 2 * AH)]),
+                "self_attn.k_proj.weight":        ("rows", [(s * kvp * AH, kvp * AH)]),
+                "self_attn.v_proj.weight":        ("rows", [(s * kvp * AH, kvp * AH)]),
+                "self_attn.o_proj.weight":        ("cols", (s * qp * AH, (s + 1) * qp * AH)),
+                "mlp.gate_proj.weight":           ("rows", [(i0, ip)]),
+                "mlp.up_proj.weight":             ("rows", [(i0, ip)]),
+                "mlp.down_proj.weight":           ("cols", (i0, i0 + ip))}[n]
+
+    def _part(self, l, n, s):
+        """Card `s`'s bytes of layer `l`'s matrix `n` (data, scales), or None when it holds it whole. An MLP part of fewer
+        512-blocks than card 0's is padded at its end to card 0's size — the slot's — and its table's width says how much
+        of it is read."""
+        c = self._cut(n, s)
+        if c is None:
+            return None
+        part = lambda k: NL.dense_part(self.b, n, l, **{c[0]: self._cut(n, k)[1]})
+        data, lut = part(s)
+        if s > 0 and n.startswith("mlp."):
+            data0, lut0 = part(0)
+            data, lut = data + bytes(len(data0) - len(data)), lut + bytes(len(lut0) - len(lut))
+        return data, lut
+
     # ── ① the collections: a type a dense tensor, the experts, the head, the embedding, the two states ──────────
     def _plan(self):
         b, L, run = self.b, self.LAYERS, self.run_layers
         names = sorted({n for l in run for n in b.names(l)} - ({GU, DN} if self.MOE else set()))
-        self.TYPE = {n: i for i, n in enumerate(names)}
-        first = {n: next(l for l in run if n in b.names(l)) for n in names}
-        self.PLAN = {n: NL.dense_plan(b, n, first[n]) for n in names}
-        slots = {n: sum(1 for l in run if n in b.names(l)) for n in names}
-        t = len(names)
+        # ⭐ A COLLECTION A MATRIX NAME AND WIDTH: a pack that keeps some layers' matrices exact (16 bits — Qwen-Image's
+        #   encoder, its last layers) holds them in a collection of their own, the slots of each the same size
+        self.KEY = {(l, n): (n, b.record(l, n).d) for l in run for n in b.names(l) if n in names}
+        keys = sorted(set(self.KEY.values()))
+        self.TYPE = {k: i for i, k in enumerate(keys)}
+        first = {k: next(l for l in run if self.KEY.get((l, k[0])) == k) for k in keys}
+        self.PLAN = {}
+        for k in keys:
+            got = self._part(first[k], k[0], 0)
+            self.PLAN[k] = NL.dense_plan(b, k[0], first[k]) if got is None else NL.SlotPlan(len(got[0]), 0, 0, len(got[1]))
+        slots = {k: sum(1 for l in run if self.KEY.get((l, k[0])) == k) for k in keys}
+        t = len(keys)
         on_card = self.MOE and not self.CPU_EXPERTS
         self.T_EXPERT = t if on_card else None
         t += 1 if on_card else 0
@@ -190,15 +269,19 @@ class Qwen35(Generates):
             data = np.asarray(rec["vbr_data"]).tobytes()
             lut = np.asarray(rec["vbr_lut"]).astype("<f2").tobytes()
             return data, lut, NL.SlotPlan(len(data), 0, 0, len(lut))
-        self.head_data, self.head_lut, self.HPLAN = plan_of(self.head_rec)
+        if self.HEADLESS:                   # a slot of zeros where the head would be: the collections keep their shape
+            self.head_data, self.head_lut, self.HPLAN = bytes(256), bytes(256), NL.SlotPlan(256, 0, 0, 256)
+        else:
+            self.head_data, self.head_lut, self.HPLAN = plan_of(self.head_rec)
         self.emb_data, self.emb_lut, self.BPLAN = plan_of(self.emb_rec)
         # what the program reads of the two tables once the engine holds them and this program does not
         self.EMB_ROW_BYTES, self.EMB_BITS = int(self.emb_rec["row_bytes"]), int(self.emb_rec["d"])
-        self.EMB_DATA_BYTES, self.HEAD_BITS = len(self.emb_data), int(self.head_rec["d"])
+        self.EMB_DATA_BYTES, self.HEAD_BITS = len(self.emb_data), 8 if self.HEADLESS else int(self.head_rec["d"])
         # ⭐ THE EMBEDDING, A TABLE IN RAM THE CARD READS IN PLACE: the rows, then the scales — a RAM buffer of its own class
         self.TABLE_BYTES = (len(self.emb_data) + len(self.emb_lut) + 255) // 256 * 256
         self.S_BYTES, self.W_BYTES = self.VH * self.LH * self.LH * 4, self.CONV_CH * 3 * 2
-        self.SPLAN = NL.SlotPlan(self.S_BYTES, 0, 0, self.W_BYTES)
+        # a model with no DeltaNet layer (Qwen 3) keeps the collection, one slot of a few bytes: nn takes none empty
+        self.SPLAN = NL.SlotPlan(self.S_BYTES, 0, 0, self.W_BYTES) if self.S_BYTES else NL.SlotPlan(256, 0, 0, 256)
         if self.TIERED:
             # a slot a layer: keys in the up half, values in the down, each [sink | hot | warm codes | warm scales |
             # cold codes | cold scales]
@@ -215,7 +298,7 @@ class Qwen35(Generates):
             kv = self.max_context * self.KV_WIDE * 2
             self.KVPLAN = NL.SlotPlan(kv, 0, 0, kv)
         n_d = sum(1 for l in run if self.kinds[l] == "d")
-        coll = [(self.TYPE[n], self.PLAN[n], slots[n]) for n in names]
+        coll = [(self.TYPE[k], self.PLAN[k], slots[k]) for k in keys]
         self.cpu_arena = 0
         if self.MOE:
             self.EPLAN = NL.expert_plan(b, 0, self.EXPERTS)
@@ -223,7 +306,7 @@ class Qwen35(Generates):
                 coll.append((self.T_EXPERT, self.EPLAN, self.EXPERTS * len(run)))
             else:
                 self.cpu_arena = self.EPLAN.slot_bytes * self.EXPERTS * len(run)
-        coll += [(self.T_HEAD, self.HPLAN, 1), (self.T_STATE, self.SPLAN, n_d),
+        coll += [(self.T_HEAD, self.HPLAN, 1), (self.T_STATE, self.SPLAN, max(n_d, 1)),
                  (self.T_KV, self.KVPLAN, len(run) - n_d)]
         after = self.T_KV + 1
         if self.VIS:
@@ -288,6 +371,8 @@ class Qwen35(Generates):
                 "nn__ram_buffer_table__size_bytes:%d\nnn__ram_buffer_table__qty:1\n"
                 % (big, 6 + (self.MASK_BYTES[CARD] > 0) + tier, (self.arena + (256 << 20)) >> 20, self.LAYERS - n_d, n_d,
                    "".join(self.kinds[l] for l in range(self.LAYERS)), len(self.collections), types, self.TABLE_BYTES))
+        if self.CARDS > 1:
+            return {k: card for k in range(self.CARDS)}       # every card the same collections, each its own part
         if not self.CPU_EXPERTS:
             return card
         # the CPU worker's section: its one collection, the experts, and small pools for the hand-off's buffers — and a
@@ -316,24 +401,31 @@ class Qwen35(Generates):
         return {CARD: card, CPU: cpu}
 
     def workers(self):
-        """The machine's workers: the card, and the CPU when the experts are there."""
+        """The machine's workers: the card, and the CPU when the experts are there — or the cards of a tensor-parallel
+        group, worker `k` device `k`."""
+        if self.CARDS > 1:
+            return [(self.m.silicon, k) for k in range(self.CARDS)]
         return [(self.m.silicon, 0)] + ([("x86_avx2", 0)] if self.CPU_EXPERTS else [])
 
     # ── ② the load ───────────────────────────────────────────────────────────────────────────────────────────
     def load(self, progress=None):
+        if self.CARDS > 1:
+            return self._load_cards(progress)
         m, b = self.m, self.b
         loader = m.loader()
         self._head_and_embedding(loader)
         if self.VIS:
             self._vision_load(loader)
         self.state_at = {}
+        self.state_of = [self.state_at]          # each card's states, where a group's cards each hold their part
         self.slot_at = {}              # (layer, name) -> the slot a dense matrix lives in, for a LoRA swap
         for i, l in enumerate(self.run_layers):
             for n in b.names(l):
                 if self.MOE and n in (GU, DN):
                     continue
-                loader.layer_width(l, self.TYPE[n], 1)
-                self.slot_at[(l, n)] = loader.load_dense(b, self.PLAN[n], self.TYPE[n], n, l)
+                k = self.KEY[(l, n)]
+                loader.layer_width(l, self.TYPE[k], 1)
+                self.slot_at[(l, n)] = loader.load_dense(b, self.PLAN[k], self.TYPE[k], n, l)
             if self.MOE and not self.CPU_EXPERTS:
                 loader.layer_width(l, self.T_EXPERT, self.EXPERTS)
                 for x in range(self.EXPERTS):
@@ -369,6 +461,49 @@ class Qwen35(Generates):
                 self.CHUNK, fixed=self.CARD_LINE)
         self.active_lora, self._lora_cache = self.folder.lora, {}     # a LoRA chosen at boot is in the slots already
         self.global_ = None                         # what was left of global.pkl, read by the buffers
+
+    def _load_cards(self, progress=None):
+        """Tensor parallel: each card its part of every layer, its buffers and its tables, as that card's worker; card 0
+        the head and the embedding as well. Then every card joins the group — refused when two of them cannot reach each
+        other's memory: ⚖ "tensor parallelism requires DMA" — and the program is bound and read once, as card 0."""
+        m, b, P = self.m, self.b, self.CARDS
+        self.state_of, self.slot_at = [{} for _ in range(P)], {}
+        for k in range(P):
+            m.act_as(k)
+            loader = m.loader()
+            if k == 0:
+                self._head_and_embedding(loader)
+            for i, l in enumerate(self.run_layers):
+                for n in b.names(l):
+                    key = self.KEY[(l, n)]
+                    loader.layer_width(l, self.TYPE[key], 1)
+                    got = self._part(l, n, k)
+                    if got is None:
+                        loader.load_dense(b, self.PLAN[key], self.TYPE[key], n, l)
+                    else:
+                        loader.load_bytes(self.PLAN[key], self.TYPE[key], l, got[0], got[1])
+                t = self.T_STATE if self.kinds[l] == "d" else self.T_KV
+                loader.layer_width(l, t, 1)
+                self.state_of[k][l] = loader.reserve(t)
+                loader.assign(l, t, 0, self.state_of[k][l])
+                if progress:
+                    progress(k * len(self.run_layers) + i + 1, P * len(self.run_layers))
+            if loader.handed() != 0:
+                raise Refused("card %d: %d slots were reserved and never published" % (k, loader.handed()))
+            self._buffers(k)
+            self.MASK_CELLS = {}
+            self._tables(k)
+        fan = min(4, P)
+        for k in range(P):
+            m.act_as(k)
+            m.must("(nn__partials__join %d %d %d %d)" % (self.GROUP, k, P, fan), "card %d joining the group" % k,
+                   "sys__value_true")
+        m.act_as(-1)
+        self.state_at = self.state_of[0]
+        self._bindings()
+        m.define_programs(self._procedures)
+        self.active_lora, self._lora_cache = self.folder.lora, {}
+        self.global_ = None
 
     # ── pictures: the vision tower on the card ───────────────────────────────────────────────────────────────
     def _vision_plan(self):
@@ -544,7 +679,7 @@ class Qwen35(Generates):
         m.write(self.EMB_AT, self.emb_data)
         m.write(self.EMB_AT + self.EMB_DATA_BYTES, self.emb_lut)
         for name in ("lm_head.weight", "model.language_model.embed_tokens.weight"):
-            del self.global_[name]
+            self.global_.pop(name, None)
         self.head_rec = self.emb_rec = None
         self.head_data = self.head_lut = self.emb_data = self.emb_lut = None
 
@@ -605,10 +740,43 @@ class Qwen35(Generates):
         m.array("EXPERTS_CPU_ROWS", ["exrc%d" % l for l in layers])
         m.act_as(CARD)
 
-    def _buffers(self):
+    def _named(self, name, card):
+        """A buffer's or a table's name on card `card` of a tensor-parallel group: card 0's are the one-card names."""
+        return name if card == 0 else "%s_%d" % (name, card)
+
+    def _buffers(self, card=0):
         m, H = self.m, self.H
         signs = 1.0 - 2.0 * np.unpackbits(np.frombuffer(self.global_["__signs__"]["plane"], dtype=np.uint8),
                                           bitorder="little").astype(np.float64)
+        if card > 0:
+            # another card of a tensor-parallel group: what its layers read — its residual, its scratch, its angles
+            nm = lambda n: self._named(n, card)
+            m.buffer(1024, nm("signs"), _half(signs[:512]))
+            m.buffer(64, nm("minus1"), _half(-np.ones(32)))
+            m.buffer(64, nm("one"), _half(np.ones(32)))
+            for n in ("x", "h"):
+                m.buffer(H * 2, nm(n))
+            m.buffer(H * 2, nm("zero_h"), _half(np.zeros(H)))
+            m.buffer(self.ROT * 4, nm("cs"))
+            m.buffer(self.QH * self.max_context * 4, nm("scores"))
+            if self.TIERED:
+                rw = 4 * self.QH * (self.AH + 2)
+                m.buffer(4 * rw + 2 * (2 * self.QH * self.AH + 3 * self.KV_WIDE), nm("tier_scratch"))
+            m.buffer(262144, nm("mix_scratch"))
+            # a prompt chunk's rows, as card 0's below: the rows and their h1s, the scratch, the angles, the tiered window
+            #   or the one-cache scores
+            m.buffer(self.CHUNK * H * 2, nm("xs"))
+            m.buffer(self.CHUNK * H * 2, nm("h1s"))
+            m.buffer(self.ROWS_SCRATCH, nm("pf_scratch"))
+            m.buffer(self.CHUNK * self.ROT * 4, nm("cs_rows"))
+            if self.TIERED:
+                m.buffer(self.WINDOW, nm("win_k"))
+                m.buffer(self.WINDOW, nm("win_v"))
+                m.buffer(3 * self.CHUNK * 4 * self.QH * (self.AH + 2), nm("rows_res"))
+                m.buffer(self.WINDOW_SCORES, nm("window_scores"))
+            else:
+                m.buffer(self.CHUNK * self.QH * self.max_context * 4, nm("scores_rows"))
+            return
         final_w = np.frombuffer(np.asarray(self.global_["model.language_model.norm.weight"]["vbr_data"]).tobytes(),
                                 dtype="<f2").astype(np.float64)[:H]
         m.buffer(1024, "signs", _half(signs[:512]))
@@ -666,9 +834,10 @@ class Qwen35(Generates):
             self.KRS_AT = m.buffer(self.KRSCRATCH, "krscratch")
 
     def plane(self, l, n, which):
-        p = self.PLAN[n]
+        k = self.KEY[(l, n)]
+        p = self.PLAN[k]
         at, size = (p.at_up_data, p.up_data) if which == "data" else (p.at_down_lut, p.down_lut)
-        return "(nn__expert__plane %d %d 0 %d %d)" % (l, self.TYPE[n], at, size)
+        return "(nn__expert__plane %d %d 0 %d %d)" % (l, self.TYPE[k], at, size)
 
     def tier(self, l, which, half):
         """A tier of an attention layer's cache, keys (`up`) or values (`down`)."""
@@ -681,9 +850,11 @@ class Qwen35(Generates):
         at, size = (p.at_up_data, p.up_bytes) if which == "up" else (p.at_down_data, p.down_bytes)
         return "(nn__expert__plane %d %d 0 %d %d)" % (l, t, at, size)
 
-    def _mixer_cells(self, l, scratch, cs="cs", scores="scores"):
-        """A mixer's plane table over the scratch named: the DeltaNet's or the attention's, as its verbs read it."""
+    def _mixer_cells(self, l, scratch, cs="cs", scores="scores", card=0):
+        """A mixer's plane table over the scratch named: the DeltaNet's or the attention's, as its verbs read it — on card
+        `card` of a tensor-parallel group, its buffers and its share of the heads."""
         pl, d = self.plane, (lambda l_, n: self.b.record(l_, n).d)
+        signs, minus1 = self._named("signs", card), self._named("minus1", card)
         if self.kinds[l] == "d":
             ns = ["linear_attn.in_proj_qkv.weight", "linear_attn.in_proj_z.weight", "linear_attn.in_proj_a.weight",
                   "linear_attn.in_proj_b.weight"]
@@ -691,17 +862,18 @@ class Qwen35(Generates):
                     + [pl(l, "linear_attn.conv1d.weight", "data"), pl(l, "linear_attn.A_log", "data"),
                        pl(l, "linear_attn.dt_bias", "data"), pl(l, "linear_attn.norm.weight", "data"),
                        pl(l, "linear_attn.out_proj.weight", "data"), pl(l, "linear_attn.out_proj.weight", "lut"),
-                       self.state(l, "up"), self.state(l, "down"), "signs", "minus1", scratch,
+                       self.state(l, "up"), self.state(l, "down"), signs, minus1, scratch,
                        self.H, self.KH, self.VH, self.LH] + [d(l, n) for n in ns] + [d(l, "linear_attn.out_proj.weight")])
         ns = ["self_attn.q_proj.weight", "self_attn.k_proj.weight", "self_attn.v_proj.weight", "self_attn.o_proj.weight"]
         return ([pl(l, "input_layernorm.weight", "data")] + [c for n in ns for c in (pl(l, n, "data"), pl(l, n, "lut"))]
                 + [pl(l, "self_attn.q_norm.weight", "data"), pl(l, "self_attn.k_norm.weight", "data"),
-                   self.state(l, "up"), self.state(l, "down"), cs, scores, "signs", scratch,
+                   self.state(l, "up"), self.state(l, "down"), cs, scores, signs, scratch,
                    self.H, self.QH, self.KVH, self.AH, self.ROT] + [d(l, n) for n in ns])
 
-    def _tiered_cells(self, l):
+    def _tiered_cells(self, l, card=0):
         """An attention layer's tiered table: the one-cache cells with the sink in the cache's place, then the tiers."""
-        cells = self._mixer_cells(l, "mix_scratch")
+        nm = lambda n: self._named(n, card)
+        cells = self._mixer_cells(l, nm("mix_scratch"), nm("cs"), nm("scores"), card)
         cells[11], cells[12] = self.tier(l, "sink", "up"), self.tier(l, "sink", "down")
         return (cells + [self.THETA, 1 if self.ROTATED else 0]
                 + [self.tier(l, "hot", "up"), self.tier(l, "hot", "down"),
@@ -709,7 +881,7 @@ class Qwen35(Generates):
                    self.tier(l, "warm_c", "down"), self.tier(l, "warm_s", "down"),
                    self.tier(l, "cold_c", "up"), self.tier(l, "cold_s", "up"),
                    self.tier(l, "cold_c", "down"), self.tier(l, "cold_s", "down"),
-                   "tier_scratch", self.SINK, self.HOT, self.WARM])
+                   nm("tier_scratch"), self.SINK, self.HOT, self.WARM])
 
     # ── the rank-1 mask, when the folder's LoRA is one (▶ `nn_rank1_mask.py`, the `rank1_*` doors) ─────────────────
     def _mask_layout(self):
@@ -765,12 +937,17 @@ class Qwen35(Generates):
         cells = lambda s_: list(self.MASK_CELLS[(l, s_)]) if (l, s_) in self.MASK_CELLS else [0, 0, 0]
         return pad + cells(site) + (cells("shared") if both else [])
 
-    def _tables(self):
+    def _tables(self, card=0):
         m, b, pl = self.m, self.b, self.plane
         d = lambda l, n: b.record(l, n).d
+        if card > 0:
+            return self._card_tables(card)
         for l in self.run_layers:
-            # ⭐ a mask's cells, when the folder's LoRA is a rank-1 mask: past each table's longest form, padded up to them
-            mk = lambda cells, at: cells + self._masked(l, "attn", at, len(cells))
+            # ⭐ a mask's cells, when the folder's LoRA is a rank-1 mask: past each table's longest form, padded up to them;
+            #   and past those, an attention without an output gate says so (▶ AI_QWEN_3__AT__UNGATED)
+            masked = lambda cells, at: cells + self._masked(l, "attn", at, len(cells))
+            mk = lambda cells, at: (masked(cells, at) if self.GATED or self.kinds[l] == "d"
+                                    else (lambda c: c + [0] * (51 - len(c)) + [1])(masked(cells, at)))
             if self.kinds[l] == "d":
                 m.table("mx%d" % l, mk(self._mixer_cells(l, "mix_scratch") + ([1] if self.ROTATED else []), 30))
             elif self.TIERED:
@@ -792,7 +969,7 @@ class Qwen35(Generates):
                 for name, scratch in (("ml%d", "mix_scratch"), ("mlr%d", "pf_scratch")):     # a position's, and the rows'
                     m.table(name % l, [pl(l, "post_attention_layernorm.weight", "data")]
                             + [c for n in ms for c in (pl(l, n, "data"), pl(l, n, "lut"))]
-                            + ["signs", "one", scratch, self.H, self.INTER] + [d(l, n) for n in ms] + [self.EPS]
+                            + ["signs", "one", scratch, self.H, self.INTER_OF[0]] + [d(l, n) for n in ms] + [self.EPS]
                             + ([1] if self.ROTATED else []))
                 continue
             sh = ["mlp.shared_expert.gate_proj.weight", "mlp.shared_expert.up_proj.weight",
@@ -822,6 +999,36 @@ class Qwen35(Generates):
             m.table("ex%d" % l, ["signs", "exp_scratch", "zero_h", l, self.T_EXPERT, e.at_up_lut, e.at_down_data,
                                  e.at_down_lut, self.H, self.INTER, self.EXPERTS, self.TOPK, d(l, GU), 0]
                     + self._masked(l, "moe", 16, 14))
+
+    def _card_tables(self, card):
+        """Another card of a tensor-parallel group: a layer's mixer and MLP tables, over that card's part, its buffers and
+        its share of the heads and the MLP's width — a position's and a prompt chunk's."""
+        m, b, pl, nm = self.m, self.b, self.plane, (lambda n: self._named(n, card))
+        d = lambda l, n: b.record(l, n).d
+        flag = [1] if self.ROTATED else []
+        for l in self.run_layers:
+            if self.kinds[l] == "d":
+                cells = self._mixer_cells(l, nm("mix_scratch"), card=card) + flag
+            elif self.TIERED:
+                cells = self._tiered_cells(l, card)
+            else:
+                cells = (self._mixer_cells(l, nm("mix_scratch"), nm("cs"), nm("scores"), card)
+                         + ([self.THETA, 1] if self.ROTATED else []))
+            ungated = lambda c: c if self.GATED or self.kinds[l] == "d" else c + [0] * (51 - len(c)) + [1]   # noqa: E731
+            m.table(nm("mx%d" % l), ungated(cells))
+            if self.kinds[l] == "d":
+                rows = self._mixer_cells(l, nm("pf_scratch"), card=card) + flag
+            elif self.TIERED:
+                rows = cells + [nm("pf_scratch"), nm("cs_rows"), nm("win_k"), nm("win_v"), nm("rows_res"), nm("window_scores")]
+            else:
+                rows = self._mixer_cells(l, nm("pf_scratch"), nm("cs_rows"), nm("scores_rows"), card) + [self.THETA] + flag
+            m.table(nm(("dr%d" if self.kinds[l] == "d" else "atr%d" if self.TIERED else "ar%d") % l), ungated(rows))
+            ms = ["mlp.gate_proj.weight", "mlp.up_proj.weight", "mlp.down_proj.weight"]
+            for name, scratch in (("ml%d", "mix_scratch"), ("mlr%d", "pf_scratch")):     # a position's, and the rows'
+                m.table(nm(name % l), [pl(l, "post_attention_layernorm.weight", "data")]
+                        + [c for n in ms for c in (pl(l, n, "data"), pl(l, n, "lut"))]
+                        + [nm("signs"), nm("one"), nm(scratch), self.H, self.INTER_OF[card]] + [d(l, n) for n in ms]
+                        + [self.EPS] + flag)
 
     def _tier_tables(self):
         """The card's tier (▶ nn's `nn__expert_tier`): its experts tables, a position's and a chunk's, each with its own
@@ -876,6 +1083,8 @@ class Qwen35(Generates):
         if not self.MOE:
             m.array("MLP", ["ml%d" % l for l in run])
             m.array("MLP_ROWS", ["mlr%d" % l for l in run])
+            if self.CARDS > 1:
+                self._card_bindings()
             return
         m.array("PRE", ["pre%d" % l for l in run])
         m.array("POST", ["post%d" % l for l in run])
@@ -888,10 +1097,30 @@ class Qwen35(Generates):
             m.array("EXPERTS_TIER", ["exk%d" % l for l in run])
             m.array("EXPERTS_TIER_ROWS", ["exkr%d" % l for l in run])
 
+    def _card_bindings(self):
+        """What lisp/qwen3_5_tp.lisp reads besides: the group, and each card's names in arrays indexed by its worker."""
+        m, run, P = self.m, self.run_layers, self.CARDS
+        m.bind_values(dict(CARDS=P, GROUP=self.GROUP))
+        m.node_array("TP_POS", 1)
+        m.node_array("TP_N", 1)
+        m.node_array("TP_I", P)
+        rows = lambda l: ("dr%d" if self.kinds[l] == "d" else "atr%d" if self.TIERED else "ar%d") % l   # noqa: E731
+        for k in range(1, P):
+            m.array(self._named("MIXER", k), [self._named("mx%d" % l, k) for l in run])
+            m.array(self._named("MLP", k), [self._named("ml%d" % l, k) for l in run])
+            m.array(self._named("MIXER_ROWS", k), [self._named(rows(l), k) for l in run])
+            m.array(self._named("MLP_ROWS", k), [self._named("mlr%d" % l, k) for l in run])
+        for name, of in (("X_OF", "x"), ("H_OF", "h"), ("ZERO_OF", "zero_h"), ("CS_OF", "cs"), ("MIXER_OF", "MIXER"),
+                         ("MLP_OF", "MLP"), ("XS_OF", "xs"), ("H1S_OF", "h1s"), ("MIXER_ROWS_OF", "MIXER_ROWS"),
+                         ("MLP_ROWS_OF", "MLP_ROWS")):
+            m.array(name, [self._named(of, k) for k in range(P)])
+
     def _procedures(self):
         """The program: `lisp/qwen3_5.lisp`, the sampler's, and — the experts on the CPU — the pictures the card hands it.
         Read from `programs.lisp` instead by the boots that have the same key (▶ `Machine.define_programs`)."""
         self.m.load_source(self.folder.program("qwen3_5"))
+        if self.CARDS > 1:
+            self.m.load_source(self.folder.program("qwen3_5_tp"))
         if self.PICTURES:
             self.m.load_source(self.folder.program("qwen3_5_pictures"))
         self.m.load_source(self.folder.program("sampling"))
@@ -908,12 +1137,27 @@ class Qwen35(Generates):
             if self.kinds[l] == "d":
                 zeros += ["(nn__vector__zero %s %d)" % (self.state(l, "up"), self.S_BYTES // 2),
                           "(nn__vector__zero %s %d)" % (self.state(l, "down"), self.W_BYTES // 2)]
+        for k in range(1, self.CARDS):                  # every other card of a tensor-parallel group: its own states
+            self.m.act_as(k)
+            self.m.must("(begin %s (type x))" % " ".join(zeros), "the reset of card %d" % k)
+        if self.CARDS > 1:
+            self.m.act_as(-1)
         self.m.must("(begin %s (type x))" % " ".join(zeros), "the reset")
+
+    def _one_card(self, what):
+        """⛳ What a tensor-parallel group does not do yet: refused rather than done on card 0's part alone."""
+        if self.CARDS > 1:
+            raise Refused("%s is one card's: not under tensor parallelism yet (each card holds its part)" % what)
+
+    def _needs_head(self):
+        if self.HEADLESS:
+            raise Refused("%s was packed without its head: it answers its rows (`forward_rows`), not tokens" % self.folder.path)
 
     def step(self, token, pos, greedy=True, sample=None, lag=0):
         """One position: the token in, the next token out — greedy, or drawn on the card by `sample` (a
         `sampling.head`) — or the logits left for a sampler on the host. `lag`: how far its rotary position is behind
         `pos` (an image before it took fewer positions than places)."""
+        self._needs_head()
         if pos >= self.max_context:
             raise Refused("position %d is past the context of %d" % (pos, self.max_context))
         head = sample or ("(head)" if greedy else "(head_logits)")
@@ -924,6 +1168,7 @@ class Qwen35(Generates):
     def vision(self):
         """The model's vision tower (▶ `vision.Vision`), made when the first picture comes."""
         if getattr(self, "_vision", None) is None:
+            self._one_card("reading pictures")
             if not self.MROPE:
                 raise Refused("%s reads no pictures: its rotary has no M-RoPE sections" % self.folder.path)
             # ⛳ the program travels with the model (lisp/): a folder fetched before pictures has no qwen3_5_pictures.lisp
@@ -958,7 +1203,7 @@ class Qwen35(Generates):
     def _run(self, text, what):
         """A program's answer. ⛳ With the experts on the CPU it runs with every block standing — it hands them work
         (`sys__compute`) — and a program that does not would find the CPU's block never started."""
-        if self.CPU_EXPERTS:
+        if self.CPU_EXPERTS or self.CARDS > 1:
             return self.m.grid(text)[1]
         return self.m.must(text, what)
 
@@ -974,11 +1219,14 @@ class Qwen35(Generates):
         the last row (greedy, or drawn by `sample`), or its logits left for a sampler. A picture's tokens come with
         `rows` {index in `tokens`: the tower's row, in place of that pad's embedding} and every token with its three
         rotary `positions` (n x 3, ▶ `vision.positions`); without them a token's position is its place in the cache."""
+        self._needs_head()
         if first + len(tokens) > self.max_context:
             raise Refused("positions to %d are past the context of %d" % (first + len(tokens), self.max_context))
         if (positions is not None or rows) and not (self.MROPE and self.PICTURES):
             raise Refused("%s reads no pictures here (▶ `vision`)" % self.folder.path)
         rows = rows or {}
+        if self.CARDS > 1 and (positions is not None or rows):
+            raise Refused("pictures are one card's: not under tensor parallelism yet")
         step = min(self.CHUNK, self.HOT) if self.TIERED else self.CHUNK      # a chunk never outgrows the hot ring
         for at in range(0, len(tokens), step):
             chunk = tokens[at:at + step]
@@ -1006,6 +1254,9 @@ class Qwen35(Generates):
         """Position `pos` through this machine's layers, from `token` (the first machine) or the residual row `x` (the
         bytes the machine before answered). Answers the next token when `head` — the greedy head, or the head expression
         it is (a sampler's draw, `sampling.head`; `(head_logits)`) — else this machine's residual row."""
+        self._one_card("a stage of a pipeline")
+        if head:
+            self._needs_head()
         if token is not None:
             start = "(embed %d)" % token
         else:
@@ -1020,6 +1271,9 @@ class Qwen35(Generates):
         """A chunk of positions `first ..` as rows through this machine's layers, from `tokens` or from the rows `xs`.
         Answers the next token from the last row when `head`, else this machine's rows. A picture's: `rows` {index in
         the chunk: the tower's row} over its pads (with `tokens`) and the chunk's rotary `positions` (▶ `prefill`)."""
+        self._one_card("a stage of a pipeline")
+        if head:
+            self._needs_head()
         if self.CPU_EXPERTS:
             # ⛳ the experts on the CPU read a prompt a position at a time (no rows words for them here): the chunk's
             #   positions through `forward` in turn — the same tokens, a pipeline's coordinator none the wiser
@@ -1057,6 +1311,7 @@ class Qwen35(Generates):
                       % ((n - 1) * H, H, H, head if isinstance(head, str) else "(head)"), "the chunk's last row")
 
     def logits(self):
+        self._needs_head()
         return np.frombuffer(self.m.read(self.LOGITS_AT, self.VOCAB * 2), dtype="<f2").astype(np.float32)
 
     # ── ⑤ LoRAs, swapped in place ─────────────────────────────────────────────────────────────────────────────
@@ -1071,7 +1326,7 @@ class Qwen35(Generates):
             r = bundle.record(l, n)
             view = np.frombuffer(r.bundle.blob(l), dtype=np.uint8)
             base = view.ctypes.data
-            at, p = self.slot_at[(l, n)], self.PLAN[n]
+            at, p = self.slot_at[(l, n)], self.PLAN[self.KEY[(l, n)]]
             (d_at, d_n), (l_at, l_n) = r.data_span(), r.lut_span()
             out += [(at + p.at_up_data, base + d_at, d_n), (at + p.at_down_lut, base + l_at, l_n)]
         return out
@@ -1093,6 +1348,7 @@ class Qwen35(Generates):
     def load_lora(self, name):
         """Write an adapter's matrices into their slots, putting back the one in use first. Answers the seconds the
         swap took."""
+        self._one_card("a LoRA swap")
         import time
         if name == self.active_lora:
             return 0.0
@@ -1125,26 +1381,79 @@ class Qwen35(Generates):
             self.m.write_from(at, pointer, n)
 
     # ── ⑥ a conversation's state, for putting it away ─────────────────────────────────────────────────────────
-    def state_regions(self, length, where=None):
-        """(address, bytes) of everything a conversation of `length` positions has written: each DeltaNet layer's
-        state and window whole, each attention layer's key and value rows `0..length`. `where`: each layer's state's
-        address — the load's by default; a table of zeros answers the sizes before the boot."""
+    def _state_layout(self, length):
+        """Every region a conversation of `length` positions has written, as (layer, offset in its state's slot, rows,
+        sections): a row is its sections one after another, each section the bytes of this card's share of the heads —
+        the DeltaNet's recurrent state one row of its value heads, its window one row of its q, k and v channels (three
+        deep, a channel's window whole), a cache's region a row a position of its key-value heads. Cards' shares of a
+        row, section by section in the cards' order, are one card's row."""
         out = []
         for l in self.run_layers:
-            at = (self.state_at if where is None else where)[l]
             if self.kinds[l] == "d":
-                out += [(at + self.SPLAN.at_up_data, self.S_BYTES), (at + self.SPLAN.at_down_data, self.W_BYTES)]
+                ch = lambda heads: heads * self.LH * 3 * 2                                  # noqa: E731
+                out += [(l, self.SPLAN.at_up_data, 1, [self.S_BYTES]),
+                        (l, self.SPLAN.at_down_data, 1, [ch(self.KH), ch(self.KH), ch(self.VH)])]
             elif self.TIERED:
                 past = max(0, length - self.SINK)
-                n_rows = dict(sink=min(length, self.SINK), hot=min(past, self.HOT),
-                              warm=min(max(0, past - self.HOT), self.WARM), cold=max(0, past - self.HOT - self.WARM))
+                warm, cold = min(max(0, past - self.HOT), self.WARM), max(0, past - self.HOT - self.WARM)
                 w, rb8, rb4 = self.KV_WIDE * 2, (self.AH + 1) // 2 * 2, (self.AH + 3) // 4 * 2
-                sizes = dict(sink=n_rows["sink"] * w, hot=n_rows["hot"] * w, warm_c=n_rows["warm"] * self.KVH * rb8,
-                             warm_s=n_rows["warm"] * self.KVH * 2, cold_c=n_rows["cold"] * self.KVH * rb4,
-                             cold_s=n_rows["cold"] * self.KVH * 2)
+                rows = dict(sink=(min(length, self.SINK), w), hot=(min(past, self.HOT), w),
+                            warm_c=(warm, self.KVH * rb8), warm_s=(warm, self.KVH * 2),
+                            cold_c=(cold, self.KVH * rb4), cold_s=(cold, self.KVH * 2))
                 for half in (self.KVPLAN.at_up_data, self.KVPLAN.at_down_data):
-                    out += [(at + half + self.TIER[nm][0], n) for nm, n in sizes.items()]
+                    out += [(l, half + self.TIER[nm][0], n, [width]) for nm, (n, width) in rows.items()]
             else:
-                n = length * self.KV_WIDE * 2
-                out += [(at + self.KVPLAN.at_up_data, n), (at + self.KVPLAN.at_down_data, n)]
+                out += [(l, half, length, [self.KV_WIDE * 2])
+                        for half in (self.KVPLAN.at_up_data, self.KVPLAN.at_down_data)]
         return out
+
+    def state_regions(self, length, where=None, card=0):
+        """(address, bytes) of everything a conversation of `length` positions has written: each DeltaNet layer's
+        state and window whole, each attention layer's key and value rows `0..length`. `where`: each layer's state's
+        address — the load's by default; a table of zeros answers the sizes before the boot. Under tensor parallelism
+        these are card `card`'s, its share of the heads: `state_read` and `state_write` take the whole."""
+        at = (self.state_of[card] if where is None else where)
+        return [(at[l] + off, rows * sum(secs)) for l, off, rows, secs in self._state_layout(length)]
+
+    def state_read(self, length):
+        """A conversation's state read off the card, region by region as one card holds it — so a conversation put away
+        under tensor parallelism comes back on one card, or on another number of cards. Several cards' shares are
+        stitched: each region's rows, section by section, card 0's share first."""
+        if self.CARDS == 1:
+            return [self.m.read(at, n) for at, n in self.state_regions(length) if n]
+        parts = []
+        for k in range(self.CARDS):
+            self.m.act_as(k)
+            parts.append([self.m.read(at, n) if n else b"" for at, n in self.state_regions(length, card=k)])
+        self.m.act_as(-1)
+        out = []
+        for i, (_, _, rows, secs) in enumerate(self._state_layout(length)):
+            if not rows * sum(secs):
+                continue
+            cut = np.cumsum([0] + secs)
+            mine = [np.frombuffer(p[i], dtype=np.uint8).reshape(rows, -1) for p in parts]
+            out.append(np.concatenate([c[:, cut[j]:cut[j + 1]] for j in range(len(secs)) for c in mine],
+                                      axis=1).tobytes())
+        return out
+
+    def state_write(self, length, blobs):
+        """A conversation's state, as `state_read` answers it, written back — each card its share of every region."""
+        layout = [r for r in self._state_layout(length) if r[2] * sum(r[3])]
+        P = self.CARDS
+        want = [rows * sum(secs) * P for _, _, rows, secs in layout]
+        if [len(b) for b in blobs] != want:
+            raise Refused("a state of %d regions (%d bytes) is not this model's at %d positions (%d regions, %d bytes)"
+                          % (len(blobs), sum(map(len, blobs)), length, len(want), sum(want)))
+        for k in range(P):
+            at = self.state_of[k]
+            if P > 1:
+                self.m.act_as(k)
+            for blob, (l, off, rows, secs) in zip(blobs, layout):
+                if P == 1:
+                    self.m.write(at[l] + off, blob)
+                    continue
+                full, cut = np.frombuffer(blob, dtype=np.uint8).reshape(rows, -1), np.cumsum([0] + secs)
+                mine = [full[:, P * cut[j] + k * secs[j]:P * cut[j] + (k + 1) * secs[j]] for j in range(len(secs))]
+                self.m.write(at[l] + off, np.concatenate(mine, axis=1).tobytes())
+        if P > 1:
+            self.m.act_as(-1)

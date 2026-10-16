@@ -84,7 +84,8 @@ def decode_record(rec, blob):
 
     if storage == "dense":
         f = rec["fields"]["dense"]
-        raw = blob[rec["record_offset"] + f["rel"]:][:f["nbytes"]]
+        a = rec["record_offset"] + f["rel"]
+        raw = blob[a:a + f["nbytes"]]          # one slice: `blob[a:]` of a file's mmap copies the file's whole tail
         return np.frombuffer(raw, dtype=np.dtype(f["dtype"])).reshape(f["shape"])
 
     if storage != "packed":
@@ -101,8 +102,9 @@ def decode_record(rec, blob):
        fl["rel"] + fl["nbytes"] > rec["record_nbytes"]:
         raise Refused("a field runs past its record")
     base = rec["record_offset"]
-    wb = blob[base + fw["rel"]:][:fw["nbytes"]]
-    lb = blob[base + fl["rel"]:][:fl["nbytes"]]
+    # one slice each: `blob[a:]` of a file's mmap copies the file's whole tail (0.27 s a record from a 200 MB layer)
+    wb = blob[base + fw["rel"]:base + fw["rel"] + fw["nbytes"]]
+    lb = blob[base + fl["rel"]:base + fl["rel"] + fl["nbytes"]]
     if len(wb) < rows * row_bytes:
         raise Refused("the weights plane is short: %d < %d" % (len(wb), rows * row_bytes))
 

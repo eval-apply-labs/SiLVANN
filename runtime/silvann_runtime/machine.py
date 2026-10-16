@@ -100,9 +100,9 @@ class Machine:
         self.booted = False
         self._abi_write = None
 
-    def boot(self, device_params, alloc_mb=256, workers=None, worker_params=None):
+    def boot(self, device_params, alloc_mb=256, workers=None, worker_params=None, bindings=512):
         """Boot with one worker (or the list given), each with the device parameters given, or its own section from
-        `worker_params` — {worker: text}."""
+        `worker_params` — {worker: text}. `bindings`: how many names the program's environment holds."""
         e = self.e
         text = "boot_commands{\nsys__alloc_size_mb:%d\n}\ndevice_params{\n%s}\n" % (alloc_mb, device_params)
         for w, params in sorted((worker_params or {}).items()):
@@ -114,7 +114,7 @@ class Machine:
             e.boot(config=text)
         self.booted = True
         self.K, self.V = e.kinds(), e.verbs()
-        self.env = e.bindings_create(512)
+        self.env = e.bindings_create(bindings)
         self.comp = Composer(e, self.env)
 
     def act_as(self, worker):

@@ -1,6 +1,6 @@
 # SiLVANN
 
-> **Developer preview, v0.9.0.** It runs the models below well on the hardware it was tested on, and it is shared
+> **Developer preview, v0.10.0.** It runs the models below well on the hardware it was tested on, and it is shared
 > for people who can find their way around a build and a stack trace. NVIDIA cards are tested on one, a GeForce
 > RTX 5060 Ti; Apple silicon is not tested yet.
 
@@ -58,57 +58,43 @@ positions and then the answer:
 | the same | without the tier | 55 positions/s | 28 tokens/s |
 | the same | on the CPU alone | 21 positions/s | 8.6 tokens/s |
 
-**New in v0.9.0:** tool calling — a model opens a Lisp REPL on the machine it runs on, in its answer.
+**New in v0.10.0:** pictures from a prompt — Qwen-Image 2.1 runs as a server's model of its own: a message is a
+prompt, and its answer a picture.
 
-The model calls one tool, `lisp`, in the format it was trained on — Qwen's and GLM's `<tool_call>`, Ministral's
-`[TOOL_CALLS]` — with a form to evaluate: the answer stops where the call ends, the form runs in a REPL beside the
-server, and its value is read back in as the model's chat template frames a tool's answer, the answer going on from
-there. `(help)` lists the commands: `ls`, `read`, `write`, `cd` and `pwd` for the folders; `bash`, a shell command in
-the working folder (stopped, with what it started, after 60 seconds — up to 600 when the form asks — or after 1 MB of
-output); `fetch`, a web page's words without its markup; and Lisp to put them together — `define`, `let`, `lambda`,
-`map`, `filter`, text and lists. The UI shows a run of calls as one `<!tools>` block ([`docs/users.md`](docs/users.md#the-models-tool)).
+[Qwen-Image 2.1](https://huggingface.co/eval-apply/silvann_tq_D8_qwen_image_2.1) (`silvann_tq_D8_qwen_image_2.1`, 18 GB)
+is a 7-billion-parameter diffusion transformer with Qwen3-VL 8B's text model as its encoder: the two at 8 bits, its
+picture decoder at 16, each on the card in turn, written in the engine's words as the text models are
+(`engine/src/packages/ai_qwen_image`; its programs `lisp/qwen_image.lisp`, the transformer's steps, and
+`lisp/qwen_image_vae.lisp`, the decoder's layers). In the UI a message typed is a prompt: its progress is
+shown beside the box — the prompt read, each step, the decode — and the picture is drawn in the conversation and kept
+with it as a PNG. A message sets its picture's size, steps and seed (`--size 768x1024 --steps 20 --seed 7`), the
+config's `image` the rest. `silvann_cli` saves the picture where it runs, and through the API the answer's text names it.
+A 1,024 x 1,024 picture at 40 steps takes 146 s on an RTX 5060 Ti 16 GB and 572 s on an MI50
+([`docs/users.md`](docs/users.md#a-picture-model-qwen-image-21)). ⚠ Its licence is the Qwen Research License Agreement:
+research and other non-commercial use only.
 
-What a command may do without asking you is the conversation's, chosen beside its **tools** switch: ask first — reads in
-the workspace and in folders you allowed; reads unasked — every read, the default (a config's `tools`, `"chill"`); full
-auto — everything. Anything else stops the answer with a question under it — allow the folder, allow once, or refuse —
-and a refusal is said to the model, which answers without it. The switch works as the thinking switch does: off, the
-model's calls are answered that the tool is off; a conversation's first message declares the tool, so one begun without
-it does not take it on later. `"tools": "no"` in a config turns it off for every conversation on that server. The REPL
-starts in `workspace/` beside the conversations (`tools_folder` names another) and runs as the server's user — in the
-Docker image, the container's.
+Checked against diffusers' Qwen-Image 2.1 pipeline from the same prompt and seed, on both cards: a block of the
+transformer, its prediction and six steps of it, the encoder's rows, the decoder, and the whole pipeline's latents and
+pictures — each nearer diffusers' float32 than its own bfloat16 pipeline is. On the RTX 5060 Ti, through the server's
+API and in a browser: the first conversation opened by itself, a prompt typed, its progress, the picture, the page
+reloaded and the picture drawn again, a second picture.
 
-In a terminal, `silvann_cli` (`silvann_cli.py`, in the release from this one) has the conversation the UI has — over
-ssh, say: the answer written as it comes, its thinking dimmed, the tool's calls and their values shown, and an ask
-answered at a prompt — `y` once, `f` the folder (a read), `n` or Enter refuses. It takes the server's defaults unless
-`--notools` or `--nothink` says otherwise, and `/mode` chooses what the tool may do
-([`docs/users.md`](docs/users.md#3-serve-it-and-chat)).
+The chat, after a user test: an answer is drawn as it comes without drawing the conversation again; while the model
+thinks the answer says "thinking…", and **show thinking** shows the thought in a section of its own; a run of the
+model's tool calls is a section, closed until you open it; a model with no conversation saved opens one as its server
+starts, and a message typed brings it online without **Activate**. A picture model's header has no thinking or tool
+switches.
 
-Checked through the server's API on two MI50s: the 27B, the 35B-A3B, the 122B (`D4E4`), GLM 5.3 Flash and Ministral 3
-14B (`D8`) each found a word in a note in its workspace through the tool; the 27B, the 35B-A3B, the 122B and GLM asked
-before reading a file outside it and went on once allowed; the 27B told the user of a write refused, and the 122B's
-`(bash "wc -l list.md")` ran once allowed. A call and its answer are framed as each model's chat template frames them,
-to the token. The terminal's chat, on the 35B-A3B: a read outside the workspace unasked in "chill", a `bash` asked
-and allowed with `y`, a read asked and refused with `n`, an answer stopped with Ctrl-C, and a conversation put away
-after two idle minutes answering again. On an RTX 5060 Ti the same through the server for the 27B, the 35B-A3B, the
-122B and GLM, and for the 27B and the 35B-A3B a `fetch` and a write asked too; the terminal's chat the same on the
-35B-A3B; the UI's switch, its selector and the three answers to an ask clicked in a browser; and inside the Docker
-image, the tool on the volume's `workspace/` and `docker exec -it silvann silvann_cli`.
-
-⚠ The models have new names — `silvann_tq_<bits>_<model>`, the model's name in lowercase:
-`silvann_tq_D8E4_qwen3.6_35b_a3b`, `silvann_tq_D4_qwen3.8_27b`, `silvann_tq_D4E4_glm_5.3_flash`,
-`silvann_tq_D8_ministral_3_14b` and the rest (`silvann list`). A model downloaded with an earlier release keeps its
-folder and its old name, and runs as before, its conversations with it; but `silvann list` and a download know only the
-new names, and a later release's new program files reach a model under its new name alone — download it again under
-that name when you can (the conversations stay with the old folder). The repositories on Hugging Face were renamed, and
-their old names lead to the new ones, so an earlier release still downloads.
-
-Also: two servers started on one machine boot one after the other, each trying the card as the other leaves it. A setup
-kept in `autotune.json` is chosen again when the card holds 1 GB less than when it was chosen, and on an AMD card a kept
-setup is taken at the next start again — the card's memory in use, which changes from one boot to the next, had kept it
-from matching; one the card refuses is chosen again around the config's own settings. An integrated GPU
-(`khronos_opencl1_igpu`) reads pictures on the CPU unless the config's `picture_pixels` gives them room in its pool. The
-UI starts again the model it last started only when that start booted. An install's `.gitignore` leaves out the Hugging
-Face token, the UI's last start and the tool's files.
+On NVIDIA cards the CUDA family has its own kernels for what a picture needs: attention with a limit to each row's keys,
+matrices at 16 bits (the decoder's 3 x 3 convolutions 30 to 48 times faster than the engine's generic kernel), a
+convolution's rows, and an activation's rotation row by row before an 8-bit product. The 16-bit matrices and the
+rotation serve the Qwen models' vision tower too: the 27B's reads a 1,024 x 1,024 picture in 0.65 s and a 2,048 x
+2,048 one in 6.3 s on the RTX 5060 Ti. The AMD family has the first of them now as well, and reads a prompt's
+DeltaNet rows without spilling registers: the 27B's 2,097-position prompt 3% faster on an MI50.
+On Windows, NVIDIA's driver lets a model larger than the card start on it and then read the rest over PCIe at every
+token: the CUDA family now refuses an allocation past the card's free memory, which has not yet
+been checked on Windows; until it is, [`docs/users.md`](docs/users.md#on-windows-the-docker-image) says which config
+keeps a model within the card.
 
 Every release before this one, and this one's notes again: [`release_logs/v0.md`](release_logs/v0.md).
 
@@ -122,6 +108,7 @@ Every release before this one, and this one's notes again: [`release_logs/v0.md`
 
 Pictures and videos are read by the Qwen models and GLM 5.3 Flash (v0.7.0: [`release_logs/v0.md`](release_logs/v0.md#v070)); Ministral 3 does not read them.
 Every model calls the tool, a Lisp REPL on the machine, in its own trained format (v0.9.0: [`docs/users.md`](docs/users.md#the-models-tool)).
+Pictures are made from a prompt by Qwen-Image 2.1, a server's model of its own (v0.10.0: [`docs/users.md`](docs/users.md#a-picture-model-qwen-image-21)).
 
 ## Quick start
 

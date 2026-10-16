@@ -17,6 +17,7 @@ machine; this page has the rest.
 | Qwen 3.5 397B-A17B (mixture of experts, 17B active) | `D4E4` | 207 GB — 4 bits | [eval-apply/silvann_tq_D4E4_qwen3.5_397b_a17b](https://huggingface.co/eval-apply/silvann_tq_D4E4_qwen3.5_397b_a17b) |
 | GLM 5.3 Flash (288 experts, 8 active) | `D4E4` | 162 GB — 4 bits | [eval-apply/silvann_tq_D4E4_glm_5.3_flash](https://huggingface.co/eval-apply/silvann_tq_D4E4_glm_5.3_flash) |
 | GLM 5.3 Flash | `D8E4` | 166 GB — experts 4 bits, the rest 8 | [eval-apply/silvann_tq_D8E4_glm_5.3_flash](https://huggingface.co/eval-apply/silvann_tq_D8E4_glm_5.3_flash) |
+| Qwen-Image 2.1 (pictures from a prompt: a 7B diffusion transformer, Qwen3-VL 8B's text model as its encoder) | `D8` | 18 GB — the transformer and the encoder 8 bits, the picture decoder 16 | [eval-apply/silvann_tq_D8_qwen_image_2.1](https://huggingface.co/eval-apply/silvann_tq_D8_qwen_image_2.1) |
 
 The name says the bits: `D8E4` is the dense matrices at 8 and the experts at 4; `D4` a dense model at 4. The 8-bit dense
 part is the one that pays — ▶ [`compression.md`](compression.md), and how close each pack comes to the original weights
@@ -24,6 +25,8 @@ is in [`results.md`](results.md#how-good-each-pack-is-perplexity). `python3 silv
 and `download-model NAME` fetches one into `models/`.
 
 Each model keeps its own licence, which is in its folder once downloaded: Qwen's and Mistral's Apache-2.0, GLM's MIT.
+⚠ Qwen-Image 2.1's is the Qwen Research License Agreement: research and other non-commercial use only. A picture model
+runs as a server's model of its own: [`users.md`](users.md#a-picture-model-qwen-image-21).
 
 ## What each needs, measured
 

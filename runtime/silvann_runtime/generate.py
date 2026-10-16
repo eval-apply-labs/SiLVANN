@@ -24,6 +24,8 @@ class Generates:
         """Up to `n` tokens from `token` at `pos`, each the next one's input, in one program on the card — ending early
         after one of `stop`. Greedy, or drawn by the card's sampler `sampler` (a `session.Sampler`). `lag`: how far the
         tokens' rotary positions are behind their places (a family whose program reads LAG). Answers the tokens."""
+        if getattr(self, "HEADLESS", False):
+            self._needs_head()
         n = min(n, GENERATE_MOST, self.max_context - pos)
         if n <= 0:
             raise Refused("position %d is past the context of %d" % (pos, self.max_context))

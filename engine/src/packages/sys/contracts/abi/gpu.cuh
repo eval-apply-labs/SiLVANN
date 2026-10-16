@@ -65,7 +65,12 @@
     X(PKG, void,     file_close,                      SYS__SILICON_FAMILY__OF_THIS(file_close),                      (uint64_t handle)) \
     X(PKG, bool,     file_read,                       SYS__SILICON_FAMILY__OF_THIS(file_read),                       (uint64_t handle, uint64_t offset, uint64_t bytes, void* to)) \
     X(PKG, bool,     memory_map_file,                 SYS__SILICON_FAMILY__OF_THIS(memory_map_file),                 (void* at, size_t bytes, uint64_t handle, uint64_t offset)) \
-    X(PKG, bool,     memory_prefetch,                 SYS__SILICON_FAMILY__OF_THIS(memory_prefetch),                 (const void* at, size_t bytes))
+    X(PKG, bool,     memory_prefetch,                 SYS__SILICON_FAMILY__OF_THIS(memory_prefetch),                 (const void* at, size_t bytes)) \
+    X(PKG, bool,     peer_access,                     SYS__SILICON_FAMILY__OF_THIS(peer_access),                     (uint32_t other)) \
+    X(PKG, bool,     mark_open,                       SYS__SILICON_FAMILY__OF_THIS(mark_open),                       (void** mark)) \
+    X(PKG, void,     mark_close,                      SYS__SILICON_FAMILY__OF_THIS(mark_close),                      (void* mark)) \
+    X(PKG, bool,     mark_record,                     SYS__SILICON_FAMILY__OF_THIS(mark_record),                     (void* mark)) \
+    X(PKG, bool,     mark_wait,                       SYS__SILICON_FAMILY__OF_THIS(mark_wait),                       (void* mark))
 
 /* What each door does, in the order of the list:
  *     memory_allocate / memory_free            memory on the card
@@ -110,7 +115,27 @@
  *     memory_prefetch                          whether every page of the range is in memory now — and when one is not,
  *                                              its reading STARTED, not waited for, so a caller can compute with what
  *                                              is here while the rest arrives. Memory that is never paged out (a
- *                                              card's, an allocation) answers true. */
+ *                                              card's, an allocation) answers true.
+ *     peer_access                              whether the bound device reads and writes device `other`'s memory
+ *                                              directly — a kernel on it given an address of `other`'s memory
+ *                                              loads and stores there, with no copy through RAM — and, when it
+ *                                              can, that access turned on. Asked from each side of a pair: it is
+ *                                              one direction. ⚖ *"tensor parallelism requires DMA"*: a family that
+ *                                              cannot answers false, and the caller refuses rather than staging
+ *                                              through RAM. A device of a family whose memory is the machine's
+ *                                              own answers true for every other device of it
+ *     mark_open / mark_close                   a point that can be placed in the bound device's queue of work, on
+ *                                              that device; one device's mark may be waited for by another's queue
+ *     mark_record                              place the mark after everything queued on the bound device so far:
+ *                                              it is reached when that work is done. The caller does not wait
+ *     mark_wait                                the bound device's queue waits, on the device, until the mark's
+ *                                              latest recording is reached — work queued after this call starts
+ *                                              only then. The caller does not wait. The mark may be another
+ *                                              device's. ⛳ It waits for the recording made BEFORE this call: a
+ *                                              recording another thread has not made yet is not waited for, so
+ *                                              the caller orders the two calls itself. A family whose work is
+ *                                              done when the call that asked returns has nothing to order: its
+ *                                              marks are tokens and both calls are true at once */
 
 #define SYS__DOORS__ZZPRIVATE_FIELD(PKG, RET, NAME, FN, PARAMS)  RET (*NAME) PARAMS;
 typedef struct sys__doors {
