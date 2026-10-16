@@ -1,6 +1,6 @@
 # SiLVANN
 
-> **Developer preview, v0.10.0.** It runs the models below well on the hardware it was tested on, and it is shared
+> **Developer preview, v0.10.1.** It runs the models below well on the hardware it was tested on, and it is shared
 > for people who can find their way around a build and a stack trace. NVIDIA cards are tested on one, a GeForce
 > RTX 5060 Ti; Apple silicon is not tested yet.
 
@@ -57,6 +57,10 @@ positions and then the answer:
 | [Qwen 3.6 35B-A3B](https://huggingface.co/eval-apply/silvann_tq_D8E4_qwen3.6_35b_a3b) (`D8E4`) | the dense part on the card, the experts on the CPU, and 8 GB of the card the tier of experts used most | 117 positions/s | 52 tokens/s |
 | the same | without the tier | 55 positions/s | 28 tokens/s |
 | the same | on the CPU alone | 21 positions/s | 8.6 tokens/s |
+
+**v0.10.1:** the UI's Options show a downloaded picture model as there, and offer it to start: in v0.10.0 a download of
+Qwen-Image 2.1 finished with its download button still showing, and the model could not be chosen — in the
+Docker app too.
 
 **New in v0.10.0:** pictures from a prompt — Qwen-Image 2.1 runs as a server's model of its own: a message is a
 prompt, and its answer a picture.

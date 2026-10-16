@@ -553,8 +553,11 @@ SERVER = ServerProcess()
 # ---------- Models fetched from Hugging Face (process-wide singleton) ----------
 
 def model_present(name: str) -> bool:
-    """A model folder that is there: its pack and its config (as silvann_runtime.fetch.present says)."""
-    return (MODELS_DIR / name / "pack.json").is_file() and (MODELS_DIR / name / "config.json").is_file()
+    """A model folder that is there, as silvann_runtime.fetch.present says: a text model's pack and config, or a picture
+    model's — diffusers' model_index.json and its transformer packed."""
+    d = MODELS_DIR / name
+    return ((d / "pack.json").is_file() and (d / "config.json").is_file()
+            or (d / "model_index.json").is_file() and (d / "transformer" / "pack.json").is_file())
 
 
 def folder_bytes(path: Path) -> int:
