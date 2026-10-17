@@ -4,10 +4,9 @@
 ⚖ ARCHITECT, 2026-09-20: *"build that quant format with the global nf table, fwht row scaler and no
 block scaler."*
 
-⛔⛔ THIS IS A REFERENCE PACKER, NOT THE SHIPPING ONE. `backstage/python/compressor.py` is what packs
+⛔⛔ THIS IS A REFERENCE PACKER, NOT THE SHIPPING ONE. `backstage/python/nn_compressor.py` is what packs
 a release; this file exists so the FORMAT has a producer that can be read against the decoder in
-`src/packages/nn/vbr__impl.cuh`, and so the oracle has something to compare. Folding the family into
-the shipping compressor is a separate change with a separate review.
+`src/packages/nn/vbr__impl.cuh`, and so the oracle has something to compare.
 
 ⛔⛔ AND NOTHING HERE IS TESTED ON SYNTHETIC DATA. ⚖ ARCHITECT: *"never test compression on synthetic
 data, use the 35b model directly as data source."* Every number this file's callers quote comes from

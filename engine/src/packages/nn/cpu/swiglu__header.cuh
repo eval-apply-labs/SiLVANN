@@ -13,7 +13,7 @@
  * transcendental in it that a reference implementation must independently agree with.
  *
  * ── ⭐⭐ WHAT THE PORT DELETED, WHICH IS MOST OF IT ───────────────────────────────────────────────────
- * The old handler (`MODEL_CMD_SWIGLU_COMBINE.cuh`, 47 lines) is the port thesis in one file:
+ * A handler of the retired engine (47 lines) is the port thesis in one file:
  * ```
  *   resolve_signature_buffers(...)     GONE — the buffers are ARGUMENTS now
  *   gate = mem_ctx->alt.live           GONE — the gate came from an implicit REGISTER because a

@@ -23,9 +23,11 @@ from .model_folder import Refused
 from .qwen_image import Stopped
 from .session import Cartridge
 
-DEFAULTS = {"width": 1024, "height": 1024, "steps": 40, "seed": None}
-# a message's settings, written in it and taken out of the prompt: `--steps 20`, `--size 768x1024`, `--seed 7`
-SETTING = re.compile(r"(?:^|\s)--(steps|size|seed)\s+(\d+(?:x\d+)?)(?=\s|$)")
+DEFAULTS = {"width": 1024, "height": 1024, "steps": 40, "seed": None, "count": 1}
+COUNT_MAX = 8                       # pictures a message asks for at most
+# a message's settings, written in it and taken out of the prompt: `--steps 20`, `--size 768x1024`, `--seed 7`,
+#   `--count 4` (that many pictures, seeds seed, seed + 1, …)
+SETTING = re.compile(r"(?:^|\s)--(steps|size|seed|count)\s+(\d+(?:x\d+)?)(?=\s|$)")
 PICTURE = re.compile(r"!\[[^\]]*\]\(picture:([A-Za-z0-9_.-]+)\)")      # an answer's picture, as its text names it
 
 
@@ -81,8 +83,9 @@ class PictureJob:
 class ImageRuntime:
     """`session.Runtime`'s part the server's endpoints read, for an image model, and the picture a message makes."""
 
-    def __init__(self, model):
+    def __init__(self, model, card=None):
         self.model = model
+        self.card = card                    # the card the picture worker draws on, or None: the one this process has
         self.identity = model.folder.identity()
         self.active = None
         self.cartridges = {}
@@ -139,8 +142,14 @@ class ImageRuntime:
         mine, theirs = socket.socketpair()
         code = ("import sys; sys.path[:0] = %r; from silvann_runtime.image_worker import main; main()"
                 % [p for p in sys.path if p])
+        env = None
+        if self.card is not None:                     # a card of its own: the only one the worker sees — the card'th
+            env = dict(os.environ)                    #   of those this process sees, where it was given a list
+            for name in ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES"):
+                given = [c for c in os.environ.get(name, "").split(",") if c.strip()]
+                env[name] = given[self.card] if self.card < len(given) else str(self.card)
         self._proc = subprocess.Popen([sys.executable, "-c", code, self.model.folder.path, str(theirs.fileno()),
-                                       self.model.silicon or ""], pass_fds=(theirs.fileno(),))
+                                       self.model.silicon or ""], pass_fds=(theirs.fileno(),), env=env)
         theirs.close()
         self._conn = Connection(mine.detach())
         if self._conn.recv()[0] != "ready":
@@ -161,6 +170,7 @@ class ImageRuntime:
         prompt = SETTING.sub(" ", text).strip()
         s["width"], s["height"] = (max(256, min(2048, int(v) // 32 * 32)) for v in (s["width"], s["height"]))
         s["steps"] = max(1, min(100, int(s["steps"])))
+        s["count"] = max(1, min(COUNT_MAX, int(s.get("count") or 1)))
         if s["seed"] is None:
             s["seed"] = int.from_bytes(os.urandom(4), "little")
         return prompt, s
@@ -199,6 +209,57 @@ class ImageRuntime:
         finally:
             job.done.set()
             self._lock.release()
+
+
+def pictures(rt, prompt, s, folder, progress, cards=None):
+    """⭐ `s["count"]` PICTURES (⚖ 2026-10-16: *"the sdxl thing where it makes 4 pic at the same time"*), seeds
+    `s["seed"]`, `s["seed"] + 1`, …: on `cards` — a picture worker on each, all at once — or one after another on `rt`'s.
+    `rt` draws on the first card; a worker of its own is started on each of the others, and ended after. Answers
+    [(name, seconds, settings)], the pictures that were made in order of their seeds; `progress(stage, done, total,
+    picture)` as each worker tells it. A stop asked of `rt` stops every worker. Raises when none is made."""
+    n = int(s.get("count") or 1)
+    each = [dict(s, seed=(int(s["seed"]) + k) % (1 << 32), count=1) for k in range(n)]
+    if n == 1:
+        name, seconds = rt.picture(prompt, each[0], folder, lambda st, d, t: progress(st, d, t, 0))
+        return [(name, seconds, each[0])]
+    cards = list(cards or [None])[:n]
+    runtimes = [rt] + [ImageRuntime(rt.model, card=c) for c in cards[1:]]
+    made, failed = {}, []
+
+    def work(w, mine):
+        for k in mine:
+            if rt._job is not None and rt._job.cancelled and w is not rt:
+                return
+            try:
+                name, seconds = w.picture(prompt, each[k], folder, lambda st, d, t, k=k: progress(st, d, t, k))
+                made[k] = (name, seconds, each[k])
+            except Stopped:
+                return
+            except Exception as ex:                   # noqa: BLE001 — the others go on; said if none is made
+                failed.append(str(ex))
+    stop_all = threading.Event()
+
+    def watch():                                      # a stop asked of rt's job, handed to every other worker's
+        while not stop_all.wait(0.5):
+            if rt._job is not None and rt._job.cancelled:
+                for w in runtimes[1:]:
+                    if w._job is not None:
+                        w._job.cancelled = True
+    threads = [threading.Thread(target=work, args=(w, list(range(i, n, len(runtimes)))), daemon=True)
+               for i, w in enumerate(runtimes)]
+    threading.Thread(target=watch, daemon=True).start()
+    try:
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+    finally:
+        stop_all.set()
+        for w in runtimes[1:]:
+            w.close()
+    if not made:
+        raise Refused("no picture was made: %s" % ("; ".join(failed) or "stopped"))
+    return [made[k] for k in sorted(made)]
 
 
 def caption(name, s, seconds):

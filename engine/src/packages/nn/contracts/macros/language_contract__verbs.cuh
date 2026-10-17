@@ -249,6 +249,10 @@
     /* ⭐ A TENSOR-PARALLEL GROUP'S PARTIAL SUMS — a worker joins a group as one of its ranks, and every rank's partial is  */ \
     /* added up a tree onto rank 0 and the sum sent back down it, over the cards' own memory. ▶ `contracts/objects/partials.cuh`. */ \
     X(PKG, 69, "nn__partials__join",  nn__partials__zzabi_adapter_join,            NN__PARTIALS__JOIN) \
-    X(PKG, 70, "nn__partials__reduce", nn__partials__zzabi_adapter_reduce,         NN__PARTIALS__REDUCE)
+    X(PKG, 70, "nn__partials__reduce", nn__partials__zzabi_adapter_reduce,         NN__PARTIALS__REDUCE) \
+    /* ⭐ SLOTS LENT TO A COLLECTION (NN-93): a card's tier holding experts in the attention caches' rows a conversation  */ \
+    /* has not reached, and how many of them are live as it grows. ▶ `cpu/opcodes/expert__abi.cuh`.                     */ \
+    X(PKG, 71, "nn__expert__lend",    nn__expert__zzabi_adapter_lend,              NN__EXPERT__LEND) \
+    X(PKG, 72, "nn__expert__lent",    nn__expert__zzabi_adapter_lent,              NN__EXPERT__LENT)
 
 #endif /* SILVANN__PACKAGES_NN_CONTRACTS_MACROS_LANGUAGE_CONTRACT__VERBS_CUH */

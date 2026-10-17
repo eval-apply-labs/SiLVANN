@@ -5,7 +5,8 @@
 #   curl -fsSL https://raw.githubusercontent.com/eval-apply-labs/SiLVANN/HEAD/install.sh | bash
 #
 # It installs nothing system-wide and asks for no password: a tool it needs and does not find is named, with the line
-# that installs it, and the installer stops. Run it again to update; models/, user_sessions/ and the venv stay.
+# that installs it, and the installer stops. Run it again to update; models/, user_sessions/, the venv and the folder
+# `silvann models` named stay.
 #
 #   SILVANN_DIR      where it installs                         default ./silvann (SILVANN_DIR=. for the current folder)
 #   SILVANN_SOURCE   the repository it fetches                 default https://github.com/eval-apply-labs/SiLVANN
@@ -30,8 +31,8 @@ BIN=${SILVANN_BIN:-$HOME/.local/bin}
 # ── what the machine has ──────────────────────────────────────────────────────────────────────────────────────────────
 check_machine() {
     if [ "$(uname -s)" != Linux ]; then
-        stop "SiLVANN runs on Linux. On a Windows or Mac machine, boot Linux from a USB SSD (Ubuntu 22.04, the system it is
-   tested on): docs/users.md, \"On Windows\". Windows' WSL2 may work but is untested."
+        stop "SiLVANN runs on Linux. On Windows, run its Docker image (docker/README.md), or boot Linux from a USB SSD
+   (Ubuntu 22.04, the system it is tested on): docs/users.md, \"On Windows\"."
     fi
     [ "$(uname -m)" = x86_64 ] || stop "SiLVANN is built for x86-64 processors; this one is $(uname -m)."
     local missing=() py
@@ -154,35 +155,70 @@ set -e
 HERE="$DIR"
 BIN="$BIN"
 PY="\$HERE/venv/bin/python"
+# the models and the conversations: the folder \`silvann models\` named, kept in data_folder (an update leaves it), else
+# this one — SILVANN_DATA in the environment before either
+DATA="\$HERE"
+[ -s "\$HERE/data_folder" ] && DATA=\$(cat "\$HERE/data_folder")
+export SILVANN_DATA="\${SILVANN_DATA:-\$DATA}"
+usage() {
+    cat <<HELP
+silvann list                        the models this release can fetch, and which are here
+silvann download <model>            a model into \$SILVANN_DATA/models
+silvann token [--set | --forget]    the Hugging Face token the downloads use (faster than none)
+silvann serve <model> [config]      the server, on port 8765 (--port to change it)
+silvann ui                          the chat in a browser, on port 8090, talking to the server
+silvann_cli                         the chat in this terminal (--notools, --nothink), talking to the server
+silvann models [folder]             where the models and the conversations are — another folder, a drive's, from now on
+silvann build                       build again — after installing CUDA or ROCm, say
+silvann update                      the newest release, then build — stop the server first
+silvann where                       the folder it is installed in
+silvann help                        this list
+HELP
+}
 cmd=\${1:-help}; [ \$# -gt 0 ] && shift
 case "\$cmd" in
     list|list-models)          exec "\$PY" "\$HERE/silvann_core.py" list-models "\$@" ;;
     download|download-model)   exec "\$PY" "\$HERE/silvann_core.py" download-model "\$@" ;;
     token|hf-token)            exec "\$PY" "\$HERE/silvann_core.py" hf-token "\$@" ;;
     serve)
-        [ \$# -gt 0 ] || { echo "silvann serve <model> [config] [--port 8765]   — a model in \$HERE/models"; exit 1; }
+        [ \$# -gt 0 ] || { echo "silvann serve <model> [config] [--port 8765]   — a model in \$SILVANN_DATA/models"; exit 1; }
         model=\$1; shift
-        [ -d "\$model" ] || model="\$HERE/models/\$model"
+        [ -d "\$model" ] || model="\$SILVANN_DATA/models/\$model"
         cd "\$HERE" && exec "\$PY" start_silvann_server.py --model "\$model" "\$@" ;;
+    models)
+        if [ \$# -eq 0 ]; then
+            echo "the models and the conversations are in \$SILVANN_DATA"
+            [ "\$SILVANN_DATA" = "\$DATA" ] || echo "   (SILVANN_DATA in the environment; silvann models set \$DATA)"
+            exit 0
+        fi
+        mkdir -p "\$1/models" "\$1/user_sessions" || { echo "silvann: \$1 cannot be written" >&2; exit 1; }
+        to=\$(cd "\$1" && pwd)
+        if [ "\$to" = "\$HERE" ]; then rm -f "\$HERE/data_folder"; else echo "\$to" > "\$HERE/data_folder"; fi
+        echo "the models and the conversations are in \$to from now on"
+        if [ "\$to" != "\$DATA" ]; then
+            # what is the user's in the folder left behind, by name: a model's folder, a skill's, the conversations — not
+            # the release's own files in models/ and skills/ when that folder is this one (an update needs them here)
+            kept=\$(cd "\$DATA" && for f in models/* skills/* user_sessions workspace tools.json tools_library.json \\
+                         .huggingface_token ui_last_start.json; do
+                         case \$f in models/*|skills/*) [ -d "\$f" ] || continue ;;
+                                     *) [ -n "\$(ls -A "\$f" 2>/dev/null)" ] || continue ;; esac
+                         if [ "\$DATA" = "\$HERE" ] && [ "\${f%%/*}" = skills ]; then
+                             [ -d "\$HERE/.git" ] || continue
+                             ! git -C "\$HERE" ls-files --error-unmatch -- "\$f" >/dev/null 2>&1 || continue
+                         fi
+                         printf '%s ' "\$f"; done)
+            [ -z "\$kept" ] || echo "   what was in \$DATA stays there — move it across to keep using it: \$kept"
+            [ "\$DATA" != "\$HERE" ] || [ -d "\$HERE/.git" ] || \\
+                echo "   and your own skills in \$HERE/skills, if you made any (the ones the release ships stay)"
+        fi ;;
     ui)
         case " \$* " in *" --port "*) ;; *) set -- --port 8090 "\$@" ;; esac
         cd "\$HERE" && exec "\$PY" silvann_ui.py "\$@" ;;
     build)   exec env SILVANN_DIR="\$HERE" SILVANN_BIN="\$BIN" bash "\$HERE/install.sh" --build ;;
     update)  exec env SILVANN_DIR="\$HERE" SILVANN_BIN="\$BIN" bash "\$HERE/install.sh" ;;
     where)   echo "\$HERE" ;;
-    *)
-        cat <<HELP
-silvann list                        the models this release can fetch, and which are here
-silvann download <model>            a model into \$HERE/models
-silvann token [--set | --forget]    the Hugging Face token the downloads use (faster than none)
-silvann serve <model> [config]      the server, on port 8765 (--port to change it)
-silvann ui                          the chat in a browser, on port 8090, talking to the server
-silvann_cli                         the chat in this terminal (--notools, --nothink), talking to the server
-silvann build                       build again — after installing CUDA or ROCm, say
-silvann update                      the newest release, then build — stop the server first
-silvann where                       the folder it is installed in
-HELP
-        ;;
+    help|-h|--help)   usage ;;
+    *)       { echo "silvann: no command \"\$cmd\" — these are:"; usage; } >&2; exit 1 ;;
 esac
 EOF
     chmod +x "$DIR/silvann"
@@ -219,11 +255,12 @@ main() {
     esac
     [ $only_build -eq 1 ] || cat <<EOF
 
-   silvann list                                       the models, and what each needs (README.md's table)
+   silvann list                                       the models, their sizes, and which are here
    silvann download silvann_tq_D8E4_qwen3.6_35b_a3b   one of them
    silvann serve silvann_tq_D8E4_qwen3.6_35b_a3b      the server
    silvann ui                                         the chat, at http://localhost:8090
    silvann_cli                                        or the chat in this terminal
+   silvann help                                       every command
 EOF
 }
 

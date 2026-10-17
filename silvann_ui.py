@@ -384,6 +384,9 @@ TOKEN_FILE = DATA_DIR / ".huggingface_token"         # the Hugging Face token, a
 # the documents: docs/ beside the UI in a release, backstage/release/ in the development tree
 RELEASE_DIR = REPO_ROOT if (REPO_ROOT / "docs" / "users.md").exists() else REPO_ROOT.parent / "backstage" / "release"
 DOCS_DIR = RELEASE_DIR / "docs"
+# the engine's source and the licence: in a release beside the docs, in the development tree backstage/src and its root
+ENGINE_SRC = RELEASE_DIR / "engine" / "src" if (RELEASE_DIR / "engine" / "src").is_dir() else REPO_ROOT.parent / "backstage" / "src"
+LICENCE_DIR = RELEASE_DIR if (RELEASE_DIR / "LICENSE").exists() else REPO_ROOT.parent
 
 
 def list_models():
@@ -415,21 +418,152 @@ def model_default_config(model: str) -> Optional[str]:
     return dflt if dflt in list_model_configs(model) else None
 
 
+# ⭐ A NEW CONFIG: every key the server reads, at its default, and the model's options listed beside — Help → "A model's
+#   config" (docs/config.md) says each. The options are listed in `_options`, not set: a placement named in `options`
+#   is kept as it is, where one left out is chosen for the machine at each boot.
+CONFIG_GUIDE = "Help → \"A model's config\" (docs/config.md) says every key and option. Keys starting with _ are notes."
+QWEN_OPTIONS = {
+    "kv": "\"tiered\" (default) or \"fp16\": the conversation's cache",
+    "tiers": "[sink, hot, warm]: the tiered cache's sizes, default [256, 4096, \"rest\"]",
+    "chunk": "1-256, default 256: a prompt's positions a layer at a time",
+    "experts_on": "\"card\" or \"cpu\" (MoE models): chosen at boot when left out",
+    "experts_from": "\"auto\", \"ram\", \"disk\" or \"mapped\": with the experts on the CPU",
+    "experts_ram_gb": "gigabytes: with experts_from \"disk\", the RAM that keeps the experts used",
+    "card_experts": "\"yes\" (default) or \"no\": the card's tier of experts, with them in RAM",
+    "card_experts_gb": "gigabytes: the tier's size, rather than the one chosen at boot",
+    "lend_cache": "true (default) or false: the tier also holds experts in the cache's rows a conversation has not "
+                  "reached, given back as it grows",
+    "experts_int8": "false (default) or true: a token's experts on the CPU in integers",
+    "picture_pixels": "default 4194304: the largest picture the card makes room for; 0 reads pictures on the CPU",
+    "picture_weights": "\"auto\" (default), \"card\" or \"ram\": the vision tower's weights",
+    "tensor_parallel": "1 (default), 2, 4: a dense model over that many cards of one size (AMD, a developer preview)",
+}
+GLM_OPTIONS = {
+    "experts_from": "\"auto\", \"ram\", \"disk\" or \"mapped\": where the routed experts are read from",
+    "experts_ram_gb": "gigabytes: with experts_from \"disk\", the RAM that keeps the experts used",
+    "chunk": "default 256: a prompt's positions a layer at a time; 1024, chosen at boot, with the experts on the disk",
+    "sockets": "1 or 2: the CPU sockets the experts are split over; by default all",
+    "experts_int8": "true (default) or false: the experts in integers on the CPU",
+    "card_experts": "\"yes\" (default) or \"no\": the card's tier of experts, with them in RAM",
+    "card_experts_gb": "gigabytes: the tier's size, rather than the one chosen at boot",
+    "card_exclusive": "chosen at boot, or false or true: an expert on the card is not also kept in RAM",
+    "lend_cache": "true (default) or false: an inclusive tier also holds experts in the latent cache's rows a "
+                  "conversation has not reached, given back as it grows",
+    "picture_pixels": "default 4194304: the largest picture the card makes room for",
+}
+
+
+def new_config(model: str) -> dict:
+    """A new config for `model`: every key the server reads at its default, and its family's options in `_options`."""
+    folder = MODELS_DIR / model
+    if (folder / "model_index.json").exists():                  # a picture model
+        return {"_guide": CONFIG_GUIDE, "card": "auto",
+                "image": {"width": 1024, "height": 1024, "steps": 40, "seed": None}}
+    try:
+        c = json.loads((folder / "config.json").read_text(encoding="utf-8"))
+        arch = (c.get("text_config") or c).get("model_type", "")
+        layers = (c.get("text_config") or c).get("num_hidden_layers")
+    except (OSError, ValueError):
+        arch, layers = "", None
+    listed = (QWEN_OPTIONS if arch.startswith("qwen") else GLM_OPTIONS if arch.startswith("glm")
+              else {"(none)": "Ministral takes no options: max_context sizes it for the card"})
+    return {"_guide": CONFIG_GUIDE,
+            # what the card holds beside the model, up to its length, a tier sharing the card with the cache (NN-93)
+            "max_context": "auto",
+            "max_tokens_per_video": 8192, "thinking": True, "sampler": "generation",
+            "tools": "chill", "tools_folder": None, "lora": None, "card": "auto", "vram_margin_mb": 50,
+            "image_model": "auto", "image_card": None, "workers": [],
+            "options": {},
+            "_options": listed,
+            "pipeline_parallelism": "no",
+            "pipeline_parallelism_layers": "0-%d" % (layers - 1) if layers else "",
+            "pipeline_parallelism_next": "192.0.2.2:8766", "pipeline_parallelism_port": 8766}
+
+
 # local mode needs the server beside the UI; a machine with no model yet downloads one from the same panel
 LOCAL_AVAILABLE = SERVER_SCRIPT.exists()
 LOCAL_APP = False                                    # --local: the UI as the app over this machine's models
 
-# Help-view documents: (label, path). path=None -> the built-in UI guide (HELP_MARKDOWN below).
-# The .md files are read from the repo at view time; only present when the UI runs from the repo root.
+# The Help view's documents, a group each: (group, label, path) — every document the release ships, the UI's guide first
 HELP_DOCS = [
-    ("UI Guide", None),
-    ("Overview", RELEASE_DIR / "README.md"),
-    ("Running SiLVANN", DOCS_DIR / "users.md"),
-    ("Working on SiLVANN", DOCS_DIR / "developers.md"),
-    ("The ideas behind it", DOCS_DIR / "concepts.md"),
-    ("How the weights are packed", DOCS_DIR / "compression.md"),
-    ("Where it could go", DOCS_DIR / "directions.md"),
+    ("Using SiLVANN", "The UI", DOCS_DIR / "ui.md"),
+    ("Using SiLVANN", "Overview", RELEASE_DIR / "README.md"),
+    ("Using SiLVANN", "Running SiLVANN", DOCS_DIR / "users.md"),
+    ("Using SiLVANN", "A model's config", DOCS_DIR / "config.md"),
+    ("Using SiLVANN", "The model's tool and your own commands", DOCS_DIR / "tools.md"),
+    ("Using SiLVANN", "Skills", RELEASE_DIR / "skills" / "README.md"),
+    ("Using SiLVANN", "Windows and the Docker app", RELEASE_DIR / "docker" / "README.md"),
+    ("Using SiLVANN", "Every release's notes", RELEASE_DIR / "release_logs" / "v0.md"),
+    ("The models", "The models", DOCS_DIR / "models.md"),
+    ("The models", "Their results", DOCS_DIR / "results.md"),
+    ("The models", "A model's folder", RELEASE_DIR / "models" / "README.md"),
+    ("The models", "How the weights are packed", DOCS_DIR / "compression.md"),
+    ("Developing", "Working on SiLVANN", DOCS_DIR / "developers.md"),
+    ("Developing", "The ideas behind it", DOCS_DIR / "concepts.md"),
+    ("Developing", "Where it could go", DOCS_DIR / "directions.md"),
+    ("Developing", "The engine's source", ENGINE_SRC / "README.md"),
+    ("Developing", "Package sys", ENGINE_SRC / "packages" / "sys" / "README.md"),
+    ("Developing", "Package nn", ENGINE_SRC / "packages" / "nn" / "README.md"),
+    ("Developing", "Package ai_qwen_3", ENGINE_SRC / "packages" / "ai_qwen_3" / "README.md"),
+    ("Developing", "Package ai_glm_5_3", ENGINE_SRC / "packages" / "ai_glm_5_3" / "README.md"),
+    ("Developing", "Package ai_qwen_image", ENGINE_SRC / "packages" / "ai_qwen_image" / "README.md"),
+    ("Developing", "Adding a silicon family", ENGINE_SRC / "silicon_families" / "add_a_family.md"),
+    ("Developing", "OpenCL 1.2 for integrated GPUs", ENGINE_SRC / "silicon_families" / "khronos_opencl1_igpu" / "README.md"),
+    ("Developing", "Contributing", LICENCE_DIR / "CONTRIBUTING.md"),
+    ("Licences", "The licence", LICENCE_DIR / "LICENSE"),
+    ("Licences", "Attribution", LICENCE_DIR / "ATTRIBUTION.md"),
+    ("Licences", "The contributor licence agreement", LICENCE_DIR / "CLA.md"),
 ]
+HELP_FIRST = "Using SiLVANN · The UI"
+
+
+def help_doc(path: Path) -> str:
+    """A document as the Help view shows it: Markdown as it is, any other text in a block of its own."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as e:
+        return f"_`{path.name}` could not be read: {e}_"
+    return text if path.suffix == ".md" else "```text\n" + text + "\n```"
+
+
+HELP_HREF = re.compile(r"\]\(<?([^)\s>]+)")             # a Markdown link's target
+
+
+def help_target(current: Path, href: str) -> Optional[Path]:
+    """The file a relative link in `current` names, without its anchor — None where it names no file."""
+    target = href.split("#", 1)[0]
+    if not target or re.match(r"[a-z][a-z0-9+.-]*:", target, re.I):
+        return None
+    path = (current.parent / target).resolve()
+    return path if path.is_file() else None
+
+
+def help_shipped() -> set:
+    """The files the Help view shows: the picker's documents, and the files their links name, document to document —
+    the release's own text. The browser says which link was clicked, and it can say any path: the Help view shows no
+    file outside this set, or anyone who reaches the UI could read any file it can (a token, a home folder's keys)."""
+    seen, todo = set(), [path.resolve() for _, _, path in HELP_DOCS if path.is_file()]
+    while todo:
+        doc = todo.pop()
+        if doc in seen:
+            continue
+        seen.add(doc)
+        if doc.suffix == ".md":
+            try:
+                text = doc.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            todo += [p for p in (help_target(doc, href) for href in HELP_HREF.findall(text)) if p is not None]
+    return seen
+
+
+HELP_SHIPPED = help_shipped()
+
+
+def help_link(current: Path, href: str) -> Optional[Path]:
+    """The document a link in `current` names, without its anchor — None where it names none the release ships."""
+    path = help_target(current, href)
+    return path if path in HELP_SHIPPED else None
 
 
 class ServerProcess:
@@ -997,6 +1131,13 @@ async def page():
             chat_header = ui.label("(no conversation active)").classes("text-sm opacity-60 flex-grow")
             # Live tok/s during streaming; final "<n> tok in <s>s · <r> tok/s" after each turn.
             speed_label = ui.label("—").classes("text-xs font-mono opacity-70")
+            # the conversation's tokens of the most the model takes: how full it is
+            with ui.row().classes("items-center gap-1 no-wrap") as context_box:
+                context_bar = ui.linear_progress(value=0, show_value=False, size="6px").props(
+                    "rounded color=primary").classes("w-16")
+                context_label = ui.label("").classes("text-xs font-mono opacity-70")
+            context_box.tooltip("The conversation's tokens, of the most the model takes (its max_context)")
+            context_box.set_visibility(False)
             thinking_mode_toggle = ui.switch("thinking mode",
                                               value=state.get("active_thinking_mode", True)
                                               ).props("dense").classes("text-xs")
@@ -1399,24 +1540,43 @@ async def page():
                     "w-full h-48 bg-slate-100 text-slate-800 font-mono text-xs p-2 border rounded"
                 )
 
-    # --- Help view: a document picker over the bundled .md docs (UI guide + role guides). ---
+    # --- Help view: a document picker over the release's documents, the UI's guide first ---
     help_view = ui.column().classes("silvann-main w-full p-6 overflow-auto")
     with help_view:
         with ui.column().classes("max-w-4xl mx-auto gap-3 w-full"):
-            def _load_help_doc(label):
-                path = dict(HELP_DOCS).get(label)
+            help_paths = {"%s · %s" % (g, label): path for g, label, path in HELP_DOCS}
+            help_shown = {"path": help_paths[HELP_FIRST]}
+            help_doc_select = ui.select(list(help_paths), value=HELP_FIRST, label="Document").classes("w-96")
+            help_doc_md = ui.markdown(help_doc(help_paths[HELP_FIRST]))
+
+            def show_help(path: Path):
+                help_shown["path"] = path
+                help_doc_md.set_content(help_doc(path))
+
+            help_doc_select.on_value_change(lambda e: show_help(help_paths[e.value]))
+
+            def on_help_link(e):
+                """A link between the documents: the one it names, in the picker where it is listed."""
+                path = help_link(help_shown["path"], str(e.args))
                 if path is None:
-                    return HELP_MARKDOWN
-                try:
-                    return path.read_text(encoding="utf-8")
-                except Exception as e:
-                    return (f"_Couldn't read `{path.name}` — run the UI from the SiLVANN repo root "
-                            f"to view the bundled docs._\n\n`{e}`")
-            help_doc_select = ui.select([lbl for lbl, _ in HELP_DOCS], value="UI Guide",
-                                        label="Document").classes("w-80")
-            help_doc_md = ui.markdown(HELP_MARKDOWN)
-            help_doc_select.on_value_change(
-                lambda e: help_doc_md.set_content(_load_help_doc(e.value)))
+                    safe_notify("%s is not in the release" % e.args, type="warning")
+                    return
+                listed = next((k for k, v in help_paths.items() if v.resolve() == path), None)
+                if listed is not None:
+                    help_doc_select.set_value(listed)
+                else:
+                    show_help(path)
+            # ⛳ a relative link would take the browser to a page the UI does not serve: it is followed here instead, and
+            #   a web page opens in a tab of its own
+            help_doc_md.on("click", on_help_link, js_handler="""(e) => {
+                const a = e.target.closest('a');
+                if (!a) return;
+                const href = a.getAttribute('href') || '';
+                if (href.startsWith('#')) return;
+                e.preventDefault();
+                if (/^[a-z][a-z0-9+.-]*:/i.test(href)) { window.open(href, '_blank', 'noopener'); return; }
+                emit(href);
+            }""")
 
     # ============================================================
     # Rendering / view-switching helpers (close over everything above)
@@ -1468,6 +1628,7 @@ async def page():
             # a picture model makes a picture of each message: it has no thinking and no tool to switch
             for switch in (thinking_mode_toggle, show_think_toggle, tools_toggle, tools_mode):
                 switch.set_visibility(not h.get("pictures"))
+            show_context(context=0 if h.get("pictures") else h.get("max_context", 0))
         except Exception as e:
             status_dot.classes(replace="text-red-500").style("font-size: 12px")
             status_tip.text = f"down: {type(e).__name__}: {e}"
@@ -1484,6 +1645,22 @@ async def page():
     connect_btn.on("click", connect_clicked)
 
     # ----- Chat helpers -----
+    def show_context(used=None, context=None):
+        """The top bar's meter: the open conversation's tokens of the context, from the server's numbers — a
+        conversation's when it opens, each token's as the answer streams, the answer's end."""
+        if context is not None:
+            state["context"] = int(context or 0)
+        if used is not None:
+            state["context_used"] = int(used)
+        total, used = state.get("context") or 0, state.get("context_used") or 0
+        context_box.set_visibility(bool(total and state.get("active_id")))
+        if not total:
+            return
+        share = min(1.0, used / total)
+        context_bar.value = share
+        context_bar.props("color=" + ("negative" if share >= 0.9 else "warning" if share >= 0.75 else "primary"))
+        context_label.text = f"{used:,} / {total:,}"
+
     pictures: dict = {}                                # (conversation, picture) -> its data URI, or None while it loads
 
     def picture_markdown(alt: str, name: str) -> str:
@@ -1670,6 +1847,7 @@ async def page():
         else:
             chat_header.text = "(no conversation active — pick one from the menu or click '+ new')"
             chat_header.classes(replace="text-sm opacity-60 flex-grow")
+        show_context()
         with chat_history_col:
             if not state["history"] and state["active_id"]:
                 empty_note["el"] = ui.label("(empty — say hi)").classes("opacity-50 text-sm self-center")
@@ -1718,6 +1896,7 @@ async def page():
             state["active_id"] = cart_id
             state["active_name"] = resp.get("name") or cart_id[:8]
             state["history"] = resp.get("history", [])
+            show_context(used=resp.get("used", resp.get("next_pos", 0)), context=resp.get("context"))
             new_thinking = bool(resp.get("enable_thinking", True))
             state["active_thinking_mode"] = new_thinking
             thinking_mode_toggle.set_value(new_thinking)
@@ -1891,6 +2070,10 @@ async def page():
             if max_tokens:
                 ui.label(f"Context window: {max_tokens:,} tokens — the model's, set in its config").classes("text-sm")
                 ui.label(f"Saved, it takes up to {gb:.2f} GB of RAM").classes("text-xs opacity-70")
+                cards = int(est0.get("num_gpus", 1) or 1)
+                if cards > 1 and est0.get("per_card"):
+                    ui.label(f"Over {cards} cards: {float(est0['per_card']['gb']):.2f} GB of its cache on each"
+                             ).classes("text-xs opacity-70")
 
             with ui.row().classes("w-full justify-end gap-2 mt-2"):
                 ui.button("Cancel", on_click=dlg.close).props("flat")
@@ -2218,6 +2401,8 @@ async def page():
                         first_token_at = time.monotonic()
                     n_tokens += 1
                     state["history"][-1]["content"] += payload.get("text", "")
+                    if "used" in payload:
+                        show_context(used=payload["used"])
                     elapsed = time.monotonic() - first_token_at
                     if elapsed > 0.3 and n_tokens > 1:
                         rate = (n_tokens - 1) / elapsed   # exclude the first token from the divisor
@@ -2273,6 +2458,8 @@ async def page():
             speed_label.text = payload.get("text", "")
         elif kind == "ask":
             state["ask"] = payload
+        elif kind == "done" and "used" in payload:
+            show_context(used=payload["used"], context=payload.get("context"))
         elif kind == "error":
             state["history"][-1]["content"] += f"\n\n_[server error: {payload.get('error')}]_"
             return False
@@ -2292,6 +2479,8 @@ async def page():
             async for kind, payload in client.stream_answer(state["active_id"], choice, int(max_in.value or 2048)):
                 if kind == "token":
                     state["history"][-1]["content"] += payload.get("text", "")
+                    if "used" in payload:
+                        show_context(used=payload["used"])
                     mark_live()
                 elif not on_tool_event(kind, payload):
                     break
@@ -2437,44 +2626,7 @@ async def page():
         if not is_new:
             body = (cfg_dir / filename).read_text(encoding="utf-8")
         else:
-            body = json.dumps({
-                "_comment": "New config — edit the values, then Save. Keys starting with '_' are "
-                            "documentation only and are IGNORED by the engine: each '_<field>_desc' "
-                            "describes the field above it. For the full offload + tiered-KV-cooling "
-                            "reference, copy a shipped config (e.g. a *_offload_200k.json) instead.",
-
-                "model_dir": "./model_data",
-                "_model_dir_desc": "Weights directory, relative to this model folder. Almost always ./model_data.",
-                "tokenizer_dir": "./model_data",
-                "_tokenizer_dir_desc": "Tokenizer directory; self-booting model_data carries the tokenizer, so usually ./model_data.",
-                "model": "python.silvann_model",
-                "_model_desc": "Python package exporting this model's Composer + ChatAdapter (resolved from the model folder).",
-
-                "is_master": True,
-                "_is_master_desc": "True for a single box or the master of a pipeline-parallel ring; False for a PP worker.",
-                "num_gpus": 1,
-                "_num_gpus_desc": "GPUs on THIS box for tensor parallelism (1 = single card).",
-                "visible_devices": "0",
-                "_visible_devices_desc": "Comma-separated device indices this process may use, e.g. \"0\" or \"0,1,2,3\".",
-                "pp_slice": [0, 40],
-                "_pp_slice_desc": "[start, end) layer range this node runs. [0, N] = all N layers on one box.",
-                "pipeline_next_ip": None,
-                "listen_port": 5555,
-                "next_port": 5556,
-                "_pp_ring_desc": "pipeline_next_ip + listen_port/next_port wire a multi-box PP ring; leave as-is (ignored) on a single box.",
-
-                "concurrent_dma_unsupported": True,
-                "_concurrent_dma_unsupported_desc": "True on AMD/MI50 or any no-PCIe-P2P box (and the safe default). Set False on a CUDA/P2P box to enable the resident single-pass + op-major prefill paths.",
-                "system_ram_offload": False,
-                "_system_ram_offload_desc": "MoE only. \"data\" streams routed experts to host RAM (the 8GB-card path); False keeps all weights resident (needs a big card).",
-                "tool_mailbox_size_mb": 2,
-
-                "engine_config": {
-                    "max_total_tokens": 8192,
-                    "temperature": 0.7,
-                },
-                "_engine_config_desc": "max_total_tokens = the KV active-window span (older tokens roll off — NOT an output cap). temperature: 0 = greedy/deterministic, 0.7 = the chat default. A cooled (tiered-KV) setup adds a 'cooling' block (hot fp32 / warm q6 / cold q4) — see a shipped *_offload_200k.json for the full reference.",
-            }, indent=2)
+            body = json.dumps(new_config(model), indent=2)
         with page_client, ui.dialog().props("maximized") as dlg, ui.card().classes("w-full h-full"):
             ui.label(("New config" if is_new else f"Edit {filename}")
                      ).classes("font-bold")
@@ -2567,74 +2719,6 @@ async def page():
     def _periodic_heartbeat():
         asyncio.create_task(_heartbeat())
     ui.timer(30.0, _periodic_heartbeat)
-
-
-# ---------- Help content (markdown shown in the Help view) ----------
-
-HELP_MARKDOWN = """\
-# SiLVANN UI
-
-A chat front-end for a SiLVANN server. The UI only talks HTTP; the model runs in `start_silvann_server.py`, on this
-machine or another one.
-
-## Navigation
-
-The **left drawer** holds everything:
-
-- **Chat** — the conversations, under the Chat row. Click one to open it.
-- **Options** — start and stop a server on this machine, and edit its settings.
-- **Help** — this page, and the release's documents.
-
-The dot next to "SiLVANN" is the server's state: **gray** not asked yet, **green** answering, **red** unreachable.
-The **Endpoint** field at the bottom is the server the UI talks to — `http://localhost:8765` when both run here.
-
-## Chat
-
-- **+ new** — a new conversation. Its context window is the model's, set in its config when the server started.
-- **import** — a conversation exported earlier (`.silvann.tar`); refused if it was made with another model.
-- **⋮** on a conversation — rename, export, delete, or protect it with a password.
-- A ⚠ next to a name: the conversation belongs to another model than the one the server runs.
-- **Enter** sends, **Shift+Enter** is a new line. **max tokens** caps an answer; the model stops earlier when it is
-  done.
-- One conversation is answered at a time. A message sent while another is being answered waits
-  (**"⏳ waiting my turn…"**) and then streams.
-- **📎** attaches a picture to the next message, when the model reads pictures (the Qwen models): it is read when it is
-  attached, a chip shows it, and the message carries it. A picture stays in the conversation and is saved with it.
-
-## Options — a server on this machine
-
-**Models** lists the models this release can fetch, their sizes and which are here. **download** fetches one from
-Hugging Face into `models/`, with its progress; it is refused when the disk has less room than the model needs, and a
-download stopped and started again keeps the files it finished. One downloads at a time. A **Hugging Face token**
-(read access, from huggingface.co/settings/tokens) makes the downloads faster: **save** checks it with Hugging Face and
-keeps it for every download after; **forget** removes it.
-
-Pick a **model** from `models/`, then one of its **configs**, and **start**. The UI runs
-`start_silvann_server.py --model models/<name> <config>`, shows its output, and points the Endpoint at it.
-
-A config is `models/<name>/configs/<config>.json`:
-
-```json
-{ "max_context": 100000, "thinking": true, "lora": null, "sampler": "generation", "options": { } }
-```
-
-`max_context` is the longest conversation, in tokens — or `"auto"`, as long as the card holds beside the model, up to
-the model's own length; `max_tokens_per_video` the most tokens a video becomes (8,192); `options` is the model's own —
-the conversation cache's tiers for the Qwen models, where the experts live and how a prompt is read for the ones that
-can run them on the CPU. What a config leaves out the server chooses for the machine when it starts, and says under
-**status**; a server that cannot start says why there too — a card too small for the config, say — and what to change.
-**Running SiLVANN**, in the list above, has every option.
-
-## Where things are
-
-- Conversations: `user_sessions/<model>/<id>/`, on the server's machine. `models/` and `user_sessions/` are in the
-  folder `SILVANN_DATA` names when it is set — the Docker image's volume, `/data`.
-- A model and its configs: `models/<name>/`; the programs it runs, as written at its last start:
-  `models/<name>/programs.lisp`.
-- The UI's own settings (endpoint, the last conversation, passwords you typed): this browser's storage.
-- The Hugging Face token Options saves: `.huggingface_token` beside `models/`, readable by its owner alone. An export of
-  the Docker image's volume carries it: **forget** it before giving an export to someone else.
-"""
 
 
 # ---------- CLI ----------

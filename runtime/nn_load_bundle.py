@@ -75,7 +75,7 @@ FORMAT = "silvann-packed-v3"
 # already halfway, and a threshold that works on this checkpoint is a heuristic. ⇒ ★ A CONVENTION IS A
 # FACT ABOUT THE CODE THAT WROTE THE FILE, SO READ IT FROM THE CODE, NOT FROM THE NUMBERS.
 #
-# ⛳ `src_old` DID EXACTLY THIS AND IS THE PRECEDENT: `composer.py` carries `self.rms_norm_offset`,
+# ⛳ THE PRECEDENT: `composer.py` carries `self.rms_norm_offset`,
 # derived from the model type, and adds it while mapping each norm to VRAM — never to
 # `linear_attn.norm.weight`. Its own comment records the bug this guards, hit once: *"omitting it scaled
 # Q/K by ~0 (raw delta) instead of ~1, collapsing attention scores in the 10 full_attention layers."*
@@ -89,7 +89,7 @@ ZERO_CENTERED = ("qwen3_5", "qwen3_next")
 
 def is_norm(short_name):
     """Whether a tensor is an RMSNorm gain at all. ⛳ Both spellings, because `q_norm`/`k_norm` do not
-    end in `norm.weight` and they are exactly the pair `src_old` once forgot."""
+    end in `norm.weight`."""
     return short_name.endswith("norm.weight") or "_norm.weight" in short_name
 
 
@@ -592,7 +592,7 @@ class Loader:
         """One dense tensor of one layer: codes in the up half, scales in the down half.
 
         ⭐ IT APPLIES THE NORM GAIN CONVENTION — ▶ `Bundle.gain_offset` and `NN-6`. A caller does not
-        choose: the tensor's NAME decides, so no site can forget the way `src_old`'s q_norm once did.
+        choose: the tensor's NAME decides, so no site can forget it.
 
         ⚖ **`NN-5` IS RULED AND THIS IS THE SHAPE:** a dense tensor is `[layer][type][0]`,
         because the TYPE in the path is what keeps it off expert 0. So `at_layer` now defaults to the

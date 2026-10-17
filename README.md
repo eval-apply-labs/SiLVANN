@@ -1,6 +1,6 @@
 # SiLVANN
 
-> **Developer preview, v0.10.1.** It runs the models below well on the hardware it was tested on, and it is shared
+> **Developer preview, v0.11.0.** It runs the models below well on the hardware it was tested on, and it is shared
 > for people who can find their way around a build and a stack trace. NVIDIA cards are tested on one, a GeForce
 > RTX 5060 Ti; Apple silicon is not tested yet.
 
@@ -41,7 +41,7 @@ The rows with a model entirely on the card were measured with v0.7.0 before its 
 within 1% of them); the others were measured with v0.3, and where a card does part of the work they are a floor. A model
 whose config names no setup — the default's — chooses its own when the server starts, by trying it on the card: where
 its experts go, how much of the card holds the ones used most, the context the card has room for
-([`docs/users.md`](docs/users.md#4-the-models-settings)). **Every model and pack, the other machines (down to a 4 GB
+([`docs/config.md`](docs/config.md)). **Every model and pack, the other machines (down to a 4 GB
 card reading its experts from the disk), and how long a conversation fits: [`docs/models.md`](docs/models.md)**; every
 measurement: [`docs/results.md`](docs/results.md).
 
@@ -58,47 +58,78 @@ positions and then the answer:
 | the same | without the tier | 55 positions/s | 28 tokens/s |
 | the same | on the CPU alone | 21 positions/s | 8.6 tokens/s |
 
-**v0.10.1:** the UI's Options show a downloaded picture model as there, and offer it to start: in v0.10.0 a download of
-Qwen-Image 2.1 finished with its download button still showing, and the model could not be chosen — in the
-Docker app too.
+**New in v0.11.0:** the model's tool grows into a workbench — it draws pictures, hands work to other models and
+keeps commands of its own; a Qwen MoE model's context and its card's tier of experts share the card with nothing to
+set; and a dense model's layers split over several AMD cards.
 
-**New in v0.10.0:** pictures from a prompt — Qwen-Image 2.1 runs as a server's model of its own: a message is a
-prompt, and its answer a picture.
+**Pictures from the tool.** A text model's REPL draws with the picture model: `(image "a lighthouse at dusk --size
+768x1024 --seed 7")`. On the text model's own card the model is put down, the picture drawn and the model booted again
+with its conversations where they were — back in 10 to 11 s on an MI50 and on the RTX 5060 Ti 16 GB — or the picture is
+drawn on another card (`image_card`) and nothing is put down. The config's `image_model` says which picture model:
+`"auto"`, a downloaded one, by default; without one the tool says so at once, and the model tells you. The picture is
+shown in the conversation and kept with it, and it is the picture model's own: the same text and seed through the 27B's
+tool and through Qwen-Image's server gave the same picture, every pixel. `--count 4` draws four, seeds s to s + 3, one a
+card at once — on four MI50s in 120 s against 261 s on one card, the same pictures — in a picture model's messages too.
 
-[Qwen-Image 2.1](https://huggingface.co/eval-apply/silvann_tq_D8_qwen_image_2.1) (`silvann_tq_D8_qwen_image_2.1`, 18 GB)
-is a 7-billion-parameter diffusion transformer with Qwen3-VL 8B's text model as its encoder: the two at 8 bits, its
-picture decoder at 16, each on the card in turn, written in the engine's words as the text models are
-(`engine/src/packages/ai_qwen_image`; its programs `lisp/qwen_image.lisp`, the transformer's steps, and
-`lisp/qwen_image_vae.lisp`, the decoder's layers). In the UI a message typed is a prompt: its progress is
-shown beside the box — the prompt read, each step, the decode — and the picture is drawn in the conversation and kept
-with it as a PNG. A message sets its picture's size, steps and seed (`--size 768x1024 --steps 20 --seed 7`), the
-config's `image` the rest. `silvann_cli` saves the picture where it runs, and through the API the answer's text names it.
-A 1,024 x 1,024 picture at 40 steps takes 146 s on an RTX 5060 Ti 16 GB and 572 s on an MI50
-([`docs/users.md`](docs/users.md#a-picture-model-qwen-image-21)). ⚠ Its licence is the Qwen Research License Agreement:
-research and other non-commercial use only.
+**Subagents.** `(agent 'model "config" "task")` opens a conversation with another model, or the same one under a LoRA,
+and the model is then inside it as in a REPL: each call is a message, `(answer 'once)` or `(answer 'refuse)` answers the
+subagent's ask — only what the caller could do itself without asking, anything more asked of you — and `(exit)` ends it.
+It runs on the same server (`'self`), on a machine in the config's `workers`, or in place, the card lent to the other
+model for each exchange; its REPL reads and lists only, unless its config allows more. `(whoami)` says which model this
+is, its cards and context, its LoRAs with what each is for, and what `(agent …)` can reach: given a task, the 27B and the
+35B chose the LoRA whose description fit it.
 
-Checked against diffusers' Qwen-Image 2.1 pipeline from the same prompt and seed, on both cards: a block of the
-transformer, its prediction and six steps of it, the encoder's rows, the decoder, and the whole pipeline's latents and
-pictures — each nearer diffusers' float32 than its own bfloat16 pipeline is. On the RTX 5060 Ti, through the server's
-API and in a browser: the first conversation opened by itself, a prompt typed, its progress, the picture, the page
-reloaded and the picture drawn again, a second picture.
+**The REPL.** `(reset)` starts it afresh — its names, its folder, a waiting ask — and keeps the files, the folders you
+allowed, its mode and the library: definitions kept across conversations with `(keep 'name "what it does")`,
+`(library)`, `(import 'name)` and `(forget 'name)`, in `tools_library.json` beside `tools.json`. The names the models
+reached for and the REPL lacked now answer: `read-file`, `slurp-file`, `read-all`, `cat` and `slurp` are `read`;
+`system`, `shell` and `sh` are `bash` — 18 of the 25 such calls in 159.
 
-The chat, after a user test: an answer is drawn as it comes without drawing the conversation again; while the model
-thinks the answer says "thinking…", and **show thinking** shows the thought in a section of its own; a run of the
-model's tool calls is a section, closed until you open it; a model with no conversation saved opens one as its server
-starts, and a message typed brings it online without **Activate**. A picture model's header has no thinking or tool
-switches.
+**Skills** — commands that live in folders: a `SKILL.md` names each command, what it touches (so it is asked as a
+built-in command would be) and the Python function or the program that runs it, in the data folder's `skills/`. The
+release ships one, `(find "folder" "*.txt")`. `(skills)` lists them, `(help)` names their commands, and `(guide)` gives
+the model the tool's guide, `docs/tools.md`, so it can write a skill of its own and keep it: the 35B and the 27B each
+did, from the guide alone.
 
-On NVIDIA cards the CUDA family has its own kernels for what a picture needs: attention with a limit to each row's keys,
-matrices at 16 bits (the decoder's 3 x 3 convolutions 30 to 48 times faster than the engine's generic kernel), a
-convolution's rows, and an activation's rotation row by row before an 8-bit product. The 16-bit matrices and the
-rotation serve the Qwen models' vision tower too: the 27B's reads a 1,024 x 1,024 picture in 0.65 s and a 2,048 x
-2,048 one in 6.3 s on the RTX 5060 Ti. The AMD family has the first of them now as well, and reads a prompt's
-DeltaNet rows without spilling registers: the 27B's 2,097-position prompt 3% faster on an MI50.
-On Windows, NVIDIA's driver lets a model larger than the card start on it and then read the rest over PCIe at every
-token: the CUDA family now refuses an allocation past the card's free memory, which has not yet
-been checked on Windows; until it is, [`docs/users.md`](docs/users.md#on-windows-the-docker-image) says which config
-keeps a model within the card.
+**Tensor parallelism, opt-in, on AMD cards.** `"options": {"tensor_parallel": 2}` splits each layer of a dense Qwen
+model over that many cards of one memory size: the 27B from 29.9 to 23.1 ms a token on two MI50s, a 2,000-position
+prompt 1.8 times faster on two cards and 2.2 on four; refused for the mixture-of-experts models, over cards of unequal
+memory, and on one card. Untested on NVIDIA cards. It needs `lisp/qwen3_5_tp.lisp` in the model's folder, on the Qwen
+packs on Hugging Face: `silvann download` of a model already here fetches its pack's `lisp/` whole.
+
+**No context to set, no tier to size.** Every model's `max_context` is `"auto"` by default now: as many positions as
+the card holds beside the model, up to the model's own length, found when the server starts. With a mixture-of-experts
+model's experts on the CPU, the card's tier of experts also holds experts in the cache's rows no conversation has
+reached, giving them back 8,192 positions at a time before a conversation writes there, and taking them again for a
+shorter one. On the RTX 5060 Ti 16 GB the 35B-A3B at 262,144 positions lends its tier 2.4 GB that way, and answers as
+fast as a boot sized for the conversation: 54.0 tokens/s after 2,000 positions, 40.8 after 16,000 and 30.8 after
+32,000, against 54.1, 40.7 and 30.8. GLM 5.3 Flash's tier is lent its latent cache's rows the same way: 11 GB on a 32 GB
+MI50 at its whole 1,048,576 positions. Where the card cannot hold the whole length beside the model, the tier keeps the
+least it takes, a slot a layer, and the context the rest: GLM on 16 GB of an MI50 790,528 positions and a 0.5 GB tier,
+lent the rows a conversation has not reached. With `"auto"` the experts stay on a card that holds them with 32,768
+positions or more. A config written before keeps the `max_context` it names: set it to `"auto"` in Options
+([`docs/config.md`](docs/config.md#the-context-and-the-tier-share-the-card)).
+
+A model booted a second time in one process — the text model back after a picture, or after lending its card to a
+subagent — no longer takes the first boot's expert copies still in flight into its tier: the 35B with a tier answered
+another conversation wrongly after an `(image …)`, and now answers as if it had never been put down. A GLM conversation
+past 2,048 positions, put away while another had the card and brought back, chose the positions it attends from the
+other's indexer: a conversation keeps its indexer's caches with it now, and its next positions are those it would have
+had never put away, to the bit.
+
+**The docs and the chat.** [`docs/config.md`](docs/config.md) — every key of a model's config, every family's options —
+and [`docs/tools.md`](docs/tools.md) — the REPL, the library and skills, step by step — are both in the UI's Help, and
+the UI's New config writes the keys the server reads. The chat's top bar shows how full the conversation is: its tokens
+of the model's context. An emoji split over two tokens is shown whole (it was "�"), and `kv` refuses a value it does not
+know (any other ran the fp16 cache). The Help view lists every document the release ships, in four groups, first a
+guide to the UI itself ([`docs/ui.md`](docs/ui.md)), and a link from one document to another opens it there.
+
+**The command and the setup.** `silvann models <folder>` keeps the models, the conversations and the rest SiLVANN keeps
+for you in another folder from then on: SiLVANN on a USB drive, its models on the machine's own disk. `silvann help`
+lists the commands, and a word it does not know says so. A setup kept in `autotune.json` is chosen again after an
+update, which may change what a boot needs; and a tier's size named alone in a Qwen config puts the experts on the CPU
+and chooses the rest, where it stopped the boot. `vram_margin_mb` (50 by default) is how much of each card the
+setup chosen at boot leaves free for a desktop or a browser — `0` on a card nothing else uses; it was a fixed 256.
 
 Every release before this one, and this one's notes again: [`release_logs/v0.md`](release_logs/v0.md).
 
@@ -106,23 +137,26 @@ Every release before this one, and this one's notes again: [`release_logs/v0.md`
 
 | | |
 |---|---|
-| **Tested** | Linux with AMD Instinct MI50 (gfx906), ROCm 6; Linux with an NVIDIA GeForce RTX 5060 Ti (sm_120), CUDA 12.9, driver 595 — every pack but GLM's checked against Hugging Face, the 35B's tier of experts included; the CPU alone with AVX2 (Xeon E5-2680 v4) and with AVX-512 (Xeon W-2123); OpenCL 2.0 with sub-groups, on the MI50 — the 27B and the 35B checked against Hugging Face, the 27B answering at 9-11 tokens a second and reading a prompt at 49 positions a second; the 122B's tier of experts, 11.7 tokens a second with 18 GB of the card (9.7 without); OpenCL 1.2 through NVIDIA's OpenCL on the RTX 5060 Ti — the 27B checked against Hugging Face, at 1.6 tokens a second (the family is for integrated GPUs) |
-| **Untested** | Windows — the Docker image ([`docker/README.md`](docker/README.md)), run so far on Linux only, or Linux booted from a USB SSD ([`docs/users.md`](docs/users.md#on-windows-the-docker-image)); other NVIDIA generations (the CUDA family is built for sm_75 to sm_120: Turing to Blackwell); GLM 5.3 Flash on an NVIDIA card; other AMD generations; OpenCL on other devices, the integrated GPUs `khronos_opencl1_igpu` is for among them; AVX-512 on processors other than Skylake (AMD's Zen 4 and 5, later Xeons) |
+| **Tested** | Linux with AMD Instinct MI50 (gfx906), ROCm 6 — a model on one card, and the 27B's layers over two and four (tensor parallelism); Linux with an NVIDIA GeForce RTX 5060 Ti (sm_120), CUDA 12.9, driver 595 — every pack but GLM's checked against Hugging Face, the 35B's tier of experts included; the CPU alone with AVX2 (Xeon E5-2680 v4) and with AVX-512 (Xeon W-2123); OpenCL 2.0 with sub-groups, on the MI50 — the 27B and the 35B checked against Hugging Face, the 27B answering at 9-11 tokens a second and reading a prompt at 49 positions a second; the 122B's tier of experts, 11.7 tokens a second with 18 GB of the card (9.7 without); OpenCL 1.2 through NVIDIA's OpenCL on the RTX 5060 Ti — the 27B checked against Hugging Face, at 1.6 tokens a second (the family is for integrated GPUs); Windows 11 and Windows 10 with an NVIDIA card, through the Docker image ([`docker/README.md`](docker/README.md)) — where the driver gives a model too large for the card the PC's RAM as shared memory, the placement is named in the model's config ([`docs/users.md`](docs/users.md#on-windows-the-docker-image)) |
+| **Untested** | Linux booted from a USB SSD; tensor parallelism on NVIDIA cards; other NVIDIA generations (the CUDA family is built for sm_75 to sm_120: Turing to Blackwell); GLM 5.3 Flash on an NVIDIA card; other AMD generations; OpenCL on other devices, the integrated GPUs `khronos_opencl1_igpu` is for among them; AVX-512 on processors other than Skylake (AMD's Zen 4 and 5, later Xeons) |
 | **Not yet** | Apple silicon |
 
 Pictures and videos are read by the Qwen models and GLM 5.3 Flash (v0.7.0: [`release_logs/v0.md`](release_logs/v0.md#v070)); Ministral 3 does not read them.
 Every model calls the tool, a Lisp REPL on the machine, in its own trained format (v0.9.0: [`docs/users.md`](docs/users.md#the-models-tool)).
 Pictures are made from a prompt by Qwen-Image 2.1, a server's model of its own (v0.10.0: [`docs/users.md`](docs/users.md#a-picture-model-qwen-image-21)).
+A model's tool draws with the picture model, opens subagents and keeps skills of its own; a dense Qwen model's layers split over AMD cards (v0.11.0: [`docs/tools.md`](docs/tools.md), [`docs/config.md`](docs/config.md)).
 
 ## Quick start
 
-### Linux: the install script
+### On Linux: the one-liner install script
 
 One line in a terminal fetches SiLVANN into `./silvann` and builds it for this machine — the CPU, and the card it finds:
 an NVIDIA card with CUDA 12's `nvcc`, an AMD card with ROCm 6's `hipcc`, each for that card alone (where the compiler is
 missing it says where to get it, and the CPU runs the models meanwhile). It installs nothing system-wide and asks for no
-password, and it leaves a `silvann` command. Run it again — or `silvann update` — to update: the models, the
-conversations and their settings stay.
+password, and it leaves a `silvann` command (`silvann help` lists what it does). Run it again — or `silvann update` —
+to update: the models, the conversations and their settings stay. `silvann models <folder>` keeps the models, the
+conversations and the rest it keeps for you in another folder from then on — SiLVANN on a USB drive, say, and its models
+on the machine's own disk ([`docs/users.md`](docs/users.md)).
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/eval-apply-labs/SiLVANN/HEAD/install.sh | bash   # into ./silvann, and a `silvann` command
@@ -138,10 +172,10 @@ python3 -m venv venv && venv/bin/pip install -r requirements.txt
 SILVANN_PYTHON=venv/bin/python ./build.sh                        # needs g++; ROCm's hipcc for AMD cards, CUDA's nvcc for NVIDIA
 venv/bin/python silvann_core.py download-model silvann_tq_D8E4_qwen3.6_35b_a3b
 venv/bin/python start_silvann_server.py --model models/silvann_tq_D8E4_qwen3.6_35b_a3b   # on port 8765
-venv/bin/python silvann_ui.py --port 8090                          # a chat in the browser, on the server above
+venv/bin/python silvann_ui.py --port 8090                          # a chat in the browser, on the server above (docs/ui.md)
 ```
 
-### Docker
+### Anywhere else: using Docker
 
 The way on Windows, and a second way on Linux: the image `ghcr.io/eval-apply-labs/silvann:main`, the nightly, is
 SiLVANN built for NVIDIA cards and the CPU, with the chat as the app in the browser; the models and the conversations
@@ -170,8 +204,13 @@ bash silvann_docker.sh install_nonfree    # once, for video files (PyAV)
 
 Updating, stopping, sharing on the LAN, exporting to another machine: [`docker/README.md`](docker/README.md).
 
-A model that is not downloaded is refused with the command that fetches it. The settings a model boots with, the
-experts on the disk, and a model split over machines: [`docs/users.md`](docs/users.md). Every measurement:
+### More info
+
+A model that is not downloaded is offered for download when the server starts on a terminal, and otherwise refused
+with the command that fetches it. Every setting a model boots with, and its
+options: [`docs/config.md`](docs/config.md). The model's tool, and adding your own commands to it in Python:
+[`docs/tools.md`](docs/tools.md). The experts on the disk, and a model split over machines:
+[`docs/users.md`](docs/users.md). Every measurement:
 [`docs/results.md`](docs/results.md). How it is built and how a model or a silicon is added:
 [`docs/developers.md`](docs/developers.md). The ideas behind the design, the Lisp lineage and the model as a collapse of meaning:
 [`docs/concepts.md`](docs/concepts.md); how the weights are packed: [`docs/compression.md`](docs/compression.md).
@@ -185,15 +224,17 @@ end of a sentence, layers replaced by simpler programs, multi-token prediction a
 install.sh          fetches, builds and installs the `silvann` command — the one-line install
 build.sh            builds the engine into lib/
 docker/             the Docker image, and the scripts that run it as an app on Windows and Linux
-engine/src/         the interpreter (engine, sys), the library (nn), the models (ai_qwen_3, ai_glm_5_3), and
+engine/src/         the interpreter (engine, sys), the library (nn), the models (ai_qwen_3, ai_glm_5_3, ai_qwen_image), and
                     silicon_families/ — one folder a kind of silicon, what it answers for the library
 runtime/            the Python side: a model folder booted onto the machine, conversations, the chat framing
 lisp/               each model family's program, in Lisp — a model folder carries its family's in its own lisp/
-silvann_core.py     download-model · list-models
+silvann_core.py     download-model · list-models · hf-token
 start_silvann_server.py, silvann_ui.py, silvann_cli.py     the server, the chat in a browser, the chat in a terminal
 models/             where downloaded models go
+skills/             commands for the model's tool, a folder each — docs/tools.md says how to add yours
 release_logs/       v0.md — what each 0.x release brought, newest first
-docs/               users.md — running it; models.md — every model and what it needs; results.md — every measurement;
+docs/               users.md — running it; ui.md — the chat in the browser; config.md — a model's settings; tools.md — the model's tool and your own
+                    commands; models.md — every model and what it needs; results.md — every measurement;
                     developers.md — how it is built, adding a model or a silicon;
                     concepts.md — the ideas behind it; compression.md — how the weights are packed;
                     directions.md — where it could go

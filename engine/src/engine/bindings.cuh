@@ -10,8 +10,7 @@
  *   an argument added to the evaluator is carried through every step of every program (`REASONED`).
  *   ⛳ The signature IS the claim, so re-derive it: `grep -n 'eng__eval(' engine/eval.cuh`.
  * ⛔⛔ NOTHING NAMES THE STRUCT BELOW. `grep -rn EngineBindings` over the tree finds its definition and
- *   nothing else; `EngineEvalPagedArm` has two hits, both in this file, and the claim gate's
- *   `no_old_tree_borrows` rule holds it there.
+ *   nothing else; `EngineEvalPagedArm` has two hits, both in this file.
  * ⛳ IT IS LEFT STANDING BECAUSE THE ARGUMENT IN IT IS WORTH READING — the argument-count discipline and
  *   the absent return address are decisions about the evaluator, not about this type, and they outlive
  *   their carrier. The struct itself is a question for the architect and not a thing to remove

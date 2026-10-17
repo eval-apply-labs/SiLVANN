@@ -8,15 +8,17 @@ engine/src/packages/sys/          the language: lists, symbols, bindings, if, wh
 engine/src/packages/nn/           the Neural Network library: buffers, the expert collections, the arithmetic
 engine/src/packages/ai_qwen_3/    the Qwen 3.5 family's layers as verbs
 engine/src/packages/ai_glm_5_3/   GLM 5.3 Flash's layers as verbs
+engine/src/packages/ai_qwen_image/  Qwen-Image 2.1's transformer and picture decoder as verbs
 engine/src/silicon_families/      one folder a kind of silicon: what it answers for the packages
 runtime/silvann_runtime/          Python: a model folder booted onto the machine, its tables and programs
 ```
 
-A **model is a program**. The runtime writes, for each layer, a short program naming the model package's verbs
-over tables of that layer's weights; the evaluator runs it on the host, and each verb launches its arithmetic on
-the silicon that holds the data — a card, or the CPU's cores. The machine is a set of **workers**, one a device:
-the card is worker 0, a CPU socket a worker of the `x86_avx2` family, and a program hands work to another worker
-with `sys__compute` and collects it with `sys__result`.
+A **model is a program**, written by hand in Lisp (`lisp/<family>.lisp`): one loop runs every layer, and a layer names
+the model package's verbs, or nn's, over tables of its weights that the runtime makes. GLM's unfused layer
+(`fused=False` in `glm5.py`) is the one the runtime writes itself, a few procedures a layer. The evaluator runs the
+program on the host, and each verb launches its arithmetic on the silicon that holds the data — a card, or the CPU's
+cores. The machine is a set of **workers**, one a device: the card is worker 0, a CPU socket a worker of the
+`x86_avx2` family, and a program hands work to another worker with `sys__compute` and collects it with `sys__result`.
 
 Every package has a README; read `engine/src/README.md` first, then `sys`'s and `nn`'s.
 
@@ -27,7 +29,9 @@ its pack on Hugging Face with it. The boot reads the folder's files and hands ev
 would; a procedure is then a binding like any other, which a program can call or define again. The files are one a
 family — `qwen3_5.lisp`, `glm5.lisp`, `mistral3.lisp`, with `qwen3_5_cpu.lisp` and `glm5_cpu.lisp` for what a CPU worker
 runs, `sampling.lisp` for the sampler every model shares, and `generate.lisp` for an answer made on the card a token
-after another, which every family shares — written in the release's `lisp/`, and a model folder
+after another, which every family shares; `qwen3_5_pictures.lisp` for the Qwen models' pictures,
+`qwen3_5_tp.lisp` for a dense Qwen model over several cards, and `qwen_image.lisp` and `qwen_image_vae.lisp` for the
+picture model — written in the release's `lisp/`, and a model folder
 holds its family's copy. A program names the words of the engine it was written for: one an engine
 does not have is an error when the program reaches it, and a `defun` of that name in the program — the old word
 written as the new one — answers it. A token's layers are a loop:
@@ -123,11 +127,12 @@ program.
 `engine/src/silicon_families/add_a_family.md`. A family answers a small contract: memory and copies, a launch, and a
 handful of arithmetic primitives (the lanes' sums, a half to a float, the tile it likes its GEMM in). The library's
 kernels are written once against those answers; a family may also override a door with its own code, as
-`amd_rocm6_wave64`, `nvidia_cuda12` and `x86_avx2` do for the hottest ones — `nvidia_cuda12` runs the GEMMs, the gemvs
-and the attention's scores on the tensor cores (`mma.sync`), and `x86_avx2` its matrix products with AVX-512 where the
-processor has it, chosen when the library loads (`SILVANN_CPU_AVX512=0` keeps AVX2). Where nn gives a door a one-row
-and a many-row form that agree to the bit — the mix of an attention and its causal form, a residual and its form over a
-prompt's rows, a norm and its rows — a family that answers one with its own arithmetic answers the other with the same.
+`amd_rocm6_wave64`, `nvidia_cuda12`, `khronos_opencl2` and `x86_avx2` do for the hottest ones — `nvidia_cuda12` runs
+the GEMMs, the gemvs and the attention's scores on the tensor cores (`mma.sync`), and `x86_avx2` its matrix products
+with AVX-512 where the processor has it, chosen when the library loads (`SILVANN_CPU_AVX512=0` keeps AVX2). Where nn
+gives a door a one-row and a many-row form that agree to the bit — the mix of an attention and its causal form, a
+residual and its form over a prompt's rows, a norm and its rows — a family that answers one with its own arithmetic
+answers the other with the same.
 A prompt read as rows and the same prompt read a position at a time may sum in their own orders (the grouped scores add
 in pairs, a card's GEMM in its own, a CPU's routed experts over a prompt go through the int8 GEMM), so they are checked as
 a model is against Hugging Face: after the prompt the two must be nearer each other than the model is to Hugging Face, over

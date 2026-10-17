@@ -67,7 +67,8 @@ Every measurement, the prompt rates, and what limits a model reading its experts
 
 ## The card's tier of experts
 
-With a model's experts on the CPU, `card_experts_gb` in its config gives part of the card to the experts used most; the
+With a model's experts on the CPU from RAM, part of the card holds the experts used most — on by default, sized when
+the server starts, or `card_experts_gb` in its config pins the size; the
 card computes those while the CPU computes the rest, and the CPU copies an expert over while the card works, so a token
 never waits for one. The rows above that name a tier are this; they ran on the machine's 256 GB of RAM, and the RAM they
 name is what the experts and the process need, not a limit they were held to. For GLM, `card_exclusive` keeps what the
@@ -76,9 +77,13 @@ cannot copy both ways at once. [`users.md`](users.md#the-cards-tier-of-experts) 
 
 ## How long a conversation fits
 
-The conversation's cache sits on the card from boot, so `max_context` in a model's `configs/default.json` is set to what
-the card has room for. The Qwen and GLM caches keep their first 256 positions and the latest 4,096 at full precision and
-the rest at 8 bits; past the first 4,352, each 100 MB of the card holds about 10,000 more tokens of the 35B's
-conversation, 3,200 of the 27B's and 8,800 of GLM 5.3 Flash's. Ministral 3's cache is every position at full precision —
-about 625 positions a 100 MB; its `D4` boots with 32,768 and its `D8` with 8,192, which fit a 16 GB card beside it. On an
-8 GB card, set the `D4`'s to about 4,096.
+The conversation's cache sits on the card from boot. A model's `configs/default.json` says `max_context` `"auto"`: as
+many positions as the card holds beside the model, up to the model's own length, found when the server starts. A number
+holds it there instead. The Qwen caches keep their first 256 positions and the latest 4,096 at full precision and the
+rest at 8 bits; past the first 4,352, each 100 MB of the card holds about 10,000 more tokens of the 35B's conversation
+and 3,200 of the 27B's. GLM 5.3 Flash's cache, a latent a position, is every position in halves: about 8,800 a 100 MB. Ministral 3's cache is every position at full precision —
+about 625 positions a 100 MB: on a 16 GB card about 32,000 beside its `D4`.
+
+With a mixture-of-experts model's experts on the CPU, the whole length costs a short conversation nothing: the card's
+tier of experts holds experts in the cache's rows no conversation has reached and gives them back as one grows
+([`config.md`](config.md#the-context-and-the-tier-share-the-card)).

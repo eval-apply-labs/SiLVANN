@@ -6,9 +6,10 @@ them — as verbs of the Eval-Apply GPU Interpreter. Each verb is one site of a 
 
 A verb takes its weights and buffers as a **table**: a node array whose cells are the planes (codes and scales of
 each matrix), the scratch it may use, and the integers of the model's shape. The tables' cells are named in
-`contracts/objects/` — `mixer.cuh` for the attention sites, `moe.cuh` for the MLP sites with experts. A dense model's
-MLP site is `nn`'s `nn__mlp__apply` (and `nn__mlp__rows`), its table nn's `contracts/objects/mlp.cuh`. The runtime that
-builds the tables and the programs over them is `silvann_runtime/qwen3_5.py`.
+`contracts/objects/` — `mixer.cuh` for the attention sites, `moe.cuh` for the MLP sites with experts, `vision.cuh` for
+the vision tower. A dense model's MLP site is `nn`'s `nn__mlp__apply` (and `nn__mlp__rows`), its table nn's
+`contracts/objects/mlp.cuh`. The runtime that builds the tables and the programs over them is
+`silvann_runtime/qwen3_5.py`.
 
 ## The verbs
 
@@ -31,10 +32,19 @@ A prompt as rows (prefill), a chunk of positions through a layer at once:
 | `ai_qwen_3__deltanet_rows` | the DeltaNet site over the chunk: projections as one GEMM, the recurrence row by row |
 | `ai_qwen_3__attention_rows` · `ai_qwen_3__attention_tiered_rows` | causal attention over the chunk and the positions before it; the tiered form also cools what the chunk displaces into the lower tiers |
 | `ai_qwen_3__moe_rows` | the MoE site expert-major: each picked expert runs once over every row that picked it |
+| `ai_qwen_3__pre_expert_rows` · `ai_qwen_3__experts_rows` · `ai_qwen_3__post_expert_rows` | the MoE site's three words over the chunk with the experts on the CPU: the card's route, the CPU's experts expert-major, the card's close |
+| `ai_qwen_3__stream_counts` | what streaming a prompt's experts from RAM has cost: bytes, ns copying, ns waiting on the card |
+
+A picture through the vision tower:
+
+| verb | what it does |
+|---|---|
+| `ai_qwen_3__vision_embed` · `ai_qwen_3__vision_block` · `ai_qwen_3__vision_merger` | the patch embedding, a block over every patch, the merger into the text model's width |
 
 ## Where to start reading
 
 - `cpu/opcodes/mixer__abi.cuh` — the attention sites, a position at a time
 - `cpu/opcodes/moe__abi.cuh` — the MLP sites with experts
 - `cpu/opcodes/prefill__abi.cuh` — the rows forms
+- `cpu/opcodes/vision__abi.cuh` — the vision tower, its tables' cells in `contracts/objects/vision.cuh`
 - `python/silvann_runtime/qwen3_5.py` — the tables, the programs, the cache tiers, the expert placement

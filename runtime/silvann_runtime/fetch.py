@@ -57,12 +57,12 @@ def programs(path):
 
 def ensure_model(path, repo=None, ask=input, yes=False):
     """The model folder at `path`, downloaded first if it is not there and the answer is yes — or at once when `yes`,
-    which is what `silvann_core.py download-model` is: the asking already done. A folder that is there without its
-    program, `lisp/` or a file of it its family reads, is asked the same about that alone."""
+    which is what `silvann_core.py download-model` is: the asking already done. A folder that is there gets its pack's
+    program afresh, `lisp/` whole, when `yes` asks for it or the folder has no `lisp/` (▶ `_program`)."""
     path = os.path.abspath(path)
     name = os.path.basename(path.rstrip(os.sep))
     if present(path):
-        if _lacks_program(path):
+        if yes or _lacks_program(path):
             _program(path, repo or KNOWN.get(name, (None, None))[0], ask, yes)
         return path
     repo, size = (repo, "several GB") if repo else KNOWN.get(name, (None, None))
@@ -81,27 +81,26 @@ def ensure_model(path, repo=None, ask=input, yes=False):
 
 
 def _lacks_program(path):
-    """Whether the folder lacks `lisp/`, or a file of it its family's runtime reads (▶ `programs`) — a folder fetched
-    for an engine before that file was one of them."""
-    if not os.path.isdir(os.path.join(path, "lisp")):
-        return True
-    return any(not os.path.isfile(os.path.join(lisp, n + ".lisp")) for lisp, names in programs(path) for n in names)
+    """Whether a folder that holds its weights has no `lisp/` — or an image pack's encoder none of its own."""
+    return any(not os.path.isdir(lisp) for lisp, _ in programs(path))
 
 
 def _program(path, repo, ask, yes):
-    """A folder with its weights and without its program, or a file of it — `lisp/` — gets `lisp/` from the folder's
-    repository, a few files of text. Nothing is fetched without a yes; a folder no repository is known for is left as
-    it is, and the boot names what it lacks."""
+    """The folder's `lisp/` — every `lisp/` it holds, an image pack's encoder's too — fetched whole from its pack, a few
+    files of text: the pack's program is what its folder runs, whatever files it is made of, and the pack's uploader
+    says which. A file the folder has and the pack does not stays. Nothing is fetched without a yes; a folder no
+    repository is known for is left as it is, and the boot names what it lacks."""
     if repo is None:
         return
     if not yes:
         if not sys.stdin.isatty():
             return
-        if ask("%s lacks lisp/ or a file of it — the model's program. Fetch it from huggingface.co/%s? [Y/n] "
+        if ask("%s has no lisp/ — the model's program. Fetch it from huggingface.co/%s? [Y/n] "
                % (path, repo)).strip().lower() in ("n", "no"):
             return
     from huggingface_hub import snapshot_download
-    snapshot_download(repo_id=repo, local_dir=path, allow_patterns=["lisp/*", "*/lisp/*"])     # an image pack's encoder's too
+    # forced: a file edited here since is the pack's again — Hugging Face's own record of the folder would skip it
+    snapshot_download(repo_id=repo, local_dir=path, allow_patterns=["lisp/*", "*/lisp/*"], force_download=True)
 
 
 def _download(repo, path):

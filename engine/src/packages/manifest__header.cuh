@@ -174,9 +174,8 @@
  * agreement: a `constexpr` is not a macro, and two identical spellings of one do not merge the way two
  * identical `#define`s do. Where the two are composed, whichever is read first generates and the other
  * sees the flag and stands down, and the value is the same either way because the row is the same.
- * ⛳ NOTHING COMPOSES THEM HERE. `MEASURED`: `grep -rn '#include' src/ | grep 'src_old/'` is EMPTY — no
- * file reachable from this one names the old tree, so the flag has no writer this build can meet and
- * the branch below is always taken. That is the same condition a host build of the package alone runs
+ * ⛳ NOTHING COMPOSES THEM HERE: the flag has no writer this build can meet, so the branch below is
+ * always taken. That is the same condition a host build of the package alone runs
  * under, which is what keeps the harness working with no arrangement of its own.
  * ⛳ RETIREMENT: the guard's subject is COMPOSITION rather than the rename, so it is already subjectless
  * and goes with the line that sets the flag over there. Renaming the package to dodge the collision

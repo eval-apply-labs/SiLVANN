@@ -10,21 +10,23 @@ the Neural Network library       what a model is built with: buffers, experts, a
 ```
 
 A model is a **program** in this language: a list of forms that name `nn`'s verbs and its own package's, run
-by the evaluator, with the heavy arithmetic launched on a graphics card or on the CPU's cores. Two model
-packages ship: `packages/ai_qwen_3` (Qwen 3.5, 3.6 and 3.8, dense and mixture of experts) and
-`packages/ai_glm_5_3` (GLM 5.3 Flash). The Python side that boots a model folder onto the machine is
-`silvann_runtime`.
+by the evaluator, with the heavy arithmetic launched on a graphics card or on the CPU's cores. Three model
+packages ship: `packages/ai_qwen_3` (Qwen 3.5, 3.6 and 3.8, dense and mixture of experts),
+`packages/ai_glm_5_3` (GLM 5.3 Flash) and `packages/ai_qwen_image` (Qwen-Image 2.1's diffusion transformer and its
+picture decoder). The Python side that boots a model folder onto the machine is `silvann_runtime`.
 
 ## How it runs
 
 - **The evaluator runs on the host CPU.** A machine is a set of runner threads — one per *block* — over
   one heap in host memory. Everything the evaluator touches is a 64-byte node on that heap. Why it is
-  shaped this way: ▶ `docs/design/evaluator.md`.
-- **Graphics cards are reached through *silicon families*.** A family is a runtime plus the traits a build
-  is compiled for — `nvidia_cuda12`, `amd_rocm6_wave64` (ROCm 6, the 64-wide AMD cards), and
-  `khronos_opencl2`, the last one a card is offered to before it is refused — and each is its own binary,
-  `libsilvann_<family>.so`. The program never names a vendor: each package lists what it needs
-  from a card, and each family answers it. ▶ `silicon_families/add_a_family.md`.
+  shaped this way: ▶ `docs/design/evaluator.md` (`docs/` is in the development repository).
+- **Graphics cards, and the CPU's cores, are reached through *silicon families*.** A family is a runtime plus
+  the traits a build is compiled for. The roster, `silicon_families/roster.cuh`, lists them lowest number first:
+  `host`, `x86_avx2` (the CPU's cores), `khronos_opencl1_igpu` (integrated GPUs whose OpenCL is 1.2),
+  `khronos_opencl2`, `amd_rocm6_wave64` (ROCm 6, the 64-wide AMD cards) and `nvidia_cuda12`. The host is
+  compiled into the program; each of the others is its own binary, `libsilvann_<family>.so`. The program never
+  names a vendor: each package lists what it needs from a card, and each family answers it.
+  ▶ `silicon_families/add_a_family.md`.
 - **The Python wheel is the host.** `silvann_engine_cpu` finds the cards on the machine, gives each to the
   highest family that includes it and works, loads only those families' binaries, and exposes the engine
   to Python.
@@ -51,6 +53,7 @@ packages/            the language and the library, each a folder that owns its o
 silicon_families/    what answers the packages on real silicon: the roster, how a card is given to a
                      family, and one folder per family
 docs/                design notes — docs/design/ for what is built, docs/design/pending/ for what is not
+                     (in the development repository)
 ```
 
 A package is `contracts/` (definitions only: objects, the lists it publishes, its interfaces), `cpu/`
@@ -59,7 +62,7 @@ folder: the next build enrols it and gives it the next id.
 
 ## Building
 
-From `backstage/`:
+From `backstage/` in the development repository:
 
 ```
 bash scripts/rebuild_engine.sh            the wheel (silvann_engine_cpu), then every silicon family
@@ -97,6 +100,7 @@ the card). `e.kinds()`, `e.verbs()` and `e.packages()` list the vocabulary; `e.c
 The program is written in a C subset — no classes, no templates, no overloading — so that it can be
 translated to C mechanically. A name carries its package, its type and its visibility
 (`sys__stack__push`, `sys__stack__zzprivate_set_current_chunk`); ▶ `packages/sys/README.md` for the rules.
+From `backstage/` in the development repository:
 
 ```
 python3 scripts/src_c_subset_gate.py      the code stays C-shaped, and names stay within their tiers
@@ -105,7 +109,7 @@ python3 scripts/src_claim_gate.py         every claim a comment makes about the 
 
 ## Testing
 
-From `backstage/`:
+From `backstage/` in the development repository:
 
 ```
 bash scripts/src_selftest.sh                   the language, compiled for the host

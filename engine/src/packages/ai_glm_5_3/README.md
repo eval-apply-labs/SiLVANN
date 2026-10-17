@@ -11,8 +11,8 @@ sockets. A token's MoE site is the card's router and shared expert, each socket'
 the card's sum.
 
 A verb takes its weights and buffers as a **table**, a node array whose cells are named in
-`contracts/objects/layer.cuh`. The runtime that builds the tables and the programs is
-`silvann_runtime/glm5.py`.
+`contracts/objects/layer.cuh` (the vision tower's in `contracts/objects/vision.cuh`). The runtime that builds the
+tables and the programs is `silvann_runtime/glm5.py`.
 
 ## The verbs
 
@@ -32,9 +32,16 @@ A prompt as rows, a chunk of positions through a layer at once:
 | `ai_glm_5_3__route_rows` · `ai_glm_5_3__close_rows` | the MoE site's card halves over the chunk, each row's carry kept between them |
 | `ai_glm_5_3__experts_rows` | on a CPU worker, expert-major: each held expert runs once over every row that picked it, so a chunk reads an expert once |
 
+A picture through the vision tower:
+
+| verb | what it does |
+|---|---|
+| `ai_glm_5_3__vision_embed` · `ai_glm_5_3__vision_block` · `ai_glm_5_3__vision_tail` | the patch embedding, a block over every patch, the tail (the last norm, the downsampling, the merger) into the text model's width |
+
 ## Where to start reading
 
-- `cpu/opcodes/layer__abi.cuh` — every verb
+- `cpu/opcodes/layer__abi.cuh` — every layer verb
+- `cpu/opcodes/vision__abi.cuh` — the vision tower's verbs
 - `cpu/table.cuh` — how a table is read
 - `python/silvann_runtime/glm5.py` — the placement, the tables, the programs
 - `python/silvann_runtime/experts_file.py` — the routed experts as a file mapped over the CPU's slots

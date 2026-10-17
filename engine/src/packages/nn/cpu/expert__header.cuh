@@ -67,6 +67,24 @@ static __device__ inline uint64_t nn__expert__type_slots(uint64_t type);
 static __device__ inline uint64_t nn__expert__type_bytes(uint64_t type);
 static __device__ inline uint64_t nn__expert__type_offset(uint64_t type);
 
+/* ⭐⭐ SLOTS LENT TO A COLLECTION (NN-93) — memory another collection owns and has not written yet, held by this one
+ * until the owner needs it: a card's tier of experts holding experts in the attention caches' rows a conversation has
+ * not reached, given back as the conversation grows. ⚖ 2026-10-17: *"progressively shrink the l1 cache as the context
+ * grows, maybe in chunks of 8k tokens... this way we dont need the users to set a max tokens or to size the l1 cache
+ * at all"* · *"it is the experts on vram"*.
+ *   live   how many slots the collection holds now: its own run's, and the lent ones that are live
+ *   lend   `regions` runs of free memory, each `depth` slots long and named by its END (`ends`), lent to `type` —
+ *          none live yet. Every run inside this worker's arena, outside the collection's own run, on its alignment, and
+ *          apart from the others; the collection stood with room for their links (`__lendable`). False otherwise.
+ *          Lent slots are numbered from the deepest (▶ NN__EXPERT__LENT_*), so the ones nearest the owner's written
+ *          rows are the highest — the first a smaller `lent` withholds.
+ *   lent   how many of them are live: more threads the new ones into the free list; fewer first waits for every copy
+ *          in flight, evicts the experts held in the slots withheld, and takes the free ones off the list — after it,
+ *          nothing of the collection is in a withheld slot, and nothing will be put there until it is live again. */
+static __device__ inline uint64_t nn__expert__type_live(uint64_t type);
+static __device__ inline bool nn__expert__lend(uint64_t type, uint64_t regions, uint64_t depth, const uint64_t* ends);
+static __device__ inline bool nn__expert__lent(uint64_t type, uint64_t live);
+
 /* TRUE when this collection's slots may never be taken back. ⛳ ANSWERS TRUE FOR A TYPE THAT DOES NOT
  * STAND, and for a table that could not be read at all — ▶ the polarity note in the block above, which is
  * where that falls out of the representation rather than out of a check. */

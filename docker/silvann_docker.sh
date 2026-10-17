@@ -43,7 +43,7 @@ yes_to() { local a; read -r -p "$1 [y/N] " a; [[ $a =~ ^[Yy] ]]; }
 
 ENGINE=${SILVANN_ENGINE:-$(command -v docker >/dev/null && echo docker || (command -v podman >/dev/null && echo podman) || true)}
 [ -n "$ENGINE" ] || stop "neither docker nor podman is installed: Docker Engine (docs.docker.com/engine/install) or
-   Podman (podman.io), then NVIDIA's container toolkit for the card — docs/users.md, \"In a container\""
+   Podman (podman.io), then NVIDIA's container toolkit for the card — docker/README.md, \"On Linux\""
 E() { "$ENGINE" "$@"; }
 
 # how a container is handed the NVIDIA card: docker's --gpus, podman's CDI device; nothing on a machine without one

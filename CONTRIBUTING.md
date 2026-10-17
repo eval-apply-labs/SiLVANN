@@ -19,6 +19,7 @@ you to accept it on your first pull request — you reply with the sentence it g
 - Discuss larger changes first, in Discussions or an Issue, so nobody builds something that cannot be merged.
 - A change comes with its evidence: a claim about speed or correctness names the command that measured it and
   the number it gave.
-- The engine's build and its gates are in `engine/` (`build.sh`); keep them green.
+- The engine builds with `build.sh` at the release's root; its build scripts and the claim gate (`src_claim_gate.py`)
+  are in `engine/scripts/`. Keep them green.
 
 Questions: GitHub Discussions, or `admin@evalapply.co.uk`.

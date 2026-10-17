@@ -60,6 +60,9 @@
     X(NN__HATCH__CARTRIDGE_TIERS)    /* a node_array on the tiers: each entry that tier's six cursors  */ \
     X(NN__HATCH__CARTRIDGE_LAYERS)   /* a node_array on the MODEL's layers: each its mechanism + lane  */ \
     X(NN__HATCH__CARTRIDGE_TEXT)     /* a VALUE_INT: where the conversation's text is, and its bytes   */ \
-    X(NN__HATCH__CARTRIDGE_DELTANET) /* a VALUE_INT: the deltanet state region, and its bytes          */
+    X(NN__HATCH__CARTRIDGE_DELTANET) /* a VALUE_INT: the deltanet state region, and its bytes          */ \
+    /* ⭐ THE LENT SLOTS (NN-93): a node_array on the types, each entry a node_array of integers — that collection's \
+     * slots in memory another collection lent it, ▶ NN__EXPERT__LENT_*. Absent where no collection was lent any. */   \
+    X(NN__HATCH__EXPERT_LENT)        /* a node_array on the types: each entry that collection's lent regions */
 
 #endif /* SILVANN__PACKAGES_NN_CONTRACTS_OBJECTS_PACKAGE_CUH */

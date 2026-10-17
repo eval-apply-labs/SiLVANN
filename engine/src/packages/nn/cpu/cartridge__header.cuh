@@ -67,7 +67,7 @@
  * `bytes_per_token_layer` covers K and V together — 4,096 B of fp32 is 2 (K+V) × 2 kv-heads × 256 dims ×
  * 4 B — and this file lays each layer's run down as a K plane then a V plane of equal length.
  * ⛔ WHAT WOULD FALSIFY IT: an attention with asymmetric K and V. MLA's latent KV is exactly that, and it
- * is on the far roadmap (`docs/deepseek_v4_mla_dsa_design.md`). ⛳ WHAT DEPENDS ON IT: the plane offset
+ * is on the far roadmap. ⛳ WHAT DEPENDS ON IT: the plane offset
  * below, and nothing else — a per-plane stride pair in the tier row is what it would become, which is one
  * more word in a row that has one to spare. The build refuses an odd stride rather than halving it, so an
  * asymmetric format arrives as a REFUSAL and not as a misread address.

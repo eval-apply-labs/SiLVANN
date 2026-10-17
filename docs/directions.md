@@ -39,7 +39,9 @@ the right direction. It is an analogy, not the theorem.) A model not trained thi
 scale at one, so small changes are safe and large ones need measuring; the norm before each next site absorbs part
 of any change to the stream's overall size.
 
-*Today:* the weighted sums happen in `ai_qwen_3__experts` / `ai_qwen_3__moe` and `ai_glm_5_3__experts`; the
+*Today:* the weighted sums happen in nn's `nn__routed__position` and `nn__routed__rows`
+(`engine/src/packages/nn/cpu/routed__impl.cuh`), which `ai_qwen_3__experts` and `ai_glm_5_3__experts` call, and
+inside `ai_qwen_3__moe` and `ai_qwen_3__moe_rows`, which weigh the downs in nn's grouped launches on the card; the
 scalars would go between each expert's output and that sum.
 
 ### 2. Choosing an adapter at the end of a sentence

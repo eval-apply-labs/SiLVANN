@@ -15,6 +15,13 @@ Four verbs do what a step does around the blocks, over the transformer's own tab
 norm's scale), `ai_qwen_image__text` (a run of the prompt's text rows into the sequence), `ai_qwen_image__latents` (a
 picture's latent rows into it), `ai_qwen_image__out` (the prediction, and the flow's Euler step on the latents).
 
+Two verbs are the picture decoder, its VAE (diffusers' `AutoencoderKLQwenImage21` on one frame), over the tables in
+`contracts/objects/vae.cuh`: `ai_qwen_image__conv` (a convolution, by nn's `unfold_rows` and a product of the rows —
+its input normed and through SiLU or upsampled first, its output's channels moved to space, or the output added onto
+`y`, as its table says) and `ai_qwen_image__vae_attention` (the middle block's one head over every pixel). The
+decoder's program is `lisp/qwen_image_vae.lisp`, `(vae_decode h w)`, and its runtime
+`python/silvann_runtime/qwen_image_vae.py`.
+
 The arithmetic is diffusers' (`QwenImage21TransformerBlock`, `QwenImage21Transformer2DModel`, diffusers 0.41.0). The
 runtime (`python/silvann_runtime/qwen_image.py`) loads the pack, reorders q and k a head for nn's rotary pairing, lays
 out the sequence, the rotary table, the key limits and the schedule, and the program (`lisp/qwen_image.lisp`) runs the

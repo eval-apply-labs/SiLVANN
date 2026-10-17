@@ -24,7 +24,7 @@
  * compression on each column so it is contained within one dot product. is that what i am doing?"*
  * **Yes.** `MEASURED` three ways, and they agree:
  * ```
- *   compressor.py:122    `rows, cols = weight_tensor.shape` on HF's [out_features, in_features]
+ *   nn_compressor.py:530 `rows, cols = W.shape` on HF's [out_features, in_features]
  *                        ⇒ a ROW is an OUTPUT feature and `cols` is the activation's length
  *   vbr_planar.cuh:906   `row_id < output_dim`, and ONE WARP OWNS ONE ROW
  *   the gemv below       out[r] = Σ_c W[r][c]·x[c], with x exactly `cols` long
@@ -40,10 +40,11 @@
  * boundary, never inside the loop** — which is the register pressure a per-term opcode is trying to
  * get out from under.
  *
- * ⛔ **THERE IS NO SCALE AND NO ZERO-POINT.** `MEASURED` from the producer (`compressor.py:173`): the
- * per-row scale is MULTIPLIED INTO the codebook at pack time — `actual_lut = win_centroids * win_scales`
- * — so the LUT holds real magnitudes and the decode is one indexed read. ⇒ ★ A SEPARATE SCALE IS A
- * SECOND NUMBER OBLIGED TO AGREE WITH A FIRST; MULTIPLYING IT IN DELETES IT.
+ * ⛔ **THIS FORMAT HAS NO SCALE AND NO ZERO-POINT.** `REASONED` from the format above, which has no field
+ * for either: the row's codebook holds real magnitudes, the scale multiplied into it when the row was
+ * packed, so the decode is one indexed read. ⇒ ★ A SEPARATE SCALE IS A SECOND NUMBER OBLIGED TO AGREE WITH
+ * A FIRST; MULTIPLYING IT IN DELETES IT. The family `python/nn_compressor.py` packs carries a per-row fp16
+ * scale beside a global table instead.
  *
  * ── ⭐ THE fp16 READ IS ARITHMETIC, NOT A SEAM VERB, AND THAT IS A RULING NOT A SHORTCUT ─────────────
  * Every fp16 is exactly representable in fp32, so the conversion is a BIT REARRANGEMENT with no

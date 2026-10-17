@@ -13,6 +13,7 @@ __pycache__/
 # what a user keeps beside the release: the Hugging Face token, the UI's last start, the model's tool's folder and the
 # folders it reads unasked
 /.huggingface_token
+/data_folder
 /ui_last_start.json
 /workspace/
 /tools.json

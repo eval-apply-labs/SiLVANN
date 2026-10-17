@@ -5,11 +5,11 @@ and the way on Windows: SiLVANN, its environment and its build in one image, run
 WSL 2, with the chat UI in the browser.
 
 - **The image:** `ghcr.io/eval-apply-labs/silvann:main`, the nightly, built from this repository's `main`; until v1.0
-  the only one. ⚠ Not published yet: until it is, build it (below) and the scripts use the image built on the machine. From v1.0 each major version has its own tag (`:1`, then `:2`), which its minor and patch releases
+  the only one. From v1.0 each major version has its own tag (`:1`, then `:2`), which its minor and patch releases
   update in place: within a major an update keeps the models and the conversations working, and a change that would
   break them is the next major.
 - **What it runs:** an NVIDIA card, through `nvidia_cuda12`, built for every compute capability that family lists (7.5,
-  8.0, 8.6, 8.9, 9.0 and 12.0: the GeForce RTX 20 to 50 series among them; only the RTX 5060 Ti has run it), or the
+  8.0, 8.6, 8.9, 9.0 and 12.0: the GeForce RTX 20 to 50 series among them; it has run on an RTX 5060 Ti and an RTX 4060 Ti), or the
   CPU alone, through `x86_avx2` (AVX2, FMA and F16C: Intel from 2013, AMD from 2015). AMD's cards are not in this
   image.
 - **The data:** the models and the conversations live in a volume, `silvann-data`, mounted at `/data`. A new image runs
@@ -94,11 +94,15 @@ Docker, installs it with the rest (`SILVANN_NONFREE=0` leaves it out).
 
 ## Building it
 
-From this repository's folder:
+From this repository's folder. The build takes only `install.sh` and the image's two scripts from the folder:
+`install.sh` fetches the release from GitHub, its default branch or `SILVANN_REF`'s. A checkout on this machine, with
+its own changes, goes in as a build context of its own:
 
 ```bash
 docker build -f docker/Dockerfile -t ghcr.io/eval-apply-labs/silvann:main .                                   # main
 docker build -f docker/Dockerfile --build-arg SILVANN_REF=<branch> -t ghcr.io/eval-apply-labs/silvann:main .  # a branch
+docker build -f docker/Dockerfile --build-context source=<a git checkout> --build-arg SILVANN_SOURCE=/source \
+             --build-arg SILVANN_REF=<its branch> -t ghcr.io/eval-apply-labs/silvann:main .                    # a checkout here
 ```
 
 Tagged with the published image's name, it is the one the scripts use; under another name, set `SILVANN_IMAGE` to it.

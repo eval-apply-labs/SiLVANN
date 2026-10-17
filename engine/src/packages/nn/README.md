@@ -27,7 +27,7 @@ would cost a synchronisation on every verb call (`MEASURED` on gfx906: 1.654 µs
 
 **Kinds and verbs are rows.** `nn`'s kinds, objects and verbs are the same X-macro rows as `sys`'s, tagged
 with this package's id so no two packages collide. From Python, `e.kinds()` and `e.verbs()` list them
-alongside the language's. Count them rather than trusting a number here (today 3 kinds and 45 verbs):
+alongside the language's. Count them rather than trusting a number here (today 3 kinds and 73 verbs):
 
 ```bash
 cd backstage/src/packages/nn
@@ -62,21 +62,46 @@ The package's own device-wide state sits in its rows of the system register, `nn
 ```
 standing up         nn__package__init
 buffers             nn__buffer__getnew  nn__buffer__getnew_ram  nn__vector__range  nn__vector__zero
+                    nn__buffer__copy — a buffer from another worker, through RAM
 vector arithmetic   nn__vector__add  nn__vector__pointwise_mul  nn__vector__scale  nn__vector__scale_at
                     nn__vector__exp  nn__vector__softplus  nn__vector__dot_product
 matrix arithmetic   nn__expert__multiply_fp16  nn__matrix__matvec_transposed  nn__matrix__transpose
 norms               nn__rmsnorm__apply  nn__vector__l2norm
 activations         nn__softmax__apply  nn__sigmoid__apply  nn__swiglu__combine
+                    nn__swiglu__clamped — the swiglu clamped at a limit (GLM 5.3's MoE)
 a layer's MLP       nn__mlp__apply  nn__mlp__rows — a dense SwiGLU MLP, its norm and its residual, over a plane table
 attention           nn__rope__angles  nn__rope__apply  nn__attention__decode
                     nn__attention__residual  nn__attention__merge  nn__attention__finish
+                    nn__attention__residual_tq — a residual over TurboQuant rows of a cache in tiers
+                    nn__attention__absorb  nn__attention__expand — latent attention: the query absorbed into the
+                    cached latent, the answer expanded by each head's value rows
                     nn__attention__rows — a prompt chunk through a plain grouped-query attention, over a plane table
+hyper-connection    nn__hyper__pre  nn__hyper__post — several residual streams collapsed into a sublayer's input,
+                    and mixed again after it
 deltanet            nn__deltanet__rank_1_update  nn__deltanet__readout  nn__deltanet__conv_step
+                    nn__deltanet__step — one step, every head in one launch
+                    nn__kda__step — Kimi Delta Attention's step, GLM 5.3 Flash's linear attention
 turboquant codec    nn__turboquant__decode  nn__turboquant__gemv  nn__turboquant__gemv_int8
+                    nn__turboquant__encode — a rotated row quantised as the codec would
 hadamard            nn__hadamard__rotate
+                    nn__hadamard__blocks — the rotation a head at a time
 experts, weights    nn__expert__layer  nn__expert__reserve  nn__expert__assign  nn__expert__revoke
                     nn__expert__handed  nn__expert__plane
+the expert loader   nn__expert__request  nn__expert__prefetch — a node array of experts asked for, for a pick or
+                    for a prediction, the missing ones read by the loader threads
+                    nn__expert__settle — a layer's reads waited for and admitted
+                    nn__expert__misses — the loader's counts
+a card's tier       nn__expert_tier__note — a prompt chunk's picks the tier takes, marked for the CPUs to skip
+                    nn__expert_tier__duplex — whether a copy each way runs at once at full speed
+                    nn__expert_tier__written — the CPUs done with a layer: an exclusive tier's writes to RAM go
+                    nn__expert__lend  nn__expert__lent — slots lent to a collection from the attention caches'
+                    rows a conversation has not reached, and how many are live
 routing             nn__vector__top_k
+                    nn__vector__top_k_biased — chosen by σ + bias, weighed by σ alone (GLM 5.3)
+sampling            nn__vector__penalize  nn__vector__draw — the repetition penalty in place, and one draw
+                    from top_k's weights after the top-p cut
+tensor parallel     nn__partials__join  nn__partials__reduce — a group's partial sums added up a tree onto
+                    rank 0, and the sum sent back down it
 reading values      nn__argmax__find  nn__vector__at  nn__vector__get_values_at  nn__buffer__read
 the cartridge       nn__kv__reference
 ```
@@ -105,7 +130,8 @@ A few things worth knowing before reading them:
   `reserve` → `nn.write` → `assign` (`python/nn_load_bundle.py`); `nn__expert__plane` then mints an
   `nn__weights` for a span of that slot, bounds-checked against the slot, and every arithmetic verb takes
   it as it takes a buffer. `nn__vector__range` mints the same kind as a view into a buffer, which is how
-  a program cuts one wide projection into heads. ▶ `src/docs/design/weight_load.md`.
+  a program cuts one wide projection into heads. ▶ `src/docs/design/weight_load.md` (`src/docs/` is in the
+  development repository).
 - **The codec's verbs are rows of their own.** `nn__turboquant__gemv` multiplies by a quantised matrix
   without expanding it; `nn__turboquant__decode` expands it to fp16. `nn__hadamard__rotate` is the
   rotation the Gaussian family depends on, with the sign flip fused in so half a transform cannot be
@@ -118,13 +144,14 @@ A few things worth knowing before reading them:
 - **DeltaNet at one token is one verb, every head in one launch.** `nn__deltanet__step` reads and updates each
   head's fp32 state in place and writes its gated, normed readout. The three verbs it was built from
   (`rank_1_update`, `readout`, `conv_step`) remain, and `conv_step` still runs before it. ▶ `cpu/deltanet__header.cuh`.
-- **Attention is one query at a time.** `nn__rope__angles` writes a position's cos and sin (fp32) on the
+- **A position's attention is one query.** `nn__rope__angles` writes a position's cos and sin (fp32) on the
   card, once for every layer, and `nn__rope__apply` rotates every head by them; `nn__attention__decode` is one query's
   attention over positions `from` to `to` of a `[position][kv_head][head_dim]` cache, grouped-query — so a
   sentence is a range of the one cache and needs no pages of its own. Several ranges — a conversation
   with a sentence evicted from its middle — are one `nn__attention__residual` each (per head the largest
   score, the sum of weights and the unnormalised weighted `v`), folded by `nn__attention__merge` and
-  turned into halves by `nn__attention__finish`: the same softmax as one call over all of them.
+  turned into halves by `nn__attention__finish`: the same softmax as one call over all of them. A prompt's
+  rows through a plain grouped-query attention are one `nn__attention__rows`, the many-row form of these words.
   There is no cache-writer verb: a program points `v_proj`'s output, and RoPE's output for `k`, at the
   cache's row for the position. These shapes are proposals awaiting a ruling. ▶ `cpu/opcodes/attention__abi.cuh`.
 
@@ -170,13 +197,14 @@ of the registers.
 
 **The host compiles the same bodies.** The host family answers `nn`'s arithmetic from libm and is one lane
 of one block, so every body compiles into the program as a plain function and runs as the serial loop it
-is. That is what the on-device check measures a card against (`scripts/src_abi_verbs_on_device.sh`). The
-host family carries no `nn` door table, so an `nn` verb on a worker with no card refuses with
-`NN__PRIMITIVES__FAULT_NO_DEVICE`.
+is. That is what the on-device check measures a card against (`scripts/src_abi_verbs_on_device.sh`, in the
+development repository). The host family carries no `nn` door table, so an `nn` verb on a worker with no card
+refuses with `NN__PRIMITIVES__FAULT_NO_DEVICE`.
 
 ## What `nn` asks of a silicon family
 
-A family answers these, beside its `sys` doors, in `silicon_families/<family>/nn.cuh`:
+A family answers these, beside its `sys` doors, in `silicon_families/<family>/nn.cuh` (`x86_avx2`'s is
+`primitives/nn.cuh`):
 
 ```
 nn__silicon__launch           start a kernel: blocks, lanes, a pointer to each argument and its width
@@ -190,6 +218,8 @@ nn__silicon__lanes_sum        every lane's part added (or the largest); every la
 nn__silicon__lanes_max        call it at the same point, because it waits for all of them
 nn__silicon__lanes_sums       several parts added at once, each as lanes_sum adds it — a GEMM tile's sums
 nn__silicon__half_to_float    a half as the float it is — exact on every family; only the cost differs
+nn__silicon__dot2             two halves by two halves onto a float, c + a.lo·b.lo + a.hi·b.hi
+nn__silicon__gemm_tile        the tile it likes its GEMM in, answered as constants
 ```
 
 Only what differs between silicon crosses: a clamp or a multiply is written once in C. The float-to-half
@@ -205,24 +235,28 @@ it with `SILVANN_NN_ARITHMETIC_FAST=1` in the environment of `scripts/build_sili
 ```
 WIDE      vector_zero  vector_exp  vector_softplus  vector_scale  vector_add  vector_pointwise_mul
           sigmoid  swiglu_combine        item i on lane i of all the blocks, stepping by all of them
+          vector_scale_at                the same, unless the output covers the factor: a program may scale
+                                         a buffer by one of its own elements, so then one lane runs the
+                                         loop, reading the factor first
           matrix_matvec_transposed       a lane owns whole output columns; no combine step
           expert_multiply_fp16           one block per row, lanes along the row, a lane sum per row
           rmsnorm  vector_l2norm  softmax  vector_dot_product  argmax
                                          one block over the vector, the combine step between passes;
                                          argmax keeps the first index of the largest
           rope                           item i is one pair of one head
+          deltanet_rank_1_update         a lane per element of the state, which reads and writes that one
+          deltanet_readout               a lane per output column, summing down the key axis
+          deltanet_conv_step             a lane per channel, which owns its window
+          hadamard_rotate                a lane per output, its row of the Hadamard matrix applied directly;
+                                         rotating in place, one lane runs the butterfly
           turboquant_gemv                one block per row, lanes along it eight bytes at a time, the
                                          width's own loop, x held as halves; codes decoded in registers
           turboquant_decode              item i is one weight
           attention_scores  attention_mix
                                          one block per query head; two launches, so the weights one
                                          writes are there for the other to read
-serial    vector_scale_at                a program may scale a buffer by one of its own elements, and
-                                         spread over lanes one would overwrite the factor first
-          deltanet_rank_1_update  deltanet_readout  deltanet_conv_step
-                                         they carry state forward; thread-per-index would be wrong
-          vector_at                      a value form, one lane
-          matrix_transpose  hadamard_rotate
+serial    vector_at                      a value form, one lane
+          matrix_transpose
 ```
 
 A serial door's width is `1u, 1u` on purpose: widening is a change to the body, made on its own and
@@ -263,12 +297,9 @@ numpy by the oracles in `backstage/test/` — `src_weights_oracle.py`, `src_mlp_
 
 Not built:
 
-- **the router**: top-k and the expert dispatch
-- **the cartridge's KV tiers in use**: the 7B's cache is two plain fp16 planes a layer; admitting a token
-  into the hot tier, sinking it through the quantised tiers and evicting the cold tail are not built
-- **a many-query attention** for a prompt: a prompt is fed a position at a time
-- the expert **eviction policy** and the L2 tier behind the L1 arena
-- the `tq8` tier ruled to replace `tq6`
+- **the cartridge's KV tiers in use**: a model's cache in tiers — the first and the newest positions in fp16,
+  older ones in `tq8` and then `tq4` — is its attention table's (`ai_qwen_3__attention_tiered`), not the
+  cartridge's; evicting the cold tail is not built
 - the conversion from a model's `config.json` to a silvann config
 
 ⚠ The evaluator's runners are real threads, so the pool's list lock and the expert index's single writer
@@ -288,7 +319,7 @@ contracts/               definitions only — nothing in here runs
   macros/                the three lists — language_contract__{kinds,verbs,objects}.cuh
   objects/               one file per subject: constants, layouts and four-letter fault words
                          buffer · cartridge · expert · deltanet · hadamard · turboquant · swiglu ·
-                         primitives · result · package
+                         primitives · result · package · attention · mlp · partials · routed
   abi/
     cpu.cuh                the C interface: nn_abi_read, nn_abi_write — bytes in and out of a buffer
     gpu.cuh                what nn asks of every family, and the door list
@@ -328,6 +359,8 @@ does not have, or tells the story of how the code got this way.
 
 ## Checks
 
+From `backstage/` in the development repository:
+
 ```
 bash scripts/src_selftest.sh               the language and nn's structures, compiled for the host
 bash scripts/src_abi_verbs_on_device.sh    every nn verb on a card against the same body on the host
@@ -337,6 +370,8 @@ python3 scripts/src_claim_gate.py          every claim this tree writes down hol
 ```
 
 ## Where to read next
+
+The design notes are in the development repository's `src/docs/`:
 
 - `src/docs/design/pending/nn_port.md` — what is built, what is open, and why
 - `src/docs/design/activation_buffer_pool.md` — the buffer pool

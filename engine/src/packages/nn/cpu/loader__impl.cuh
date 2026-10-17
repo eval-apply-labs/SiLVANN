@@ -192,6 +192,21 @@ static void nn__loader__zzpackage_stop(void) {
     for (unsigned t = 0u; t < n; ++t) pthread_join(nn__loader__zzprivate_threads[t], 0);
     pthread_mutex_lock(&nn__loader__zzprivate_lock);
     nn__loader__zzprivate_started = 0u;
+    /* ⛔⛔ AND NOTHING OF THIS MACHINE'S IS LEFT FOR THE NEXT. A read or a promotion that landed and was never settled
+     *   stays in the table, and a machine booted after this one in the same process — the text model booted again after a
+     *   picture, a model the card was lent to — has an index whose owner can be the same handle: its first settle admitted
+     *   the old machine's copies into its own tier, experts named resident in slots nothing was copied to, computed from
+     *   whatever the card held there. `MEASURED` 2026-10-17 on the precision: the 35B with an 11 GB tier, booted a second
+     *   time in a process, answered ".\n" over and over (measurements/2026-10-17_v0110rc1_on_precision.md). The table is
+     *   emptied here, and the evacuation channels — pinned memory of the machine that is going — forgotten. */
+    for (unsigned i = 0u; i < NN__EXPERT__FLIGHT_MAX; ++i) nn__loader__zzprivate_reads[i].state = NN__LOADER__FREE;
+    for (unsigned c = 0u; c < NN__EXPERT_TIER__CHANNELS; ++c) {
+        nn__loader__zzprivate_channels[c].host = 0;
+        nn__loader__zzprivate_channels[c].bytes = 0ull;
+        nn__loader__zzprivate_channels[c].held = false;
+        nn__loader__zzprivate_channels[c].pending = 0u;
+    }
+    nn__loader__zzprivate_writes_out = 0ull;
     pthread_mutex_unlock(&nn__loader__zzprivate_lock);
 }
 
@@ -234,7 +249,7 @@ static bool nn__loader__zzprivate_room(uint64_t layer, uint64_t type, const uint
     const uint64_t layers = nn__expert__index_layers();
     uint64_t banded = 0ull;
     for (uint64_t l = 0ull; l < layers; ++l) banded += nn__expert__layer_experts(l, type) != 0ull ? 1ull : 0ull;
-    const uint64_t share = banded == 0ull ? 0ull : nn__expert__type_slots(type) / banded;
+    const uint64_t share = banded == 0ull ? 0ull : nn__expert__type_live(type) / banded;
     if (share != 0ull && nn__expert__layer_resident(layer, type) >= share
      && nn__loader__zzprivate_evict_oldest(layer, type, layer, pinned, npinned, slot, room))
         return true;
@@ -659,7 +674,7 @@ static bool nn__expert_tier__zzprivate_victim(uint64_t owner, uint64_t layer, ui
         banded += nn__expert__layer_experts(l, type) != 0ull ? 1ull : 0ull;
         if (n > held) { held = n; most = l; }
     }
-    const uint64_t share = banded == 0ull ? 0ull : nn__expert__type_slots(type) / banded;
+    const uint64_t share = banded == 0ull ? 0ull : nn__expert__type_live(type) / banded;
     const uint64_t order[2] = { (share != 0ull && nn__expert__layer_resident(layer, type) >= share) ? layer : most, layer };
     for (unsigned k = 0u; k < 2u; ++k) {
         const uint64_t l = order[k];

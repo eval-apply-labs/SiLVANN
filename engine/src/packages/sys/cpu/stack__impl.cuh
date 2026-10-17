@@ -14,7 +14,7 @@
  *   as the densest thing in the ADT — 14 value registers, and 262 s_and_saveexec_b64 plus 351
  *   s_cbranch_execz across its inline copies, because a data-dependent walk compiles as divergent
  *   control flow. Adopting the array here retires that loop from the binding path.
- *   The environment today holds a SysPagedList per symbol (src_old/engine/environment.cuh:245); replacing
+ *   The environment today holds a SysPagedList per symbol; replacing
  *   it is the point of this file, not an incidental difference.
  *
  * WHY THE ELEMENT IS A WHOLE NODE, AND WHY A PACKED ONE WAS REFUSED.

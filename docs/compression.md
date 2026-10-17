@@ -34,7 +34,8 @@ conversation's cache uses the same codec for its older positions — 8 bits, the
 A model's widths are chosen by name when it is packed: the published models put their routed experts at 4 bits
 and the rest at 8 (`D8E4`, the 35B) or at 4 (`D4`, the 27B; `D4E4`, GLM 5.3 Flash) — ▶ the section below for why the
 dense part is the one worth the bits. The embedding and the output
-head are at 8 bits; one-dimensional tensors — norms, biases — are kept at 16.
+head are at 8 bits; one-dimensional tensors — norms, biases — are kept at 16, and so are the router
+(`mlp.gate.weight`), the short convolutions' weights (`conv1d.weight`) and GLM 5.3 Flash's hyper-connection maps.
 
 ## Why the dense part gets more bits than the experts
 

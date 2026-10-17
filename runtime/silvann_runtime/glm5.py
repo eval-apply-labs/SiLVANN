@@ -37,7 +37,7 @@ import numpy as np
 
 from . import experts_file, expert_tier, sampling
 from .vision import video_ram
-from .generate import Generates
+from .generate import GENERATE_MOST, Generates
 from .model_folder import NL, Refused
 
 ARCHITECTURES = ("glm5_next_text",)
@@ -56,7 +56,7 @@ class Glm5(Generates):
     def __init__(self, folder, machine, max_context=2048, layers=None, grid=True, fused=True, sockets=None, experts_int8=True,
                  experts_from="auto", experts_dir=None, chunk=256, experts_ram_gb=None, card_experts_gb=0, card_hot=None,
                  card_landing=1, card_line=None, card_exclusive=False, card_free=16, card_duplex_line=1200, card_duplex=None, card_landing_line=3,
-                 picture_pixels=1 << 22,
+                 lend_cache=True, picture_pixels=1 << 22,
                  ):
         if folder.architecture not in ARCHITECTURES:
             raise Refused("%s is a %r model, not one of %s" % (folder.path, folder.architecture, ARCHITECTURES))
@@ -123,6 +123,10 @@ class Glm5(Generates):
         self.CARD_EXCLUSIVE, self.CARD_FREE = bool(card_exclusive), int(card_free)
         self.CARD_DUPLEX_LINE, self.CARD_DUPLEX = int(card_duplex_line), card_duplex
         self.CARD_LANDING_LINE = int(card_landing_line)    # ▶ `expert_tier.tier`: above this many hits a visit lands one
+        # ⭐ THE LATENT CACHE'S ROWS NO CONVERSATION HAS REACHED, LENT TO AN INCLUSIVE TIER (NN-93) — ▶ `_lend`. An exclusive
+        #   tier is lent none: what it gives back is RAM, sized at boot, and an expert withheld from it would have no RAM
+        #   slot to go to. `lend_cache` false keeps the tier to its own run
+        self.LEND_ON = bool(lend_cache)
         if self.CARD_EXCLUSIVE and not self.CARD_GB:
             raise Refused("an exclusive tier needs a card tier — card_experts_gb")
         if self.CARD_GB and not fused:
@@ -255,6 +259,7 @@ class Glm5(Generates):
             self.CPLAN = NL.SlotPlan(2 * self.MINTER * g.row_bytes, 2 * self.MINTER * 2, dn.rows * dn.row_bytes, dn.rows * 2)
             self.T_CEXP = self.T_KV + 1
             self.CARD_SLOTS = int(self.CARD_GB * (1 << 30)) // self.CPLAN.slot_bytes
+            self.TIER_LEAST = len(moe) * self.CPLAN.slot_bytes             # the least tier it takes: a slot a MoE layer
             if self.CARD_SLOTS < len(moe):
                 raise Refused("%.1f GB holds %d experts, fewer than one a MoE layer" % (self.CARD_GB, self.CARD_SLOTS))
             self.collections.append((self.T_CEXP, self.CPLAN, self.CARD_SLOTS))
@@ -267,6 +272,13 @@ class Glm5(Generates):
             self.GATE_ROW, self.DOWN_ROW = g.row_bytes, dn.row_bytes
             if self.EPLAN.at_up_data != 0 or self.CPLAN.at_up_data != 0:
                 raise Refused("a slot's gate-and-up codes are expected at its start")
+        # ⭐ WHAT THE TIER MAY BE LENT (NN-93): each MLA layer's latents past those a conversation has written, a region a
+        #   layer, `most` slots deep at the most
+        self.LEND = None
+        if self.CPLAN is not None and not self.CARD_EXCLUSIVE and self.LEND_ON:
+            attn, most = sum(1 for l in run if self.kinds[l] == "f"), self.C_BYTES // self.CPLAN.slot_bytes
+            if attn and most:
+                self.LEND = dict(row=self.LAT * 2, regions=attn, most=most)
         self.SRC = {}                  # (layer, part) -> every expert's address in that socket's memory, as loaded
 
     @staticmethod
@@ -313,6 +325,8 @@ class Glm5(Generates):
             self.WORK, works, bigs = max(self.WORK, self.KRSCRATCH), 2, bigs + 1
         card = self._section(big, self.arena, self.collections, kinds, bigs=bigs, mains=2 + (4 + len(self.CPUS) if self.CH else 0),
                              work=self.WORK, works=works)
+        if self.LEND:                                  # the links for the slots the tier may be lent (▶ nn's `__lendable`)
+            card += "nn__expert__type%d__lendable:%d\n" % (self.T_CEXP, self.LEND["regions"] * self.LEND["most"])
         # the embedding table's RAM class — ⛳ with the other two RAM classes, which nn takes all or none of
         card += ("nn__ram_buffer_result__size_bytes:64\nnn__ram_buffer_result__qty:1\n"
                  "nn__ram_buffer_experts__size_bytes:64\nnn__ram_buffer_experts__qty:1\n"
@@ -388,6 +402,8 @@ class Glm5(Generates):
                 self._cpu_buffers(i)
         m.act_as(CARD)
         self._tables()
+        if self.CPLAN is not None:
+            self._lend()
         if self.VIS:
             self._vision_tables()
         if self.SOURCE:
@@ -440,6 +456,60 @@ class Glm5(Generates):
             m.must("(begin %s (< 0 1))" % " ".join("(sys__node_array__set %s %d %d)" % (name, i, v)
                                                      for i, v in enumerate(values[at:at + 100], at)),
                    "the array %s" % name, "sys__value_true")
+
+    # ── the latent cache's unreached rows lent to the tier (NN-93) ─────────────────────────────────────────────
+    # ⚖ 2026-10-17: *"progressively shrink the l1 cache as the context grows, maybe in chunks of 8k tokens... this way we
+    # dont need the users to set a max tokens or to size the l1 cache at all"*. An MLA layer's latents are the context's
+    # whole length and position p's row is written at p (▶ `layer`, the rows' `at`), read only below the conversation's
+    # count, so the rows past them are memory nothing reads. The tier holds experts there — slots numbered from each
+    # region's end — and gives back LEND_CHUNK rows' worth before a conversation reaches them: `_room` before every write,
+    # and when a conversation comes onto the card (`reset`, `state_write`) the slots its length leaves are lent again.
+    # ▶ qwen3_5's, the same over its warm ring.
+    LEND_CHUNK = 8192
+
+    def _lend(self):
+        """The tier lent every MLA layer's latents' tail — the regions' ends on the slots' alignment, each `depth` slots
+        deep — then all of them live, the cache holding nothing yet."""
+        L, b = self.LEND, self.CPLAN.slot_bytes
+        if L is None:
+            return
+        starts = [self.state_at[l] + self.KVPLAN.at_up_data for l in self.run_layers if self.kinds[l] == "f"]
+        ends = [(s + self.C_BYTES) // 4096 * 4096 for s in starts]
+        depth = min((e - (s + 4095) // 4096 * 4096) // b for s, e in zip(starts, ends))
+        if depth <= 0:
+            self.LEND = None
+            return
+        self.m.act_as(CARD)
+        self._int_array("lend_ends", ends)
+        self.m.must("(nn__expert__lend %d %d lend_ends)" % (self.T_CEXP, depth), "the cache's rows lent to the tier")
+        L.update(starts=starts, ends=ends, depth=depth, live=0, until=-1)
+        self.LENT_GB = depth * len(ends) * b / 2 ** 30
+        self._room(0, exact=True)
+
+    def _room(self, n, exact=False):
+        """The cache's first `n` positions free to be written: the lent slots in their rows withheld — the rows rounded up
+        to LEND_CHUNK, so the tier gives way a chunk at a time. `exact`: set for a conversation of `n` positions coming
+        onto the card, the slots past its rows lent again."""
+        L = self.LEND
+        if L is None or (not exact and n <= L["until"]):
+            return
+        rows = -(-max(0, n) // self.LEND_CHUNK) * self.LEND_CHUNK
+        b, need = self.CPLAN.slot_bytes, rows * L["row"]
+        deep = max(0, min(L["depth"], min((e - s - need) // b for s, e in zip(L["starts"], L["ends"]))))
+        live = deep * len(L["ends"])
+        if live != L["live"]:
+            self.m.act_as(CARD)
+            got = self.m.must("(nn__expert__lent %d %d)" % (self.T_CEXP, live), "the tier's lent slots")
+            if got != live:
+                raise Refused("the tier holds %d lent slots, not %d" % (got, live))
+            L["live"] = live
+        free = min(e - deep * b - s for s, e in zip(L["starts"], L["ends"]))
+        L["until"] = min(self.max_context, free // L["row"])
+
+    def lent(self):
+        """The cache's rows lent to the tier now: (slots live, GB), or None where the tier is lent none."""
+        L = self.LEND
+        return None if L is None else (L["live"], L["live"] * self.CPLAN.slot_bytes / 2 ** 30)
 
     def _card_experts(self, loader):
         """The card's tier, stood at boot: each MoE layer's band of every expert — and, given a router log, its most picked
@@ -1036,6 +1106,7 @@ class Glm5(Generates):
                 zeros += ["(nn__vector__zero %s %d)" % (self.state(l, "S"), self.S_BYTES // 2),
                           "(nn__vector__zero %s %d)" % (self.state(l, "W"), self.W_BYTES // 2)]
         self.m.must("(begin %s (type streams))" % " ".join(zeros), "the reset")
+        self._room(0, exact=True)                       # a conversation from nothing: every lent slot the tier's again
 
     def layer(self, l, pos):
         """One layer at one position, the streams in and out on the card."""
@@ -1053,6 +1124,7 @@ class Glm5(Generates):
         — or the logits left for a sampler on the host (answers None)."""
         if pos >= self.max_context:
             raise Refused("position %d is past the context of %d" % (pos, self.max_context))
+        self._room(pos + 1)
         head = sample or ("(head)" if greedy else "(head_logits)")
         if self.FUSED or self.GRID:
             value = self._run("(begin (position %d %d) %s)" % (token, pos, head), "position %d" % pos)
@@ -1063,6 +1135,11 @@ class Glm5(Generates):
             self.layer(l, pos)
         got = m.must(head, "the head at %d" % pos)
         return got if greedy or sample else None
+
+    def generate(self, token, pos, n, stop=(), sampler=None, lag=0):
+        """`Generates.generate`, the cache's rows it may write withheld from the tier first."""
+        self._room(pos + min(n, GENERATE_MOST) + 1)
+        return Generates.generate(self, token, pos, n, stop, sampler, lag)
 
     def _run(self, text, what):
         """A program's answer, run with every block standing: it hands the CPU sockets their experts (`sys__compute`), and
@@ -1287,6 +1364,7 @@ class Glm5(Generates):
         """One position through this stage's layers: the token embedded (the first stage) or the streams that came across
         (`x`, MULT·H halves as bytes) set; then the next token (the last stage) or the streams to hand on."""
         m = self.m
+        self._room(pos + 1)
         if token is not None:
             m.must("(begin (embed %d) (type streams))" % token, "the embedding at %d" % pos)
         else:
@@ -1304,6 +1382,7 @@ class Glm5(Generates):
         n = len(tokens) if tokens is not None else n
         if n > self.CH:
             raise Refused("a chunk is at most %d rows, not %d" % (self.CH, n))
+        self._room(first + n)
         if tokens is not None:
             if self.SOURCE:
                 self._prompt(tokens)
@@ -1366,15 +1445,25 @@ class Glm5(Generates):
     def lora_identity(self):
         return None
 
+    def state_write(self, length, blobs):
+        """A conversation's state, as `state_regions` lays it out, written back — its rows withheld from the tier first."""
+        self._room(length, exact=True)
+        for (at, _), blob in zip([r for r in self.state_regions(length) if r[1]], blobs):
+            self.m.write(at, blob)
+
     def state_regions(self, length, where=None):
         """(address, bytes) of everything a conversation of `length` positions has written: each KDA layer's state
-        and window whole, each MLA layer's latents `0..length`. `where`: each layer's state's address — the load's by
-        default; a table of zeros answers the sizes before the boot."""
-        out = []
+        and window whole, each MLA layer's latents `0..length` — and then each MLA layer's indexer caches, the ring of keys
+        and gates and the pooled keys to its last pool, which choose what a position past `index_topk` attends. They come
+        last, so a conversation saved without them still finds its latents and states where they were. `where`: each
+        layer's state's address — the load's by default; a table of zeros answers the sizes before the boot."""
+        out, index = [], []
         for l in self.run_layers:
             at = (self.state_at if where is None else where)[l]
             if self.kinds[l] == "d":
                 out += [(at + self.SPLAN.at_up_data, self.S_BYTES), (at + self.SPLAN.at_down_data, self.W_BYTES)]
             else:
                 out.append((at + self.KVPLAN.at_up_data, length * self.LAT * 2))
-        return out
+                index += [(at + self.KVPLAN.at_up_data + self.IK_AT, self.IP_AT - self.IK_AT),
+                          (at + self.KVPLAN.at_up_data + self.IP_AT, -(-length // self.KP) * self.ID * 2)]
+        return out + index

@@ -16,6 +16,9 @@
  * note in the header. A config says `anchored:0` to let a collection be evicted; saying nothing, or saying
  * it wrong, anchors. */
 #define NN__EXPERT__KEY_ANCHORED(n) "nn__expert__type" #n "__anchored"
+/* The second optional key: how many slots the collection may be lent past its own run (NN-93) — the free list's links
+ * for them are stood with the rest, as a link a slot is all a lent slot costs the heap. Absent: none. */
+#define NN__EXPERT__KEY_LENDABLE(n) "nn__expert__type" #n "__lendable"
 
 static __device__ inline sys__heap_node nn__expert__zzprivate_arena_row(void) {
     return sys__package__own_row(nn_pkg_id, (uint64_t)NN__HATCH__EXPERT_ARENA);
@@ -157,15 +160,46 @@ static __device__ inline bool nn__expert__type_anchored(uint64_t type) {
     return nn__expert__zzprivate_type_word(type, NN__EXPERT__TYPE_EVICTABLE) == 0ull;
 }
 
+/* ⭐ THE LENT RECORD (NN-93): a collection's node_array of integers — ▶ NN__EXPERT__LENT_* — or 0 where it was lent
+ * none. Borrowed, never got, as the links are. */
+static __device__ inline uint64_t nn__expert__zzprivate_lent(uint64_t type) {
+    const sys__heap_node row = sys__package__own_row(nn_pkg_id, (uint64_t)NN__HATCH__EXPERT_LENT);
+    if (row.dtype != SYS__KIND__OBJECT_REFERENCE || type >= sys__node_array__length(row.args[0])) return 0ull;
+    const sys__heap_node rec = sys__node_array__borrow(row.args[0], type);
+    return rec.dtype == SYS__KIND__OBJECT_REFERENCE ? rec.args[0] : 0ull;
+}
+static __device__ inline uint64_t nn__expert__zzprivate_lent_word(uint64_t record, uint64_t which) {
+    if (record == 0ull || which >= sys__node_array__length(record)) return 0ull;
+    const sys__heap_node n = sys__node_array__borrow(record, which);
+    return n.dtype == SYS__KIND__VALUE_INT ? n.args[0] : 0ull;
+}
+
+/* How many slots a collection holds now: its own run's, and the lent ones that are live. */
+static __device__ inline uint64_t nn__expert__type_live(uint64_t type) {
+    return nn__expert__type_slots(type)
+         + nn__expert__zzprivate_lent_word(nn__expert__zzprivate_lent(type), NN__EXPERT__LENT_LIVE);
+}
+
 /* ⭐⭐ THE ADDRESS, AND IT IS ARITHMETIC: every slot in a collection is one size, so where the i-th one
- * begins follows from the run's base and nothing is stored per slot. */
+ * begins follows from the run's base and nothing is stored per slot — and a lent one from its region's end, the lent
+ * slots numbered from the deepest (▶ NN__EXPERT__LENT_*). A lent slot that is not live has no address. */
 static __device__ inline bool nn__expert__type_slot_at(uint64_t type, uint64_t slot, uint64_t* at) {
     if (at == 0) return false;
     const uint64_t base = nn__expert__type_at(type);
     const uint64_t bytes = nn__expert__type_bytes(type);
     if (base == 0ull || bytes == 0ull) return false;
-    if (slot >= nn__expert__type_slots(type)) return false;
-    *at = base + slot * bytes;                    /* the stand checked this product against the arena */
+    const uint64_t own = nn__expert__type_slots(type);
+    if (slot < own) {
+        *at = base + slot * bytes;                /* the stand checked this product against the arena */
+        return true;
+    }
+    const uint64_t rec = nn__expert__zzprivate_lent(type);
+    const uint64_t regions = nn__expert__zzprivate_lent_word(rec, NN__EXPERT__LENT_REGIONS);
+    const uint64_t k = slot - own;
+    if (regions == 0ull || k >= nn__expert__zzprivate_lent_word(rec, NN__EXPERT__LENT_LIVE)) return false;
+    const uint64_t deep = k / regions;
+    if (deep >= nn__expert__zzprivate_lent_word(rec, NN__EXPERT__LENT_DEPTH)) return false;
+    *at = nn__expert__zzprivate_lent_word(rec, NN__EXPERT__LENT_ENDS + k % regions) - (deep + 1ull) * bytes;   /* `lend` checked it */
     return true;
 }
 
@@ -175,13 +209,28 @@ static __device__ inline bool nn__expert__type_slot_of(uint64_t type, uint64_t a
     if (slot == 0) return false;
     const uint64_t base = nn__expert__type_at(type);
     const uint64_t bytes = nn__expert__type_bytes(type);
-    if (base == 0ull || bytes == 0ull || at < base) return false;
-    const uint64_t past = at - base;
-    if (past % bytes != 0ull) return false;
-    const uint64_t which = past / bytes;
-    if (which >= nn__expert__type_slots(type)) return false;
-    *slot = which;
-    return true;
+    if (base == 0ull || bytes == 0ull) return false;
+    const uint64_t own = nn__expert__type_slots(type);
+    if (at >= base && at - base < own * bytes) {
+        const uint64_t past = at - base;
+        if (past % bytes != 0ull) return false;
+        *slot = past / bytes;
+        return true;
+    }
+    const uint64_t rec = nn__expert__zzprivate_lent(type);
+    const uint64_t regions = nn__expert__zzprivate_lent_word(rec, NN__EXPERT__LENT_REGIONS);
+    const uint64_t depth = nn__expert__zzprivate_lent_word(rec, NN__EXPERT__LENT_DEPTH);
+    const uint64_t live = nn__expert__zzprivate_lent_word(rec, NN__EXPERT__LENT_LIVE);
+    for (uint64_t r = 0ull; r < regions; ++r) {
+        const uint64_t end = nn__expert__zzprivate_lent_word(rec, NN__EXPERT__LENT_ENDS + r);
+        if (at >= end || end - at > depth * bytes) continue;
+        if ((end - at) % bytes != 0ull) return false;
+        const uint64_t k = ((end - at) / bytes - 1ull) * regions + r;
+        if (k >= live) return false;
+        *slot = own + k;
+        return true;
+    }
+    return false;
 }
 
 /* ── ⭐⭐⭐ THE FREE LIST, AND IT COSTS NO MEMORY AT ALL ──────────────────────────────────────────────
@@ -289,6 +338,7 @@ static __device__ inline bool nn__expert__type_give(uint64_t type, uint64_t slot
 static __device__ inline bool nn__expert__zzprivate_type_row(uint64_t up_bytes,
                                                              uint64_t down_bytes,
                                                              uint64_t slots,
+                                                             uint64_t lendable,
                                                              bool evictable,
                                                              uint64_t arena_at,
                                                              uint64_t arena_bytes,
@@ -317,13 +367,15 @@ static __device__ inline bool nn__expert__zzprivate_type_row(uint64_t up_bytes,
      * until every type has been built — so they cannot answer yet.
      * ⛔ EVERY SLOT STARTS FREE, so the list begins at its full length and the head is slot 0. The last
      * slot's link is the sentinel, which is what makes `take` terminate rather than walk off the run. */
-    if (slots > NN__EXPERT__MAX_SLOTS) return false;
-    const uint64_t page_count = (slots + NN__EXPERT__LINKS_PER_PAGE - 1ull) / NN__EXPERT__LINKS_PER_PAGE;
+    /* ⛳ THE LINKS COVER THE SLOTS IT MAY BE LENT TOO (NN-93), unthreaded: a lent slot joins the list when it is lent. */
+    if (slots > NN__EXPERT__MAX_SLOTS || lendable > NN__EXPERT__MAX_SLOTS - slots) return false;
+    const uint64_t linked = slots + lendable;
+    const uint64_t page_count = (linked + NN__EXPERT__LINKS_PER_PAGE - 1ull) / NN__EXPERT__LINKS_PER_PAGE;
     *link_pages = sys__node_array__create(page_count);
     if (*link_pages == 0ull) return false;
     for (uint64_t p = 0ull; p < page_count; ++p) {
         const uint64_t first = p * NN__EXPERT__LINKS_PER_PAGE;
-        const uint64_t count = (slots - first < NN__EXPERT__LINKS_PER_PAGE) ? slots - first : NN__EXPERT__LINKS_PER_PAGE;
+        const uint64_t count = (linked - first < NN__EXPERT__LINKS_PER_PAGE) ? linked - first : NN__EXPERT__LINKS_PER_PAGE;
         const uint64_t page = sys__node_array__create(count);
         if (page == 0ull) return false;
         sys__node_array_walk lw;
@@ -388,12 +440,14 @@ static __device__ inline bool nn__expert__zzpackage_stand_types(void) {
             /* ⛳ THE ONE KEY WHOSE ABSENCE IS NOT A REFUSAL AND NOT A ZERO. A reader that answers false  \
              * cannot say whether the key was missing or malformed, so both land on ANCHORED — which is  \
              * the failure this tier survives. ▶ the header's polarity note. */                          \
-            uint64_t anchored = 1ull;                                                                   \
+            uint64_t anchored = 1ull, lendable = 0ull;                                                  \
             (void)sys__settings__count((const uint8_t*)NN__EXPERT__KEY_ANCHORED(n),                     \
                                        sizeof(NN__EXPERT__KEY_ANCHORED(n)) - 1ull, &anchored);          \
+            (void)sys__settings__count((const uint8_t*)NN__EXPERT__KEY_LENDABLE(n),                     \
+                                       sizeof(NN__EXPERT__KEY_LENDABLE(n)) - 1ull, &lendable);          \
             sys__heap_node one;                                                                         \
             uint64_t pages = 0ull;                                                                      \
-            ok = nn__expert__zzprivate_type_row(up, down, slots, anchored == 0ull,                      \
+            ok = nn__expert__zzprivate_type_row(up, down, slots, lendable, anchored == 0ull,            \
                                                 arena_at, arena_bytes, &walked, &one, &pages)           \
                  && sys__node_array__set(array, (uint64_t)(n), &one);                                   \
             if (pages != 0ull) {                                                                        \
@@ -413,6 +467,12 @@ static __device__ inline bool nn__expert__zzpackage_stand_types(void) {
         ok = sys__package__own_row_set(nn_pkg_id, (uint64_t)NN__HATCH__EXPERT_TYPES, &row);
         row.args[0] = all_links;
         ok = ok && sys__package__own_row_set(nn_pkg_id, (uint64_t)NN__HATCH__EXPERT_LINKS, &row);
+        /* the lent slots' records, one a type, empty until a collection is lent some (NN-93) */
+        const uint64_t lent = sys__node_array__create(types);
+        if (lent == 0ull) ok = false;
+        row.args[0] = lent;
+        ok = ok && sys__package__own_row_set(nn_pkg_id, (uint64_t)NN__HATCH__EXPERT_LENT, &row);
+        if (lent != 0ull) (void)sys__heap_object__release(lent);   /* the row took its own hold */
     }
     /* The row took its own hold. This one is the stand's and goes back either way — on the failing path
      * that is what takes a half-built table apart. */
@@ -833,7 +893,7 @@ static __device__ inline bool nn__expert__qualifies(uint64_t layer, uint64_t typ
         const uint64_t layers = nn__expert__index_layers();
         uint64_t banded = 0ull;
         for (uint64_t l = 0ull; l < layers; ++l) banded += nn__expert__layer_experts(l, type) != 0ull ? 1ull : 0ull;
-        if (banded != 0ull && nn__expert__layer_resident(layer, type) < nn__expert__type_slots(type) / banded) return true;
+        if (banded != 0ull && nn__expert__layer_resident(layer, type) < nn__expert__type_live(type) / banded) return true;
     }
     if (!nn__expert__zzpackage_older(layer, type, expert, &score) || score == 0ull) return false;   /* fewer than three calls */
     if (!nn__expert__oldest(layer, type, &tail)) return false;           /* nothing of this band to give its slot up */
@@ -1199,6 +1259,117 @@ static __device__ __noinline__ void nn__weights__zzpackage_release_internal(sys_
     if (held == 0ull) return;
     sys__heap_node reference = sys__heap_object__reference_to(held);
     sys__stack__transfer(releaser_stack, &reference);
+}
+
+/* ══ ⭐⭐ SLOTS LENT TO A COLLECTION (NN-93) — ▶ `expert__header.cuh` ═══════════════════════════════════════════════ */
+
+/* How many links the collection was stood with: its own slots and those it may be lent. */
+static __device__ inline uint64_t nn__expert__zzprivate_link_capacity(uint64_t type) {
+    const sys__heap_node row = sys__package__own_row(nn_pkg_id, (uint64_t)NN__HATCH__EXPERT_LINKS);
+    if (row.dtype != SYS__KIND__OBJECT_REFERENCE || type >= sys__node_array__length(row.args[0])) return 0ull;
+    const sys__heap_node pages = sys__node_array__borrow(row.args[0], type);
+    if (pages.dtype != SYS__KIND__OBJECT_REFERENCE) return 0ull;
+    const uint64_t n = sys__node_array__length(pages.args[0]);
+    if (n == 0ull) return 0ull;
+    const sys__heap_node last = sys__node_array__borrow(pages.args[0], n - 1ull);
+    if (last.dtype != SYS__KIND__OBJECT_REFERENCE) return 0ull;
+    return (n - 1ull) * NN__EXPERT__LINKS_PER_PAGE + sys__node_array__length(last.args[0]);
+}
+
+static __device__ inline bool nn__expert__zzprivate_lent_set(uint64_t record, uint64_t which, uint64_t value) {
+    sys__heap_node n = sys__heap_node__nothing();
+    n.dtype = SYS__KIND__VALUE_INT; n.num_args = 0u; n.op_code = 0ull; n.args[0] = value;
+    return sys__node_array__set(record, which, &n);
+}
+
+static __device__ inline bool nn__expert__lend(uint64_t type, uint64_t regions, uint64_t depth, const uint64_t* ends) {
+    if (ends == 0 || type >= nn__expert__types() || regions == 0ull || regions > NN__EXPERT__LENT_MAX_REGIONS || depth == 0ull)
+        return false;
+    const uint64_t base = nn__expert__type_at(type), bytes = nn__expert__type_bytes(type), own = nn__expert__type_slots(type);
+    const uint64_t arena = nn__expert__arena_at(), arena_bytes = nn__expert__arena_bytes();
+    if (base == 0ull || bytes == 0ull || arena == 0ull) return false;
+    /* the links: every lent slot needs one, stood with the collection */
+    if (depth > NN__EXPERT__MAX_SLOTS / regions || own + regions * depth > nn__expert__zzprivate_link_capacity(type)) return false;
+    /* a lent collection is lent once: what it holds now is live in it */
+    const uint64_t old = nn__expert__zzprivate_lent(type);
+    if (old != 0ull && nn__expert__zzprivate_lent_word(old, NN__EXPERT__LENT_LIVE) != 0ull) return false;
+    const uint64_t span = depth * bytes;                 /* fits: depth × bytes < the arena, checked below by the subtraction */
+    if (depth > arena_bytes / bytes) return false;
+    for (uint64_t r = 0ull; r < regions; ++r) {
+        const uint64_t end = ends[r];
+        /* inside this worker's arena, on the slots' alignment, outside the collection's own run */
+        if (end % NN__EXPERT__PAGE_ALIGN != 0ull || end <= arena || end - arena > arena_bytes || end - arena < span) return false;
+        const uint64_t start = end - span;
+        if (start < base + own * bytes && end > base) return false;
+        for (uint64_t q = 0ull; q < r; ++q)              /* apart from every other run */
+            if (start < ends[q] && ends[q] - span < end) return false;
+    }
+    const uint64_t record = sys__node_array__create(NN__EXPERT__LENT_ENDS + regions);
+    if (record == 0ull) return false;
+    bool ok = nn__expert__zzprivate_lent_set(record, NN__EXPERT__LENT_REGIONS, regions)
+           && nn__expert__zzprivate_lent_set(record, NN__EXPERT__LENT_DEPTH, depth)
+           && nn__expert__zzprivate_lent_set(record, NN__EXPERT__LENT_LIVE, 0ull);
+    for (uint64_t r = 0ull; ok && r < regions; ++r) ok = nn__expert__zzprivate_lent_set(record, NN__EXPERT__LENT_ENDS + r, ends[r]);
+    const sys__heap_node row = sys__package__own_row(nn_pkg_id, (uint64_t)NN__HATCH__EXPERT_LENT);
+    if (ok && row.dtype == SYS__KIND__OBJECT_REFERENCE) {
+        const sys__heap_node held = sys__heap_object__reference_to(record);
+        ok = sys__node_array__set(row.args[0], type, &held);
+    } else {
+        ok = false;
+    }
+    (void)sys__heap_object__release(record);             /* the table holds it now, or nothing does */
+    return ok;
+}
+
+static __device__ inline bool nn__expert__lent(uint64_t type, uint64_t live) {
+    const uint64_t rec = nn__expert__zzprivate_lent(type);
+    const uint64_t regions = nn__expert__zzprivate_lent_word(rec, NN__EXPERT__LENT_REGIONS);
+    const uint64_t depth = nn__expert__zzprivate_lent_word(rec, NN__EXPERT__LENT_DEPTH);
+    const uint64_t was = nn__expert__zzprivate_lent_word(rec, NN__EXPERT__LENT_LIVE);
+    const uint64_t own = nn__expert__type_slots(type);
+    if (rec == 0ull || regions == 0ull || live > regions * depth) return false;
+    if (live > was) {
+        /* ⛳ LIVE FIRST, THEN GIVEN: `give` asks the slot's address, which a withheld slot does not have */
+        if (!nn__expert__zzprivate_lent_set(rec, NN__EXPERT__LENT_LIVE, live)) return false;
+        for (uint64_t k = was; k < live; ++k)
+            if (!nn__expert__type_give(type, own + k)) return false;
+        return true;
+    }
+    if (live == was) return true;
+    /* ① every copy in flight landed and admitted, so no loader is writing into a slot about to be withheld */
+    const uint64_t layers = nn__expert__index_layers();
+    bool ok = true;
+    for (uint64_t l = 0ull; l < layers; ++l)
+        if (nn__expert__layer_experts(l, type) != 0ull) ok = nn__expert__settle(l, type) && ok;
+    /* ② every expert held in a slot to be withheld evicted — its slot back on the free list, taken off it below */
+    for (uint64_t l = 0ull; l < layers; ++l) {
+        const uint64_t n = nn__expert__layer_experts(l, type);
+        for (uint64_t x = 0ull; x < n; ++x) {
+            sys__heap_node me;
+            uint64_t slot = 0ull;
+            if (!nn__expert__slot(l, type, x, &me) || me.args[NN__EXPERT__SLOT_AT] == 0ull
+             || me.args[NN__EXPERT__SLOT_TYPE] != type) continue;
+            if (!nn__expert__type_slot_of(type, me.args[NN__EXPERT__SLOT_AT], &slot) || slot < own + live) continue;
+            ok = nn__expert__evict(l, type, x) && ok;
+        }
+    }
+    /* ③ the withheld slots off the free list, the rest of it in its order */
+    uint64_t prev = NN__EXPERT__TYPE_FREE_NONE, cur = nn__expert__type_free(type);
+    while (cur != NN__EXPERT__TYPE_FREE_NONE) {
+        const uint64_t s = cur - 1ull;
+        uint64_t next = NN__EXPERT__TYPE_FREE_NONE;
+        if (!nn__expert__zzprivate_link_get(type, s, &next)) return false;
+        if (s >= own + live) {
+            const bool cut = prev == NN__EXPERT__TYPE_FREE_NONE
+                ? nn__expert__zzprivate_type_word_set(type, NN__EXPERT__TYPE_FREE, next)
+                : nn__expert__zzprivate_link_set(type, prev - 1ull, next);
+            if (!cut) return false;
+        } else {
+            prev = cur;
+        }
+        cur = next;
+    }
+    return nn__expert__zzprivate_lent_set(rec, NN__EXPERT__LENT_LIVE, live) && ok;
 }
 
 #endif /* SILVANN__PACKAGES_NN_CPU_EXPERT__IMPL_CUH */

@@ -1,6 +1,6 @@
 # Running SiLVANN
 
-This is a **developer preview (v0.7.0)**. It is tested on Linux with AMD Instinct MI50 cards (gfx906, ROCm 6), with an
+This is a **developer preview (v0.11.0)**. It is tested on Linux with AMD Instinct MI50 cards (gfx906, ROCm 6), with an
 NVIDIA GeForce RTX 5060 Ti (sm_120, CUDA 12.9), and on the CPU alone with AVX2 and with AVX-512 — on Ubuntu 22.04. On a
 Windows PC, run the Docker image or boot Linux from a USB SSD (below); Windows itself and other NVIDIA generations are
 untested, Apple silicon is not supported yet. If something does not build or does not run on your
@@ -17,7 +17,15 @@ curl -fsSL https://raw.githubusercontent.com/eval-apply-labs/SiLVANN/HEAD/instal
 It fetches the release into `./silvann`, makes its Python environment, finds the card and its compiler, builds the
 engine and the families this machine needs (the whole build's output in `silvann/build.log`), and puts a `silvann`
 command in `~/.local/bin`: `silvann list`, `silvann download <model>`, `silvann serve <model>`, `silvann ui`, and
-`silvann update` for the next release (stop the server first). It installs nothing system-wide and asks for no
+`silvann update` for the next release (stop the server first); `silvann help` lists the rest.
+
+`silvann models <folder>` keeps what SiLVANN keeps for you in that folder from then on: SiLVANN on a USB drive, say, with
+its models on the machine's own disk. That is the models (`models/`), the conversations (`user_sessions/`), and beside
+them your skills (`skills/`), the tool's workspace, the folders it was allowed and the definitions it kept
+(`workspace/`, `tools.json`, `tools_library.json`), the Hugging Face token (`.huggingface_token`) and the UI's last start
+(`ui_last_start.json`). What the old folder holds stays there; the command names what to move across. The `silvann`
+command's `serve`, `ui` and `download` read the folder; the server and the UI started by hand read `SILVANN_DATA`, which
+also comes before it. It installs nothing system-wide and asks for no
 password: a tool it needs and does not find — Python's `venv`, `g++`, `git` — it names, with the `apt` line that installs
 it. A card whose compiler is missing (CUDA's `nvcc`, ROCm's `hipcc`) is named too; install it, then `silvann build`.
 
@@ -34,7 +42,7 @@ SILVANN_PYTHON=venv/bin/python ./build.sh
 family whose toolchain is missing is skipped and named. `SILVANN_HIP_ARCHES=gfx906` builds for one AMD card
 generation only, which is much faster than building for every one, and `SILVANN_CUDA_ARCHES=120` the same for NVIDIA
 (the number is the card's compute capability: 120 for the RTX 50 series, 89 for the 40, 86 for the 30). A card is given
-to the family that includes it when the server starts — nothing in a model's config names the card.
+to the family that includes it when the server starts; a model's config only picks which card (`card`, in [`config.md`](config.md)).
 
 ### On Windows: the Docker image
 
@@ -43,13 +51,14 @@ environment and its build for an NVIDIA card or the CPU, and Docker Desktop runs
 models are downloaded from the UI into the image's volume. [`docker/README.md`](../docker/README.md) has the steps and
 the scripts: `silvann_install`, `silvann_start`, `silvann_stop`, and `silvann_export` / `silvann_import` to carry it,
 models and all, to another drive or PC. It has been run on Linux (Docker, an RTX 5060 Ti: the 27B and the 35B against
-Hugging Face as outside it, at the same speed) and not yet on Windows.
+Hugging Face as outside it, at the same speed) and on two Windows PCs with NVIDIA cards: on Windows 11 well; on
+Windows 10 the card's shared memory misled the setup's choice of where the experts go — name it, as below.
 
 **A model larger than the card, on Windows.** NVIDIA's Windows driver lets a program use more memory than the card has,
 the rest in the PC's RAM ("shared GPU memory" in Task Manager), so a model too large for the card starts on it all the
 same and then reads that rest over PCIe at every token. On one PC (an RTX 4060 Ti 16 GB) the Qwen 3.6 35B-A3B `D8E4`
-started with all its experts on the card, 4 GB of them in shared memory, and answered at 6 tokens a second. Until the
-setup checks for this, name the placement in the model's config (the Options view): the experts on the CPU, and a tier
+started with all its experts on the card, 4 GB of them in shared memory, and answered at 6 tokens a second. The CUDA family now
+refuses an allocation past the card's free memory, which has not been checked on Windows yet; until it is, name the placement in the model's config (the Options view): the experts on the CPU, and a tier
 of them on the card that leaves Task Manager's shared GPU memory near 0 —
 `"options": {"kv": "tiered", "tiers": [256, 4096, "rest"], "experts_on": "cpu", "experts_from": "ram",
 "card_experts_gb": 6}` answered at 16 tokens a second there. The driver's "CUDA - Sysmem Fallback Policy" set to
@@ -86,7 +95,9 @@ venv/bin/python silvann_core.py download-model silvann_tq_D8E4_qwen3.6_35b_a3b
 ```
 
 A model lands in `models/<name>/` with a `configs/default.json` and its program in `lisp/` — the Lisp the evaluator
-runs it with, yours to read and change. The server refuses a model that is not there and tells you this command.
+runs it with, yours to read and change. `silvann download <model>` on a model that is there fetches its pack's `lisp/`
+afresh, whole — the program its pack carries now, over any change of yours. A server started on a model that is not there asks, on a terminal, whether to
+download it; started without one (a service, the UI), it refuses and names this command.
 
 The UI's Options download a model too, with its progress. Hugging Face serves a client that is not signed in more slowly:
 a token with read access (huggingface.co/settings/tokens) saved with `venv/bin/python silvann_core.py hf-token --set`
@@ -108,10 +119,12 @@ ask stops the answer at a prompt — `y` allows it once, `f` the folder (a read)
 conversation: `/new`, `/sys <prompt>` (a new conversation with it), `/mode ask|chill|full-auto`, `/quit`; Ctrl-C stops
 an answer. `--endpoint` names another server (`http://localhost:8765` by default).
 
-**In the browser**, a model with no conversation saved opens one as its server starts, and a message typed brings the
+**In the browser** ([`ui.md`](ui.md) goes through the UI, view by view; it is the first document in its Help), a model
+with no conversation saved opens one as its server starts, and a message typed brings the
 open conversation online, as **Activate** does. While the model thinks the answer says "thinking…"; **show thinking**
 shows the thought itself, in a section of its own. A run of the model's tool calls is a section, "tool · 3 calls", closed
-until you open it.
+until you open it. The top bar shows how full the conversation is: its tokens of the most the model takes (its
+`max_context`), as "4,210 / 32,768" beside a bar that turns amber at three quarters and red at nine tenths.
 
 **Pictures** (the Qwen models): the UI's 📎 button attaches one to the next message — it is read when it is attached,
 and the message carries it; the server reads one at `POST /cartridges/<id>/images` and a message names it in `images`.
@@ -141,11 +154,12 @@ into the message before what you type, as `<file name="…">…</file>` — cut,
 context still holds. The server takes them at the same `POST /cartridges/<id>/images` (it answers `kind: "document"`),
 and `/health` says `files`.
 
-The UI is a web page on port 8090 that talks to the server on port 8765; it can also start a server itself (Options). Conversations are saved under `user_sessions/` and
+The UI is a web page on port 8090 (`silvann ui`; `silvann_ui.py` alone takes 8080 unless `--port` says) that talks to the server on port 8765; it can also start a server itself (Options). Conversations are saved under `user_sessions/` and
 can be exported and imported. One conversation runs at a time; a second request while one is running is
 answered `503` with `Retry-After: 5`, and the UI retries. The card holds one conversation's cache: when another takes
 the card, the one on it is kept in RAM — or, when RAM has no room for two conversations at the full context beside 500
-MB, put away to its folder, as one left idle for two minutes is, and **Activate** brings it back.
+MB, put away to its folder, as one is when the UI or client that opened it has been gone for two minutes, and
+**Activate** brings it back.
 
 On a machine with no card the model runs on the CPU's own cores (the `x86_avx2` family, which needs AVX2, FMA and F16C:
 Intel from Haswell, 2013, AMD from Excavator, 2015; an older processor has no family to run on). The pack made for
@@ -162,7 +176,8 @@ and reads each value back before it writes on. The commands list folders, read f
 command and read a web page: `(ls "notes")`, `(read "notes/a.md" 140 20)`, `(write "out.txt" "…")`,
 `(bash "git log -3")` (in the working folder, stopped after 60 seconds or `(bash "…" 300)`), `(fetch "https://…")` (the
 page's words, without its markup), `(cd "…")`, `(pwd)`; and Lisp to put them together — `define`, `let`, `lambda`,
-`map`, `filter`, text and lists. The UI shows a run of calls as one section, which opens to:
+`map`, `filter`, text and lists. The names other Lisps and Python give these are the same commands, asked the same
+way: `read-file`, `slurp-file`, `read-all`, `cat` and `slurp` are `read`; `system`, `shell` and `sh` are `bash`. The UI shows a run of calls as one section, which opens to:
 ```
 <!tools>
 > (ls "notes")
@@ -174,6 +189,14 @@ page's words, without its markup), `(cd "…")`, `(pwd)`; and Lisp to put them t
 The REPL starts in the workspace folder (`tools_folder`). What its commands may do without asking you is chosen beside
 the tools switch, for that conversation — a new one starts with the config's `tools`. The folders you allowed are
 every conversation's, kept in `tools.json` beside the conversations.
+
+Each conversation's REPL keeps what the model defines — its names, its functions, its working folder — from one call to
+the next and through the conversation, until `(reset)` (or `(exit)`) starts it afresh; a server's restart starts every
+conversation's REPL afresh too. What is outside the REPL stays through a reset: the files, the folders allowed, the
+conversation's mode, and the library — `(keep 'name "what it does")` puts a definition the model made in
+`tools_library.json` beside the conversations, `(library)` lists what is kept, and `(import 'name)` brings one into any
+conversation's REPL, the kept names it uses first; `(forget 'name)` takes one out. It is plain JSON, a definition's
+source as the model wrote it: yours to read, edit or share.
 
 | the UI's setting (`tools`) | reads | writes, commands, web pages |
 |---|---|---|
@@ -187,6 +210,23 @@ model's calls are answered that the tool is off; turned on, only in a conversati
 declared in a conversation's first message. ⚠ The REPL runs as the server's user, with its files and its network: in a
 Docker container, the container's. A command allowed once runs as written — read it before you allow it; "full auto"
 runs every command the model writes.
+
+### A picture from the model's tool
+
+With a picture model downloaded (Qwen-Image 2.1, below), a text model's REPL has `(image "a red apple on a table")`.
+Ask the model for a picture and it calls it. The picture appears in the conversation, and the model says what it
+made.
+
+On one card, the text model is put down while the picture is drawn and brought back after, its conversation where it
+was. A free card can draw instead, with `image_card` in the config. How, and what it costs:
+[`config.md`](config.md#a-picture-from-the-text-model).
+
+### Skills
+
+A skill gives the model's REPL commands of yours, written in Python or as a program: a folder with a `SKILL.md` that
+declares them, in `skills/` beside the conversations (the Docker image's `/data/skills`). The release ships `files`:
+`(find "folder" "pattern")`. `(skills)` lists them. **How to write one, step by step, and how values cross between Lisp
+and Python: [`tools.md`](tools.md).**
 
 ### A picture model: Qwen-Image 2.1
 
@@ -219,70 +259,10 @@ non-commercial use only.
 ## 4. The model's settings
 
 `models/<name>/configs/default.json` is read when the server starts; another file can be named as the server's
-first argument.
+first argument. The UI's Options edit it, and their **New** starts a file with every key the server reads.
 
-```json
-{
-  "_note": "… every 100 MB of the card's memory holds about 10000 positions of it …",
-  "max_context": 32768,
-  "lora": null,
-  "thinking": true,
-  "sampler": "generation",
-  "options": { ... }
-}
-```
-
-| key | what it sets |
-|---|---|
-| `max_context` | the longest conversation, in positions, 32,768 by default (the 27B's config: `"auto"`); the cache is sized for it at boot, and the `_note` beside it says how many positions 100 MB of the card holds for this model — lower it if the model does not fit on your card, raise it if there is room. `"auto"` (or `"max"`): as many as the card holds beside the model, up to the model's own length (262,144 for the Qwen models and Ministral, 1,048,576 for GLM) — the card's tier of experts then gets only what is left once the context is that whole length |
-| `max_tokens_per_video` | the most tokens a video attached to a message becomes, 8,192 by default: its frames share them, so a longer video is seen as smaller pictures of each frame; more sees it in more detail and takes as many positions of the conversation. Reading a video holds 57-74 KB of RAM a token, depending on the model — its patches twice and its row (0.45 GB at 8,192 for GLM, 0.58 for the 27B) — and the server counts it when it chooses whether the experts fit in RAM |
-| `thinking` | whether the model reasons before it answers, by default |
-| `tools` | `"chill"` (default), `"ask"` or `"full-auto"`: what the model's tool, a Lisp REPL on the server's machine, may do without asking you in a new conversation — the UI chooses a conversation's own (section 3, the model's tool); `"no"`: no conversation has the tool |
-| `tools_folder` | where the model's REPL starts and reads unasked; by default `workspace/` beside the conversations |
-| `lora` | an adapter from the model's folder to load at boot, or `null` |
-| `sampler` | how the next token is chosen: `"generation"` (the model's own `generation_config.json`), `null` (the most likely, greedy), or `{"temperature", "top_k", "top_p", "repetition_penalty"}`. It is drawn on the card — only the token comes back — when `temperature` is above 0 and `top_k` 1 to 64, and on the host over the logits otherwise |
-| `options` | handed to the model's runtime, below |
-
-**What the config leaves out is chosen for the machine** (`runtime/silvann_runtime/autotune.py`). A model whose
-`options` name no placement — `experts_on`, `experts_from`, `card_experts` — has it tried on the card when the server
-starts, fastest first: the experts on the card, if it holds them; else on the CPU — in RAM when they fit in what the
-server may hold with about 3 GB to spare — the server's own 2 GB, what reading a video holds (`max_tokens_per_video`,
-below: 0.45-0.58 GB at its 8,192) and 500 MB more (a container's or a capped service's memory
-limit counts), else read from the disk — and, with them in RAM, the largest tier of the card it boots with beside the
-context's cache, in steps of 256 MB, one step left free. The cache for the whole context comes first: a tier a little
-smaller costs a little speed, a cache too small refuses a conversation. If nothing boots, the context is halved, down
-to 4,096. A trial the card cannot hold is refused at once, so the trials take seconds. The
-server's log says what was chosen and why; the choice is kept in the model's folder, `autotune.json`, and a start on
-the same machine with the same config takes it without trying (delete the file to choose again); a card that holds
-1 GB less than when the choice was made — another program, or another server, held it then — has it chosen again. Two
-servers started on one machine boot one after the other, each trying the card as the other leaves it. What the config names
-of the placement is kept and the rest is chosen around it — `"auto"` names nothing, so `{"experts_on": "cpu",
-"experts_from": "auto"}` has where from and the tier chosen, and `"card_experts": "no"` asks for no tier — and its other
-options are kept in every trial. A machine with no card of its own (the CPU alone, an integrated GPU) is not tried.
-
-The Qwen models' `options`:
-
-| option | values | |
-|---|---|---|
-| `kv` | `"tiered"` (default), `"fp16"` | the conversation's cache: tiered keeps the first 256 and the latest positions in halves and the rest at 8 bits |
-| `tiers` | `[sink, hot, warm]` | the tiers' sizes; `warm` may be `"rest"`. `[256, 4096, "rest"]` is the default; `[256, 4096, N]` puts what is older than `N` at 4 bits, for small cards |
-| `chunk` | positions, 1 to 256, default 256 | how many positions of a prompt go through a layer at once |
-| `experts_on` | `"card"`, `"cpu"` | the routed experts on the card, or on the CPU — the setup for a card too small to hold them; chosen at boot when the config does not say (above) |
-| `experts_from` | `"auto"`, `"ram"`, `"disk"`, `"mapped"` | with the experts on the CPU: copied into RAM, or read from a file on the disk as they are needed — `disk` keeps the ones used in the engine's own memory, as much of it as there is (`experts_ram_gb` to set it), `mapped` leaves that to the system's page cache and is slower; `auto` chooses by the memory there is |
-| `card_experts` | `"yes"` (default), `"no"` | with the experts on the CPU from RAM: the card's own tier of them (the L1), sized at boot to what the card holds beside the context — or none. `card_experts_gb` pins a size instead, in gigabytes, below |
-| `experts_int8` | `false` (default), `true` | with the experts on the CPU: a generated token's experts multiplied in integers, faster on the CPU and slightly less exact — ▶ the quantisation table |
-| `picture_pixels` | pixels, default `4194304` (2048 x 2048) | the largest picture the boot makes room for on the card, about 23 KB of the card's memory a 16 x 16 patch (0.37 GB at the default); a larger picture is made smaller. `0` keeps none and reads pictures on the CPU instead (1.8 GB of RAM, at most a megapixel) — the default on an integrated GPU (OpenCL 1.2), whose pool is refused the 4 MP room |
-| `picture_weights` | `"auto"` (default), `"card"`, `"ram"` | the vision tower's weights, 0.6 GB: on the card, or in RAM and written to the card a block at a time as a picture is read (about 0.1 s more a picture); `auto` puts them on the card when the experts are on the CPU and in RAM otherwise |
-
-GLM 5.3 Flash's `options`:
-
-| option | values | |
-|---|---|---|
-| `experts_from` | `"auto"`, `"ram"`, `"disk"`, `"mapped"` | its routed experts (142 GB) in RAM, or read from a file on the disk as they are needed — `disk` keeps the ones used in the engine's own memory (`experts_ram_gb` to set how much), `mapped` leaves that to the system's page cache; `auto` puts them in RAM when the available memory holds them with about 3 GB to spare (above) — about 145 GB available |
-| `chunk` | positions, default 256 | how many positions of a prompt go through a layer at once; with the experts on the disk, 1024 reads a prompt faster |
-| `sockets` | `1`, `2` | the CPU sockets the experts are split over; by default, all of them |
-| `card_experts` | `"yes"` (default), `"no"` | with the experts in RAM: the card's own tier of experts (the L1), sized at boot — or none; `card_experts_gb` pins a size, in gigabytes, below |
-| `card_exclusive` | `false` (default), `true` | with `experts_from: "ram"`: what the card's tier holds is not also kept in RAM, below |
+**Every key, every model's options, what the config leaves out and how it is chosen for the machine, and tensor
+parallelism: [`config.md`](config.md).**
 
 ### The card's tier of experts
 
@@ -295,6 +275,15 @@ experts too few positions pick stay on the CPU; how many is worked out at boot f
 Give it the card's memory the model's dense part and its cache leave: on our MI50 GLM 5.3 Flash went from 6.8 to 7.5
 tokens a second with a 300,000-position cache and a 6 GB tier in 16 GB, and to 8.1 with 18 GB on a 32 GB card; the
 122B went from 10.9 to 19.9 with 24 GB. [`results.md`](results.md) has every run.
+
+**The context and the tier share the card** (the Qwen MoE models and GLM 5.3 Flash): with `max_context` `"auto"`, every
+model's default, the cache is sized for the model's whole length where the card holds it, and the tier holds experts in the cache's
+rows no conversation has reached yet — on an RTX 5060 Ti 16 GB the 35B-A3B lends its tier 2.4 GB that way at 262,144
+positions, and on a 32 GB MI50 GLM 11 GB at 1,048,576. As a conversation
+grows the tier gives them back 8,192 positions at a time, before the conversation writes there, and a shorter
+conversation or a new one has them lent again: nothing to size, and no context to choose
+([`config.md`](config.md#the-context-and-the-tier-share-the-card)). A config written before v0.11.0 keeps the
+`max_context` it names; set it to `"auto"` in the Options view to have this.
 
 With `card_exclusive: true` (GLM 5.3 Flash, experts in RAM), an expert is on the card or in RAM, never both: the card
 starts with its share of every layer, and each expert it takes in sends one back, written into the RAM the newcomer
@@ -311,7 +300,8 @@ map that file. The
 disk should be an NVMe drive: RAM keeps the experts that are used, and every other one is read from the disk
 when a token picks it, so the disk's speed is the answer's speed. On our test machine GLM 5.3 Flash answered at
 5.7 tokens a second with 128 GB of RAM from a disk that reads 5 GB/s. Keep the disk cool: a hot NVMe drive slows itself down. Every measurement: [`results.md`](results.md). The engine keeps as many experts
-as the memory there is allows — the process's own limit when it has one — less a quarter of it for everything else.
+as the memory there is allows — the process's own limit when it has one — less a quarter of it for everything else,
+at least 3 GB and at most 8 GB.
 
 ## 6. A model over several machines
 

@@ -17,7 +17,7 @@ silicon_families/<family>/
   includes.cuh   which cards it takes — a TARGETS row, and <family>__includes(card)
   sys.cuh        sys's doors: memory, copies, waiting, the side channel, and the devices
   nn.cuh         nn's requests: nn__silicon__launch, nn__silicon__expf / sqrtf / logf / cosf / sinf,
-                 the lanes and blocks, the combine step and half_to_float
+                 the lanes and blocks, the combine step, half_to_float, dot2 and gemm_tile
   <package>.cuh  one per package the family supports: that package's requests
                  (packages/<package>/contracts/abi/gpu.cuh), answered
   manifest.cuh   includes each <package>.cuh above, and nothing else — no one outside the family names them
@@ -42,11 +42,11 @@ of its definitions as `zzabi_` functions (nn's: `nn__turboquant__zzabi_levels`, 
 `v_dot2_f32_f16`, the exact one at 8 bits too, and the rotation as a butterfly through wave shuffles) while its
 primitives still sit at the family's root.
 
-Where nn gives a door a one-row and a many-row form that agree to the bit (`test/src_abi_verbs_on_device.cpp` names
-them), a family that overrides one form with its own arithmetic overrides the other with the same. nn's many-row
-residual doors (`attention_weights_rows`, `attention_residual_mix_rows` and their TurboQuant pair) keep it for
-every family by their definition — the family's own one-row door, a row at a time, through its own table
-(`sys__silicon__own_doors`) — so a family need only override them to run a chunk's rows in one launch.
+Where nn gives a door a one-row and a many-row form that agree to the bit (`test/src_abi_verbs_on_device.cpp`, in the
+development repository, names them), a family that overrides one form with its own arithmetic overrides the other with
+the same. nn's many-row residual doors (`attention_weights_rows`, `attention_residual_mix_rows` and their TurboQuant
+pair) keep it for every family by their definition — the family's own one-row door, a row at a time, through its own
+table (`sys__silicon__own_doors`) — so a family need only override them to run a chunk's rows in one launch.
 
 ⛳ A FAMILY WHOSE BLOCKS ARE THREADS OF THIS PROCESS — the CPU — defines
 `SYS__SILICON_FAMILY__RUNS_ON_HOST_THREADS` in its `unit.cuh`. nn then compiles no kernel: each door packs
@@ -116,6 +116,8 @@ static inline void nn__silicon__launch(const void* kernel, const char* name, uin
 static __device__ inline float nn__silicon__expf(float x);
 static __device__ inline float nn__silicon__sqrtf(float x);
 static __device__ inline float nn__silicon__logf(float x);
+static __device__ inline float nn__silicon__cosf(float x);   /* RoPE's angles */
+static __device__ inline float nn__silicon__sinf(float x);
 static __device__ inline uint32_t nn__silicon__lane(void);   /* which lane of its block a body runs on */
 static __device__ inline uint32_t nn__silicon__lanes(void);  /* how many lanes the block has */
 static __device__ inline uint32_t nn__silicon__block(void);  /* which block, of how many */
@@ -124,6 +126,8 @@ static __device__ inline float nn__silicon__lanes_sum(float part);  /* every lan
 static __device__ inline float nn__silicon__lanes_max(float part);
 static __device__ inline void nn__silicon__lanes_sums(float* parts, uint32_t n);  /* n sums at once, each as lanes_sum */
 static __device__ inline float nn__silicon__half_to_float(uint16_t h);  /* exact: the card's own instruction */
+static __device__ inline float nn__silicon__dot2(uint32_t a, uint32_t b, float c);  /* c + a.lo·b.lo + a.hi·b.hi */
+static __device__ inline nn__gemm__tile nn__silicon__gemm_tile(void);  /* the tile it likes its GEMM in */
 ```
 
 `nn__silicon__launch` starts a kernel on `blocks` of `threads`, with `args` pointing at each of its
@@ -157,10 +161,11 @@ business (`packages/<pkg>/manifest__gpu.cuh`), so a family names no package head
 
 ### 6. The roster
 
-In `roster.cuh`, include the family's `includes.cuh` beside the others and add its row:
+In `roster.cuh`, include the family's `includes.cuh` beside the others and add its row where its number falls —
+here between `amd_rocm6_wave64`'s and `nvidia_cuda12`'s:
 
 ```c
-X(3u, AMD_ROCM7_WAVE64, amd_rocm7_wave64, amd)
+X(250u, AMD_ROCM7_WAVE64, amd_rocm7_wave64, amd)
 ```
 
 The last column is the vendor. **Two families of one vendor are never opened in one process.** A
@@ -182,6 +187,9 @@ driver or the vendor's driver library — never from a vendor runtime. A new ven
 name its cards there, in the same form its TARGETS row uses.
 
 ## Proving it
+
+`src_claim_gate.py` and `build_silicon_families.sh` ship in a release's `engine/scripts/`; the other checks are in the
+development repository:
 
 ```
 python3 scripts/src_claim_gate.py            silicon_seam_conformance checks every door and request

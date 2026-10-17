@@ -81,8 +81,7 @@ static __device__ inline uint64_t nn__turboquant__family(uint64_t rate) {
  * one number, and `zzprivate_row` computes it.
  *
  * ⛔ AND THE READING COST OF THE CHANGE IS REAL: a bundle packed for the previous decoder is not
- * readable here, and `python/compressor.py` is what produces those. Repacking with
- * `python/nn_compressor.py` is the only route in. */
+ * readable here. Repacking with `python/nn_compressor.py` is the only route in. */
 /* ── ⭐ fp16 TO fp32, EXACTLY, IN INTEGERS ───────────────────────────────────────────────────────────
  * Every fp16 is representable in fp32, so this rounds nothing and approximates nothing — it is a
  * rearrangement of bits. ▶ the header on why that keeps it out of the seam.

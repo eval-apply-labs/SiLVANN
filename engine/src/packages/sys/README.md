@@ -38,7 +38,7 @@ the switch over all of them is written once, over `PACKAGE_LIST`, and never edit
 | symbol | a name registered once and numbered once, spelled by an interned string |
 | bindings | what each name means right now, and what it meant before — a stack of meanings per name |
 | procedure | what a name means when it names a function (`defun`) |
-| dictionary | values found by key, in a balanced tree of small sorted leaves (why: `src/docs/design/dictionary.md`) |
+| dictionary | values found by key, in a balanced tree of small sorted leaves (why: `src/docs/design/dictionary.md`, in the development repository) |
 | stack | a chunked last-in-first-out stack |
 | error | what a computation hands back when it went wrong |
 | computing base | the state machine that owns one computation: claimed, started, finished, read |
@@ -52,13 +52,15 @@ a number, tagged like a kind. From Python, `e.verbs()` lists them. ▶
 `contracts/macros/language_contract__verbs.cuh`, `cpu/opcodes/`.
 
 ```
-arithmetic   add sub less eq, and their int__ / float__ forms
-control      if begin prog1
+arithmetic   add sub mul less eq, and their int__ / float__ forms
+control      if begin prog1 while unquote
 names        let defun bindings__set bindings__viewonly add_bindings remove_bindings
 objects      create type clone
-computation  compute result completed
+node arrays  node_array__get node_array__set
+computation  compute result completed worker
 the machine  system_register__get system_register__set package__init
 dictionary   dictionary__put dictionary__get
+files        file__open file__close
 ```
 
 **Nothing is a special form.** A quoted list is a value, so both arms of an `if` sit untouched while its
@@ -144,9 +146,9 @@ sys__stack__zzpackage_construct            package    this package only
 sys__stack__zzprivate_set_current_chunk    private    its own file only
 ```
 
-`zz` sorts after every letter, so a type's public names list first. `scripts/src_c_subset_gate.py` finds
-each marked name's definition and fails on any reach from outside its tier; `test/` is exempt, and the
-gate says so when it applies the exemption.
+`zz` sorts after every letter, so a type's public names list first. `scripts/src_c_subset_gate.py` (in the
+development repository) finds each marked name's definition and fails on any reach from outside its tier;
+`test/` is exempt, and the gate says so when it applies the exemption.
 
 A method a kind takes from the object interface, rather than overriding, ends in `__default` or `__plain`
 — `sys__heap_object__release__default`.
@@ -187,6 +189,8 @@ The clause to re-read whenever a file grows is **what it does not do**: a promis
 absent has nothing that will notice when it stops being true.
 
 ## Checks
+
+From `backstage/` in the development repository:
 
 ```
 bash scripts/src_selftest.sh             the language, compiled for the host and run: ~1,650 checks

@@ -23,4 +23,10 @@ static __device__ __noinline__ void nn__expert_tier__zzabi_adapter_written(sys__
 static sys__heap_node nn__expert_tier__zzabi_apply_duplex(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx);
 static __device__ __noinline__ void nn__expert_tier__zzabi_adapter_duplex(sys__heap_node* base, uint64_t form);
 
+/* Slots lent to a collection, and how many are live (NN-93). ▶ `expert__abi.cuh`. */
+static sys__heap_node nn__expert__zzabi_apply_lend(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx);
+static __device__ __noinline__ void nn__expert__zzabi_adapter_lend(sys__heap_node* base, uint64_t form);
+static sys__heap_node nn__expert__zzabi_apply_lent(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx);
+static __device__ __noinline__ void nn__expert__zzabi_adapter_lent(sys__heap_node* base, uint64_t form);
+
 #endif /* SILVANN__PACKAGES_NN_CPU_OPCODES_EXPERT__ABI__HEADER_CUH */

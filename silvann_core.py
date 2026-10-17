@@ -32,10 +32,11 @@ from silvann_runtime.model_folder import Refused                   # noqa: E402
 DATA = Path(os.environ.get("SILVANN_DATA") or ROOT)
 MODELS = DATA / "models"
 TOKEN_FILE = DATA / ".huggingface_token"
-DEFAULT_CONFIG = {"max_context": 32768, "max_tokens_per_video": 8192, "card": "auto", "lora": None, "thinking": True,
+DEFAULT_CONFIG = {"max_context": "auto", "max_tokens_per_video": 8192, "card": "auto", "vram_margin_mb": 50,
+                  "lora": None, "thinking": True,
                   "sampler": "generation", "options": {},
                   "pipeline_parallelism": "no", "pipeline_parallelism_layers": "", "pipeline_parallelism_next": "192.0.2.2:8766",
-                  "pipeline_parallelism_port": 8766, "tools": "chill"}
+                  "pipeline_parallelism_port": 8766, "tools": "chill", "image_model": "auto", "workers": []}
 TOOLS_NOTE = ("tools gives a conversation a tool: a Lisp REPL on this machine the model opens in its answer, to list "
               "folders, read and write files, run commands and read web pages (it asks with (help) what it can do). "
               "It starts in the workspace folder beside the conversations (tools_folder to name another). tools is "
@@ -70,15 +71,6 @@ TOKENS_PER_100MB = {
     "silvann_tq_D8_ministral_3_14b": 625,
 }
 
-# a model's context unless its config says otherwise, where the release's default does not suit it: Mistral 3's cache
-# is every position in halves, so on a 16 GB card its D4 leaves room for 32k positions and its D8 for 8k
-MAX_CONTEXT = {
-    "silvann_tq_D4_ministral_3_14b": 32768,
-    "silvann_tq_D8_ministral_3_14b": 8192,
-    "silvann_tq_D4_qwen3.8_27b": "auto",           # as long as the card holds, to its 262,144 (⚖ 2026-10-14)
-}
-
-
 def default_config(folder):
     """`configs/default.json` in a model folder, written when it has none."""
     cfg = Path(folder) / "configs" / "default.json"
@@ -88,15 +80,15 @@ def default_config(folder):
     if not cfg.exists():
         # no options: where the experts sit and how much of the card holds them are chosen for the machine at each boot
         # (silvann_runtime/autotune.py), unless the config is edited to name them
+        # ⚖ 2026-10-17 *"ideally auto should always be the default, as it sizes the tokens against the remaining space
+        #   after the model and it sizes the l1 cache against the actual tokens on the moe setups"*
         config = dict(DEFAULT_CONFIG, options={})
-        if Path(folder).name in MAX_CONTEXT:
-            config["max_context"] = MAX_CONTEXT[Path(folder).name]
         per = TOKENS_PER_100MB.get(Path(folder).name)
-        if per:
-            config = {"_note": "max_context is the longest conversation, and its cache is on the card from boot: "
-                               "every 100 MB of the card's memory holds about %d positions of it. Lower it if "
-                               "the model does not fit, raise it if there is room — or \"auto\": as many as the card "
-                               "holds beside the model, up to the model's own length." % per, **config}
+        config = {"_note": "max_context is the longest conversation, and its cache is on the card from boot. \"auto\": "
+                           "as many positions as the card holds beside the model, up to the model's own length, found "
+                           "when the server starts — with the experts on the CPU, their tier on the card holds experts "
+                           "in the rows a conversation has not reached. A number holds the context to it instead%s."
+                           % (": every 100 MB of the card holds about %d positions" % per if per else ""), **config}
         config = {"_note_video": VIDEO_NOTE, "_note_pipeline": PIPELINE_NOTE, "_note_tools": TOOLS_NOTE, **config}
         if not config.get("pipeline_parallelism_layers"):
             try:

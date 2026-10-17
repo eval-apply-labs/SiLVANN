@@ -11,11 +11,9 @@
  *   `packages/manifest__header.cuh` — `sys` and `nn` — and `packages/manifest.cuh` is generated from it.
  *
  * ⭐ THE TRANSLATION UNIT REACHES NOTHING OUTSIDE `src/` BUT THE TOOLCHAIN'S OWN HEADERS. The claim gate's
- *   `src_reaches_only_itself` and `no_borrow_from_src` rules check it (`python3 scripts/src_claim_gate.py`
- *   from `backstage/`). ⛔ AND NOTHING COUPLES THIS TREE TO `src_old/`, SO THE COMPILER IS NOT A GUARD
- *   HERE: an edit made over there reaches nothing in this build. The language this engine runs on is
- *   `packages/sys/`, and that is the folder to open.
- * ⛳ THE DECOUPLING IS CHEAP TO LOSE: one include of the other tree's manifest puts the WHOLE of it — its
+ *   `src_reaches_only_itself` rule checks it (`python3 scripts/src_claim_gate.py` from `backstage/`).
+ *   The language this engine runs on is `packages/sys/`, and that is the folder to open.
+ * ⛳ THE DECOUPLING IS CHEAP TO LOSE: one include of another tree's manifest puts the WHOLE of it — its
  *   router and every package behind it — into this single translation unit, to borrow a handful of names.
  *   ⇒ ★ BORROW A NAME, TAKE A TREE.
  * ⛳ THE `sys__`/`SYS__` PREFIXING STANDS ON ITS OWN ARGUMENT — ⚖ *"sys__ remains for clarity"*: an id

@@ -25,8 +25,9 @@ import pickle
 import numpy as np
 
 from . import experts_file, expert_tier, sampling
+from .autotune import card_memory
 from .vision import video_ram
-from .generate import Generates
+from .generate import GENERATE_MOST, Generates
 from .model_folder import NL, Refused
 
 GU, DN = NL.GATE_UP, NL.DOWN
@@ -39,13 +40,13 @@ def _half(a):
 
 
 class Qwen35(Generates):
-    PROGRAM = ("qwen3_5", "qwen3_5_cpu", "sampling", "generate", "qwen3_5_pictures")   # the model folder's lisp/ files (▶ `ModelFolder.program`)
+    PROGRAM = ("qwen3_5", "qwen3_5_cpu", "sampling", "generate", "qwen3_5_pictures", "qwen3_5_tp")   # the pack's lisp/ files (▶ `ModelFolder.program`)
     SAMPLES_ON_CARD = True          # `head_sample` — ▶ `sampling`
 
     def __init__(self, folder, machine, max_context=4096, fused_moe=True, kv="tiered", tiers=None, experts_on="card",
                  experts_from="auto", experts_dir=None, layers=None, chunk=256, experts_ram_gb=None, card_experts_gb=0,
                  card_landing=1, card_line=None, experts_int8=False, picture_pixels=1 << 22,
-                 picture_weights="auto", tensor_parallel=1):
+                 picture_weights="auto", tensor_parallel=1, lend_cache=True):
         if folder.architecture not in ARCHITECTURES:
             raise Refused("%s is a %r model, not one of %s" % (folder.path, folder.architecture, ARCHITECTURES))
         c, b = folder.config, folder.bundle
@@ -60,6 +61,8 @@ class Qwen35(Generates):
         rope = c.get("rope_parameters") or c.get("rope_scaling") or {}
         self.ROT = int(self.AH * (rope.get("partial_rotary_factor") or c.get("partial_rotary_factor") or 1.0))
         self.GATED = bool(c.get("attn_output_gate", folder.architecture.startswith("qwen3_5")))
+        if kv not in ("tiered", "fp16"):
+            raise Refused("kv is 'tiered' or 'fp16', not %r" % (kv,))
         if not self.GATED and kv != "fp16":
             raise Refused("an attention without an output gate reads its prompt through one cache: kv 'fp16', not %r" % (kv,))
         # M-RoPE: a token's three positions (time, row, column), interleaved by frequency — the row's sections, then the
@@ -115,6 +118,15 @@ class Qwen35(Generates):
             if any(n % P for n in (self.KH, self.VH, self.QH, self.KVH)) or self.INTER % 512 or self.INTER // 512 < P:
                 raise Refused("%d cards do not split %s's heads (%d, %d, %d, %d) and 512-blocks evenly"
                               % (P, folder.path, self.KH, self.VH, self.QH, self.KVH))
+            # ⭐ CARDS OF ONE SIZE (⚖ 2026-10-16: "it should only work when the cards have the same size otherwise it is
+            #   a nightmare"): every card holds the same share, so the group is sized as one card of them
+            sizes = card_memory()
+            if sizes is None or len(sizes) < P:
+                raise Refused("tensor parallelism over %d cards: the cards' memory cannot be read (rocm-smi or "
+                              "nvidia-smi says it)%s" % (P, "" if sizes is None else ": %d cards here" % len(sizes)))
+            if len(set(sizes[:P])) > 1:
+                raise Refused("tensor parallelism takes cards of one size, and these %d are not: %s GB"
+                              % (P, ", ".join("%.1f" % (s / 2 ** 30) for s in sizes[:P])))
             self.KH, self.VH, self.QH, self.KVH = self.KH // P, self.VH // P, self.QH // P, self.KVH // P
             blocks = self.INTER // 512
             each = [blocks // P + (1 if k < blocks % P else 0) for k in range(P)]
@@ -172,6 +184,9 @@ class Qwen35(Generates):
         #   (`card_line` fixes it). ▶ glm5.py's, and nn's `nn__expert_tier__*`
         self.CARD_GB, self.CARD_LANDING = float(card_experts_gb or 0), int(card_landing)
         self.CARD_LINE = int(card_line) if card_line else None
+        # ⭐ THE CACHE'S ROWS NO CONVERSATION HAS REACHED, LENT TO THE TIER (NN-93) — ▶ `_lend`. `lend_cache` false keeps
+        #   the tier to its own run
+        self.LEND_ON = bool(lend_cache)
         # a position's experts on the CPU multiplied in integers (nn's int8 gemvs, as GLM's) rather than exactly — the
         # prompt's rows there are in integers either way. ▶ AI_QWEN_3__EXP__INT8
         self.EXPERTS_INT8 = bool(experts_int8)
@@ -319,9 +334,18 @@ class Qwen35(Generates):
         if self.CARD_GB and self.MOE:
             self.CPLAN, self.T_CEXP = self.EPLAN, after
             self.CARD_SLOTS = int(self.CARD_GB * (1 << 30)) // self.EPLAN.slot_bytes
+            self.TIER_LEAST = len(run) * self.EPLAN.slot_bytes             # the least tier it takes: a slot a layer
             if self.CARD_SLOTS < len(run):
                 raise Refused("%.1f GB holds %d experts, fewer than one a layer" % (self.CARD_GB, self.CARD_SLOTS))
             coll.append((self.T_CEXP, self.CPLAN, self.CARD_SLOTS))
+        # ⭐ WHAT THE TIER MAY BE LENT (NN-93): the tail of each attention layer's warm keys and values — the rows of the
+        #   warm ring past those a conversation has written — `most` slots a region at the most, two regions a layer
+        self.LEND = None
+        if self.CPLAN is not None and self.TIERED and self.CARDS == 1 and self.LEND_ON:
+            row, attn = self.KVH * ((self.AH + 1) // 2 * 2), sum(1 for l in run if self.kinds[l] == "f")
+            most = self.WARM * row // self.CPLAN.slot_bytes
+            if attn and most:
+                self.LEND = dict(row=row, regions=2 * attn, most=most)
         self.collections = coll
         self.arena = sum(p.slot_bytes * n for _, p, n in coll)
 
@@ -351,6 +375,8 @@ class Qwen35(Generates):
             big, tier = max(big, self.KRSCRATCH), 2
         types = "".join("nn__expert__type%d__up_bytes:%d\nnn__expert__type%d__down_bytes:%d\nnn__expert__type%d__slots:%d\n"
                         % (t, p.up_bytes, t, p.down_bytes, t, n) for t, p, n in self.collections)
+        if self.LEND:                                  # the links for the slots the tier may be lent (▶ nn's `__lendable`)
+            types += "nn__expert__type%d__lendable:%d\n" % (self.T_CEXP, self.LEND["regions"] * self.LEND["most"])
         n_d = sum(1 for k in self.kinds.values() if k == "d")
         # ⛳ four mid-size buffers: a wide model's chunk of rows (the 27B's `xs` and `h1s` at 256 rows, 2.6 MB each) lands here
         card = ("nn__buffer_resid__size_bytes:2097152\nnn__buffer_resid__qty:8\n"
@@ -449,6 +475,7 @@ class Qwen35(Generates):
             self._cpu_experts(progress)
         if self.CPLAN is not None:
             self._tier_tables()
+            self._lend()
         self._bindings()
         if self.VIS:
             self._vision_bindings()
@@ -1047,6 +1074,70 @@ class Qwen35(Generates):
                          {l: "src%d" % l for l in self.run_layers if l in self.SRC}, landing=self.CARD_LANDING)
         expert_tier.bind(m, {CARD: "tier_card"}, len(self.workers()))
 
+    # ── the cache's unreached rows lent to the tier (NN-93) ──────────────────────────────────────────────────────
+    # ⚖ 2026-10-17: *"progressively shrink the l1 cache as the context grows, maybe in chunks of 8k tokens... this way we
+    # dont need the users to set a max tokens or to size the l1 cache at all"* · *"it is the experts on vram"*. The warm
+    # ring is the context's whole length and a conversation writes its rows from the first (▶ ai_qwen_3's
+    # `attention_tiered`: position p's row is p - SINK - HOT, read only below the conversation's count), so the rows past
+    # them are memory nothing reads. The tier holds experts there — slots numbered from each region's end — and gives
+    # back LEND_CHUNK rows' worth before a conversation reaches them: `_room` before every write, and when a
+    # conversation comes onto the card (`reset`, `state_write`) the slots its length leaves are lent again.
+    LEND_CHUNK = 8192
+
+    def _lend(self):
+        """The tier lent every attention layer's warm keys' and values' tail — the regions' ends on the slots' alignment,
+        each `depth` slots deep — then all of them live, the cache holding nothing yet."""
+        L, b = self.LEND, self.CPLAN.slot_bytes
+        if L is None:
+            return
+        starts, ends = [], []
+        for l in self.run_layers:
+            if self.kinds[l] != "f":
+                continue
+            for half in (self.KVPLAN.at_up_data, self.KVPLAN.at_down_data):
+                start = self.state_at[l] + half + self.TIER["warm_c"][0]
+                starts.append(start)
+                ends.append((start + self.WARM * L["row"]) // 4096 * 4096)
+        depth = min((e - (s + 4095) // 4096 * 4096) // b for s, e in zip(starts, ends))
+        if depth <= 0:
+            self.LEND = None
+            return
+        was = self.m.worker
+        self.m.act_as(CARD)
+        self._int_array("lend_ends", ends)
+        self.m.must("(nn__expert__lend %d %d lend_ends)" % (self.T_CEXP, depth), "the cache's rows lent to the tier")
+        self.m.act_as(was)
+        L.update(starts=starts, ends=ends, depth=depth, live=0, until=-1)
+        self.LENT_GB = depth * len(ends) * b / 2 ** 30
+        self._room(0, exact=True)
+
+    def _room(self, n, exact=False):
+        """The cache's first `n` positions free to be written: the lent slots in their rows withheld — the rows rounded up
+        to LEND_CHUNK, so the tier gives way a chunk at a time. `exact`: set for a conversation of `n` positions coming
+        onto the card, the slots past its rows lent again."""
+        L = self.LEND
+        if L is None or (not exact and n <= L["until"]):
+            return
+        rows = -(-max(0, n - self.SINK - self.HOT) // self.LEND_CHUNK) * self.LEND_CHUNK
+        b, need = self.CPLAN.slot_bytes, rows * L["row"]
+        deep = max(0, min(L["depth"], min((e - s - need) // b for s, e in zip(L["starts"], L["ends"]))))
+        live = deep * len(L["ends"])
+        if live != L["live"]:
+            was = self.m.worker
+            self.m.act_as(CARD)
+            got = self.m.must("(nn__expert__lent %d %d)" % (self.T_CEXP, live), "the tier's lent slots")
+            self.m.act_as(was)
+            if got != live:
+                raise Refused("the tier holds %d lent slots, not %d" % (got, live))
+            L["live"] = live
+        free = min(e - deep * b - s for s, e in zip(L["starts"], L["ends"]))
+        L["until"] = min(self.max_context, self.SINK + self.HOT + free // L["row"])
+
+    def lent(self):
+        """The cache's rows lent to the tier now: (slots live, GB), or None where the tier is lent none."""
+        L = self.LEND
+        return None if L is None else (L["live"], L["live"] * self.CPLAN.slot_bytes / 2 ** 30)
+
     def _int_array(self, name, values):
         """A node array of integers, bound by name — filled a hundred at a time, as a program must fit one heap chunk."""
         m = self.m
@@ -1143,6 +1234,7 @@ class Qwen35(Generates):
         if self.CARDS > 1:
             self.m.act_as(-1)
         self.m.must("(begin %s (type x))" % " ".join(zeros), "the reset")
+        self._room(0, exact=True)                       # a conversation from nothing: every lent slot the tier's again
 
     def _one_card(self, what):
         """⛳ What a tensor-parallel group does not do yet: refused rather than done on card 0's part alone."""
@@ -1160,9 +1252,15 @@ class Qwen35(Generates):
         self._needs_head()
         if pos >= self.max_context:
             raise Refused("position %d is past the context of %d" % (pos, self.max_context))
+        self._room(pos + 1)
         head = sample or ("(head)" if greedy else "(head_logits)")
         self._lag = lag                                    # what `generate` finds set (▶ generate.py)
         return self._run("(begin (set! LAG %d) (position %d %d) %s)" % (lag, token, pos, head), "position %d" % pos)
+
+    def generate(self, token, pos, n, stop=(), sampler=None, lag=0):
+        """`Generates.generate`, the cache's rows it may write withheld from the tier first."""
+        self._room(pos + min(n, GENERATE_MOST) + 1)
+        return Generates.generate(self, token, pos, n, stop, sampler, lag)
 
     # ── pictures: the tower's rows in place of their pads, and M-RoPE's positions ─────────────────────────────
     def vision(self):
@@ -1174,7 +1272,7 @@ class Qwen35(Generates):
             # ⛳ the program travels with the model (lisp/): a folder fetched before pictures has no qwen3_5_pictures.lisp
             if not self.PICTURES:
                 raise Refused("%s has no lisp/qwen3_5_pictures.lisp — the program's pictures, which a folder fetched before "
-                              "v0.7.0 lacks: `silvann download <model>` fetches it, and only it" % self.folder.path)
+                              "v0.7.0 lacks: `silvann download <model>` fetches the pack's lisp/ afresh" % self.folder.path)
             from .vision import Vision
             self._vision = Vision(self.folder, self if getattr(self, "VIS", False) else None)
         return self._vision
@@ -1227,6 +1325,7 @@ class Qwen35(Generates):
         rows = rows or {}
         if self.CARDS > 1 and (positions is not None or rows):
             raise Refused("pictures are one card's: not under tensor parallelism yet")
+        self._room(first + len(tokens))
         step = min(self.CHUNK, self.HOT) if self.TIERED else self.CHUNK      # a chunk never outgrows the hot ring
         for at in range(0, len(tokens), step):
             chunk = tokens[at:at + step]
@@ -1257,6 +1356,7 @@ class Qwen35(Generates):
         self._one_card("a stage of a pipeline")
         if head:
             self._needs_head()
+        self._room(pos + 1)
         if token is not None:
             start = "(embed %d)" % token
         else:
@@ -1290,6 +1390,7 @@ class Qwen35(Generates):
         m, H = self.m, self.H
         if (positions is not None or rows) and not (self.MROPE and self.PICTURES):
             raise Refused("%s reads no pictures here (▶ `vision`)" % self.folder.path)
+        self._room(first + (len(tokens) if tokens is not None else n))
         if tokens is not None:
             n = len(tokens)
             self._prompt(tokens)
@@ -1439,6 +1540,7 @@ class Qwen35(Generates):
     def state_write(self, length, blobs):
         """A conversation's state, as `state_read` answers it, written back — each card its share of every region."""
         layout = [r for r in self._state_layout(length) if r[2] * sum(r[3])]
+        self._room(length, exact=True)                  # its rows withheld from the tier before they are written
         P = self.CARDS
         want = [rows * sum(secs) * P for _, _, rows, secs in layout]
         if [len(b) for b in blobs] != want:

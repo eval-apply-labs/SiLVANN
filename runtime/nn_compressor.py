@@ -16,10 +16,7 @@ as **QuIP#** does. Applying the same rotation to activations and the KV cache is
 scalar codebook lies vector quantisation (QuIP#'s E8 lattices), which is what §⑭ means when it says
 the level placement is finished. ▶ `src/docs/design/pending/quant_families.md` §⓪.
 
-⛔ THIS IS NOT `python/compressor.py`. That one packs FAMILY 0 (a per-row codebook) and is what
-`src_old` reads — `silvann_core/memory.py` and `silvann_model/composer.py` decode its output and every
-deployed bundle is in that format. It is untouched, and it stays the reference for how the planes are
-laid out. This file produces FAMILY 2, which only `src/packages/nn/cpu/turboquant__impl.cuh` reads.
+⛔ This file produces FAMILY 2, which only `src/packages/nn/cpu/turboquant__impl.cuh` reads.
 
 ── ⭐⭐ WHAT IS PER TENSOR AND WHAT IS PER ROW, AND BOTH HALVES ARE `MEASURED` ───────────
 ```

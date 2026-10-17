@@ -211,4 +211,44 @@ static sys__heap_node nn__expert_tier__zzabi_apply_duplex(const sys__heap_node* 
 }
 SYS__ENGINE__ABI__BRIDGE(nn__expert_tier__zzabi_adapter_duplex, nn__expert_tier__zzabi_apply_duplex)
 
+/* ── ⭐⭐ SLOTS LENT TO A COLLECTION (NN-93) ─────────────────────────────────────────────────────────────────────────────
+ * `(nn__expert__lend type depth ends)` -> how many slots were lent: `ends` a node array of integers, each the END of a run
+ *   of `depth` slots of free memory in this worker's arena (▶ `nn__expert__lend`) — none live yet.
+ * `(nn__expert__lent type live)` -> `live`: that many of them live, the rest withheld — their experts evicted, their slots
+ *   off the free list (▶ `nn__expert__lent`). `(nn__expert__lent type)` -> how many are live now. */
+static sys__heap_node nn__expert__zzabi_apply_lend(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx) {
+    (void)ctx;
+    if (argc != 3u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
+    if (argv[0].dtype != SYS__KIND__VALUE_INT || argv[1].dtype != SYS__KIND__VALUE_INT || !sys__heap_node__carries_reference(argv[2].dtype))
+        return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
+    const uint64_t list = argv[2].args[0], regions = sys__node_array__length(list);
+    if (regions == 0u || regions > NN__EXPERT__LENT_MAX_REGIONS) return sys__engine__abi__error(NN__EXPERT__FAULT_LEND);
+    uint64_t ends[NN__EXPERT__LENT_MAX_REGIONS];
+    for (uint64_t r = 0u; r < regions; ++r) {
+        const sys__heap_node n = sys__node_array__borrow(list, r);
+        if (n.dtype != SYS__KIND__VALUE_INT) return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
+        ends[r] = n.args[0];
+    }
+    if (!nn__expert__lend(argv[0].args[0], regions, argv[1].args[0], ends)) return sys__engine__abi__error(NN__EXPERT__FAULT_LEND);
+    sys__heap_node answer = sys__heap_node__nothing();
+    answer.dtype = SYS__KIND__VALUE_INT;
+    answer.args[0] = regions * argv[1].args[0];
+    return answer;
+}
+SYS__ENGINE__ABI__BRIDGE(nn__expert__zzabi_adapter_lend, nn__expert__zzabi_apply_lend)
+
+static sys__heap_node nn__expert__zzabi_apply_lent(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx) {
+    (void)ctx;
+    if (argc != 1u && argc != 2u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
+    if (argv[0].dtype != SYS__KIND__VALUE_INT || (argc == 2u && argv[1].dtype != SYS__KIND__VALUE_INT))
+        return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
+    const uint64_t type = argv[0].args[0];
+    if (argc == 2u && !nn__expert__lent(type, argv[1].args[0])) return sys__engine__abi__error(NN__EXPERT__FAULT_LEND);
+    sys__heap_node answer = sys__heap_node__nothing();
+    answer.dtype = SYS__KIND__VALUE_INT;
+    answer.args[0] = nn__expert__type_live(type) - nn__expert__type_slots(type);
+    return answer;
+}
+SYS__ENGINE__ABI__BRIDGE(nn__expert__zzabi_adapter_lent, nn__expert__zzabi_apply_lent)
+
 #endif /* SILVANN__PACKAGES_NN_CPU_OPCODES_EXPERT__ABI_CUH */

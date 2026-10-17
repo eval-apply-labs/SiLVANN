@@ -52,8 +52,9 @@ class ModelFolder:
         reads it and the evaluator runs it. Refused when the folder has none."""
         path = os.path.join(self.path, "lisp", name + ".lisp")
         if not os.path.isfile(path):
-            raise Refused("%s has no lisp/%s.lisp — a file of the model's program. `silvann_core.py download-model %s` "
-                          "fetches it into the folder; a folder of your own takes its family's files from the release's lisp/"
+            raise Refused("%s has no lisp/%s.lisp — a file of the model's program. `silvann download %s` fetches the "
+                          "pack's lisp/ afresh, whole; a pack that does not carry the file is its uploader's to fix. A "
+                          "folder of your own takes its family's files from the release's lisp/"
                           % (self.path, name, os.path.basename(self.path.rstrip(os.sep))))
         return path
 
@@ -61,6 +62,15 @@ class ModelFolder:
         d = os.path.join(self.path, "loras")
         return sorted(n for n in os.listdir(d)
                       if any(os.path.isfile(os.path.join(d, n, f)) for f in ("pack.json", "mask.json"))) if os.path.isdir(d) else []
+
+    def lora_about(self, name):
+        """A LoRA of this folder: its `kind` — "adapter", whose matrices are written into the model's own between
+        conversations, or "rank1-mask", applied beside them and so chosen when the model boots — and the `description`
+        its maker wrote of what it is for, from its `pack.json` or `mask.json` ("" when it has none)."""
+        d = os.path.join(self.path, "loras", name)
+        if os.path.isfile(os.path.join(d, "mask.json")):
+            return dict(kind="rank1-mask", description=json.load(open(os.path.join(d, "mask.json"))).get("description", ""))
+        return dict(kind="adapter", description=json.load(open(os.path.join(d, "pack.json"))).get("description", ""))
 
     def identity(self):
         """What a conversation records and checks: the model — the raw weights it was packed from and how — and

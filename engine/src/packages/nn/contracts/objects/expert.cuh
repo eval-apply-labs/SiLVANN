@@ -169,7 +169,22 @@ enum { NN__EXPERT__MAX_TYPES = 0u NN__EXPERT_TYPE_SLOT_LIST(NN__EXPERT__ZZPRIVAT
  * expert LRU's links have, bought the same way: the head is stored as `slot + 1`. ▶ `expert_lru_node_array.md` §ⓑ②. */
 #define NN__EXPERT__TYPE_FREE_NONE  0ull
 
+/* ⭐⭐ A COLLECTION'S LENT SLOTS (NN-93) — slots past its own run, in memory another collection owns and has not written
+ * yet: a card's tier of experts holding experts in the rows of the attention caches a conversation has not reached.
+ * ⚖ 2026-10-17: *"progressively shrink the l1 cache as the context grows, maybe in chunks of 8k tokens... this way we
+ * dont need the users to set a max tokens or to size the l1 cache at all"*. The lender names `regions` places, each the
+ * END of a run of free memory as long as `depth` slots, and the slots are numbered from the deepest: slot `own + k` is
+ * region `k % regions`, `k / regions + 1` slots before its end — so the slots nearest the lender's written rows are the
+ * highest-numbered, and the first given back. `live` of them are the collection's; the rest are withheld. A row a
+ * collection: VALUE_INTs, the three counts then the ends. ▶ `nn__expert__lend`, `nn__expert__lent`. */
+#define NN__EXPERT__LENT_REGIONS  0u
+#define NN__EXPERT__LENT_DEPTH    1u
+#define NN__EXPERT__LENT_LIVE     2u
+#define NN__EXPERT__LENT_ENDS     3u
+#define NN__EXPERT__LENT_MAX_REGIONS 256u
+
 #define NN__EXPERT__FAULT_TYPES  0x4E455459ull   /* "NETY" — the type table does not describe the arena */
+#define NN__EXPERT__FAULT_LEND   0x4E454C4Eull   /* "NELN" — lent slots a collection was not stood for, or outside its arena */
 
 /* ══ ⭐⭐ THE EXPERT INDEX — WHERE AN EXPERT IS, AND WHEN IT WAS LAST WANTED ══════════════════════════
  *
