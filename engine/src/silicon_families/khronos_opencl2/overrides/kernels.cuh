@@ -282,6 +282,100 @@ __kernel void khronos_opencl2__attention_mix(ulong res__address, ulong p__addres
     }
 }
 
+/* ⭐ THE `k` LARGEST OF A LONG VECTOR — a vocabulary's logits, for a sampler — amd_rocm6_wave64's `top_k_long` in shape,
+ *   one work-group alone. nn's generic body is `k` rounds, each reading every value and asking it whether an earlier round
+ *   took it: 20 rounds over 248,320 logits cost the MI50 ~50 ms a token. Here two passes. Every value is a WORD that
+ *   orders as nn's rounds pick — its high half the value's order (the two zeros one), its low half the index taken from
+ *   all ones, so of equal values the first is the larger word; a NaN is 0 — and the words are distinct.
+ *   ① each lane's largest word; the `k`-th largest of the lanes' is a BAR the `k`-th pick reaches — the `k` lanes' words
+ *     at or above it are `k` distinct values' words;
+ *   ② every word at or above the bar, into local memory; a value below the bar's is passed at once.
+ *   Each held word's place is then the count of held words above it, and the first `k` places are nn's `k` rounds' picks,
+ *   in its order. Each weight is nn's expression over a sum added in the rounds' order, over the values read from `x`,
+ *   so the indices and the weights are nn's to the bit.
+ *   ⛳ MORE THAN `HELD` WORDS AT THE BAR — fewer than `k` lanes holding any valid value, and many valid values among them —
+ *   and the work-group runs nn's own rounds instead, so the answer never depends on the input, only the time.
+ *   ⛳ ONE WORK-GROUP, WAITING FOR ITSELF: the lanes' words, the bar, the held words, the picks' values. No other group. */
+#define KHRONOS_OPENCL2__ZZPRIVATE_TOP_K_LANES 256u     /* the host's `KHRONOS_OPENCL2__ZZPRIVATE_GROUP` */
+#define KHRONOS_OPENCL2__ZZPRIVATE_TOP_K_HELD  1024u    /* words the work-group holds at or above the bar */
+#define KHRONOS_OPENCL2__ZZPRIVATE_TOP_K_MOST  64u      /* nn's `NN__VECTOR__TOP_K_MAX`: this text joins nn's program after its macros */
+/* A half's word: its order above, the index taken from all ones below; 0 for a NaN, which no round takes. */
+static inline ulong khronos_opencl2__zzprivate_top_k_word(uint h, uint i) {
+    const uint z = (h & 0x7FFFu) == 0u ? 0u : h;
+    const uint order = (z & 0x8000u) != 0u ? (~z & 0xFFFFu) : (z | 0x8000u);
+    return (h & 0x7FFFu) > 0x7C00u ? 0ul : ((ulong)order << 32) | (ulong)(0xFFFFFFFFu - i);
+}
+/* A word's value. */
+static inline float khronos_opencl2__zzprivate_top_k_value(ulong word) {
+    const uint order = (uint)(word >> 32);
+    return nn__silicon__half_to_float((uint16_t)((order & 0x8000u) != 0u ? (order & 0x7FFFu) : (~order & 0xFFFFu)));
+}
+__kernel void khronos_opencl2__top_k_long(ulong values__address, uint64_t stride, ulong weights__address, ulong x__address,
+                                          uint64_t n, uint64_t k) {
+    __global uint64_t* values = (__global uint64_t*)values__address;
+    __global uint16_t* weights = (__global uint16_t*)weights__address;
+    __global const uint16_t* x = (__global const uint16_t*)x__address;
+    __local ulong lane_word[KHRONOS_OPENCL2__ZZPRIVATE_TOP_K_LANES];
+    __local ulong held[KHRONOS_OPENCL2__ZZPRIVATE_TOP_K_HELD];
+    __local float picked[KHRONOS_OPENCL2__ZZPRIVATE_TOP_K_MOST];
+    __local ulong bar;
+    __local uint count;
+    const uint t = (uint)get_local_id(0), lanes = (uint)get_local_size(0), m = (uint)n;   /* n is under 2^24 here */
+    /* ① the lane's largest word */
+    ulong mine = 0ul;
+    for (uint i = t; i < m; i += lanes) {
+        const ulong word = khronos_opencl2__zzprivate_top_k_word(x[i], i);
+        mine = word > mine ? word : mine;
+    }
+    lane_word[t] = mine;
+    if (t == 0u) { count = 0u; bar = 0ul; }
+    barrier(CLK_LOCAL_MEM_FENCE);
+    /* the bar: the `k`-th largest of the lanes' words — distinct, so exactly one lane has `k - 1` above it — or 0, every
+     * valid value, where fewer than `k` lanes hold one */
+    uint above = 0u;
+    for (uint j = 0u; j < lanes; ++j) above += lane_word[j] > mine ? 1u : 0u;
+    if (mine != 0ul && above == (uint)k - 1u) bar = mine;
+    barrier(CLK_LOCAL_MEM_FENCE);
+    const ulong floor_word = bar;
+    const float floor_v = floor_word != 0ul ? khronos_opencl2__zzprivate_top_k_value(floor_word) : -INFINITY;
+    /* ② every word at or above the bar: a value below the bar's (or a NaN) passed at once */
+    for (uint i = t; i < m; i += lanes) {
+        if (!(nn__silicon__half_to_float(x[i]) >= floor_v)) continue;
+        const ulong word = khronos_opencl2__zzprivate_top_k_word(x[i], i);
+        if (word < floor_word) continue;
+        const uint at = atomic_inc(&count);
+        if (at < KHRONOS_OPENCL2__ZZPRIVATE_TOP_K_HELD) held[at] = word;
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+    const uint c = count;
+    if (c > KHRONOS_OPENCL2__ZZPRIVATE_TOP_K_HELD) {                     /* the same on every lane: nn's rounds */
+        nn__vector__zzabi_body_top_k(values, stride, weights, x, n, k);
+        return;
+    }
+    /* each held word's place among them; the first `k` places are the picks */
+    for (uint j = t; j < c; j += lanes) {
+        const ulong word = held[j];
+        uint place = 0u;
+        for (uint q = 0u; q < c; ++q) place += held[q] > word ? 1u : 0u;
+        if (place < (uint)k) {
+            const uint at = 0xFFFFFFFFu - (uint)word;
+            values[place * stride] = (uint64_t)at;
+            picked[place] = nn__silicon__half_to_float(x[at]);
+        }
+    }
+    for (uint r = c + t; r < (uint)k; r += lanes) {                      /* fewer valid values than picks: nn's none */
+        values[r * stride] = n;
+        picked[r] = -INFINITY;
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+    if (t < (uint)k) {
+        float sum = 0.0f;
+        for (uint r = 0u; r < (uint)k; ++r) sum += nn__silicon__expf(picked[r] - picked[0]);
+        unsigned int unreported = 0u;                                    /* nn's top_k raises no overflow either */
+        weights[t] = nn__kernels__zzabi_to_half(nn__silicon__expf(picked[t] - picked[0]) / sum, &unreported);
+    }
+}
+
 #endif /* __OPENCL_C_VERSION__ && cl_khr_subgroups */
 
 /* ══ ⭐⭐ THE EXPERT-MAJOR GEMM IN TILES — a prompt's rows against a matrix, each weight and each row of `x` read once a tile ═

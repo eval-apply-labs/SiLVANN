@@ -1,8 +1,15 @@
 # SiLVANN in a container
 
-On Linux, the one-line installer is the way we recommend (`README.md`). The Docker image is the supported second way,
-and the way on Windows: SiLVANN, its environment and its build in one image, run by Docker Desktop (or Podman) on
-WSL 2, with the chat UI in the browser.
+⚠ **On Linux this image runs as fast as the install; on Windows it runs well below what the same PC gives under Linux,
+so there it is for evaluating SiLVANN.** On Linux (an RTX 5060 Ti), the image decoded the Qwen 3.6 35B-A3B `D8E4` at
+55.2 and 55.5 tokens a second where the install gave 54.6 to 55.7. On Windows, on one PC (an RTX 5070 Ti, a Ryzen 7
+5800X, 32 GB of RAM), Docker Desktop answered at 37 tokens a second with Ministral 3 14B `D4`, where Linux gives 46, and
+at 22 with the 35B, its experts in RAM and a tier of them on the card, where Linux gives 40. To run SiLVANN on a Windows
+PC, run Linux on an NVMe drive — the PC's own, or one in a USB enclosure booted from the boot menu (`docs/users.md`) —
+with the one-line installer (`README.md`).
+
+The image is SiLVANN, its environment and its build in one image, run by Docker Engine or Podman on Linux, or by
+Docker Desktop on WSL 2 on Windows, with the chat UI in the browser.
 
 - **The image:** `ghcr.io/eval-apply-labs/silvann:main`, the nightly, built from this repository's `main`; until v1.0
   the only one. From v1.0 each major version has its own tag (`:1`, then `:2`), which its minor and patch releases

@@ -41,27 +41,33 @@ From a machine with no graphics card to a model near the frontier on salvaged se
 | A 24 GB card | Qwen 3.6 35B-A3B entirely on the card (17 GB at a 32,000-token context) | 87 tokens/s (102 on a short prompt) |
 | A 4 GB card, 8 GB of RAM, an NVMe disk | Qwen 3.6 35B-A3B — the dense part on the card, the experts on the CPU, read from the disk as they are needed | 11.9 tokens/s ◦ |
 | An 8 GB card, 32 GB of RAM, an NVMe disk | Qwen 3.5 122B-A10B (`D4E4`) — the same split | 4.7 tokens/s ◦ |
-| An 8 GB card (an RTX 5060 Ti with 7.5 GB of it held), 32 GB of RAM | Qwen 3.6 35B-A3B (`D8E4`) — the dense part on the card, the experts on the CPU in RAM, and 2 GB of the card the tier of experts used most | 42.2 tokens/s |
-| A 16 GB card (an RTX 5060 Ti), 28 GB of RAM | Qwen 3.6 35B-A3B (`D8E4`) — the dense part on the card, the experts on the CPU in RAM, and 8 GB of the card the tier of experts used most | 55.9 tokens/s |
-| A 16 GB card (an RTX 5060 Ti), 28 GB of RAM, an NVMe disk reading 5 GB/s | Qwen 3.5 122B-A10B (`D4E4`) — the dense part on the card, the experts on the CPU, read from the disk | 7.8 tokens/s |
-| A 16 GB card (an RTX 5060 Ti), 28 GB of RAM, an NVMe disk reading 5 GB/s | GLM 5.3 Flash (`D8E4`) — the same split | 2.2 tokens/s |
-| A 16 GB card (an RTX 5060 Ti), 32 GB of RAM, an NVMe disk reading 5 GB/s | GLM 5.3 Flash — the same split | 2.3 tokens/s |
-| A 16 GB card (an RTX 5060 Ti), 60 GB of RAM, an NVMe disk reading 5 GB/s | GLM 5.3 Flash — the same split | 3.0 tokens/s |
+| An 8 GB card (an RTX 5060 Ti with 7.5 GB of it held), 32 GB of RAM | Qwen 3.6 35B-A3B (`D8E4`) — the dense part on the card, the experts on the CPU in RAM, and 3.5 GB of the card the tier of experts used most | 56 tokens/s ‡ |
+| An 8 GB card (the same), 32 GB of RAM | Ministral 3 14B (`D4`) entirely on the card, at a 4,096-token context | 47 tokens/s ‡ |
+| A 12 GB card (an RTX 5060 Ti with 4 GB of it held), 62 GB of RAM | Qwen 3.6 35B-A3B (`D8E4`) — the same split, and 7 GB of the card the tier | 65 tokens/s ‡ |
+| A 16 GB card (an RTX 5060 Ti), 28 GB of RAM | Qwen 3.6 35B-A3B (`D8E4`) — the dense part on the card, the experts on the CPU in RAM, and 11 GB of the card the tier of experts used most | 68 tokens/s ‡ |
+| A 16 GB card (an RTX 5060 Ti), 28 GB of RAM, an NVMe disk reading 5 GB/s | Qwen 3.5 122B-A10B (`D4E4`) — the dense part on the card, the experts on the CPU, read from the disk | 8.1 tokens/s ‡ |
+| A 16 GB card (an RTX 5060 Ti), 28 GB of RAM, an NVMe disk reading 5 GB/s | GLM 5.3 Flash (`D8E4`) — the same split | 2.3 tokens/s ‡ |
+| A 16 GB card (an RTX 5060 Ti), 32 GB of RAM, an NVMe disk reading 5 GB/s | GLM 5.3 Flash — the same split | 2.4 tokens/s ‡ |
+| A 16 GB card (an RTX 5060 Ti), 60 GB of RAM, an NVMe disk reading 5 GB/s | GLM 5.3 Flash — the same split | 3.2 tokens/s ‡ |
+| A 16 GB card (an RTX 5060 Ti), 62 GB of RAM | Qwen 3.5 122B-A10B (`D4E4`) — the dense part on the card, the experts on the CPU in RAM (54 GB), and 9.5 GB of the card the tier of experts used most | 20 tokens/s ‡ |
 | A 16 GB card, 128 GB of RAM, an NVMe disk reading 5 GB/s | GLM 5.3 Flash — the same split | 5.7 tokens/s |
-| A 16 GB card, 150 GB of RAM | GLM 5.3 Flash with all of its experts (142 GB) in RAM, a 300,000-token context, and 6 GB of the card the tier of experts used most | 7.5 tokens/s (6.8 without the tier) |
-| A 32 GB card, 80 GB of RAM | Qwen 3.5 122B-A10B (`D4E4`), its experts in RAM and 24 GB of them on the card | 19.9 tokens/s (10.9 without the tier) |
+| A 16 GB card, 150 GB of RAM | GLM 5.3 Flash with all of its experts (142 GB) in RAM, a 300,000-token context, and 6 GB of the card the tier of experts used most | 8.0 tokens/s |
+| A 32 GB card, 80 GB of RAM | Qwen 3.5 122B-A10B (`D4E4`), its experts in RAM and 24 GB of them on the card | 24.5 tokens/s |
 | A 32 GB card, 160 GB of RAM | GLM 5.3 Flash, its experts in RAM and 24 GB of them on the card | 10.7 tokens/s |
 | A 32 GB card, 256 GB of RAM | Qwen 3.5 397B-A17B, its experts in RAM and 24 GB of them on the card | 9.0 tokens/s (6.3 without the tier) |
 
 Measured on a Dell R730 (two Xeon E5-2680 v4, AMD Instinct MI50 cards; disk speed 5 GB/s, RAM speed 126 GB/s), each row
 with its process held to the memory it names — leave room beside it for the operating system — and from a cold start
 where the experts come from the disk. ◦ Ran on a 32 GB MI50: the model fits the smaller card, but a card that size has
-not been measured. The rows with a model entirely on the card are v0.4.0's; the others were measured with v0.3's card
-kernels, and where a card does part of the work they are a floor. The RTX 5060 Ti rows are another machine's, a
-four-core Xeon with two channels of DDR4, the 28 GB rows measured with v0.7.0, the 8 GB one with v0.8.0 and 7.5 GB of
-the card held (the room a headless 8 GB card leaves), and the others with v0.5.1; from that disk the 122B with 32 GB of
-RAM answers at 8.2 tokens/s. On that card Ministral `D4` answers at 39 tokens/s, the 27B at 23.6, and the 35B with its
-experts on the four-core Xeon and 8 GB of tier at 52 ([`results.md`](results.md#on-an-nvidia-card-the-rtx-5060-ti)).
+not been measured. The rows with a model entirely on the card, the 122B's with 24 GB of tier and GLM's with 6 GB are
+v0.7.0's and v0.8.0's; the others were measured with v0.3's card kernels, and where a card does part of the work they
+are a floor ([`results.md`](results.md) names each row's version). ‡ The RTX 5060 Ti rows are another machine's, a
+four-core Xeon with two channels of DDR4: the answer in the chat — the server with the model's own config, held to the
+RAM its row names, as the chat's meter reads a short conversation — measured with v0.11.1
+(2026-10-18), a smaller card's room the rest of the card held (7.5 GB held leaves what a headless 8 GB card does); from
+that disk the 122B with 32 GB of RAM answers at 8.5 tokens/s. On that card in the chat Ministral `D4` answers at 47
+tokens/s, the 27B at 26, and the 35B with its experts on the four-core Xeon and the tier the setup chooses at 67; after
+a 2,000-position prompt at 39, 23.5 and 57 ([`results.md`](results.md#the-rtx-5060-ti)).
 Every measurement, the prompt rates, and what limits a model reading its experts from the disk:
 [`results.md`](results.md).
 

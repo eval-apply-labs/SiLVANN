@@ -2,7 +2,8 @@
 
 This is a **developer preview (v0.11.0)**. It is tested on Linux with AMD Instinct MI50 cards (gfx906, ROCm 6), with an
 NVIDIA GeForce RTX 5060 Ti (sm_120, CUDA 12.9), and on the CPU alone with AVX2 and with AVX-512 — on Ubuntu 22.04. On a
-Windows PC, run the Docker image or boot Linux from a USB SSD (below); Windows itself and other NVIDIA generations are
+Windows PC, boot Linux from an SSD (below); the Docker image runs as fast as the install on Linux, but well below Linux
+on the same PC under Windows, so there it is for evaluating SiLVANN. Windows itself and other NVIDIA generations are
 untested, Apple silicon is not supported yet. If something does not build or does not run on your
 machine, you are expected to be able to read the error and the source.
 
@@ -46,6 +47,12 @@ to the family that includes it when the server starts; a model's config only pic
 
 ### On Windows: the Docker image
 
+⚠ **On Windows the Docker image is for evaluating SiLVANN: it runs well below what the same PC gives under Linux** (on
+Linux the image runs as fast as the install, below). On one PC (an RTX 5070 Ti, a Ryzen 7 5800X, 32 GB of RAM), Docker Desktop answered at 37 tokens a second
+with Ministral 3 14B `D4`, where Linux gives 46, and at 22 with the Qwen 3.6 35B-A3B `D8E4`, its experts in RAM and a
+tier of them on the card, where Linux gives 40 — the model that goes between the card and the CPU at every layer loses
+the most. To use SiLVANN, run Linux on an SSD, [below](#on-windows-linux-on-a-usb-ssd).
+
 SiLVANN runs on Linux, and on Windows it runs in Linux through WSL 2: the Docker image holds the release, its
 environment and its build for an NVIDIA card or the CPU, and Docker Desktop runs it, with the chat in the browser. The
 models are downloaded from the UI into the image's volume. [`docker/README.md`](../docker/README.md) has the steps and
@@ -71,8 +78,8 @@ calls, so it does not run as a Windows program or in PowerShell. **The path we s
 — a real installation, not a live session, which forgets the card's driver and the build at every shutdown — booted
 from the PC's boot menu, the Windows disk untouched:
 
-1. **A drive:** an NVMe SSD in a USB-C enclosure (a USB stick is too slow to load models from), large enough for the
-   models you want — 7 GB to 200 GB each — and about 40 GB for the system.
+1. **A drive:** an NVMe SSD in a USB-C enclosure (a USB stick is too slow to load models from), or one in the PC beside
+   Windows', large enough for the models you want — 7 GB to 200 GB each — and about 40 GB for the system.
 2. **Ubuntu 22.04 LTS**, the system SiLVANN is tested on: write its installer to a second USB stick (balenaEtcher or
    Rufus), boot from it, and install onto the SSD — choosing the SSD as the installation disk, and its boot loader.
 3. **The card's driver:** NVIDIA's from Ubuntu's *Additional Drivers* (570 or newer for an RTX 50 card), then CUDA 12's

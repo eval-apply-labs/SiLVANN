@@ -854,6 +854,7 @@ def _session_default():
         "endpoint": os.environ.get("SILVANN_DEFAULT_ENDPOINT", "http://localhost:8765"),
         "active_id": None,
         "active_name": None,
+        "active_model": None,      # the model the open conversation is with; another serving empties the chat
         # Per-cart passwords this browser session has unlocked. Kept in app.storage.user so they
         # survive page reloads for the same user (one browser identity). They are NOT shared with
         # other users' sessions.
@@ -1634,7 +1635,42 @@ async def page():
             status_tip.text = f"down: {type(e).__name__}: {e}"
             attach_btn.set_visibility(False)
             return
+        if await model_changed(h.get("model_id")):
+            close_chat()
+            with page_client:                              # the timer's task has no slot of its own to notify in
+                safe_notify(f"{h.get('model_id')} is serving now: its conversations are in the menu")
+            await render_convs()
         await first_conversation(h.get("model_id"))
+
+    async def model_changed(model: Optional[str]) -> bool:
+        """Whether the server serves another model than the open conversation's. Not while an answer runs, here or on
+        the server: a subagent lent the card shows its own model until the answer that called it is done."""
+        if not state.get("active_id") or state["streaming"]:
+            return False
+        try:
+            if state.get("active_model"):
+                if model == state["active_model"]:
+                    return False
+            elif state["active_id"] in [c["id"] for c in await client.list_cartridges()]:
+                state["active_model"] = model              # a conversation opened before its model was kept
+                return False
+            b = await client.busy()
+            if b.get("busy") or b.get("cart"):
+                return False
+            if state.get("active_model"):
+                return (await client.health()).get("model_id") != state["active_model"]
+            return state["active_id"] not in [c["id"] for c in await client.list_cartridges()]
+        except Exception:
+            return False
+
+    def close_chat():
+        """The chat emptied of a conversation another model made: the menu lists the serving model's."""
+        state["active_id"] = state["active_name"] = state["active_model"] = None
+        state["history"] = []
+        state["active_bound"] = False
+        state["context_used"] = 0
+        speed_label.text = "—"                             # the last model's rate
+        render_chat()
 
     async def connect_clicked():
         state["endpoint"] = endpoint_in.value
@@ -1922,6 +1958,9 @@ async def page():
                 bind_banner_label.text = "Conversation loaded. Type a message, or click Activate, to bring the session online (~3s, allocates VRAM)."
             render_chat()
             await render_convs()
+            # the model that made it, as the server's list says — the chat is emptied when another serves (ping)
+            state["active_model"] = next((c.get("model_id") for c in state.get("_last_carts") or []
+                                          if c["id"] == cart_id), None)
         except httpx.HTTPStatusError as ex:
             if ex.response.status_code == 401:
                 safe_notify("wrong password", type="negative")

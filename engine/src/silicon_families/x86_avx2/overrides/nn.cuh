@@ -1934,6 +1934,65 @@ static void x86_avx2__override_attention_mix(uint16_t* o, const float* p, const 
     x86_avx2__zzpackage_run((uint32_t)(kv_heads * (head_dim / 16u)), x86_avx2__zzprivate_causal_mix, &c);
 }
 
+/* ── THE `k` LARGEST: a sampler's top k over a vocabulary, a router's over its experts ──────────────────────────────── */
+/* ⭐ ONE PASS, WHERE nn's ONE LANE TAKES `k`. nn's rounds each read every value and ask it whether an earlier round took
+ *   it — on one lane ~29 ms a token for 248,320 logits top 20. Here the `k` largest so far are held in order, largest
+ *   first, as WORDS that order as nn's rounds pick: a value's order above (the two zeros one), its index taken from all
+ *   ones below, so of equal values the first is the larger word; a NaN is never held. Eight values at a time are widened
+ *   and compared with the `k`-th held one, and only those at or above it are looked at. The picks are the held words in
+ *   their order, and each weight is nn's expression over a sum added in the rounds' order, so the indices and the
+ *   weights are nn's to the bit. */
+static inline uint64_t x86_avx2__zzprivate_top_k_word(uint16_t h, uint64_t i) {
+    const uint32_t z = (h & 0x7FFFu) == 0u ? 0u : h;
+    const uint32_t order = (z & 0x8000u) != 0u ? (~z & 0xFFFFu) : (z | 0x8000u);
+    return ((uint64_t)order << 32) | (uint64_t)(0xFFFFFFFFu - (uint32_t)i);
+}
+/* Value `i`, not a NaN, among the held words if it is one of the `k` largest so far; the floor the `k`-th held one's
+ * value once `k` are held. */
+static inline void x86_avx2__zzprivate_top_k_offer(uint64_t* held, uint64_t* count, uint64_t k, float* floor_v,
+                                                   const uint16_t* x, uint64_t i) {
+    const uint64_t word = x86_avx2__zzprivate_top_k_word(x[i], i);
+    uint64_t j = *count;
+    if (j == k) {
+        if (word <= held[k - 1u]) return;
+        j = k - 1u;
+    } else {
+        *count = j + 1u;
+    }
+    for (; j > 0u && held[j - 1u] < word; --j) held[j] = held[j - 1u];
+    held[j] = word;
+    if (*count == k) *floor_v = _cvtsh_ss(x[0xFFFFFFFFu - (uint32_t)held[k - 1u]]);
+}
+static void x86_avx2__override_vector_top_k(uint64_t* values, uint64_t stride, uint16_t* weights, const uint16_t* x, uint64_t n,
+                                            uint64_t k) {
+    if (n == 0u || n > NN__KERNELS__INDEX_EXACT || k == 0u || k > NN__VECTOR__TOP_K_MAX || stride == 0u) {
+        nn__vector__zzabi_launch_top_k(values, stride, weights, x, n, k);
+        return;
+    }
+    uint64_t held[NN__VECTOR__TOP_K_MAX];
+    float picked[NN__VECTOR__TOP_K_MAX];
+    uint64_t count = 0u;
+    float floor_v = -NN__KERNELS__INFINITY;
+    uint64_t i = 0u;
+    for (; i + 8u <= n; i += 8u) {
+        const __m256 v = _mm256_cvtph_ps(_mm_loadu_si128((const __m128i*)(const void*)(x + i)));
+        uint32_t near = (uint32_t)_mm256_movemask_ps(_mm256_cmp_ps(v, _mm256_set1_ps(floor_v), _CMP_GE_OQ));
+        for (; near != 0u; near &= near - 1u)
+            x86_avx2__zzprivate_top_k_offer(held, &count, k, &floor_v, x, i + (uint64_t)__builtin_ctz(near));
+    }
+    for (; i < n; ++i)
+        if (_cvtsh_ss(x[i]) >= floor_v) x86_avx2__zzprivate_top_k_offer(held, &count, k, &floor_v, x, i);
+    for (uint64_t r = 0u; r < k; ++r) {
+        const uint64_t at = r < count ? (uint64_t)(0xFFFFFFFFu - (uint32_t)held[r]) : n;
+        values[r * stride] = at;
+        picked[r] = r < count ? nn__silicon__half_to_float(x[at]) : -NN__KERNELS__INFINITY;
+    }
+    float sum = 0.0f;
+    for (uint64_t r = 0u; r < k; ++r) sum += nn__silicon__expf(picked[r] - picked[0]);
+    unsigned int unreported = 0u;                                        /* nn's top_k raises no overflow either */
+    for (uint64_t r = 0u; r < k; ++r) weights[r] = nn__kernels__zzabi_to_half(nn__silicon__expf(picked[r] - picked[0]) / sum, &unreported);
+}
+
 /* Whether the AVX-512 bodies go in: the processor has the four extensions they are compiled for, and
  * `SILVANN_CPU_AVX512` is not `0`; the 8-bit ones also need the levels symmetric. */
 static inline void x86_avx2__zzprivate_install_wide(void) {
@@ -1981,6 +2040,7 @@ static inline void x86_avx2__override_doors(nn__doors* doors) {
     doors->attention_causal_scores_grouped = x86_avx2__override_attention_causal_scores_grouped;
     doors->attention_causal_mix            = x86_avx2__override_attention_causal_mix;
     doors->attention_mix                   = x86_avx2__override_attention_mix;
+    doors->vector_top_k                    = x86_avx2__override_vector_top_k;
 }
 
 #endif /* SILVANN__SILICON_FAMILIES_X86_AVX2_OVERRIDES_NN_CUH */

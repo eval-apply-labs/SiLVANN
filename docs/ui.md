@@ -34,6 +34,11 @@ earlier, and is refused when it was made with another model.
 A conversation opened from the list waits off the card. A banner says so; typing a message, or **Activate**, brings it
 on.
 
+When the server starts serving another model — started from Options, or by anyone else — the chat closes the
+conversation the last model made, says which model serves now, and the list shows that model's conversations; a model
+with none gets one, open and empty. An answer running holds the chat as it is: a subagent the card is lent to shows its
+own model on the server until the answer is done.
+
 ## The chat
 
 The top bar, left to right:

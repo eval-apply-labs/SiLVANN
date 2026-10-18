@@ -199,6 +199,21 @@ static void khronos_opencl2__override_expert_groups(uint16_t* out, nn__expert__g
     nn__expert__zzabi_launch_groups(out, g, x, rows, cols, over);
 }
 
+/* ⭐ A SAMPLER'S TOP K over more than `TOP_K_SHORT` values, one to `NN__VECTOR__TOP_K_MAX` picks, each its own word
+ *   (`stride` not 0); anything else — a router's few among them — is the generic door. */
+#define KHRONOS_OPENCL2__ZZPRIVATE_TOP_K_SHORT 1024u
+static void khronos_opencl2__override_vector_top_k(uint64_t* values, uint64_t stride, uint16_t* weights, const uint16_t* x, uint64_t n,
+                                                   uint64_t k) {
+    if (!khronos_opencl2__zzpackage_has_kernel("khronos_opencl2__top_k_long") || n <= KHRONOS_OPENCL2__ZZPRIVATE_TOP_K_SHORT
+     || n > NN__KERNELS__INDEX_EXACT || k == 0u || k > NN__VECTOR__TOP_K_MAX || stride == 0u) {
+        nn__vector__zzabi_launch_top_k(values, stride, weights, x, n, k);
+        return;
+    }
+    void* args[] = { &values, &stride, &weights, &x, &n, &k };
+    const size_t sizes[] = { sizeof values, sizeof stride, sizeof weights, sizeof x, sizeof n, sizeof k };
+    nn__silicon__launch(0, "khronos_opencl2__top_k_long", 1u, KHRONOS_OPENCL2__ZZPRIVATE_GROUP, args, sizes, 6u);
+}
+
 static inline void khronos_opencl2__override_doors(nn__doors* doors) {
     doors->turboquant_gemv            = khronos_opencl2__override_turboquant_gemv;
     doors->turboquant_gemv_groups     = khronos_opencl2__override_gemv_groups;
@@ -209,6 +224,7 @@ static inline void khronos_opencl2__override_doors(nn__doors* doors) {
     doors->expert_rows                = khronos_opencl2__override_expert_rows;
     doors->expert_rows_sum            = khronos_opencl2__override_expert_rows_sum;
     doors->expert_groups              = khronos_opencl2__override_expert_groups;
+    doors->vector_top_k               = khronos_opencl2__override_vector_top_k;
 }
 
 #endif /* SILVANN__SILICON_FAMILIES_KHRONOS_OPENCL2_OVERRIDES_NN_CUH */

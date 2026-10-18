@@ -11,6 +11,7 @@
 #include "result.cuh"
 #include "expert.cuh"
 #include "conv.cuh"
+#include "vector.cuh"
 
 /* Into nn's table, once, when the family is first asked for it. */
 static inline void nvidia_cuda12__override_doors(nn__doors* doors) {
@@ -42,6 +43,7 @@ static inline void nvidia_cuda12__override_doors(nn__doors* doors) {
     doors->expert_rows_sum      = nvidia_cuda12__override_expert_rows_sum;
     doors->expert_groups        = nvidia_cuda12__override_expert_groups;
     doors->unfold_rows          = nvidia_cuda12__override_unfold_rows;
+    doors->vector_top_k         = nvidia_cuda12__override_vector_top_k;
 }
 
 #endif /* SILVANN__SILICON_FAMILIES_NVIDIA_CUDA12_OVERRIDES_DOORS_CUH */

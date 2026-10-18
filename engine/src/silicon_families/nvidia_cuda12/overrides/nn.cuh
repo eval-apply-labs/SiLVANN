@@ -10,6 +10,7 @@
 #include "result.cuh"       /* argmax */
 #include "expert.cuh"       /* the expert-major GEMM, on the tensor cores */
 #include "conv.cuh"         /* a convolution's rows */
+#include "vector.cuh"       /* a sampler's top k */
 #include "doors.cuh"        /* into nn's table */
 
 /* ══ ⭐⭐ OVERRIDES — THE DOORS THIS FAMILY RUNS FASTER THAN THE GENERIC BODY ══════════════════════════
