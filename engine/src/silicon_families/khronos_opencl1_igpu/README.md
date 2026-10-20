@@ -41,9 +41,17 @@ has run on, an RTX 5060 Ti through NVIDIA's OpenCL, the 27B D4 decodes 1.61 toke
 
 ▶ `measurements/2026-10-13_khronos_opencl1.md` (written under the family's first name, `khronos_opencl1`).
 
-**On an integrated GPU the two copies should be one,** because the card's memory is the host's RAM
-(`CL_DEVICE_HOST_UNIFIED_MEMORY`). That leaves the kernels to compete with the machine's own CPU. `REASONED`, not built:
-this is NN-73 in the backlog.
+**On an integrated GPU the two copies are one (NN-73, 2026-10-20),** because the card's memory is the host's RAM: where
+the device says `CL_DEVICE_HOST_UNIFIED_MEMORY`, a span of mapped RAM is a buffer of its own over the program's copy
+(`CL_MEM_USE_HOST_PTR`), handed to the card by unmapping it and back by mapping it, which moves nothing. A laptop's GPU, an
+APU's. Kept only where mapping answers the program's own address; anything else is the two copies, and
+`SILVANN_OPENCL1_UNIFIED=0` asks for them. `MEASURED` on PoCL (a CPU's OpenCL, unified, on node-01's Xeon, through
+`SILVANN_OPENCL1_TAKE=pthread` and `SILVANN_SILICON_CARDS=sm_120`): nn's verbs 335/0 either way, PoCL's log showing the
+host-pointer buffers only with it; the 35B-A3B against HF 6/0 either way, the same logits, a token 2852 ms against
+3088 — there the kernels on the CPU are most of a token; on a GPU's faster kernels the copies are the larger share.
+`ASSUMED` on Intel's and AMD's integrated GPUs, never run on one. ⚠ A runtime can answer the program's address when
+mapped and still not be one memory: Apple's (an M4, 2026-10-20, before macOS was dropped) faulted at the first heap
+object with it and booted without it.
 
 ## How it works
 

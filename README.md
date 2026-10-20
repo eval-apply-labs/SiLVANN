@@ -1,8 +1,8 @@
 # SiLVANN
 
-> **Developer preview, v0.12.0.** It runs the models below well on the hardware it was tested on, and it is shared
+> **Developer preview, v0.14.0.** It runs the models below well on the hardware it was tested on, and it is shared
 > for people who can find their way around a build and a stack trace. NVIDIA cards are tested on two, a GeForce
-> RTX 5060 Ti and an RTX 5070 Ti; Windows natively on one PC; Apple silicon is not tested yet.
+> RTX 5060 Ti and an RTX 5070 Ti; Windows natively on one PC; macOS is not supported.
 
 **Silicon Linked Virtualized Architecture for Neural Networks** — a from-scratch inference engine for large language
 models, and the two things it is made of:
@@ -67,34 +67,22 @@ v0.11.1, the RTX 5070 Ti's with v0.11.0. v0.11.0's server drew each token with n
 card, through OpenCL and on the CPU alone: the 35B answered in the chat at 32-35 tokens a second on the RTX 5060 Ti,
 and answers at 67 now ([`docs/results.md`](docs/results.md)).
 
-**New in v0.12.0:** SiLVANN runs natively on Windows — no WSL, no Docker — from the libraries the release was built
-with, or built on the PC.
+**New in v0.14.0:** SiLVANN reads a model's experts from its pack faster than from the file earlier releases wrote beside it, and an
+integrated GPU reads the model's memory where it lies.
 
-**Windows, natively.** The engine's calls to the operating system — threads, libraries, files, memory, the processors —
-go through one layer, a folder a system (`engine/src/operating_systems/`), as its arithmetic goes through a silicon
-family. `install.ps1` fetches the release, makes its Python environment and takes the libraries GitHub built for the
-release (`silvann_windows_x64.zip`, on the release's page: the evaluator for Python 3.10 to 3.14, NVIDIA's family for
-every card it lists, the CPU's, and the two OpenCL families), so Python, Git and the card's driver are all a PC needs.
-`build.ps1` builds them on the PC instead, with Visual Studio's clang-cl and, for an NVIDIA card, CUDA's nvcc (12 or 13).
-AMD's and Intel's GPUs go through their driver's OpenCL. The model's tool has `(powershell …)` beside `(bash …)`, and
-`(help)` tells the model it runs on Windows ([`docs/tools.md`](docs/tools.md)). The libraries are not signed yet: where
-Windows 11's Smart App Control is on, Windows refuses them, and the installer says what to do
-([`docs/users.md`](docs/users.md#on-windows)). On an RTX 5070 Ti with a Ryzen 7 5800X,
-built from source with CUDA 13.4, Ministral 3 14B `D4` on the card answers in the chat at 58 tokens a second.
+**The experts from the pack, faster.** An expert lies in a pack as several pieces; the loader's threads now read them
+side by side rather than one after another. With `experts_from: "disk"`, on two Xeon E5-2680 v4 with an MI50 and a
+SATA SSD, the 35B-A3B waits 6.8 ms a token on its reads against the old file's 8.2, and answers at 23.6–24.3 tokens a
+second against 22.5–23.7 — the same logits, bit for bit. GLM 5.3 Flash's packs, uploaded again on 19 October with each
+expert's records in the experts' order, are read in place too: a GLM pack downloaded before that day still writes its
+file at the first start ([`docs/users.md`](docs/users.md#5-the-experts-on-the-disk)).
 
-**The experts read from the pack.** With `experts_from: "disk"` a Qwen model's experts are read where its pack holds
-them: the first start no longer writes them out again beside it — 55 GB for the 122B, 16 GB for the 35B. The logits are
-the file's to the bit; on the RTX 5060 Ti's desktop, from its NVMe drive, the 122B answers 2.7% and the 35B 3.4% below
-the file's rate. Their `experts/` folder an earlier release wrote is not read any more on one socket and can be deleted.
-GLM 5.3 Flash still writes its file: its pack keeps an expert's records in the order of their names
-([`docs/users.md`](docs/users.md#5-the-experts-on-the-disk)).
+**An integrated GPU, one copy.** Through the OpenCL 1.2 family, a GPU whose memory is the machine's RAM — a laptop's, an
+APU's — no longer keeps a second copy of the memory the program shares with it, nor copies it across each token.
+Checked through a CPU's OpenCL (PoCL), which shares its memory the same way; not yet on an integrated GPU itself.
+`SILVANN_OPENCL1_UNIFIED=0` asks for the copies.
 
-**No Docker image.** None is published from this release, and the scripts that ran one are gone: SiLVANN installs
-natively on Linux and on Windows. `docker/` keeps the Dockerfile, for a container of your own
-([`docker/README.md`](docker/README.md)).
-
-**In progress:** the engine carries the first part of DeepSeek V4.1 Flash's port (`ai_deepseek_4`); its pack is not
-published yet.
+**macOS is not supported.**
 
 Every release before this one, and this one's notes again: [`release_logs/v0.md`](release_logs/v0.md).
 
@@ -103,8 +91,8 @@ Every release before this one, and this one's notes again: [`release_logs/v0.md`
 | | |
 |---|---|
 | **Tested** | Linux with AMD Instinct MI50 (gfx906), ROCm 6 — a model on one card, and the 27B's layers over two and four (tensor parallelism); Linux with an NVIDIA GeForce RTX 5060 Ti (sm_120), CUDA 12.9, driver 595 — every pack but GLM's checked against Hugging Face, the 35B's tier of experts included; the CPU alone with AVX2 (Xeon E5-2680 v4) and with AVX-512 (Xeon W-2123); OpenCL 2.0 with sub-groups, on the MI50 — the 27B and the 35B checked against Hugging Face, the 27B answering at 9-11 tokens a second and reading a prompt at 49 positions a second; the 122B's tier of experts, 11.7 tokens a second with 18 GB of the card (9.7 without); OpenCL 1.2 through NVIDIA's OpenCL on the RTX 5060 Ti — the 27B checked against Hugging Face, at 1.6 tokens a second (the family is for integrated GPUs); Windows with an NVIDIA card (an RTX 5070 Ti, a Ryzen 7 5800X), natively: built from source with CUDA 13.4, Ministral 3 14B `D4` on the card ([`docs/users.md`](docs/users.md#on-windows)) |
-| **Untested** | on Windows: the prebuilt libraries on a PC (GitHub's runners, which build them, have no card), the CPU alone, a model's experts on the CPU or read from the disk, AMD's and Intel's GPUs through OpenCL; Linux booted from a USB SSD; tensor parallelism on NVIDIA cards; other NVIDIA generations (the CUDA family is built for sm_75 to sm_120: Turing to Blackwell; an older card — Kepler, Maxwell, Pascal, Volta — goes to OpenCL 1.2, the GTX 1080 first); GLM 5.3 Flash on an NVIDIA card; other AMD generations; OpenCL on other devices, the integrated GPUs `khronos_opencl1_igpu` is for among them — which card goes to OpenCL 1.2 and which to 2 is a best guess from the vendors' published versions (OpenCL 1.2: every NVIDIA card CUDA does not take, Intel's iGPUs before Gen9, AMD's TeraScale and GCN 1; OpenCL 2: the rest), and a card on the wrong one is an issue to open, with its `clinfo`; AVX-512 on processors other than Skylake (AMD's Zen 4 and 5, later Xeons) |
-| **Not yet** | Apple silicon |
+| **Untested** | on Windows: the prebuilt libraries on a PC (GitHub's runners, which build them, have no card), the CPU alone, a model's experts on the CPU or read from the disk, AMD's and Intel's GPUs through OpenCL; Linux booted from a USB SSD; tensor parallelism on NVIDIA cards; other NVIDIA generations (the CUDA family is built for sm_75 to sm_120: Turing to Blackwell; an older card — Kepler, Maxwell, Pascal, Volta — goes to OpenCL 1.2, the GTX 1080 first); GLM 5.3 Flash on an NVIDIA card; other AMD generations; OpenCL on other devices, the integrated GPUs `khronos_opencl1_igpu` is for among them (on one, the model's memory is read where it is, not copied to the GPU: checked only through PoCL, a CPU's OpenCL) — which card goes to OpenCL 1.2 and which to 2 is a best guess from the vendors' published versions (OpenCL 1.2: every NVIDIA card CUDA does not take, Intel's iGPUs before Gen9, AMD's TeraScale and GCN 1; OpenCL 2: the rest), and a card on the wrong one is an issue to open, with its `clinfo`; AVX-512 on processors other than Skylake (AMD's Zen 4 and 5, later Xeons) |
+| **Not supported** | macOS |
 
 Pictures and videos are read by the Qwen models and GLM 5.3 Flash (v0.7.0: [`release_logs/v0.md`](release_logs/v0.md#v070)); Ministral 3 does not read them.
 Every model calls the tool, a Lisp REPL on the machine, in its own trained format (v0.9.0: [`docs/users.md`](docs/users.md#the-models-tool)).

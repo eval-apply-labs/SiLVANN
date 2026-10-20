@@ -2,8 +2,8 @@
 
 This is a **developer preview (v0.12.0)**. It is tested on Linux with AMD Instinct MI50 cards (gfx906, ROCm 6), with an
 NVIDIA GeForce RTX 5060 Ti (sm_120, CUDA 12.9), and on the CPU alone with AVX2 and with AVX-512 — on Ubuntu 22.04 — and
-natively on Windows on one PC, with an RTX 5070 Ti ([below](#on-windows)). Other NVIDIA generations are untested, Apple
-silicon is not supported yet. If something does not build or does not run on your
+natively on Windows on one PC, with an RTX 5070 Ti ([below](#on-windows)). Other NVIDIA generations are untested; macOS is
+not supported. If something does not build or does not run on your
 machine, you are expected to be able to read the error and the source.
 
 ## 1. Build
@@ -335,11 +335,11 @@ the one coming in has arrived.
 
 ## 5. The experts on the disk
 
-With `experts_from: "disk"`, a Qwen model's experts are read from its pack as they are wanted: nothing is written
-beside it. Where they do not lie in the pack as the CPU reads them — GLM 5.3 Flash, whose pack keeps an expert's
-records in the order of their names, or a model under a LoRA that holds experts of its own — they are written once, at
-the first start, to `models/<name>/experts/` in that layout (about 150 GB for GLM 5.3 Flash), and later starts read the
-file. Before v0.12.0 a Qwen model's were written so too: its `experts/` folder (55 GB for the 122B, 16 GB for the 35B)
+With `experts_from: "disk"`, a model's experts are read from its pack as they are wanted: nothing is written beside
+it. Where they do not lie in the pack as the CPU reads them — a GLM 5.3 Flash pack downloaded before 19 October 2026,
+which keeps an expert's records in the order of their names (download it again for one in the experts' order), a model
+under a LoRA that holds experts of its own, or a model split over two CPU sockets — they are written once, at the first
+start, to `models/<name>/experts/` in that layout (about 150 GB for GLM 5.3 Flash), and later starts read the file. Before v0.12.0 a Qwen model's were written so too: its `experts/` folder (55 GB for the 122B, 16 GB for the 35B)
 is not read any more on one socket, and can be deleted. The disk should be an NVMe drive: RAM keeps the experts that are used, and every other one is read from the disk
 when a token picks it, so the disk's speed is the answer's speed. On our test machine GLM 5.3 Flash answered at
 5.7 tokens a second with 128 GB of RAM from a disk that reads 5 GB/s. Keep the disk cool: a hot NVMe drive slows itself down. Every measurement: [`results.md`](results.md). The engine keeps as many experts

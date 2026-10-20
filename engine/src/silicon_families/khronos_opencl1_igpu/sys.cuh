@@ -38,6 +38,13 @@
  *   ⛔ THE STEP IS THE WHOLE ALLOCATION, and that is what this family's rate pays for: nn's RAM span (the 27B's
  *   embedding table, 1.27 GB, beside the 64-byte result a value verb writes) crosses whole both ways once a token —
  *   `MEASURED` 1.61 tokens/s against CUDA's 21 on the same bodies, same record.
+ * ⭐⭐ ON A CARD WHOSE MEMORY IS THE HOST'S, ONE COPY (NN-73) — an integrated GPU's: a laptop's, an APU's. ⚖
+ *   2026-10-20 *"so also pcs with an igpu get the benefit"*. Where the card says `CL_DEVICE_HOST_UNIFIED_MEMORY`, a span
+ *   of mapped RAM is an arena of its own, a buffer made over the program's copy (`CL_MEM_USE_HOST_PTR`), and the steps
+ *   across are OpenCL's own hand-over of it — unmapped before a kernel is handed it, mapped again when the card is
+ *   waited for — which move nothing where the memory is one. Kept only where mapping it answers the program's copy's
+ *   own address (the runtime did not make a copy of its own); otherwise, or with no slot free among the 32, the span
+ *   is the two copies above. `SILVANN_OPENCL1_UNIFIED=0` keeps every span two copies, to measure one against the other.
  *
  * ⛔⛔ ONE CONTEXT PER CARD, AND AN ARENA BELONGS TO THE CARD IT WAS MADE ON — as `khronos_opencl2`'s
  *   allocations do, and for its reason: a context over several cards puts a buffer in host RAM.
@@ -76,6 +83,8 @@ typedef struct khronos_opencl1_igpu__arena {
     uint64_t               used;                            /* bytes handed out */
     khronos_opencl1_igpu__span* free;                            /* its free spans, by offset */
     size_t                 free_count, free_room;
+    bool                   host;                            /* one span of mapped RAM, over the program's copy (NN-73) */
+    bool                   host_holds;                      /* ...mapped to the host now: no kernel may be handed it */
 } khronos_opencl1_igpu__arena;
 
 /* A span handed out: its address and its size, and for mapped RAM the program's copy and which copy is the newer. */
@@ -92,6 +101,7 @@ typedef struct khronos_opencl1_igpu__state {
     cl_context              context[KHRONOS_OPENCL1_IGPU__DEVICES_MAX];       /* one each: ▶ the note above */
     cl_command_queue        queue[KHRONOS_OPENCL1_IGPU__DEVICES_MAX];         /* one in-order queue each */
     uint64_t                largest[KHRONOS_OPENCL1_IGPU__DEVICES_MAX];       /* the card's largest one buffer */
+    bool                    unified[KHRONOS_OPENCL1_IGPU__DEVICES_MAX];       /* its memory the host's (NN-73) */
     khronos_opencl1_igpu__arena  arena[KHRONOS_OPENCL1_IGPU__DEVICES_MAX][KHRONOS_OPENCL1_IGPU__ARENAS];
     uint64_t                generation[KHRONOS_OPENCL1_IGPU__DEVICES_MAX];    /* moves when a card's arenas change */
     khronos_opencl1_igpu__allocation* live;                                   /* every span of card memory not yet given back */
@@ -129,17 +139,23 @@ static inline bool khronos_opencl1_igpu__zzprivate_suits(cl_device_id d) {
 /* Find this family's cards on the first platform that has any, and stand up a context and a queue for
  * each. Once per process; a machine with none leaves the count at zero, and a card whose context or queue
  * will not stand up takes the family's cards with it — a partial set would renumber the rest. */
+/* ⛳ A DEVELOPER'S DEVICE: `SILVANN_OPENCL1_TAKE` names one by the start of its name, of any type, beside the cards the
+ *   family includes — a CPU's OpenCL (PoCL) is the nearest to an integrated GPU's on a box with none: its memory the
+ *   host's (`CL_DEVICE_HOST_UNIFIED_MEMORY`), its OpenCL C 1.2. Never in a release's use; the checks' alone. */
 static void khronos_opencl1_igpu__zzprivate_stand_up(void) {
     khronos_opencl1_igpu__state* s = &khronos_opencl1_igpu__zzprivate_state;
+    const char* take = getenv("SILVANN_OPENCL1_TAKE");
     cl_platform_id platforms[8]; cl_uint np = 0u;
     if (clGetPlatformIDs(8u, platforms, &np) != CL_SUCCESS) return;
     for (cl_uint p = 0u; p < np && p < 8u && s->count == 0u; ++p) {
         cl_device_id all[KHRONOS_OPENCL1_IGPU__DEVICES_MAX]; cl_uint nd = 0u;
-        if (clGetDeviceIDs(platforms[p], CL_DEVICE_TYPE_GPU, KHRONOS_OPENCL1_IGPU__DEVICES_MAX, all, &nd) != CL_SUCCESS) continue;
+        const cl_device_type type = take && take[0] ? CL_DEVICE_TYPE_ALL : CL_DEVICE_TYPE_GPU;
+        if (clGetDeviceIDs(platforms[p], type, KHRONOS_OPENCL1_IGPU__DEVICES_MAX, all, &nd) != CL_SUCCESS) continue;
         for (cl_uint d = 0u; d < nd && d < KHRONOS_OPENCL1_IGPU__DEVICES_MAX; ++d) {
             char name[256];
             if (!khronos_opencl1_igpu__zzprivate_name(all[d], name, sizeof name)) continue;
-            if (khronos_opencl1_igpu__includes(name) && khronos_opencl1_igpu__zzprivate_suits(all[d])) s->device[s->count++] = all[d];
+            const bool taken = take && take[0] ? strncmp(name, take, strlen(take)) == 0 : khronos_opencl1_igpu__includes(name);
+            if (taken && khronos_opencl1_igpu__zzprivate_suits(all[d])) s->device[s->count++] = all[d];
         }
     }
     if (s->count == 0u) return;
@@ -148,6 +164,10 @@ static void khronos_opencl1_igpu__zzprivate_stand_up(void) {
         cl_ulong largest = 0u;
         if (clGetDeviceInfo(s->device[d], CL_DEVICE_MAX_MEM_ALLOC_SIZE, sizeof largest, &largest, 0) != CL_SUCCESS) { s->count = 0u; return; }
         s->largest[d] = (uint64_t)largest;
+        cl_bool unified = CL_FALSE;
+        const char* say = getenv("SILVANN_OPENCL1_UNIFIED");
+        s->unified[d] = clGetDeviceInfo(s->device[d], CL_DEVICE_HOST_UNIFIED_MEMORY, sizeof unified, &unified, 0) == CL_SUCCESS
+                     && unified == CL_TRUE && !(say && say[0] == '0');
         s->context[d] = clCreateContext(0, 1u, &s->device[d], 0, 0, &err);
         if (err != CL_SUCCESS) { s->count = 0u; return; }
         s->queue[d] = clCreateCommandQueue(s->context[d], s->device[d], 0, &err);
@@ -249,6 +269,12 @@ static inline bool khronos_opencl1_igpu__zzprivate_arena(khronos_opencl1_igpu__s
 static inline void khronos_opencl1_igpu__zzprivate_drop_arena(khronos_opencl1_igpu__state* s, uint32_t card, uint32_t slot) {
     khronos_opencl1_igpu__arena* a = &s->arena[card][slot];
     (void)clFinish(s->queue[card]);
+    if (a->host && a->host_holds) {                         /* a buffer is unmapped before it is released */
+        void* host = 0;
+        (void)clGetMemObjectInfo(a->buffer, CL_MEM_HOST_PTR, sizeof host, &host, 0);
+        (void)clEnqueueUnmapMemObject(s->queue[card], a->buffer, host, 0u, 0, 0);
+        (void)clFinish(s->queue[card]);
+    }
     (void)clReleaseMemObject(a->buffer);
     free(a->free);
     memset(a, 0, sizeof *a);
@@ -295,6 +321,38 @@ static inline void khronos_opencl1_igpu__zzprivate_unspan(khronos_opencl1_igpu__
         khronos_opencl1_igpu__zzprivate_drop_arena(s, card, slot);
 }
 
+/* ⭐ MAPPED RAM AS AN ARENA OF ITS OWN, over the program's copy (NN-73): a buffer made on `host` itself, and mapped to
+ *   the host at once — the program's copy is the one it writes first. The address of slot `slot`'s first byte, or 0
+ *   when the card would copy it anyway (mapping it answered another address) and the span is two copies instead. Under
+ *   the lock. */
+static inline uint64_t khronos_opencl1_igpu__zzprivate_host_arena(khronos_opencl1_igpu__state* s, uint32_t card, uint8_t* host,
+                                                                  uint64_t bytes) {
+    for (uint32_t k = 0u; k < KHRONOS_OPENCL1_IGPU__ARENAS; ++k) {
+        khronos_opencl1_igpu__arena* a = &s->arena[card][k];
+        if (a->buffer) continue;
+        cl_int err = CL_SUCCESS;
+        cl_mem b = clCreateBuffer(s->context[card], CL_MEM_READ_WRITE | CL_MEM_USE_HOST_PTR, (size_t)bytes, host, &err);
+        if (err != CL_SUCCESS || b == 0) return 0u;
+        void* seen = clEnqueueMapBuffer(s->queue[card], b, CL_TRUE, CL_MAP_READ | CL_MAP_WRITE, 0u, (size_t)bytes, 0u, 0, 0, &err);
+        if (err != CL_SUCCESS || seen != (void*)host) {
+            if (err == CL_SUCCESS) { (void)clEnqueueUnmapMemObject(s->queue[card], b, seen, 0u, 0, 0); (void)clFinish(s->queue[card]); }
+            (void)clReleaseMemObject(b);
+            return 0u;
+        }
+        a->free = (khronos_opencl1_igpu__span*)malloc(16u * sizeof(khronos_opencl1_igpu__span));
+        if (a->free == 0) {
+            (void)clEnqueueUnmapMemObject(s->queue[card], b, seen, 0u, 0, 0); (void)clFinish(s->queue[card]);
+            (void)clReleaseMemObject(b);
+            return 0u;
+        }
+        a->free_room = 16u; a->free_count = 0u;            /* the one span is the whole of it, handed out */
+        a->buffer = b; a->bytes = bytes; a->used = bytes; a->host = true; a->host_holds = true;
+        ++s->generation[card];
+        return khronos_opencl1_igpu__zzprivate_address(card, k, 0u);
+    }
+    return 0u;
+}
+
 /* A span of `bytes` on the bound card, and for mapped RAM the program's copy beside it, in `*host`. */
 static inline void* khronos_opencl1_igpu__zzprivate_allocate(size_t bytes, bool mapped, void** host) {
     khronos_opencl1_igpu__state* s = khronos_opencl1_igpu__zzpackage_up();
@@ -303,17 +361,21 @@ static inline void* khronos_opencl1_igpu__zzprivate_allocate(size_t bytes, bool 
     const uint64_t want = (((uint64_t)(bytes ? bytes : 1u)) + KHRONOS_OPENCL1_IGPU__ALIGN - 1ull) & ~(KHRONOS_OPENCL1_IGPU__ALIGN - 1ull);
     if (want > KHRONOS_OPENCL1_IGPU__OFFSET_MASK) return 0;
     uint8_t* copy = 0;
+    const uint64_t pages = (want + 4095ull) & ~4095ull;
     if (mapped) {
-        copy = (uint8_t*)sys__os__memory_aligned(4096u, (size_t)((want + 4095ull) & ~4095ull));
+        copy = (uint8_t*)sys__os__memory_aligned(4096u, (size_t)pages);
         if (copy == 0) return 0;
-        memset(copy, 0, (size_t)want);
+        memset(copy, 0, (size_t)pages);
     }
     uint64_t at = 0u;
     sys__os__lock_take(&khronos_opencl1_igpu__zzpackage_lock);
     khronos_opencl1_igpu__allocation** list = mapped ? &s->mapped : &s->live;
     size_t* count = mapped ? &s->mapped_count : &s->live_count;
     size_t* room  = mapped ? &s->mapped_room  : &s->live_room;
-    if (khronos_opencl1_igpu__zzprivate_room(list, *count, room)) at = khronos_opencl1_igpu__zzprivate_span(s, card, want);
+    if (khronos_opencl1_igpu__zzprivate_room(list, *count, room)) {
+        if (mapped && s->unified[card]) at = khronos_opencl1_igpu__zzprivate_host_arena(s, card, copy, pages);
+        if (at == 0u) at = khronos_opencl1_igpu__zzprivate_span(s, card, want);
+    }
     if (at) {
         khronos_opencl1_igpu__allocation* l = &(*list)[(*count)++];
         l->at = at; l->bytes = want; l->host = copy; l->card_newer = false;
@@ -335,7 +397,12 @@ static inline void khronos_opencl1_igpu__zzprivate_release(const void* at, bool 
         const khronos_opencl1_igpu__allocation l = list[i];
         if (mapped ? (const void*)l.host != at : (const void*)(uintptr_t)l.at != at) continue;
         list[i] = list[--*count];
-        khronos_opencl1_igpu__zzprivate_unspan(s, l.at, l.bytes);
+        uint32_t card = 0u, slot = 0u; uint64_t offset = 0u;
+        if (mapped && khronos_opencl1_igpu__zzprivate_where((const void*)(uintptr_t)l.at, &card, &slot, &offset) && card < s->count
+         && s->arena[card][slot].host)
+            khronos_opencl1_igpu__zzprivate_drop_arena(s, card, slot);           /* its own arena, whole (NN-73) */
+        else
+            khronos_opencl1_igpu__zzprivate_unspan(s, l.at, l.bytes);
         sys__os__memory_aligned_free(l.host);
         break;
     }
@@ -356,7 +423,22 @@ static inline bool khronos_opencl1_igpu__zzprivate_across(khronos_opencl1_igpu__
                                                      cl_command_queue q, bool up) {
     uint32_t card = 0u, slot = 0u; uint64_t offset = 0u;
     if (!khronos_opencl1_igpu__zzprivate_where((const void*)(uintptr_t)m->at, &card, &slot, &offset) || card >= s->count) return false;
-    const cl_mem b = s->arena[card][slot].buffer;
+    khronos_opencl1_igpu__arena* a = &s->arena[card][slot];
+    const cl_mem b = a->buffer;
+    if (a->host) {                                          /* NN-73: handed over, not copied */
+        if (up) {
+            if (a->host_holds && clEnqueueUnmapMemObject(q, b, m->host, 0u, 0, 0) != CL_SUCCESS) return false;
+            a->host_holds = false;
+            return true;
+        }
+        cl_int err = CL_SUCCESS;
+        void* seen = a->host_holds ? (void*)m->host
+                   : clEnqueueMapBuffer(q, b, CL_TRUE, CL_MAP_READ | CL_MAP_WRITE, 0u, (size_t)a->bytes, 0u, 0, 0, &err);
+        if (err != CL_SUCCESS || seen != (void*)m->host) return false;
+        a->host_holds = true;
+        m->card_newer = false;
+        return true;
+    }
     const bool ok = up ? clEnqueueWriteBuffer(q, b, CL_TRUE, (size_t)offset, (size_t)m->bytes, m->host, 0u, 0, 0) == CL_SUCCESS
                        : clEnqueueReadBuffer(q, b, CL_TRUE, (size_t)offset, (size_t)m->bytes, m->host, 0u, 0, 0) == CL_SUCCESS;
     if (ok && !up) m->card_newer = false;

@@ -41,6 +41,10 @@ typedef struct nn__loader__read {
     unsigned channel;              /* an EVACUATE's or a WRITE's evacuation channel */
     uint64_t by;                   /* a WRITE: the worker whose commit queued it, the one whose program releases it */
     uint64_t queued_ns;            /* a GATHER: when it was queued, for the time it takes to land */
+    /* a READ's slices, each a thread's (NN-97): every slice with bytes, those a thread has taken, those landed, and
+     *   whether any failed — the read DONE or FAILED when the last lands. Set when its first slice is taken. */
+    uint32_t slices_all, slices_taken, slices_landed;
+    bool     slices_failed;
 } nn__loader__read;
 /* ⭐ WHAT A JOB IS. A READ (a file into a slot) and a GATHER (a promotion: the CPUs' memory into a card slot) are admitted
  *   by whoever settles their layer. The exclusive tier's two are not: an EVACUATE (a card slot's bytes into an evacuation
@@ -126,28 +130,61 @@ static void* nn__loader__zzprivate_run(void* unused) {
     (void)unused;
     sys__os__lock_take(&nn__loader__zzprivate_lock);
     for (;;) {
-        /* the oldest queued first — so a layer's promotions land in the order its verb will compute them */
+        /* the oldest first — so a layer's promotions land in the order its verb will compute them: a job queued, or a
+         *   READ another thread is reading whose slices are not all taken (NN-97: an expert's slices read side by side,
+         *   where the pack lays them apart — the file's one run was one read) */
         nn__loader__read* job = 0;
-        for (unsigned i = 0u; i < NN__EXPERT__FLIGHT_MAX; ++i)
-            if (nn__loader__zzprivate_reads[i].state == NN__LOADER__QUEUED && (job == 0 || nn__loader__zzprivate_reads[i].seq < job->seq))
-                job = &nn__loader__zzprivate_reads[i];
+        for (unsigned i = 0u; i < NN__EXPERT__FLIGHT_MAX; ++i) {
+            nn__loader__read* c = &nn__loader__zzprivate_reads[i];
+            const bool open = c->state == NN__LOADER__QUEUED
+                           || (c->state == NN__LOADER__READING && c->job == NN__LOADER__JOB_READ && !c->gather
+                               && (c->slices_all & ~c->slices_taken) != 0u);
+            if (open && (job == 0 || c->seq < job->seq)) job = c;
+        }
         if (job == 0) {
             if (nn__loader__zzprivate_stopping) break;
             sys__os__condition_wait(&nn__loader__zzprivate_work, &nn__loader__zzprivate_lock);
             continue;
         }
-        job->state = NN__LOADER__READING;
+        const bool slices = job->job == NN__LOADER__JOB_READ && !job->gather;
+        if (job->state == NN__LOADER__QUEUED) {
+            job->state = NN__LOADER__READING;
+            if (slices) {
+                job->slices_all = 0u; job->slices_taken = 0u; job->slices_landed = 0u; job->slices_failed = false;
+                for (unsigned i = 0u; i < NN__EXPERT__SLICES; ++i) if (job->backing.bytes[i] != 0ull) job->slices_all |= 1u << i;
+            }
+        }
+        /* a READ: this thread's slice, the lowest not taken — and the others woken, to take the rest */
+        unsigned slice = NN__EXPERT__SLICES;
+        if (slices) {
+            const uint32_t open = job->slices_all & ~job->slices_taken;
+            if (open != 0u) {
+                slice = (unsigned)__builtin_ctz(open);
+                job->slices_taken |= 1u << slice;
+                if ((job->slices_all & ~job->slices_taken) != 0u) sys__os__condition_wake_all(&nn__loader__zzprivate_work);
+            }
+        }
         const nn__loader__read r = *job;
         sys__os__lock_give(&nn__loader__zzprivate_lock);
         bool ok = true;
         if (r.job == NN__LOADER__JOB_EVACUATE) ok = nn__loader__zzprivate_evacuate(&r);
         else if (r.job == NN__LOADER__JOB_WRITE) ok = nn__loader__zzprivate_write(&r);
         else if (r.gather) ok = nn__loader__zzprivate_gather(&r);
-        for (unsigned i = 0u; ok && r.job == NN__LOADER__JOB_READ && i < NN__EXPERT__SLICES; ++i) {
-            if (r.backing.bytes[i] == 0ull) continue;
-            const uint64_t step = r.backing.stride[i] != 0ull ? r.backing.stride[i] : r.backing.bytes[i];
-            ok = sys__gpu__file_read(r.family, r.backing.file, r.backing.from[i] + r.expert * step, r.backing.bytes[i],
-                                     (void*)(uintptr_t)(r.room + r.backing.into[i]));
+        else if (slice < NN__EXPERT__SLICES) {
+            const uint64_t step = r.backing.stride[slice] != 0ull ? r.backing.stride[slice] : r.backing.bytes[slice];
+            ok = sys__gpu__file_read(r.family, r.backing.file, r.backing.from[slice] + r.expert * step, r.backing.bytes[slice],
+                                     (void*)(uintptr_t)(r.room + r.backing.into[slice]));
+        }
+        if (slices) {
+            sys__os__lock_take(&nn__loader__zzprivate_lock);
+            if (slice < NN__EXPERT__SLICES) job->slices_landed |= 1u << slice;
+            if (!ok) job->slices_failed = true;
+            const bool last = job->slices_landed == job->slices_all;
+            if (last) {
+                job->state = job->slices_failed ? NN__LOADER__FAILED : NN__LOADER__DONE;
+                sys__os__condition_wake_all(&nn__loader__zzprivate_done);
+            }
+            continue;                                   /* the lock held, as the loop's top wants it */
         }
         sys__os__lock_take(&nn__loader__zzprivate_lock);
         if (r.job == NN__LOADER__JOB_WRITE) {

@@ -138,7 +138,7 @@ build() {
     say "the cards and the compilers"
     find_cards
     say "building the engine and the families for this machine: $FAMILIES (a few minutes; everything in $DIR/build.log)"
-    if ! (cd "$DIR" && env SILVANN_PYTHON="$DIR/venv/bin/python" SILVANN_SILICON_FAMILIES="$FAMILIES" "${BUILD_ENV[@]}" \
+    if ! (cd "$DIR" && env SILVANN_PYTHON="$DIR/venv/bin/python" SILVANN_SILICON_FAMILIES="$FAMILIES" ${BUILD_ENV[@]+"${BUILD_ENV[@]}"} \
               ./build.sh > "$DIR/build.log" 2>&1); then
         tail -n 30 "$DIR/build.log" >&2
         stop "the build failed — the lines above, and all of it in $DIR/build.log"
@@ -200,8 +200,8 @@ case "\$cmd" in
             # the release's own files in models/ and skills/ when that folder is this one (an update needs them here)
             kept=\$(cd "\$DATA" && for f in models/* skills/* user_sessions workspace tools.json tools_library.json \\
                          .huggingface_token ui_last_start.json; do
-                         case \$f in models/*|skills/*) [ -d "\$f" ] || continue ;;
-                                     *) [ -n "\$(ls -A "\$f" 2>/dev/null)" ] || continue ;; esac
+                         case \$f in (models/*|skills/*) [ -d "\$f" ] || continue ;;
+                                     (*) [ -n "\$(ls -A "\$f" 2>/dev/null)" ] || continue ;; esac
                          if [ "\$DATA" = "\$HERE" ] && [ "\${f%%/*}" = skills ]; then
                              [ -d "\$HERE/.git" ] || continue
                              ! git -C "\$HERE" ls-files --error-unmatch -- "\$f" >/dev/null 2>&1 || continue
