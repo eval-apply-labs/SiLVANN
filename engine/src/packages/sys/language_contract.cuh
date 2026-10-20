@@ -7,7 +7,7 @@
  * relative, so two packages' copies can be the same text. ⛳ And every header is guarded by its path's name
  * rather than `#pragma once`, because GCC's `#pragma once` takes two files of the same size and modification
  * time for ONE even when their bytes differ — `MEASURED`: a fresh checkout of the release, every file
- * of one time, lost `ai_glm_5_3`'s kinds (260 bytes, the same as `ai_qwen_3`'s) and failed to build. */
+ * of one time, lost `ai_z__glm_5_3`'s kinds (260 bytes, the same as `ai_qwen_3`'s) and failed to build. */
 #include "contracts/macros/language_contract__kinds.cuh"
 #include "contracts/macros/language_contract__verbs.cuh"
 #include "contracts/macros/language_contract__objects.cuh"

@@ -1,0 +1,156 @@
+# Windows' libraries, prebuilt: the evaluator for each Python install.ps1 accepts, and the silicon families, built on
+# GitHub's Windows runners from this tree with build.py — the commands a PC builds them with — and attached to the
+# release a tag names, as silvann_windows_x64.zip. install.ps1 takes them when their stamp is its own folder's (the
+# engine's tree and build.py, by git's hash); otherwise it builds them, as build.ps1 does.
+#
+# The runners have no GPU: each library is built and loaded, no model is run. Windows Server 2022's runner, for its
+# Visual Studio 2022: CUDA 12.9's front end does not take Visual Studio 2026's headers (cudafe++ crashed on them),
+# and a library built with the older toolset runs on an older Visual C++ runtime. NVIDIA's family is built with CUDA 12.9
+# for every card the family lists, so any driver of CUDA 12's line or newer runs it. The zip holds binaries: its
+# NOTICES.md says which, and each one's licence (ATTRIBUTION.md §7). The actions are pinned to their release commits,
+# because the job can write to the repository's releases.
+name: "windows: libraries"
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: windows-libraries-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CUDA_VERSION: "12.9.1"
+  CUDA_SHORT: "12.9"
+  PYTHONUTF8: "1"
+
+jobs:
+  evaluator:
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python }}
+      - name: The evaluator, for Python ${{ matrix.python }}
+        shell: pwsh
+        env:
+          SILVANN_SILICON_FAMILIES: none
+        run: |
+          python -m pip install --quiet -r requirements.txt
+          python build.py
+          if ($LASTEXITCODE -ne 0) { Get-Content lib\evaluator.log -ErrorAction SilentlyContinue; exit 1 }
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: evaluator-${{ matrix.python }}
+          path: lib/silvann_engine_cpu*.pyd
+          if-no-files-found: error
+
+  families:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: CUDA's compiler and runtime
+        shell: pwsh
+        run: |
+          $exe = Join-Path $env:RUNNER_TEMP "cuda.exe"
+          curl.exe -fsSL -o $exe "https://developer.download.nvidia.com/compute/cuda/$env:CUDA_VERSION/network_installers/cuda_${env:CUDA_VERSION}_windows_network.exe"
+          $parts = @("nvcc", "cudart") | ForEach-Object { "$($_)_$env:CUDA_SHORT" }   # 12.9 carries crt and nvvm in nvcc
+          $p = Start-Process -FilePath $exe -ArgumentList (@("-s") + $parts) -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "CUDA's installer stopped: exit $($p.ExitCode)" }
+          $root = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v$env:CUDA_SHORT"
+          if (-not (Test-Path "$root\bin\nvcc.exe")) { Get-ChildItem $root -ErrorAction SilentlyContinue; throw "no nvcc in $root" }
+          & "$root\bin\nvcc.exe" --version
+          "SILVANN_NVCC=$root\bin\nvcc.exe" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "CUDA_ROOT=$root" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+      - name: The families
+        shell: pwsh
+        env:
+          SILVANN_SILICON_FAMILIES: x86_avx2 nvidia_cuda12 khronos_opencl2 khronos_opencl1_igpu
+        run: |
+          python -m pip install --quiet -r requirements.txt
+          python build.py
+          $built = Get-ChildItem lib\silicon_families -Filter "libsilvann_*.dll" | ForEach-Object { $_.Name }
+          $missing = $env:SILVANN_SILICON_FAMILIES.Split(" ") | Where-Object { $built -notcontains "libsilvann_$_.dll" }
+          if ($missing) {
+            Get-ChildItem lib\silicon_families -Filter "*.log" | ForEach-Object { "== $($_.Name)"; Get-Content $_.FullName -Tail 40 }
+            throw "not built: $missing"
+          }
+          New-Item -ItemType Directory -Force notices | Out-Null
+          # CUDA's licence: in its folder when the installer put it there, else from the installer itself (a 7-Zip archive)
+          $eula = Get-ChildItem $env:CUDA_ROOT -Recurse -Filter "EULA.txt" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $eula) {
+            7z e (Join-Path $env:RUNNER_TEMP "cuda.exe") EULA.txt -r "-o$env:RUNNER_TEMP\eula" -y | Out-Null
+            $eula = Get-ChildItem "$env:RUNNER_TEMP\eula" -Filter "EULA.txt" -ErrorAction SilentlyContinue | Select-Object -First 1
+          }
+          if (-not $eula) { throw "no EULA.txt in CUDA's folder or its installer" }
+          Copy-Item $eula.FullName notices\CUDA_EULA.txt
+          (& $env:SILVANN_NVCC --version | Select-Object -Last 2) | Out-File -Encoding utf8 notices\CUDA_VERSION.txt
+          python -c "import importlib.metadata as m, shutil; d = m.distribution('pybind11'); f = [p for p in d.files if p.name.upper().startswith('LICENSE')][0]; shutil.copy(d.locate_file(f), r'notices\PYBIND11_LICENSE.txt')"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: families
+          path: |
+            lib/silicon_families/libsilvann_*.dll
+            notices/
+          if-no-files-found: error
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: families-logs
+          path: lib/**/*.log
+
+  zip:
+    needs: [evaluator, families]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: built
+      - name: The zip, stamped with what it was built from
+        run: |
+          mkdir -p out/lib/silicon_families out/lib/notices
+          cp built/evaluator-*/silvann_engine_cpu*.pyd out/lib/
+          cp built/families/lib/silicon_families/*.dll out/lib/silicon_families/
+          cp built/families/notices/* out/lib/notices/
+          printf 'engine %s\nbuild.py %s\ncommit %s\n' "$(git rev-parse HEAD:engine)" "$(git rev-parse HEAD:build.py)" \
+            "$GITHUB_SHA" > out/lib/windows_libraries.txt
+          cat > out/lib/NOTICES.md <<EOF
+          # SiLVANN's prebuilt Windows libraries — what they hold
+
+          Built by \`.github/workflows/windows-libraries.yml\` from commit $GITHUB_SHA of
+          https://github.com/$GITHUB_REPOSITORY, which is their corresponding source (\`windows_libraries.txt\` names it).
+
+          | part | licence | its notice |
+          |---|---|---|
+          | SiLVANN: the evaluator (\`silvann_engine_cpu.*.pyd\`) and the silicon families (\`silicon_families/*.dll\`) | AGPL-3.0 with the additional permission in ATTRIBUTION.md §1 | the release's \`LICENSE\` and \`ATTRIBUTION.md\` |
+          | NVIDIA's CUDA runtime, linked statically into \`libsilvann_nvidia_cuda12.dll\` | NVIDIA CUDA Toolkit EULA (a redistributable component) | \`notices/CUDA_EULA.txt\`, \`notices/CUDA_VERSION.txt\` |
+          | pybind11, compiled into the evaluator | BSD-3-Clause | \`notices/PYBIND11_LICENSE.txt\` |
+          | LLVM's compiler-rt builtins, linked into each library | Apache-2.0 WITH LLVM-exception | ATTRIBUTION.md §7 |
+          EOF
+          (cd out && zip -qr ../silvann_windows_x64.zip lib)
+          unzip -l silvann_windows_x64.zip
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: silvann_windows_x64
+          path: silvann_windows_x64.zip
+      - name: Attached to the tag's release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          gh release view "$tag" > /dev/null 2>&1 || gh release create "$tag" --verify-tag --title "SiLVANN $tag" \
+            --notes "SiLVANN $tag. silvann_windows_x64.zip holds the Windows libraries install.ps1 takes."
+          gh release upload "$tag" silvann_windows_x64.zip --clobber

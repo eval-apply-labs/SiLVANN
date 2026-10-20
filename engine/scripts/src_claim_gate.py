@@ -31,8 +31,8 @@ filenames, symbols, counts it can find. This one asks whether an ASSERTION ABOUT
 that a call always passes zero, that one function has exactly one caller, that nothing but one place
 makes a particular kind. A name can be checked by looking it up; a behaviour has to be gone and counted.
 
-  usage:  python3 backstage/scripts/src_claim_gate.py            check the tree
-          python3 backstage/scripts/src_claim_gate.py --selftest prove every rule can FAIL
+  usage:  python3 scripts/src_claim_gate.py            check the tree
+          python3 scripts/src_claim_gate.py --selftest prove every rule can FAIL
           exit 0 = green · 1 = a rule or a spec site failed
 """
 import os, re, sys

@@ -31,7 +31,7 @@ BIN=${SILVANN_BIN:-$HOME/.local/bin}
 # ── what the machine has ──────────────────────────────────────────────────────────────────────────────────────────────
 check_machine() {
     if [ "$(uname -s)" != Linux ]; then
-        stop "SiLVANN runs on Linux. On Windows, run its Docker image (docker/README.md), or boot Linux from a USB SSD
+        stop "install.sh is Linux's. On Windows, install.ps1 (README.md), or boot Linux from a USB SSD
    (Ubuntu 22.04, the system it is tested on): docs/users.md, \"On Windows\"."
     fi
     [ "$(uname -m)" = x86_64 ] || stop "SiLVANN is built for x86-64 processors; this one is $(uname -m)."

@@ -99,10 +99,10 @@ static inline cl_kernel khronos_opencl2__zzprivate_kernel(khronos_opencl2__state
 static inline bool khronos_opencl2__zzpackage_has_kernel(const char* name) {
     khronos_opencl2__state* s = khronos_opencl2__zzpackage_up();
     if (s == 0) return false;
-    pthread_mutex_lock(&s->lock);
+    sys__os__lock_take(&s->lock);
     const uint32_t card = khronos_opencl2__bound_device();
     const bool has = card < s->count && khronos_opencl2__zzprivate_kernel(s, card, name) != 0;
-    pthread_mutex_unlock(&s->lock);
+    sys__os__lock_give(&s->lock);
     return has;
 }
 
@@ -132,7 +132,7 @@ static inline void nn__silicon__launch(const void* kernel, const char* name, uin
     khronos_opencl2__state* s = khronos_opencl2__zzpackage_up();
     cl_command_queue q = khronos_opencl2__zzpackage_queue();
     if (s == 0 || q == 0) return;
-    pthread_mutex_lock(&s->lock);
+    sys__os__lock_take(&s->lock);
     const uint32_t card = khronos_opencl2__bound_device();
     cl_kernel k = card < s->count ? khronos_opencl2__zzprivate_kernel(s, card, name) : 0;
     bool ok = k != 0;
@@ -144,7 +144,7 @@ static inline void nn__silicon__launch(const void* kernel, const char* name, uin
         const size_t global = (size_t)blocks * (size_t)threads, local = (size_t)threads;
         ok = clEnqueueNDRangeKernel(q, k, 1u, 0, &global, &local, 0u, 0, 0) == CL_SUCCESS;
     }
-    pthread_mutex_unlock(&s->lock);
+    sys__os__lock_give(&s->lock);
     if (!ok) fprintf(stderr, "khronos_opencl2: %s did not launch\n", name);
 }
 

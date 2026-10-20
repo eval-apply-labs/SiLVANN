@@ -8,6 +8,9 @@
  * ⛳ IT DOES NAME ONE TYPE, AND ONLY AS ROOM TO PUT CELLS IN. A list crosses in one call, so something has
  *   to hold the cells while they are handed over — and they are MADE by the C interface's own verb, so
  *   how a node is laid out stays on the other side of the door.
+ * ⛳ AND IT ASKS THE SYSTEM THROUGH THE OS LAYER. Loading a family's library and asking after a path are
+ *   the system's (`sys__os__*`, `operating_systems/`), not a way into the engine: ⚖ 2026-10-18 the
+ *   architect, *"the rule takes sys__os__ as the system's"*.
  * ⛳ AND IT LIVES IN THE TRANSLATION UNIT RATHER THAN IN THE ENGINE ON PURPOSE. The engine is checked
  *   for naming any binding symbol at all, because a package publishes words and the interpreter must not
  *   be written against one particular host. This file is where that rule stops applying.
@@ -17,15 +20,13 @@
  * ══════════════════════════════════════════════════════════════════════════════════════════════════ */
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
-#include <dirent.h>
-#include <dlfcn.h>
 #include <stdlib.h>
-#include <sys/stat.h>
 #include <algorithm>
 #include <map>
 #include <string>
 #include <tuple>
 #include <vector>
+#include "operating_systems/os.cuh"              /* loading a library, a path: the system's */
 #include "silicon_families/cards_present.cuh"   /* the cards present, before any family loads */
 namespace py = pybind11;
 
@@ -36,7 +37,7 @@ namespace py = pybind11;
 /* ══ THE SILICON FAMILIES THE WHEEL LOADS ═════════════════════════════════════════════════════════
  * ⚖ *"the gpu side becomes a separate binary that is loaded at the start of the cpu session"*, and the
  * program never loads one itself — so the wheel does, here, when it is imported. A family is a
- * `libsilvann_<family>.so`; the wheel opens it, asks `silvann_silicon_family_get` for the table of the
+ * `libsilvann_<family>` with the system's ending (`SYS__OS__LIBRARY_SUFFIX`); the wheel opens it, asks `silvann_silicon_family_get` for the table of the
  * version this program reads, and offers that table to the engine.
  *
  * ⭐⭐ WHICH ONES: THE FAMILIES THAT TAKE A CARD THIS MACHINE HAS, AND NO OTHERS. ⚖ *"find the device name
@@ -78,10 +79,10 @@ static std::vector<silvann_wheel_card> silvann_wheel_cards;
 /* Load one family and offer its card. Answers the silicon's spelling, or an empty string with `why`
  * saying what refused. */
 static std::string silvann_wheel_load_silicon_family(const std::string& path, std::string* why) {
-    void* lib = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
-    if (lib == 0) { const char* e = dlerror(); *why = e ? e : "dlopen refused"; return std::string(); }
+    const sys__os__library lib = sys__os__library_open(path.c_str());
+    if (lib == 0) { const char* e = sys__os__library_why(); *why = e ? e : "the system would not load it"; return std::string(); }
     typedef const void* (*entry_fn)(unsigned int);
-    const entry_fn open = (entry_fn)dlsym(lib, eng_abi_silicon_family_entry());
+    const entry_fn open = (entry_fn)sys__os__library_find(lib, eng_abi_silicon_family_entry());
     if (open == 0) { *why = std::string("no ") + eng_abi_silicon_family_entry() + " in it"; return std::string(); }
     const void* table = open(eng_abi_silicon_family_version());
     if (table == 0) { *why = "it does not speak family version " +
@@ -94,15 +95,14 @@ static std::string silvann_wheel_load_silicon_family(const std::string& path, st
 }
 
 static bool silvann_wheel_is_dir(const std::string& p) {
-    struct stat st;
-    return !p.empty() && stat(p.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
+    return !p.empty() && sys__os__path_is_directory(p.c_str());
 }
 
 /* The directory the wheel's own file is in, found from the address of this function. */
 static std::string silvann_wheel_own_dir(void) {
-    Dl_info info;
-    if (dladdr((void*)&silvann_wheel_own_dir, &info) == 0 || info.dli_fname == 0) return std::string();
-    const std::string f(info.dli_fname);
+    const char* file = sys__os__library_path_of((const void*)&silvann_wheel_own_dir);
+    if (file == 0) return std::string();
+    const std::string f(file);
     const size_t slash = f.rfind('/');
     return slash == std::string::npos ? std::string(".") : f.substr(0, slash);
 }
@@ -122,14 +122,13 @@ static bool silvann_wheel_open_family(const char* family, void* context) {
     (void)context;
     silvann_wheel_silicon_family rec;
     rec.family = family;
-    const std::string file = "libsilvann_" + rec.family + ".so";
+    const std::string file = "libsilvann_" + rec.family + SYS__OS__LIBRARY_SUFFIX;
     if (silvann_wheel_silicon_family_dir.empty()) {
         rec.path = file;
         rec.outcome = "no directory of silicon families was found";
     } else {
         rec.path = silvann_wheel_silicon_family_dir + "/" + file;
-        struct stat st;
-        if (stat(rec.path.c_str(), &st) != 0) {
+        if (!sys__os__path_exists(rec.path.c_str())) {
             /* ⛳ A FAMILY THE BUILD SKIPPED LEFT ITS REASON BESIDE WHERE ITS BINARY WOULD BE — the requests it
              *   does not answer — and that is the answer to give, rather than "not there". */
             rec.outcome = "not in " + silvann_wheel_silicon_family_dir;

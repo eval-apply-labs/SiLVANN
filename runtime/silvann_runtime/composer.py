@@ -10,7 +10,7 @@ does not care about: writing `(+ 1 2)` instead of naming kinds, verbs and symbol
 
 ── WHAT IT IS FOR, AND WHAT IT IS NOT ──────────────────────────────────────────────────────────────
 It is the engine's front end, and the runtime writes each model with it: any verb the built engine publishes
-can be named — the language's, `nn`'s and a model package's (`ai_qwen_3__…`, `ai_glm_5_3__…`) — so what is
+can be named — the language's, `nn`'s and a model package's (`ai_qwen_3__…`, `ai_z__glm_5_3__…`) — so what is
 written here is a model's forward pass as much as any other lisp program.
 
 ── HOW A PROGRAM IS BUILT ──────────────────────────────────────────────────────────────────────────

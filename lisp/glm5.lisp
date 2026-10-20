@@ -1,7 +1,7 @@
 ;; GLM 5.3 FLASH — four residual streams, Kimi Delta Attention and latent attention, routed experts on the CPUs.
 ;;
 ;; A token is `(begin (position tok pos) (head))`: its row of the embedding into every stream, then every layer this
-;; machine runs. A layer is ai_glm_5_3's sites over its tables: the attention site — a KDA layer's or an MLA layer's mixer,
+;; machine runs. A layer is ai_z__glm_5_3's sites over its tables: the attention site — a KDA layer's or an MLA layer's mixer,
 ;; the streams' hyper-connection around it — then the MLP site: dense, or the router, the shared expert on the card while
 ;; each CPU socket runs its share of every picked expert, and the shares summed into the streams. A prompt runs as rows:
 ;; each layer once over a chunk, `(begin (embed_rows n) (rows first n))`. An answer is `generate` (▶ generate.lisp).
@@ -97,9 +97,11 @@
                    (set! s (+ s 1))))
     (if CARD_TIER (nn__expert_tier__written nn__expert_tier) 0)
     (set! s 0)
+    ;; ⛳ THE CHUNK'S ROWS BACK, NOT A WHOLE CHUNK'S: a draft's check is two rows, and a chunk is 256 — MEASURED 2026-10-19,
+    ;;   node-01, the two rows' hand-off was 5.5 ms a layer copying 256 rows' hands out and sums back (▶ src_glm5_rows2_profile)
     (while '(< s SOCKETS)
-           '(begin (nn__buffer__copy (nth C_RROWS s) (nth SOCKET s) (nth RROWS_INTO s) ROWS_BYTES)
-                   (if (< 0 s) (nn__vector__add rrows (nth RROWS_INTO s) rrows ROWS_HALVES) 0)
+           '(begin (nn__buffer__copy (nth C_RROWS s) (nth SOCKET s) (nth RROWS_INTO s) (* (nth nrows 0) HIDDEN_BYTES))
+                   (if (< 0 s) (nn__vector__add rrows (nth RROWS_INTO s) rrows (* (nth nrows 0) HIDDEN)) 0)
                    (set! s (+ s 1))))
     (type rrows)))
 
@@ -107,26 +109,26 @@
 ;; ── a layer at a position ───────────────────────────────────────────────────────────────────────────────────────────
 (defun (mixer i pos)
   (if (nth KDA i)
-      (ai_glm_5_3__kda streams (nth AT i))
-      (ai_glm_5_3__mla streams (nth AT i) pos)))
+      (ai_z__glm_5_3__kda streams (nth AT i))
+      (ai_z__glm_5_3__mla streams (nth AT i) pos)))
 
 ;; the routed MLP: the router's picks into the hand, a card tier's share computed and marked, every socket handed the
 ;; rest while the card runs the shared expert, the shares summed — and the card tier's — and the streams closed
 (defun (moe i)
   (let ((s 0))
-    (ai_glm_5_3__route streams (nth MO i) hand picks)
-    (if CARD_TIER (ai_glm_5_3__experts hand picks (nth EXK i) routed_k nn__expert_tier) 0)
+    (ai_z__glm_5_3__route streams (nth MO i) hand picks)
+    (if CARD_TIER (ai_z__glm_5_3__experts hand picks (nth EXK i) routed_k nn__expert_tier) 0)
     (sockets_start i xf)
-    (ai_glm_5_3__shared hand (nth MO i))
+    (ai_z__glm_5_3__shared hand (nth MO i))
     (while '(< s SOCKETS) '(begin (sys__result (nth SOCKET s)) (set! s (+ s 1))))
     (if CARD_TIER (nn__expert_tier__written nn__expert_tier) 0)     ; the CPUs done: an exclusive tier's writes go now
     (sockets_sum)
     (if CARD_TIER (nn__vector__add routed routed_k routed HIDDEN) 0)
-    (ai_glm_5_3__close streams (nth MO i) routed)))
+    (ai_z__glm_5_3__close streams (nth MO i) routed)))
 
 (defun (layer i pos)
   (begin (mixer i pos)
-         (if (nth MOE i) (moe i) (ai_glm_5_3__mlp streams (nth ML i)))
+         (if (nth MOE i) (moe i) (ai_z__glm_5_3__mlp streams (nth ML i)))
          (type streams)))
 
 (defun (layers_f pos)
@@ -141,22 +143,22 @@
 
 ;; ── a layer over a prompt's rows ────────────────────────────────────────────────────────────────────────────────────
 (defun (moe_rows i n)
-  (begin (ai_glm_5_3__route_rows srows (nth MO i) hands carries n rwork)
+  (begin (ai_z__glm_5_3__route_rows srows (nth MO i) hands carries n rwork)
          ;; the card's tier told of the chunk's picks, so the prompt warms it
          (if CARD_TIER (nn__expert_tier__note hands nn__expert_tier (nth LAYER i) n HAND HAND_PICKS_AT
                                               nn__expert_major__vram_promotion_threshold_picks) 0)
          (sockets_start i xr)
          ;; the card's share computed while the CPUs compute theirs
-         (if CARD_TIER (ai_glm_5_3__experts_rows hands (nth EXKR i) rrows_k n nn__expert_tier) 0)
+         (if CARD_TIER (ai_z__glm_5_3__experts_rows hands (nth EXKR i) rrows_k n nn__expert_tier) 0)
          (sockets_sum_rows)
-         (if CARD_TIER (nn__vector__add rrows rrows_k rrows ROWS_HALVES) 0)
-         (ai_glm_5_3__close_rows srows (nth MO i) rrows carries n rwork)))
+         (if CARD_TIER (nn__vector__add rrows rrows_k rrows (* n HIDDEN)) 0)
+         (ai_z__glm_5_3__close_rows srows (nth MO i) rrows carries n rwork)))
 
 (defun (rows_layer i first n)
   (begin (if (nth KDA i)
-             (ai_glm_5_3__kda_rows srows (nth AT i) n rwork)
-             (ai_glm_5_3__mla_rows srows (nth AT i) first n rwork))
-         (if (nth MOE i) (moe_rows i n) (ai_glm_5_3__mlp_rows srows (nth ML i) n rwork))
+             (ai_z__glm_5_3__kda_rows srows (nth AT i) n rwork)
+             (ai_z__glm_5_3__mla_rows srows (nth AT i) first n rwork))
+         (if (nth MOE i) (moe_rows i n) (ai_z__glm_5_3__mlp_rows srows (nth ML i) n rwork))
          (type srows)))
 
 (defun (rows first n)

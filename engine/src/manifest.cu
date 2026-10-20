@@ -4,7 +4,7 @@
  *   It is also load-bearing for §3 ③ of the spec: ONE TU is why the compiler already has whole-call-graph
  *   visibility, which is why `static` measured as convention rather than mechanism.
  *
- * ⚖ SPEC: docs/nested_frames_engine_spec.md. Read §1 before changing anything here — the rework is
+ * ⚖ SPEC: the archive's docs/nested_frames_engine_spec.md. Read §1 before changing anything here — the rework is
  *   justified by ONTOLOGY, not by registers, and §1 says so with the numbers that refute the alternative.
  *
  * BUILD:  bash scripts/rebuild_engine.sh

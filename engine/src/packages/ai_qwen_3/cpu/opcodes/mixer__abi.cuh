@@ -44,8 +44,10 @@ static sys__heap_node ai_qwen_3__deltanet__zzabi_apply(const sys__heap_node* arg
     unsigned int* over = ctx->fault_word;
 
     const bool rotated = ai_qwen_3__table__zzpackage_flag(argv[1].args[0], AI_QWEN_3__DN__RESIDUAL_ROTATED);
-    doors->rmsnorm((uint16_t*)(uintptr_t)h, (const uint16_t*)(uintptr_t)x, (const uint16_t*)(uintptr_t)at[AI_QWEN_3__DN__INPUT_NORM], H, AI_QWEN_3__RMS_NORM_EPS, over);
-    if (!rotated) doors->hadamard_rotate((uint16_t*)(uintptr_t)hrot, (const uint16_t*)(uintptr_t)h, (const uint16_t*)(uintptr_t)signs, H, over);
+    /* the norm and its rotation in one door (`rmsnorm_rotate`), the bits of the two */
+    if (rotated) doors->rmsnorm((uint16_t*)(uintptr_t)h, (const uint16_t*)(uintptr_t)x, (const uint16_t*)(uintptr_t)at[AI_QWEN_3__DN__INPUT_NORM], H, AI_QWEN_3__RMS_NORM_EPS, over);
+    else doors->rmsnorm_rotate((uint16_t*)(uintptr_t)hrot, (uint16_t*)(uintptr_t)h, (const uint16_t*)(uintptr_t)x, (const uint16_t*)(uintptr_t)at[AI_QWEN_3__DN__INPUT_NORM],
+                               (const uint16_t*)(uintptr_t)signs, H, AI_QWEN_3__RMS_NORM_EPS, over);
     const uint64_t in = rotated ? h : hrot;
     nn__turboquant__groups g = {};
     const unsigned codes[4] = {AI_QWEN_3__DN__QKV, AI_QWEN_3__DN__Z, AI_QWEN_3__DN__A, AI_QWEN_3__DN__B};
@@ -82,6 +84,93 @@ static sys__heap_node ai_qwen_3__deltanet__zzabi_apply(const sys__heap_node* arg
         return fault != 0u ? sys__engine__abi__error(fault) : nn__doors_answer(&argv[2]);
     }
     doors->vector_add((uint16_t*)(uintptr_t)h1, (const uint16_t*)(uintptr_t)res, (const uint16_t*)(uintptr_t)ao, H, over);
+    return nn__doors_answer(&argv[2]);
+}
+
+/* `(ai_qwen_3__deltanet_n xs planes h1s n [keep_state keep_window])` -> `h1s`: `ai_qwen_3__deltanet` for `n` positions in
+ * turn (1 … 4), their rows `HIDDEN` apart in `xs` and `h1s` — a draft's check, the next position and the draft after it at
+ * once. ⭐ EACH ROW IS THE ONE-POSITION VERB'S TO THE BIT: the projections are nn's grouped gemv over `n` inputs, which reads
+ *   each matrix once and answers each input as the one-input door does; the norm, the conv and the recurrence are the
+ *   one-position doors a row at a time, in order; the gates, the rotations and the residual are the doors the
+ *   one-position verb calls, over every row. With `keep_state` and `keep_window` the state and the window as they are
+ *   after the first row are copied there — what a refused draft leaves. Over the one-position verb's table and scratch,
+ *   which must hold `n` rows. */
+static sys__heap_node ai_qwen_3__deltanet_n__zzabi_apply(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx) {
+    if (argc != 4u && argc != 6u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
+    uint64_t x = 0, x_room = 0, h1 = 0, h1_room = 0, ks = 0, ks_room = 0, kw = 0, kw_room = 0;
+    if (!sys__heap_node__carries_reference(argv[1].dtype) || !sys__node_array__is(argv[1].args[0]) || argv[3].dtype != SYS__KIND__VALUE_INT
+     || !nn__primitives__room(&argv[0], &x, &x_room) || !nn__primitives__room(&argv[2], &h1, &h1_room)
+     || (argc == 6u && (!nn__primitives__room(&argv[4], &ks, &ks_room) || !nn__primitives__room(&argv[5], &kw, &kw_room))))
+        return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
+    uint64_t at[AI_QWEN_3__DN__TABLE], room[AI_QWEN_3__DN__TABLE], v[AI_QWEN_3__DN__TABLE];
+    if (!ai_qwen_3__table__zzpackage_read(argv[1].args[0], AI_QWEN_3__DN__HIDDEN, AI_QWEN_3__DN__TABLE, at, room, v))
+        return sys__engine__abi__error(AI_QWEN_3__MIXER__FAULT_TABLE);
+    const uint64_t H = v[AI_QWEN_3__DN__HIDDEN], kh = v[AI_QWEN_3__DN__K_HEADS], vh = v[AI_QWEN_3__DN__V_HEADS];
+    const uint64_t hd = v[AI_QWEN_3__DN__HEAD_DIM], T = argv[3].args[0];
+    if (H == 0u || kh == 0u || vh == 0u || hd == 0u || vh % kh != 0u || H > (1ull << 24) || vh > (1ull << 16) || hd > (1ull << 16)
+     || T == 0u || T > 4u || !nn__primitives__fits(T * H, x_room) || !nn__primitives__fits(T * H, h1_room))
+        return sys__engine__abi__error(AI_QWEN_3__MIXER__FAULT_TABLE);
+    if (argc == 6u && (ks_room < room[AI_QWEN_3__DN__STATE] || kw_room < room[AI_QWEN_3__DN__WINDOW]))
+        return sys__engine__abi__error(AI_QWEN_3__MIXER__FAULT_ROOM);
+    const uint64_t vdim = vh * hd, ch = 2u * kh * hd + vdim;
+    /* scratch, in halves, `T` rows each: h · hrot · [qkv · z · a · b, each group's rows together] · beta · gb · conved · core · crot · ao */
+    const uint64_t proj = ch + vdim + 2u * vh;
+    const uint64_t need = T * (2u * H + proj + 2u * vh + ch + 2u * vdim + H);
+    if (!nn__primitives__fits(need, room[AI_QWEN_3__DN__SCRATCH])) return sys__engine__abi__error(AI_QWEN_3__MIXER__FAULT_ROOM);
+    const uint64_t h = at[AI_QWEN_3__DN__SCRATCH], hrot = h + 2u * T * H, mixed = hrot + 2u * T * H, z = mixed + 2u * T * ch;
+    const uint64_t av = z + 2u * T * vdim, bv = av + 2u * T * vh, beta = bv + 2u * T * vh, gb = beta + 2u * T * vh, conved = gb + 2u * T * vh;
+    const uint64_t core = conved + 2u * T * ch, crot = core + 2u * T * vdim, ao = crot + 2u * T * vdim;
+    const uint64_t signs = at[AI_QWEN_3__DN__SIGNS];
+    const nn__doors* doors = nn__doors_for(ctx);
+    if (doors == 0) return sys__engine__abi__error(NN__PRIMITIVES__FAULT_NO_DEVICE);
+    unsigned int* over = ctx->fault_word;
+
+    const bool rotated = ai_qwen_3__table__zzpackage_flag(argv[1].args[0], AI_QWEN_3__DN__RESIDUAL_ROTATED);
+    /* each row normed and rotated in one door where its rotation is whole blocks — the bits of the rotation over all T */
+    const bool each = !rotated && H % NN__HADAMARD__WHOLE_BELOW == 0u;
+    for (uint64_t r = 0u; r < T; ++r) {
+        if (each) doors->rmsnorm_rotate((uint16_t*)(uintptr_t)(hrot + 2u * r * H), (uint16_t*)(uintptr_t)(h + 2u * r * H),
+                                        (const uint16_t*)(uintptr_t)(x + 2u * r * H), (const uint16_t*)(uintptr_t)at[AI_QWEN_3__DN__INPUT_NORM],
+                                        (const uint16_t*)(uintptr_t)signs, H, AI_QWEN_3__RMS_NORM_EPS, over);
+        else doors->rmsnorm((uint16_t*)(uintptr_t)(h + 2u * r * H), (const uint16_t*)(uintptr_t)(x + 2u * r * H),
+                            (const uint16_t*)(uintptr_t)at[AI_QWEN_3__DN__INPUT_NORM], H, AI_QWEN_3__RMS_NORM_EPS, over);
+    }
+    if (!rotated && !each) doors->hadamard_rotate((uint16_t*)(uintptr_t)hrot, (const uint16_t*)(uintptr_t)h, (const uint16_t*)(uintptr_t)signs, T * H, over);
+    nn__turboquant__groups g = {};
+    const unsigned codes[4] = {AI_QWEN_3__DN__QKV, AI_QWEN_3__DN__Z, AI_QWEN_3__DN__A, AI_QWEN_3__DN__B};
+    const unsigned widths[4] = {AI_QWEN_3__DN__D_QKV, AI_QWEN_3__DN__D_Z, AI_QWEN_3__DN__D_A, AI_QWEN_3__DN__D_B};
+    const uint64_t rows[4] = {ch, vdim, vh, vh};
+    uint64_t placed = 0u;
+    for (unsigned i = 0u; i < 4u; ++i) {
+        g.codes[i] = at[codes[i]]; g.luts[i] = at[codes[i] + 1u]; g.rows[i] = rows[i]; g.d[i] = v[widths[i]];
+        g.out_at[i] = placed; placed += T * rows[i];
+    }
+    g.count = 4u;
+    doors->turboquant_gemv_groups_n((uint16_t*)(uintptr_t)mixed, g, (const uint16_t*)(uintptr_t)(rotated ? h : hrot), H, T, 0u, over);
+    doors->deltanet_gates_rows((uint16_t*)(uintptr_t)beta, (uint16_t*)(uintptr_t)gb, (const uint16_t*)(uintptr_t)av,
+                               (const uint16_t*)(uintptr_t)bv, (const uint16_t*)(uintptr_t)at[AI_QWEN_3__DN__A_LOG],
+                               (const uint16_t*)(uintptr_t)at[AI_QWEN_3__DN__DT_BIAS], vh, T, over);
+    for (uint64_t r = 0u; r < T; ++r) {
+        doors->deltanet_conv_step((uint16_t*)(uintptr_t)(conved + 2u * r * ch), (uint16_t*)(uintptr_t)at[AI_QWEN_3__DN__WINDOW],
+                                  (const uint16_t*)(uintptr_t)at[AI_QWEN_3__DN__CONV_W], (const uint16_t*)(uintptr_t)(mixed + 2u * r * ch), ch, over);
+        doors->deltanet_step((float*)(uintptr_t)at[AI_QWEN_3__DN__STATE], (const uint16_t*)(uintptr_t)(conved + 2u * r * ch),
+                             (const uint16_t*)(uintptr_t)(z + 2u * r * vdim), (const uint16_t*)(uintptr_t)(beta + 2u * r * vh),
+                             (const uint16_t*)(uintptr_t)(gb + 2u * r * vh), (const uint16_t*)(uintptr_t)at[AI_QWEN_3__DN__NORM_W],
+                             (uint16_t*)(uintptr_t)(core + 2u * r * vdim), kh, vh, hd, over);
+        if (r == 0u && argc == 6u) {                                     /* what a refused draft leaves */
+            doors->vector_copy((uint16_t*)(uintptr_t)ks, (const uint16_t*)(uintptr_t)at[AI_QWEN_3__DN__STATE], room[AI_QWEN_3__DN__STATE] / 2u);
+            doors->vector_copy((uint16_t*)(uintptr_t)kw, (const uint16_t*)(uintptr_t)at[AI_QWEN_3__DN__WINDOW], room[AI_QWEN_3__DN__WINDOW] / 2u);
+        }
+    }
+    doors->hadamard_rotate((uint16_t*)(uintptr_t)crot, (const uint16_t*)(uintptr_t)core, (const uint16_t*)(uintptr_t)signs, T * vdim, over);
+    nn__turboquant__groups o = {};
+    o.codes[0] = at[AI_QWEN_3__DN__OUT]; o.luts[0] = at[AI_QWEN_3__DN__OUT_LUT]; o.rows[0] = H; o.d[0] = v[AI_QWEN_3__DN__D_OUT];
+    o.out_at[0] = 0u; o.count = 1u;
+    doors->turboquant_gemv_groups_n((uint16_t*)(uintptr_t)ao, o, (const uint16_t*)(uintptr_t)crot, vdim, T, H, over);
+    const uint64_t masked = ai_qwen_3__table__zzpackage_masked(doors, over, argv[1].args[0], AI_QWEN_3__DN__MASK, ao, crot, T, H, vdim,
+                                                               AI_QWEN_3__MIXER__FAULT_TABLE);
+    if (masked != 0u) return sys__engine__abi__error(masked);
+    doors->vector_add((uint16_t*)(uintptr_t)h1, (const uint16_t*)(uintptr_t)x, (const uint16_t*)(uintptr_t)ao, T * H, over);
     return nn__doors_answer(&argv[2]);
 }
 
@@ -127,8 +216,10 @@ static sys__heap_node ai_qwen_3__attention__zzabi_apply(const sys__heap_node* ar
     unsigned int* over = ctx->fault_word;
 
     const bool rotated = ai_qwen_3__table__zzpackage_flag(argv[1].args[0], AI_QWEN_3__AT__RESIDUAL_ROTATED);
-    doors->rmsnorm((uint16_t*)(uintptr_t)h, (const uint16_t*)(uintptr_t)x, (const uint16_t*)(uintptr_t)at[AI_QWEN_3__AT__INPUT_NORM], H, AI_QWEN_3__RMS_NORM_EPS, over);
-    if (!rotated) doors->hadamard_rotate((uint16_t*)(uintptr_t)hrot, (const uint16_t*)(uintptr_t)h, (const uint16_t*)(uintptr_t)signs, H, over);
+    /* the norm and its rotation in one door (`rmsnorm_rotate`), the bits of the two */
+    if (rotated) doors->rmsnorm((uint16_t*)(uintptr_t)h, (const uint16_t*)(uintptr_t)x, (const uint16_t*)(uintptr_t)at[AI_QWEN_3__AT__INPUT_NORM], H, AI_QWEN_3__RMS_NORM_EPS, over);
+    else doors->rmsnorm_rotate((uint16_t*)(uintptr_t)hrot, (uint16_t*)(uintptr_t)h, (const uint16_t*)(uintptr_t)x, (const uint16_t*)(uintptr_t)at[AI_QWEN_3__AT__INPUT_NORM],
+                               (const uint16_t*)(uintptr_t)signs, H, AI_QWEN_3__RMS_NORM_EPS, over);
     const uint64_t in = rotated ? h : hrot;
     nn__turboquant__groups g = {};
     g.codes[0] = at[AI_QWEN_3__AT__Q]; g.luts[0] = at[AI_QWEN_3__AT__Q_LUT]; g.rows[0] = 2u * qw; g.d[0] = v[AI_QWEN_3__AT__D_Q]; g.out_at[0] = 0u;
@@ -238,8 +329,10 @@ static sys__heap_node ai_qwen_3__attention_tiered__zzabi_apply(const sys__heap_n
 
     /* ① the projections, as the one-cache verb makes them — the value into `vt` rather than a cache row */
     const bool rotated = ai_qwen_3__table__zzpackage_flag(table, AI_QWEN_3__AT__RESIDUAL_ROTATED);
-    doors->rmsnorm((uint16_t*)(uintptr_t)h, (const uint16_t*)(uintptr_t)x, (const uint16_t*)(uintptr_t)at[AI_QWEN_3__AT__INPUT_NORM], H, AI_QWEN_3__RMS_NORM_EPS, over);
-    if (!rotated) doors->hadamard_rotate((uint16_t*)(uintptr_t)hrot, (const uint16_t*)(uintptr_t)h, (const uint16_t*)(uintptr_t)signs, H, over);
+    /* the norm and its rotation in one door (`rmsnorm_rotate`), the bits of the two */
+    if (rotated) doors->rmsnorm((uint16_t*)(uintptr_t)h, (const uint16_t*)(uintptr_t)x, (const uint16_t*)(uintptr_t)at[AI_QWEN_3__AT__INPUT_NORM], H, AI_QWEN_3__RMS_NORM_EPS, over);
+    else doors->rmsnorm_rotate((uint16_t*)(uintptr_t)hrot, (uint16_t*)(uintptr_t)h, (const uint16_t*)(uintptr_t)x, (const uint16_t*)(uintptr_t)at[AI_QWEN_3__AT__INPUT_NORM],
+                               (const uint16_t*)(uintptr_t)signs, H, AI_QWEN_3__RMS_NORM_EPS, over);
     const uint64_t in = rotated ? h : hrot;
     nn__turboquant__groups g = {};
     g.codes[0] = at[AI_QWEN_3__AT__Q]; g.luts[0] = at[AI_QWEN_3__AT__Q_LUT]; g.rows[0] = 2u * qw; g.d[0] = v[AI_QWEN_3__AT__D_Q]; g.out_at[0] = 0u;
@@ -339,6 +432,7 @@ static sys__heap_node ai_qwen_3__attention_tiered__zzabi_apply(const sys__heap_n
 
 SYS__ENGINE__ABI__BRIDGE(ai_qwen_3__attention_tiered__zzabi_adapter, ai_qwen_3__attention_tiered__zzabi_apply)
 SYS__ENGINE__ABI__BRIDGE(ai_qwen_3__deltanet__zzabi_adapter,  ai_qwen_3__deltanet__zzabi_apply)
+SYS__ENGINE__ABI__BRIDGE(ai_qwen_3__deltanet_n__zzabi_adapter, ai_qwen_3__deltanet_n__zzabi_apply)
 SYS__ENGINE__ABI__BRIDGE(ai_qwen_3__attention__zzabi_adapter, ai_qwen_3__attention__zzabi_apply)
 
 #endif /* SILVANN__PACKAGES_AI_QWEN_3_CPU_OPCODES_MIXER__ABI_CUH */

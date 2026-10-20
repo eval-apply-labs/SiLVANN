@@ -244,25 +244,33 @@ enum { NN__EXPERT__MAX_TYPES = 0u NN__EXPERT_TYPE_SLOT_LIST(NN__EXPERT__ZZPRIVAT
 #define NN__EXPERT__NONE        0ull
 
 /* ⭐ WHERE AN EXPERT LIVES ON DISK — the backing an expert of a (layer, type) band is read from when it is
- * not in memory (⚖ *"the lru as a ram construct … load the misses from disk"*). An expert is `SLICES`
- * byte runs of one file: run `i` of expert `e` is `bytes[i]` at `from[i] + e · bytes[i]`, and it lands at
- * `into[i]` inside the expert's slot. `file` is a handle from the family's `file_open`; zero is no backing. */
-#define NN__EXPERT__SLICES 4u
+ * not in memory (⚖ *"the lru as a ram construct … load the misses from disk"*). An expert is up to `SLICES`
+ * byte runs of one file: run `i` of expert `e` is `bytes[i]` at `from[i] + e · stride[i]` — a stride of 0 is
+ * `bytes[i]`, the experts back to back — and it lands at `into[i]` inside the expert's slot. `file` is a handle
+ * from the family's `file_open`; zero is no backing. ⚖ 2026-10-19 *"ship it in 0.12.0"* (NN-97): a pack is read
+ * where its experts lie — a Qwen layer's four slices, the experts stacked by tensor — and a slice steps by its own
+ * stride, not its length, for a pack whose expert is records of its own: GLM's six, once its pack holds them in the
+ * experts' order (it holds them in their names' order: expert 10 after expert 1). */
+#define NN__EXPERT__SLICES 8u
 typedef struct nn__expert__backing {
     uint64_t file;
     uint64_t from[NN__EXPERT__SLICES];
     uint64_t bytes[NN__EXPERT__SLICES];
     uint64_t into[NN__EXPERT__SLICES];
+    uint64_t stride[NN__EXPERT__SLICES];
 } nn__expert__backing;
 
 /* ⭐ AND THE SAME BACKING AS A PROGRAM HOLDS IT — a node array of integers, so a boot program can write one
- * and a verb can be handed one: the file, then each slice's start, one expert's length, and its place in the slot. */
+ * and a verb can be handed one: the file, then each slice's start, one expert's length, its place in the slot and
+ * its stride — 33 integers; the 13 of four slices without a stride (`FOUR`) are read as well. */
 #define NN__EXPERT__BACKING__FILE      0u
-#define NN__EXPERT__BACKING__FROM(i)   (1u + 3u * (i))
-#define NN__EXPERT__BACKING__BYTES(i)  (2u + 3u * (i))
-#define NN__EXPERT__BACKING__INTO(i)   (3u + 3u * (i))
-#define NN__EXPERT__BACKING__LENGTH    13u
-#define NN__EXPERT__FAULT_BACKING      0x4E45424Bull   /* "NEBK" — a backing that is not 13 integers */
+#define NN__EXPERT__BACKING__FROM(i)   (1u + 4u * (i))
+#define NN__EXPERT__BACKING__BYTES(i)  (2u + 4u * (i))
+#define NN__EXPERT__BACKING__INTO(i)   (3u + 4u * (i))
+#define NN__EXPERT__BACKING__STRIDE(i) (4u + 4u * (i))
+#define NN__EXPERT__BACKING__LENGTH    33u
+#define NN__EXPERT__BACKING__FOUR      13u
+#define NN__EXPERT__FAULT_BACKING      0x4E45424Bull   /* "NEBK" — a backing that is not 13 or 33 integers */
 #define NN__EXPERT__FAULT_TIER       0x4E455452ull   /* "NETR" — no tier for this worker, or not a tier's cells */
 
 /* ⭐ THE LOADER — reads in flight at once, the threads that do them, and what it counts. ▶ `cpu/loader__impl.cuh`. */

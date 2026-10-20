@@ -194,10 +194,31 @@ class Bundle:
         return self.norm_offset
 
     def layer_dir(self, layer):
-        return os.path.join(self.path, self.manifest["layout"]["layer_dir"].format(L=layer))
+        return os.path.join(self.path, self.manifest["layout"]["layer_dir"].format(L=self._store(layer)))
+
+    # ⭐ THE MULTI-TOKEN PREDICTION LAYER FILED UNDER LAYER 0 — Qwen 3.5's packs keep `mtp.layers.0.*` in layer 000's index
+    #   and blob (its name has a `layers.0`, the packer's layer key): read here as the layer after the last, `n_layers`, its
+    #   names without the `mtp.layers.0.` prefix — so a runtime loads and plans it as any other layer. A pack with a
+    #   folder of its own for that layer (GLM's layer 45) reads that folder.
+    MTP_PREFIX = "mtp.layers.0."
+
+    def _store(self, layer):
+        """The layer whose files hold `layer`'s records: itself, or layer 0 for an MTP layer filed there."""
+        return 0 if layer == self.n_layers and self.mtp_in_layer0() else layer
+
+    def mtp_in_layer0(self):
+        """Whether this pack keeps its MTP layer in layer 0's files (and has no folder for layer `n_layers`)."""
+        if not hasattr(self, "_mtp0"):
+            own = os.path.join(self.path, self.manifest["layout"]["layer_dir"].format(L=self.n_layers))
+            self._mtp0 = not os.path.isdir(own) and any(k.startswith(self.MTP_PREFIX) for k in self.index(0))
+        return self._mtp0
+
+    def _prefix(self, layer):
+        return self.MTP_PREFIX if self._store(layer) != layer else "model.language_model.layers.%d." % (layer,)
 
     def index(self, layer):
         """The layer's record table. Read once and kept — it is ~6 KB against a 1.6 GB blob."""
+        layer = self._store(layer)
         if layer not in self._index:
             p = os.path.join(self.layer_dir(layer), self.manifest["layout"]["index"])
             if not os.path.exists(p):
@@ -211,6 +232,7 @@ class Bundle:
         ⛳ `mmap` AND NOT A READ, because a layer is 1.6 GB and a loader that read it whole would need
         the model's size in RAM to put the model on a card. Slicing an mmap touches only the pages a
         slice covers, which is what makes loading one expert cost one expert."""
+        layer = self._store(layer)
         if layer not in self._blob:
             import mmap
             p = os.path.join(self.layer_dir(layer), self.manifest["layout"]["weights_bin"])
@@ -220,7 +242,7 @@ class Bundle:
 
     def record(self, layer, short_name):
         """One record, by the name it carries after the layer prefix is stripped — the overlay's when it has one."""
-        full = "model.language_model.layers.%d.%s" % (layer, short_name)
+        full = self._prefix(layer) + short_name
         if self.overlay is not None and layer in self._overlaid and full in self.overlay.index(layer):
             return Record(self.overlay, layer, full, self.overlay.index(layer)[full])
         idx = self.index(layer)
@@ -230,7 +252,7 @@ class Bundle:
 
     def names(self, layer):
         """Every record this layer carries, short — the layer prefix stripped."""
-        pre = "model.language_model.layers.%d." % (layer,)
+        pre = self._prefix(layer)
         return sorted(k[len(pre):] for k in self.index(layer) if k.startswith(pre))
 
     def close(self):

@@ -162,6 +162,13 @@
 #define nn__rank1__zzabi_launch_spread__RUNS             NN__GPU__ZZPRIVATE_WIDE,     nn__rank1__zzabi_body_spread,             NN__GPU__ZZPRIVATE_EACH(rows), 256u, (acc, r, s, row_of, n, rows, row_stride)
 #define nn__attention__zzabi_launch_scores_grouped__RUNS NN__GPU__ZZPRIVATE_WIDE,     nn__attention__zzabi_body_scores_grouped, NN__GPU__ZZPRIVATE_EACH(q_heads * ((length + NN__ATTENTION__GROUP_SPAN - 1u) / NN__ATTENTION__GROUP_SPAN)), 256u, (p, q, k, q_heads, kv_heads, head_dim, length)
 #define nn__attention__zzabi_launch_softmax_rows__RUNS   NN__GPU__ZZPRIVATE_WIDE,     nn__attention__zzabi_body_softmax_rows,   NN__GPU__ZZPRIVATE_UP_TO(rows, NN__KERNELS__BLOCKS_MAX), 256u, (p, rows, length)
+#define nn__rope__zzabi_launch_interleaved__RUNS          NN__GPU__ZZPRIVATE_WIDE,     nn__rope__zzabi_body_interleaved,         NN__GPU__ZZPRIVATE_EACH(heads * (rot / 2ull)), 256u, (o, x, cs, heads, head_stride, rot, inverse, over)
+#define nn__attention__zzabi_launch_softmax_sink__RUNS    NN__GPU__ZZPRIVATE_WIDE,     nn__attention__zzabi_body_softmax_sink,   NN__GPU__ZZPRIVATE_UP_TO(rows, NN__KERNELS__BLOCKS_MAX), 256u, (p, sink, rows, length)
+#define nn__hyper__zzabi_launch_collapse__RUNS            NN__GPU__ZZPRIVATE_WIDE,     nn__hyper__zzabi_body_collapse,           NN__GPU__ZZPRIVATE_EACH(hidden), 256u, (out, mix, streams, hidden, mult, over)
+#define nn__vector__zzabi_launch_top_k_scored__RUNS       NN__GPU__ZZPRIVATE_WIDE,     nn__vector__zzabi_body_top_k_scored,      1u, 256u, (values, stride, weights, x, bias, n, k, scale, score)
+#define nn__engram__zzabi_launch_gate__RUNS               NN__GPU__ZZPRIVATE_WIDE,     nn__engram__zzabi_body_gate,              NN__GPU__ZZPRIVATE_UP_TO(mult, NN__KERNELS__BLOCKS_MAX), 256u, (streams, kv, w, hidden, mult, eps, over)
+#define nn__rmsnorm__zzabi_launch_rotate__RUNS            NN__GPU__ZZPRIVATE_BY_ROW,   nn__rmsnorm__zzprivate_rotate_by_two,     1u, 1u, (rot, o, x, w, sign, n, eps, over)
+#define nn__turboquant__zzabi_launch_gemv_groups_n__RUNS NN__GPU__ZZPRIVATE_WIDE,   nn__turboquant__zzabi_body_gemv_groups_n, NN__KERNELS__BLOCKS_MAX, 256u, (out, g, x, cols, n, out_stride, over)
 #define nn__attention__zzabi_launch_causal_scores_grouped__RUNS NN__GPU__ZZPRIVATE_WIDE, nn__attention__zzabi_body_causal_scores_grouped, NN__GPU__ZZPRIVATE_EACH((rows + NN__ATTENTION__CAUSAL_ROWS - 1u) / NN__ATTENTION__CAUSAL_ROWS * q_heads * ((first + rows + NN__ATTENTION__GROUP_SPAN - 1u) / NN__ATTENTION__GROUP_SPAN)), 256u, (p, q, k, q_heads, kv_heads, head_dim, first, rows)
 #define nn__attention__zzabi_launch_causal_softmax__RUNS NN__GPU__ZZPRIVATE_WIDE,     nn__attention__zzabi_body_causal_softmax, NN__GPU__ZZPRIVATE_UP_TO(rows * q_heads, NN__KERNELS__BLOCKS_MAX), 256u, (p, q_heads, first, rows)
 #define nn__vector__zzabi_launch_penalize__RUNS          NN__GPU__ZZPRIVATE_WIDE,     nn__vector__zzabi_body_penalize,          NN__GPU__ZZPRIVATE_EACH(count), 256u, (x, n, ids, stride, count, penalty, over)
@@ -399,6 +406,17 @@ static void nn__attention__zzprivate_residual_mix_tq_by_row(float* res, const fl
     for (uint64_t r = 0u; r < rows; ++r)
         doors->attention_residual_mix_tq(res + r * q_heads * rf, p + r * q_heads * length, codes, scales, q_heads, kv_heads,
                                          head_dim, length, d);
+}
+
+/* ── ⭐ THE NORM AND ITS ROTATION: THE FAMILY'S TWO DOORS, ONE AFTER THE OTHER ────────────────────────────────────────────
+ * nn's definition of `rmsnorm_rotate`: `o = rmsnorm(x, w)`, then `rot = hadamard_rotate(o, sign)` over `n` — the two doors
+ * a layer calls before a TurboQuant gemv, `o` kept for a reader of the unrotated row (a router). A family with no kernel of
+ * its own runs, through this, those two launches and their bits; one that has answers it in one launch, the same bits. */
+static void nn__rmsnorm__zzprivate_rotate_by_two(uint16_t* rot, uint16_t* o, const uint16_t* x, const uint16_t* w, const uint16_t* sign,
+                                                 uint64_t n, float eps, unsigned int* over) {
+    const nn__doors* doors = nn__attention__zzprivate_own();
+    doors->rmsnorm(o, x, w, n, eps, over);
+    doors->hadamard_rotate(rot, o, sign, n, over);
 }
 
 extern "C" {

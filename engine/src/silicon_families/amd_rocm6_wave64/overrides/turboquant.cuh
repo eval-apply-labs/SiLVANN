@@ -917,11 +917,12 @@ static __host__ __device__ inline uint64_t amd_rocm6_wave64__zzprivate_unit_rows
 /* One unit: `RU` rows of a `D`-bit group from `r0`, row `r` written at `out[r]` by the first lane of its slice of the wave.
  * ⛳ EVERY LANE SCALES ITS SLICE'S SUM, though one writes it: read with the codes the scale costs no wait; read by the
  *   writing lane alone it would be read after the sum, a second wait a unit. */
-template <uint32_t HELD, uint32_t RU, uint32_t D>
+template <uint32_t HELD, uint32_t RU, uint32_t D, uint32_t NX = 1u>
 static __device__ inline void amd_rocm6_wave64__zzprivate_groups_unit(uint16_t* out, const uint8_t* codes, const uint8_t* lut, uint64_t rows,
                                                                       uint64_t r0, uint64_t cols, const uint4* xs, const uint16_t* table8,
                                                                       const uint32_t* low, const uint32_t* high, const uint32_t* at,
-                                                                      const bool* real, uint32_t lane, unsigned int* over) {
+                                                                      const bool* real, uint32_t lane, unsigned int* over,
+                                                                      uint64_t out_stride = 0u) {
     const uint32_t slice = AMD_ROCM6_WAVE64__ZZPRIVATE_WAVE / RU, mine = lane / slice;   /* the row whose sum this lane writes */
     const uint64_t row_bytes = cols * D / 8u, mrow = r0 + mine < rows ? r0 + mine : rows - 1u;
     uint64_t cur[RU][HELD][D / 2u];                                    /* a lane's block of a row: 16 bytes at 4 bits, 32 at 8 */
@@ -938,17 +939,25 @@ static __device__ inline void amd_rocm6_wave64__zzprivate_groups_unit(uint16_t* 
     const uint32_t lo = lut[mrow * 2ull], hi = lut[mrow * 2ull + 1ull];
     __builtin_amdgcn_sched_barrier(0);                                 /* the scale's loads stay with the codes' */
     const float scale = nn__silicon__half_to_float((uint16_t)(lo | (hi << 8)));
-    float part[RU];
+    /* ⭐ NX INPUTS, THE CODES DECODED ONCE: input `j`'s `x` at `xs + j · cols / 8`, its sums in `part[j]` — each its own
+     *   blocks in the one-input order, so each output is the one-input kernel's to the bit */
+    float part[NX][RU];
 #pragma unroll
-    for (uint32_t a = 0u; a < RU; ++a) part[a] = 0.0f;
+    for (uint32_t j = 0u; j < NX; ++j)
+#pragma unroll
+        for (uint32_t a = 0u; a < RU; ++a) part[j][a] = 0.0f;
 #pragma unroll
     for (uint32_t k = 0u; k < HELD; ++k) {
-        float sub[RU];
+        float sub[NX][RU];
 #pragma unroll
-        for (uint32_t a = 0u; a < RU; ++a) sub[a] = 0.0f;
+        for (uint32_t j = 0u; j < NX; ++j)
+#pragma unroll
+            for (uint32_t a = 0u; a < RU; ++a) sub[j][a] = 0.0f;
 #pragma unroll
         for (uint32_t q = 0u; q < 4u; ++q) {                             /* eight columns at a time */
-            const uint4 xv = xs[4u * at[k] + q];
+            uint4 xv[NX];
+#pragma unroll
+            for (uint32_t j = 0u; j < NX; ++j) xv[j] = xs[(uint64_t)j * (cols / 8u) + 4u * at[k] + q];
 #pragma unroll
             for (uint32_t a = 0u; a < RU; ++a) {
                 uint32_t pairs[4];
@@ -961,24 +970,32 @@ static __device__ inline void amd_rocm6_wave64__zzprivate_groups_unit(uint16_t* 
                     const uint32_t l6 = table8[(c >> 48) & 0xFFu], l7 = table8[(c >> 56) & 0xFFu];
                     pairs[0] = l0 | (l2 << 16); pairs[1] = l4 | (l6 << 16); pairs[2] = l1 | (l3 << 16); pairs[3] = l5 | (l7 << 16);
                 }
-                sub[a] = amd_rocm6_wave64__zzpackage_dot2(pairs[0], xv.x, sub[a]);
-                sub[a] = amd_rocm6_wave64__zzpackage_dot2(pairs[1], xv.y, sub[a]);
-                sub[a] = amd_rocm6_wave64__zzpackage_dot2(pairs[2], xv.z, sub[a]);
-                sub[a] = amd_rocm6_wave64__zzpackage_dot2(pairs[3], xv.w, sub[a]);
+#pragma unroll
+                for (uint32_t j = 0u; j < NX; ++j) {
+                    sub[j][a] = amd_rocm6_wave64__zzpackage_dot2(pairs[0], xv[j].x, sub[j][a]);
+                    sub[j][a] = amd_rocm6_wave64__zzpackage_dot2(pairs[1], xv[j].y, sub[j][a]);
+                    sub[j][a] = amd_rocm6_wave64__zzpackage_dot2(pairs[2], xv[j].z, sub[j][a]);
+                    sub[j][a] = amd_rocm6_wave64__zzpackage_dot2(pairs[3], xv[j].w, sub[j][a]);
+                }
             }
         }
 #pragma unroll
-        for (uint32_t a = 0u; a < RU; ++a) part[a] += real[k] ? sub[a] : 0.0f;
+        for (uint32_t j = 0u; j < NX; ++j)
+#pragma unroll
+            for (uint32_t a = 0u; a < RU; ++a) part[j][a] += real[k] ? sub[j][a] : 0.0f;
     }
-    const float v = amd_rocm6_wave64__zzprivate_sums<RU>(part, lane) * scale;
-    if (lane % slice == 0u && r0 + mine < rows) out[r0 + mine] = nn__kernels__zzabi_to_half(v, over);
+#pragma unroll
+    for (uint32_t j = 0u; j < NX; ++j) {
+        const float v = amd_rocm6_wave64__zzprivate_sums<RU>(part[j], lane) * scale;
+        if (lane % slice == 0u && r0 + mine < rows) out[(uint64_t)j * out_stride + r0 + mine] = nn__kernels__zzabi_to_half(v, over);
+    }
 }
-template <uint32_t HELD>
+template <uint32_t HELD, uint32_t NX = 1u>
 static __device__ inline void amd_rocm6_wave64__zzprivate_groups_units(uint16_t* out, nn__turboquant__groups g, const uint16_t* x,
-                                                                       uint64_t cols, unsigned int* over) {
+                                                                       uint64_t cols, unsigned int* over, uint64_t out_stride = 0u) {
     extern __shared__ uint4 room[];
     uint4* xs = room;
-    uint16_t* table8 = (uint16_t*)(room + cols / 8u);  /* nn's 8-bit levels, read here rather than gathered a code at a time */
+    uint16_t* table8 = (uint16_t*)(room + NX * (cols / 8u));  /* nn's 8-bit levels, read here rather than gathered a code at a time */
     uint32_t low[2], high[2];
     amd_rocm6_wave64__zzpackage_tables(low, high);
     for (uint32_t e = (uint32_t)nn__silicon__lane(); e < 256u; e += AMD_ROCM6_WAVE64__ZZPRIVATE_ROWS * AMD_ROCM6_WAVE64__ZZPRIVATE_WAVE)
@@ -986,9 +1003,9 @@ static __device__ inline void amd_rocm6_wave64__zzprivate_groups_units(uint16_t*
     const uint32_t lane = (uint32_t)(nn__silicon__lane() % AMD_ROCM6_WAVE64__ZZPRIVATE_WAVE);
     const uint32_t wave = (uint32_t)__builtin_amdgcn_readfirstlane((int)(nn__silicon__lane() / AMD_ROCM6_WAVE64__ZZPRIVATE_WAVE));
     const uint64_t blocks = cols / 32u;
-    for (uint64_t e = nn__silicon__lane(); e < cols / 8u; e += AMD_ROCM6_WAVE64__ZZPRIVATE_ROWS * AMD_ROCM6_WAVE64__ZZPRIVATE_WAVE) {
+    for (uint64_t e = nn__silicon__lane(); e < NX * (cols / 8u); e += AMD_ROCM6_WAVE64__ZZPRIVATE_ROWS * AMD_ROCM6_WAVE64__ZZPRIVATE_WAVE) {
         uint32_t v[4];
-        amd_rocm6_wave64__zzprivate_x8(x + 8u * e, v);
+        amd_rocm6_wave64__zzprivate_x8(x + 8u * e, v);                 /* the inputs one after another, `cols` apart */
         xs[e] = make_uint4(v[0], v[1], v[2], v[3]);
     }
     __syncthreads();
@@ -1013,12 +1030,15 @@ static __device__ inline void amd_rocm6_wave64__zzprivate_groups_units(uint16_t*
         uint16_t* o = out + g.out_at[i];
         const uint8_t* codes = (const uint8_t*)(uintptr_t)g.codes[i];
         const uint8_t* lut = (const uint8_t*)(uintptr_t)g.luts[i];
+        const uint64_t st = out_stride != 0u ? out_stride : g.rows[i];   /* 0: a group's answers one input after another */
         if (g.d[i] == 4u)
-            amd_rocm6_wave64__zzprivate_groups_unit<HELD, AMD_ROCM6_WAVE64__ZZPRIVATE_UNIT_ROWS, 4u>(
-                o, codes, lut, g.rows[i], (u - first) * AMD_ROCM6_WAVE64__ZZPRIVATE_UNIT_ROWS, cols, xs, table8, low, high, at, real, lane, over);
+            amd_rocm6_wave64__zzprivate_groups_unit<HELD, AMD_ROCM6_WAVE64__ZZPRIVATE_UNIT_ROWS, 4u, NX>(
+                o, codes, lut, g.rows[i], (u - first) * AMD_ROCM6_WAVE64__ZZPRIVATE_UNIT_ROWS, cols, xs, table8, low, high, at, real, lane, over,
+                st);
         else
-            amd_rocm6_wave64__zzprivate_groups_unit<HELD, AMD_ROCM6_WAVE64__ZZPRIVATE_UNIT_ROWS / 2u, 8u>(
-                o, codes, lut, g.rows[i], (u - first) * (AMD_ROCM6_WAVE64__ZZPRIVATE_UNIT_ROWS / 2u), cols, xs, table8, low, high, at, real, lane, over);
+            amd_rocm6_wave64__zzprivate_groups_unit<HELD, AMD_ROCM6_WAVE64__ZZPRIVATE_UNIT_ROWS / 2u, 8u, NX>(
+                o, codes, lut, g.rows[i], (u - first) * (AMD_ROCM6_WAVE64__ZZPRIVATE_UNIT_ROWS / 2u), cols, xs, table8, low, high, at, real, lane, over,
+                st);
     }
 }
 
@@ -1413,6 +1433,15 @@ static __global__ AMD_ROCM6_WAVE64__ZZPRIVATE_BOUNDS void amd_rocm6_wave64__zzpr
                                                                                                 uint64_t cols, unsigned int* over) {
     amd_rocm6_wave64__zzprivate_groups_units<2u>(out, g, x, cols, over);
 }
+/* ...and over two inputs at once, `cols` apart, their answers `out_stride` apart (▶ `override_gemv_groups_n`) */
+static __global__ AMD_ROCM6_WAVE64__ZZPRIVATE_BOUNDS void amd_rocm6_wave64__zzprivate_groups_u1_x2(uint16_t* out, nn__turboquant__groups g, const uint16_t* x,
+                                                                                                   uint64_t cols, unsigned int* over, uint64_t out_stride) {
+    amd_rocm6_wave64__zzprivate_groups_units<1u, 2u>(out, g, x, cols, over, out_stride);
+}
+static __global__ AMD_ROCM6_WAVE64__ZZPRIVATE_BOUNDS void amd_rocm6_wave64__zzprivate_groups_u2_x2(uint16_t* out, nn__turboquant__groups g, const uint16_t* x,
+                                                                                                   uint64_t cols, unsigned int* over, uint64_t out_stride) {
+    amd_rocm6_wave64__zzprivate_groups_units<2u, 2u>(out, g, x, cols, over, out_stride);
+}
 static __global__ AMD_ROCM6_WAVE64__ZZPRIVATE_BOUNDS void amd_rocm6_wave64__zzprivate_groups_sum(uint16_t* out, nn__turboquant__groups g,
                                                                                                 const uint16_t* x, const uint16_t* w,
                                                                                                 const uint16_t* residual, uint64_t rows,
@@ -1490,6 +1519,38 @@ static void amd_rocm6_wave64__override_gemv_groups(uint16_t* out, nn__turboquant
     const uint32_t blocks = amd_rocm6_wave64__zzprivate_blocks(kernel, total, room);
     void* args[] = { &out, &g, &x, &cols, &over };
     amd_rocm6_wave64__zzprivate_launch_room(kernel, blocks, args, room);
+}
+
+/* ⭐ THE GROUPS OVER `n` INPUTS — `x`'s rows `cols` apart, their answers `out_stride` apart, or with `out_stride` 0 each
+ *   group's answers one input after another (the rows verbs' layout) — a draft's check: two positions through every matrix
+ *   of a step at once. Where the units kernel takes the call, two inputs a launch, the codes read and
+ *   decoded once for both; anything else, and an odd input left over, the one-input door an input at a time. Each answer
+ *   is the one-input door's to the bit: the same blocks to the same lanes, the same order, the same butterfly. */
+static void amd_rocm6_wave64__override_gemv_groups_n(uint16_t* out, nn__turboquant__groups g, const uint16_t* x, uint64_t cols,
+                                                     uint64_t n, uint64_t out_stride, unsigned int* over) {
+    uint64_t k = 0u;
+    const uint64_t held = (cols / 32u + AMD_ROCM6_WAVE64__ZZPRIVATE_WAVE - 1u) / AMD_ROCM6_WAVE64__ZZPRIVATE_WAVE;
+    if (n >= 2u && held <= 2u && amd_rocm6_wave64__zzprivate_groups_fit(&g, cols) && ((uint64_t)(uintptr_t)x) % 16u == 0u
+        && cols % 8u == 0u) {
+        const void* kernel = held == 1u ? (const void*)amd_rocm6_wave64__zzprivate_groups_u1_x2 : (const void*)amd_rocm6_wave64__zzprivate_groups_u2_x2;
+        uint64_t units = 0u;
+        for (uint64_t i = 0u; i < g.count; ++i)
+            units += (g.rows[i] + amd_rocm6_wave64__zzprivate_unit_rows(g.d[i]) - 1u) / amd_rocm6_wave64__zzprivate_unit_rows(g.d[i]);
+        const size_t room = 2u * (size_t)amd_rocm6_wave64__zzprivate_held(cols) * AMD_ROCM6_WAVE64__ZZPRIVATE_WAVE * 64u + 512u;
+        const uint32_t blocks = amd_rocm6_wave64__zzprivate_blocks(kernel, units, room);
+        for (; k + 2u <= n; k += 2u) {
+            uint16_t* o = out;
+            nn__turboquant__groups gk = nn__turboquant__groups_input(&g, &o, k, out_stride);
+            const uint16_t* xk = x + k * cols;
+            void* args[] = { &o, &gk, &xk, &cols, &over, &out_stride };
+            amd_rocm6_wave64__zzprivate_launch_room(kernel, blocks, args, room);
+        }
+    }
+    for (; k < n; ++k) {
+        uint16_t* o = out;
+        const nn__turboquant__groups gk = nn__turboquant__groups_input(&g, &o, k, out_stride);
+        amd_rocm6_wave64__override_gemv_groups(o, gk, x + k * cols, cols, over);
+    }
 }
 
 /* ⛳ `x` NEEDS ONLY 4-BYTE ALIGNMENT here: the four-row kernel reads `x` a word at a time and the one-matrix kernel a half

@@ -26,12 +26,14 @@ static inline void amd_rocm6_wave64__override_doors(nn__doors* doors) {
     doors->deltanet_step                = amd_rocm6_wave64__override_deltanet_step;
     doors->hadamard_rotate      = amd_rocm6_wave64__override_hadamard_rotate;
     doors->turboquant_gemv_groups     = amd_rocm6_wave64__override_gemv_groups;
+    doors->turboquant_gemv_groups_n   = amd_rocm6_wave64__override_gemv_groups_n;
     doors->turboquant_gemv_groups_sum = amd_rocm6_wave64__override_gemv_groups_sum;
     doors->expert_rows          = amd_rocm6_wave64__override_expert_rows;
     doors->expert_rows_sum      = amd_rocm6_wave64__override_expert_rows_sum;
     doors->expert_groups        = amd_rocm6_wave64__override_expert_groups;
     doors->rmsnorm              = amd_rocm6_wave64__override_rmsnorm;
     doors->rmsnorm_rows         = amd_rocm6_wave64__override_rmsnorm_rows;
+    doors->rmsnorm_rotate       = amd_rocm6_wave64__override_rmsnorm_rotate;
     doors->argmax               = amd_rocm6_wave64__override_argmax;
     doors->vector_top_k         = amd_rocm6_wave64__override_vector_top_k;
     doors->vector_penalize      = amd_rocm6_wave64__override_vector_penalize;

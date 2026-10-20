@@ -91,7 +91,7 @@ static __device__ inline uint16_t nn__primitives__zzpackage_float_to_half(float 
  * so that sigmoid is one number and the `*` is a broadcast. `nn__vector__scale` is what serves it.
  * ⇒ ★ A PYTORCH `*` IS NOT EVIDENCE OF AN ELEMENTWISE OPERATION — check the shape either side of it.
  * ⚖ THE VERB IS KEPT AND FLAGGED: elementwise multiply is an ordinary primitive, and whether an
- * uncalled one stays is the architect's. ▶ `docs_history_internal/nn_retired_symbols.md`.
+ * uncalled one stays is the architect's. ▶ the archive's `docs_history_internal/nn_retired_symbols.md`.
  * ⛳ `swiglu` ALREADY CONTAINS THIS PRODUCT AND CANNOT LEND IT: it computes `silu(gate) * up`, so a
  * caller wanting only the product would have to pass a `gate` whose silu is the identity, and there
  * is none. ⇒ ★ A FUSED OPERATION IS NOT AVAILABLE IN PARTS TO A CALLER THAT WANTS ONE PART.

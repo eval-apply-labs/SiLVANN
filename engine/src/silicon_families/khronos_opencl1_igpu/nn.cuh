@@ -99,7 +99,7 @@ static inline void nn__silicon__launch(const void* kernel, const char* name, uin
     khronos_opencl1_igpu__state* s = khronos_opencl1_igpu__zzpackage_up();
     cl_command_queue q = khronos_opencl1_igpu__zzpackage_queue();
     if (s == 0 || q == 0) return;
-    pthread_mutex_lock(&khronos_opencl1_igpu__zzpackage_lock);
+    sys__os__lock_take(&khronos_opencl1_igpu__zzpackage_lock);
     const uint32_t card = khronos_opencl1_igpu__bound_device();
     khronos_opencl1_igpu__kernel* k = card < s->count ? khronos_opencl1_igpu__zzprivate_kernel(s, card, name) : 0;
     bool ok = k != 0;
@@ -114,7 +114,7 @@ static inline void nn__silicon__launch(const void* kernel, const char* name, uin
         const size_t global = (size_t)blocks * (size_t)threads, local = (size_t)threads;
         ok = clEnqueueNDRangeKernel(q, k->kernel, 1u, 0, &global, &local, 0u, 0, 0) == CL_SUCCESS;
     }
-    pthread_mutex_unlock(&khronos_opencl1_igpu__zzpackage_lock);
+    sys__os__lock_give(&khronos_opencl1_igpu__zzpackage_lock);
     if (!ok) fprintf(stderr, "khronos_opencl1_igpu: %s did not launch\n", name);
 }
 

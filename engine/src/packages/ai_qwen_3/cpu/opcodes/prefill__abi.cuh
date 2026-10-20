@@ -2,7 +2,7 @@
 #define SILVANN__PACKAGES_AI_QWEN_3_CPU_OPCODES_PREFILL__ABI_CUH
 
 /* What this file needs, named where a reader — and an editor — can follow it. */
-#include <time.h>                                 /* the streaming's own clock */
+#include "../../../../operating_systems/os.cuh"   /* the streaming's own clock: the system's */
 #include "../../../nn/cpu/doors.cuh"            /* nn's doors, launched on the worker's silicon */
 #include "../../../nn/cpu/expert__header.cuh"   /* where a routed expert's slot is */
 #include "../../contracts/objects/mixer.cuh"    /* the mixers' tables */
@@ -471,7 +471,7 @@ static sys__silicon_family__id ai_qwen_3__stream__zzprivate_family = SYS__SILICO
 
 static uint64_t ai_qwen_3__stream__zzprivate_now(void) {
     struct timespec t;
-    clock_gettime(CLOCK_MONOTONIC, &t);
+    sys__os__clock(&t);
     return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec;
 }
 

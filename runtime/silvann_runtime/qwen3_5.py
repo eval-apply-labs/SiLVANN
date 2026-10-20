@@ -19,6 +19,7 @@ values up to its length — `state_regions` says where, so a conversation can be
 and `state_write` take it whole, in one card's form however many cards hold it.
 """
 import json
+import re
 import os
 import pickle
 
@@ -46,7 +47,7 @@ class Qwen35(Generates):
     def __init__(self, folder, machine, max_context=4096, fused_moe=True, kv="tiered", tiers=None, experts_on="card",
                  experts_from="auto", experts_dir=None, layers=None, chunk=256, experts_ram_gb=None, card_experts_gb=0,
                  card_landing=1, card_line=None, experts_int8=False, picture_pixels=1 << 22,
-                 picture_weights="auto", tensor_parallel=1, lend_cache=True):
+                 picture_weights="auto", tensor_parallel=1, lend_cache=True, mtp="no", mtp_rows=False, mtp_pairs=True):
         if folder.architecture not in ARCHITECTURES:
             raise Refused("%s is a %r model, not one of %s" % (folder.path, folder.architecture, ARCHITECTURES))
         c, b = folder.config, folder.bundle
@@ -143,6 +144,43 @@ class Qwen35(Generates):
         self.head_rec, self.emb_rec = g.get("lm_head.weight"), g["model.language_model.embed_tokens.weight"]
         self.HEADLESS = self.head_rec is None
         self.VOCAB = int((self.emb_rec if self.HEADLESS else self.head_rec)["rows"])
+        # ⭐ THE MULTI-TOKEN PREDICTION LAYER (`mtp_num_hidden_layers` 1) — packed with the model, filed under layer 0 as
+        #   `mtp.layers.0.*` (▶ nn_load_bundle's `MTP_PREFIX`), and its `fc` and three norms in global.pkl: `fc` over
+        #   [norm(the next token's embedding) | norm(the model's hidden)], an attention layer and its MoE on the residual,
+        #   `mtp.norm`, the model's head — the token after next, a draft the model then checks with the next token
+        #   (▶ `_mtp_procedures`). Held as the layer after the last (LAYERS) at the end of `run_layers`, so its tables,
+        #   its cache and its experts are made as any layer's; `layers` and `rows` run to RUN, before it.
+        #   ⚖ 2026-10-19: *"ok do the qwen mtp as a stretch goal"*; its option as GLM's, "no" by default
+        self.MTP = None
+        if isinstance(mtp, str):
+            if mtp.lower() not in ("yes", "no", "true", "false", "1", "0"):
+                raise Refused("mtp is 'yes' or 'no', not %r" % (mtp,))
+            mtp = mtp.lower() in ("yes", "true", "1")
+        # the MTP layer's history, as GLM's (▶ glm5.py): the last position its cache has, the position whose head state is
+        # in hB, and (pos, token, draft) to go on with; the prompt's last MTP_HISTORY rows given to it; what drafts did
+        self._mtp_have, self._mtp_hid, self._mtp_next = -1, -1, None
+        self.MTP_HISTORY, self.mtp_stats = 8, dict(passes=0, kept=0)
+        # the experts on the CPU: a check's hand-off as two rows (▶ `_mtp_procedures`) — off: ⚖ MEASURED 2026-10-20 node-01,
+        # the 35B, two rows' hand-off 0.84x the plain rate and two one-position hand-offs in one picture 1.12x
+        self.CHECK_ROWS = bool(mtp_rows)
+        self.CHECK_PAIRS = bool(mtp_pairs)            # a check's both positions in one word a site (`deltanet_n`, `moe_n`)
+        if mtp:
+            L = self.LAYERS
+            if int(c.get("mtp_num_hidden_layers", 0)) < 1 or "mtp.fc.weight" not in g \
+                    or "self_attn.q_proj.weight" not in b.names(L):
+                raise Refused("%s carries no multi-token prediction layer" % folder.path)
+            if layers is not None or int(tensor_parallel or 1) > 1 or card_experts_gb or b.mask is not None:
+                raise Refused("the MTP layer runs on one machine's every layer, on one card, without a card tier of "
+                              "experts or a mask")
+            if self.HEADLESS or b.residual_rotated:
+                raise Refused("the MTP layer reads the model's head and its residual unrotated")
+            self.MTP = L
+            self.kinds[L] = "f"
+            self.run_layers.append(L)
+            fc = g["mtp.fc.weight"]
+            self.fc_data = np.asarray(fc["vbr_data"]).tobytes()
+            self.fc_lut = np.asarray(fc["vbr_lut"]).astype("<f2").tobytes()
+            self.FCPLAN, self.FC_BITS = NL.SlotPlan(len(self.fc_data), 0, 0, len(self.fc_lut)), int(fc["d"])
         # ⭐ PICTURES' FORMS, a file of their own that a runtime before them never reads — so a pack's qwen3_5.lisp stays
         #   one every runtime runs; a folder without it reads text, and refuses pictures (▶ `vision`). Decided at the boot,
         #   as a boot that reads `programs.lisp` never calls `_procedures`; the file is in that file's key, so what it
@@ -346,6 +384,11 @@ class Qwen35(Generates):
             most = self.WARM * row // self.CPLAN.slot_bytes
             if attn and most:
                 self.LEND = dict(row=row, regions=2 * attn, most=most)
+        # the MTP layer's `fc`, a collection of its own as the head's: it is no layer's record
+        self.T_FC = None
+        if self.MTP is not None:
+            self.T_FC = max(t for t, _, _ in coll) + 1
+            coll.append((self.T_FC, self.FCPLAN, 1))
         self.collections = coll
         self.arena = sum(p.slot_bytes * n for _, p, n in coll)
 
@@ -395,8 +438,9 @@ class Qwen35(Generates):
                 "nn__ram_buffer_result__size_bytes:64\nnn__ram_buffer_result__qty:1\n"
                 "nn__ram_buffer_experts__size_bytes:64\nnn__ram_buffer_experts__qty:1\n"
                 "nn__ram_buffer_table__size_bytes:%d\nnn__ram_buffer_table__qty:1\n"
-                % (big, 6 + (self.MASK_BYTES[CARD] > 0) + tier, (self.arena + (256 << 20)) >> 20, self.LAYERS - n_d, n_d,
-                   "".join(self.kinds[l] for l in range(self.LAYERS)), len(self.collections), types, self.TABLE_BYTES))
+                % (big, 6 + (self.MASK_BYTES[CARD] > 0) + tier, (self.arena + (256 << 20)) >> 20, len(self.kinds) - n_d, n_d,
+                   self._layer_types(), len(self.collections), types, self.TABLE_BYTES))
+        card = self._pools(card, self._mtp_asks())
         if self.CARDS > 1:
             return {k: card for k in range(self.CARDS)}       # every card the same collections, each its own part
         if not self.CPU_EXPERTS:
@@ -421,10 +465,46 @@ class Qwen35(Generates):
                "nn__conversation__text_size_kb:4\nnn__deltanet_state__bytes_per_layer:64\n"
                "nn__model__layer_types:%s\nnn__expert__types:1\n"
                "nn__expert__type0__up_bytes:%d\nnn__expert__type0__down_bytes:%d\nnn__expert__type0__slots:%d\n"
-               % (cbig, 5 + (self.MASK_BYTES[CPU] > 0), (self.cpu_arena + (256 << 20)) >> 20, self.LAYERS - n_d, n_d,
-                  "".join(self.kinds[l] for l in range(self.LAYERS)), p.up_bytes, p.down_bytes,
+               % (cbig, 5 + (self.MASK_BYTES[CPU] > 0), (self.cpu_arena + (256 << 20)) >> 20, len(self.kinds) - n_d, n_d,
+                  self._layer_types(), p.up_bytes, p.down_bytes,
                   self.SLOTS if self.SLOTS is not None else self.EXPERTS * len(self.run_layers)))
+        cpu = self._pools(cpu, [2 * (self.H + 16), self.H * 2] if self.MTP is not None else [])   # c_hand2, c_routed2
         return {CARD: card, CPU: cpu}
+
+    def _index_layers(self):
+        """The model's layers, as the experts' file names them — the MTP layer's place after them where it is held."""
+        return list(range(self.LAYERS + (1 if self.MTP is not None else 0)))
+
+    def _layer_types(self):
+        """Every layer's kind, the index's places — and the MTP layer's after them, where it is held."""
+        return "".join(self.kinds[l] for l in range(self.LAYERS + (1 if self.MTP is not None else 0)))
+
+    @staticmethod
+    def _pools(section, asks):
+        """A device section with a buffer more in the class each of `asks` (bytes) lands in: nn takes the smallest class
+        that fits and never a larger one (▶ nn's `zzprivate_take`), the first of two the same size."""
+        sizes, order = {}, ("resid", "main", "attn_out", "logits", "partials")
+        for k in order:
+            sizes[k] = int(re.search(r"nn__buffer_%s__size_bytes:(\d+)" % k, section).group(1))
+        more = dict.fromkeys(order, 0)
+        for n in asks:
+            fits = [k for k in order if sizes[k] >= n]
+            if not fits:
+                raise Refused("a %d-byte buffer fits none of the card's buffer classes" % n)
+            more[min(fits, key=lambda k: (sizes[k], order.index(k)))] += 1
+        for k in order:
+            if more[k]:
+                section = re.sub(r"(nn__buffer_%s__qty:)(\d+)" % k, lambda mt: mt.group(1) + str(int(mt.group(2)) + more[k]),
+                                 section, count=1)
+        return section
+
+    def _mtp_asks(self):
+        """The bytes of each card buffer the MTP layer and a draft's check make (▶ `_buffers`)."""
+        if self.MTP is None:
+            return []
+        H, n_d = self.H, sum(1 for l in self.run_layers if self.kinds[l] == "d")
+        small = [H * 2] * 11 + [H * 4] * 4 + ([2 * (H + 16 + self.INTER)] if self.MOE else [])   # xp and hp: two rows each
+        return small + [self.S_BYTES] * n_d + [self.W_BYTES] * n_d + [4 * self.VOCAB]
 
     def workers(self):
         """The machine's workers: the card, and the CPU when the experts are there — or the cards of a tensor-parallel
@@ -440,6 +520,10 @@ class Qwen35(Generates):
         m, b = self.m, self.b
         loader = m.loader()
         self._head_and_embedding(loader)
+        if self.MTP is not None:
+            loader.layer_width(0, self.T_FC, 1)
+            loader.load_bytes(self.FCPLAN, self.T_FC, 0, self.fc_data, self.fc_lut)
+            self.fc_data = self.fc_lut = None
         if self.VIS:
             self._vision_load(loader)
         self.state_at = {}
@@ -711,12 +795,21 @@ class Qwen35(Generates):
         self.head_data = self.head_lut = self.emb_data = self.emb_lut = None
 
     def _expert_pieces(self, view, l, x, part):
-        """Expert `x` of layer `l` as its slot's four pieces (▶ `experts_file`) — the loader's own slices."""
-        b, p = self.b, self.EPLAN
-        gd, gl = b.record(l, GU).expert_slices(x, self.EXPERTS)
-        dd, dl = b.record(l, DN).expert_slices(x, self.EXPERTS)
-        u8 = lambda raw: np.frombuffer(raw, dtype=np.uint8)
-        return [(p.at_up_data, u8(gd)), (p.at_up_lut, u8(gl)), (p.at_down_data, u8(dd)), (p.at_down_lut, u8(dl))]
+        """Expert `x` of layer `l` as its slot's four pieces (▶ `experts_file`) — the loader's own slices: runs of the
+        mapped layer `view` where the pack holds the record, so the disk tier can read them where they lie; a LoRA's
+        record, in a file of its own, as a copy."""
+        b, p, out = self.b, self.EPLAN, []
+        for rec, data_into, lut_into in ((b.record(l, GU), p.at_up_data, p.at_up_lut),
+                                         (b.record(l, DN), p.at_down_data, p.at_down_lut)):
+            if rec.bundle is b:
+                per = rec.expert_rows(self.EXPERTS)
+                (d, _), (s, _) = rec.data_span(), rec.lut_span()
+                d, s = d + x * per * rec.row_bytes, s + x * per * 2
+                out += [(data_into, view[d:d + per * rec.row_bytes]), (lut_into, view[s:s + per * 2])]
+            else:
+                data, lut = rec.expert_slices(x, self.EXPERTS)
+                out += [(data_into, np.frombuffer(data, dtype=np.uint8)), (lut_into, np.frombuffer(lut, dtype=np.uint8))]
+        return out
 
     def _cpu_experts(self, progress):
         """The CPU worker: every layer's experts in its memory or mapped from their file, the hand-off's buffers, each
@@ -726,10 +819,10 @@ class Qwen35(Generates):
         backing = {}
         if self.EXPERTS_FROM == "disk":
             backing = experts_file.cache_experts(m, self.b, [(CPU, 0, 1)], e, layers, self.EXPERTS, self.experts_dir,
-                                                 self._expert_pieces, list(range(self.LAYERS)), progress=progress)
+                                                 self._expert_pieces, self._index_layers(), progress=progress)
         elif self.EXPERTS_FROM == "mapped":
             experts_file.map_experts(m, self.b, [(CPU, 0, 1)], e, layers, self.EXPERTS, self.experts_dir,
-                                     self._expert_pieces, list(range(self.LAYERS)), progress=progress)
+                                     self._expert_pieces, self._index_layers(), progress=progress)
         else:
             m.act_as(CPU)
             loader = m.loader()
@@ -747,6 +840,9 @@ class Qwen35(Generates):
         m.buffer(H * 2, "c_zero", _half(np.zeros(H)))
         m.buffer(2 * (H + 16), "c_hand")
         m.buffer(H * 2, "c_routed")
+        if self.MTP is not None:                       # a draft's check: the second position's hand and sum
+            m.buffer(2 * (H + 16), "c_hand2")
+            m.buffer(H * 2, "c_routed2")
         m.buffer(131072, "c_scratch")
         self.C_HANDS_AT = m.buffer(self.CHUNK * self.HAND_ROW, "c_hands")
         m.buffer(self.CHUNK * H * 2, "c_rrows")
@@ -848,6 +944,8 @@ class Qwen35(Generates):
             m.buffer(65536, "pre_scratch")
             m.node_array("picks", self.TOPK)
             m.buffer(131072, "exp_scratch")
+        if self.MTP is not None:
+            self._mtp_buffers()
         if self.CPU_EXPERTS:
             # a prompt's hand rows and the routed rows the CPU hands back
             m.buffer(self.CHUNK * self.HAND_ROW, "hands")
@@ -859,6 +957,34 @@ class Qwen35(Generates):
             m.buffer(2 * (self.TOPK * 2 * self.INTER + 2 * self.TOPK * self.INTER), "kscratch")
             m.buffer(self.CHUNK * H * 2, "rrows_k")
             self.KRS_AT = m.buffer(self.KRSCRATCH, "krscratch")
+
+    def _mtp_buffers(self):
+        """The MTP layer's and a draft's check's (▶ `_mtp_procedures`): its three norms' gains (`1 + w`, as `fnw`), its input
+        — the embedding, the two normed halves and their rotation — its head's norm, the head states of the check's two
+        positions (hA, hB), the second position's residual and sums, each DeltaNet layer's state and window kept between
+        the check's two positions, and CHECK, the model's greedy token after each. ⛔ Made here, never where the programs
+        are composed: a boot that reads programs.lisp composes none (▶ glm5.py, MEASURED 2026-10-19). Counted for the
+        pools by `_mtp_asks`."""
+        m, H, g = self.m, self.H, self.global_
+        gain = lambda n: _half(1.0 + np.frombuffer(np.asarray(g[n]["vbr_data"]).tobytes(), dtype="<f2").astype(np.float64)[:H])
+        m.buffer(H * 2, "enw", gain("mtp.pre_fc_norm_embedding.weight"))
+        m.buffer(H * 2, "hnw", gain("mtp.pre_fc_norm_hidden.weight"))
+        m.buffer(H * 2, "mnw", gain("mtp.norm.weight"))
+        for nm in ("me", "hA", "hB", "mh", "mhr", "x2", "h12", "routed2"):
+            m.buffer(H * 2, nm)
+        for nm in ("xp", "hp"):                          # the check's two positions' residuals, and its mixers' answers, side by side
+            m.buffer(2 * H * 2, nm)
+        m.buffer(2 * self.VOCAB * 2, "logits2")         # both heads' logits
+        m.buffer(H * 4, "mcat")
+        m.buffer(H * 4, "mcatr")
+        if self.MOE:
+            m.buffer(2 * (H + 16 + self.INTER), "hand2")
+            m.node_array("picks2", self.TOPK)
+        for l in self.run_layers:
+            if self.kinds[l] == "d":
+                m.buffer(self.S_BYTES, "kbS%d" % l)
+                m.buffer(self.W_BYTES, "kbW%d" % l)
+        m.node_array("CHECK", 2)
 
     def plane(self, l, n, which):
         k = self.KEY[(l, n)]
@@ -1155,7 +1281,7 @@ class Qwen35(Generates):
         row = self.EMB_ROW_BYTES
         plane = lambda at, size: "(nn__expert__plane 0 %d 0 %d %d)" % (self.T_HEAD, at, size)
         values = dict(HIDDEN=H, HIDDEN_BYTES=2 * H, VOCAB=self.VOCAB, EPS=self.EPS, THETA=self.THETA, ROTARY=self.ROT,
-                      RUN=len(run), EMB_HALVES=row // 2, EMB_SCALES=self.EMB_DATA_BYTES // 2, EMB_BITS=self.EMB_BITS,
+                      RUN=len(run) - (1 if self.MTP is not None else 0), EMB_HALVES=row // 2, EMB_SCALES=self.EMB_DATA_BYTES // 2, EMB_BITS=self.EMB_BITS,
                       HEAD_BITS=self.HEAD_BITS, STOPS=0, SEEN=sampling.SEEN,
                       HEAD_CODES=plane(self.HPLAN.at_up_data, self.HPLAN.up_data),
                       HEAD_SCALES=plane(self.HPLAN.at_down_lut, self.HPLAN.down_lut),
@@ -1166,6 +1292,10 @@ class Qwen35(Generates):
         if self.CPU_EXPERTS:
             values.update(HAND_BYTES=2 * (H + 16), HANDS_BYTES=self.CHUNK * self.HAND_ROW, ROWS_BYTES=self.CHUNK * H * 2,
                           ROWS_HALVES=self.CHUNK * H, HAND_ROW=self.HAND_ROW, HAND_PICKS_AT=self.HAND_ROW - 8 * self.TOPK)
+        if self.MTP is not None:
+            fc = lambda at, size: "(nn__expert__plane 0 %d 0 %d %d)" % (self.T_FC, at, size)
+            values.update(FC_CODES=fc(self.FCPLAN.at_up_data, self.FCPLAN.up_data),
+                          FC_SCALES=fc(self.FCPLAN.at_down_lut, self.FCPLAN.down_lut), FC_BITS=self.FC_BITS)
         m.bind_values(values)
         m.array("DELTANET", [self.kinds[l] == "d" for l in run])
         m.array("LAYER", list(run))
@@ -1218,6 +1348,115 @@ class Qwen35(Generates):
         self.m.load_source(self.folder.program("generate"))
         if self.CPU_EXPERTS:
             self.m.load_source(self.folder.program("qwen3_5_cpu"))
+        if self.MTP is not None:
+            self._mtp_procedures()
+
+    def _mtp_procedures(self):
+        """⭐ THE MTP LAYER AND A DRAFT'S CHECK, composed (as GLM's, ▶ glm5.py `_mtp_procedures`):
+          (mtp_from tok pos hid)   the MTP layer at `pos` of its own cache — `tok` the token at pos + 1, `hid` the model's
+                                   normed hidden at `pos` — and its head: the greedy draft of the token at pos + 2
+          (mtp_cache_from …)       the layer alone, its cache's row written: what a prompt's rows give it
+          (row_hidden r)           a prompt row's normed hidden (its final norm) into hB
+          (check a b p q)          the token `a` at `p` and the draft `b` at q = p + 1 through every layer, each layer's
+                                   two positions in turn — its mixer's for p, then q's (a DeltaNet layer's state and window
+                                   kept between them, the rotary's angles each position's), both MoEs (the experts on the
+                                   CPU: one hand-off for both) — then both heads: CHECK the greedy token after each, hA and
+                                   hB the normed hidden at each
+          (restore)                every DeltaNet layer's state and window as they were after `p`
+        ⛳ An attention layer needs nothing given back: a position reads only rows it has written, and q's row is written
+        again when q is run for real.
+        ⚖ MEASURED 2026-10-19 node-01, the 35B on one MI50 (scratchpad qwen_parts_cost.py): a step 8.6 ms, its mixers alone
+        5.3 and its MoE 5.4 — and the rows verbs over 2 rows 40 + 50 ms (the MoE's rows verb reads every expert): so the
+        check is two one-position passes, not a chunk of two rows."""
+        m, H, run = self.m, self.H, self.run_layers
+        main = [l for l in run if l != self.MTP]
+        attn = "ai_qwen_3__attention_tiered" if self.TIERED else "ai_qwen_3__attention"
+        rng = lambda b, at, n: "(nn__vector__range %s %d %d)" % (b, at, n)
+        head = "(nn__turboquant__gemv HEAD_CODES HEAD_SCALES mhr logits_h VOCAB HIDDEN HEAD_BITS)"
+        m.defun("(defun (mtp_input tok hid) (begin (embed_into tok me) (nn__rmsnorm__apply me enw %s HIDDEN EPS) "
+                "(nn__rmsnorm__apply hid hnw %s HIDDEN EPS) (nn__hadamard__rotate mcat signs mcatr %d) "
+                "(nn__turboquant__gemv FC_CODES FC_SCALES mcatr x HIDDEN %d FC_BITS) (type x)))"
+                % (rng("mcat", 0, H), rng("mcat", H, H), 2 * H, 2 * H))
+        m.defun("(defun (mtp_cache_from tok pos hid) (begin (mtp_input tok hid) (nn__rope__angles cs pos THETA ROTARY) "
+                "(layer RUN pos) (type x)))")
+        m.defun("(defun (mtp_logits_from tok pos hid) (begin (mtp_cache_from tok pos hid) (nn__rmsnorm__apply x mnw mh HIDDEN EPS) "
+                "(nn__hadamard__rotate mh signs mhr HIDDEN) %s (type x)))" % head)
+        m.defun("(defun (mtp_from tok pos hid) (begin (mtp_logits_from tok pos hid) (nn__argmax__find logits_h res VOCAB) "
+                "(nn__buffer__read res)))")
+        m.defun("(defun (row_hidden r) (begin (nn__rmsnorm__apply (nn__vector__range xs (* r HIDDEN) HIDDEN) fnw hB HIDDEN EPS) "
+                "(type hB)))")
+        # ⭐ THE EXPERTS ON THE CPU: the two positions are a prompt's two rows — the residuals rows 0 and 1 of xs, the mixers'
+        #   answers of h1s — so the card routes both in one call into their hand rows, the CPU runs each expert once over
+        #   the rows that picked it (`experts_rows`, the prompt's), and the card closes both. `mtp_rows` false keeps
+        #   two one-position hand-offs in one picture instead
+        rows2 = self.CPU_EXPERTS and self.CHECK_ROWS
+        # ⭐ BOTH POSITIONS SIDE BY SIDE (`mtp_pairs`): a DeltaNet layer's two in one word, `deltanet_n`, which reads its
+        #   matrices once for both and keeps its state and window as the first leaves them
+        pairs = self.CHECK_PAIRS
+        xb, hb = ("xs", "h1s") if rows2 else ("xp", "hp") if pairs else (None, None)
+        x, x2 = (rng(xb, 0, H), rng(xb, H, H)) if xb else ("x", "x2")
+        h1, h12 = (rng(hb, 0, H), rng(hb, H, H)) if hb else ("h1", "h12")
+        if self.CPU_EXPERTS:
+            m.act_as(CPU)
+            m.picture("xqb", "(begin (nn__buffer__copy hand CARD c_hand HAND_BYTES) (nn__buffer__copy hand2 CARD c_hand2 HAND_BYTES) "
+                      "(ai_qwen_3__experts c_hand picks (nth EXPERTS_CPU (nth HERE 0)) c_routed) "
+                      "(ai_qwen_3__experts c_hand2 picks2 (nth EXPERTS_CPU (nth HERE 0)) c_routed2))")
+            m.picture("xr2", "(begin (nn__buffer__copy hands CARD c_hands %d) "
+                      "(ai_qwen_3__experts_rows c_hands (nth EXPERTS_CPU_ROWS (nth HERE 0)) c_rrows 2))" % (2 * self.HAND_ROW))
+            m.act_as(CARD)
+            m.view("names")
+        for i, l in enumerate(main):
+            if self.kinds[l] == "d" and xb:
+                mix = "(ai_qwen_3__deltanet_n %s mx%d %s 2 kbS%d kbW%d)" % (xb, l, hb, l, l)
+            elif self.kinds[l] == "d":
+                mix = ("(ai_qwen_3__deltanet %s mx%d %s) (nn__vector__copy %s kbS%d %d) (nn__vector__copy %s kbW%d %d) "
+                       "(ai_qwen_3__deltanet %s mx%d %s)" % (x, l, h1, self.state(l, "up"), l, self.S_BYTES // 2,
+                                                           self.state(l, "down"), l, self.W_BYTES // 2, x2, l, h12))
+            else:
+                mix = ("(nn__rope__angles cs p THETA ROTARY) (%s %s mx%d p %s) (nn__rope__angles cs q THETA ROTARY) (%s %s mx%d q %s)"
+                       % (attn, x, l, h1, attn, x2, l, h12))
+            if not self.MOE:
+                ffn = "(nn__mlp__apply %s ml%d %s) (nn__mlp__apply %s ml%d %s)" % (h1, l, x, h12, l, x2)
+            elif rows2:
+                ffn = ("(ai_qwen_3__pre_expert_rows h1s pre%d hands 2) (sys__node_array__set HERE 0 %d) (sys__compute CPU names xr2) "
+                       "(sys__result CPU) (nn__buffer__copy c_rrows CPU rrows %d) (ai_qwen_3__post_expert_rows h1s hands rrows post%d xs 2)"
+                       % (l, i, 4 * H, l))
+            elif self.CPU_EXPERTS:
+                ffn = ("(ai_qwen_3__pre_expert %s pre%d hand picks) (ai_qwen_3__pre_expert %s pre%d hand2 picks2) "
+                       "(sys__node_array__set HERE 0 %d) (sys__compute CPU names xqb) (sys__result CPU) "
+                       "(nn__buffer__copy c_routed CPU routed HIDDEN_BYTES) (nn__buffer__copy c_routed2 CPU routed2 HIDDEN_BYTES) "
+                       "(ai_qwen_3__post_expert %s hand routed post%d %s) (ai_qwen_3__post_expert %s hand2 routed2 post%d %s)"
+                       % (h1, l, h12, l, i, h1, l, x, h12, l, x2))
+            elif self.FUSED and pairs:
+                ffn = "(ai_qwen_3__moe_n %s mr%d %s 2)" % (hb, l, xb)       # both positions, one wait for their picks
+            elif self.FUSED:
+                ffn = "(ai_qwen_3__moe %s mr%d %s) (ai_qwen_3__moe %s mr%d %s)" % (h1, l, x, h12, l, x2)
+            else:
+                ffn = ("(ai_qwen_3__pre_expert %s pre%d hand picks) (ai_qwen_3__experts hand picks ex%d routed) "
+                       "(ai_qwen_3__post_expert %s hand routed post%d %s) "
+                       "(ai_qwen_3__pre_expert %s pre%d hand2 picks2) (ai_qwen_3__experts hand2 picks2 ex%d routed2) "
+                       "(ai_qwen_3__post_expert %s hand2 routed2 post%d %s)" % (h1, l, l, h1, l, x, h12, l, l, h12, l, x2))
+            m.defun("(defun (ck%d p q) (begin %s %s (type x)))" % (l, mix, ffn))
+        heads = " ".join("(nn__rmsnorm__apply %s fnw %s HIDDEN EPS) (nn__hadamard__rotate %s signs mhr HIDDEN) %s "
+                         "(nn__argmax__find logits_h res VOCAB) (sys__node_array__set CHECK %d (nn__buffer__read res))"
+                         % (xk, hid, hid, head, k) for k, (xk, hid) in enumerate(((x, "hA"), (x2, "hB"))))
+        if pairs:
+            # ⭐ both heads in one read of the head's matrix (`nn__turboquant__gemv_n`): each row's normed hidden rotated
+            #   into mcatr's two rows, both rows' logits into logits2
+            heads = ("(nn__rmsnorm__apply %s fnw hA HIDDEN EPS) (nn__rmsnorm__apply %s fnw hB HIDDEN EPS) "
+                     "(nn__hadamard__rotate hA signs %s HIDDEN) (nn__hadamard__rotate hB signs %s HIDDEN) "
+                     "(nn__turboquant__gemv_n HEAD_CODES HEAD_SCALES mcatr logits2 VOCAB HIDDEN HEAD_BITS 2) "
+                     "(nn__argmax__find %s res VOCAB) (sys__node_array__set CHECK 0 (nn__buffer__read res)) "
+                     "(nn__argmax__find %s res VOCAB) (sys__node_array__set CHECK 1 (nn__buffer__read res))"
+                     % (x, x2, rng("mcatr", 0, H), rng("mcatr", H, H), rng("logits2", 0, self.VOCAB),
+                        rng("logits2", self.VOCAB, self.VOCAB)))
+        m.defun("(defun (check_heads) (begin %s (type hB)))" % heads)
+        m.defun("(defun (check a b p q) (begin (embed_into a %s) (embed_into b %s) %s (check_heads) (type x)))"
+                % (x, x2, " ".join("(ck%d p q)" % l for l in main)))
+        back = ["(nn__vector__copy kbS%d %s %d) (nn__vector__copy kbW%d %s %d)"
+                % (l, self.state(l, "up"), self.S_BYTES // 2, l, self.state(l, "down"), self.W_BYTES // 2)
+                for l in main if self.kinds[l] == "d"]
+        m.defun("(defun (restore) (begin %s (type x)))" % " ".join(back))
 
     # ── ④ running ─────────────────────────────────────────────────────────────────────────────────────────────
     def reset(self):
@@ -1235,6 +1474,7 @@ class Qwen35(Generates):
             self.m.act_as(-1)
         self.m.must("(begin %s (type x))" % " ".join(zeros), "the reset")
         self._room(0, exact=True)                       # a conversation from nothing: every lent slot the tier's again
+        self._mtp_have, self._mtp_hid, self._mtp_next = -1, -1, None
 
     def _one_card(self, what):
         """⛳ What a tensor-parallel group does not do yet: refused rather than done on card 0's part alone."""
@@ -1258,9 +1498,68 @@ class Qwen35(Generates):
         return self._run("(begin (set! LAG %d) (position %d %d) %s)" % (lag, token, pos, head), "position %d" % pos)
 
     def generate(self, token, pos, n, stop=(), sampler=None, lag=0):
-        """`Generates.generate`, the cache's rows it may write withheld from the tier first."""
-        self._room(pos + min(n, GENERATE_MOST) + 1)
+        """`Generates.generate`, the cache's rows it may write withheld from the tier first — or, with the MTP layer and a
+        greedy answer, two tokens a pass where its draft is kept (`generate_mtp`). ⛳ The draft goes on from where the last
+        prompt or answer left it; anywhere else (another conversation ran between) the answer is the plain one."""
+        self._room(pos + min(n, GENERATE_MOST) + 2)
+        if self.MTP is not None and sampler is None and not lag:
+            n = min(n, GENERATE_MOST, self.max_context - pos - 1)
+            draft = None
+            if n > 0 and self._mtp_next is not None and self._mtp_next[:2] == (pos, token):
+                draft = self._mtp_next[2]
+            elif n > 0 and self._mtp_hid == pos - 1:     # the head state at pos - 1 is hB's
+                draft = self._run("(mtp_from %d %d hB)" % (token, pos - 1), "the draft at %d" % (pos - 1))
+            if draft is not None:
+                self._watch(())
+                out, passes = self.generate_mtp(token, pos, draft, n, set(stop))
+                self.mtp_stats["passes"] += passes
+                self.mtp_stats["kept"] += len(out) - passes
+                return out
+            self._mtp_have, self._mtp_hid, self._mtp_next = -1, -1, None   # the plain path runs on without the MTP layer
         return Generates.generate(self, token, pos, n, stop, sampler, lag)
+
+    def generate_mtp(self, token, pos, draft, n, stop=()):
+        """`n` greedy tokens from `token` at `pos` with the MTP layer's `draft` of the one after: each pass checks the
+        token and the draft together (`check`) — the draft kept when the model's own greedy token after `token` is the
+        draft, the token after the draft then the next; refused, the DeltaNet states given back. Answers (tokens,
+        passes). ▶ glm5.py's, the same steps."""
+        m, out, passes = self.m, [], 0
+        # ⛳ WHAT `generate` PROMISES (▶ session.py): every token it answers but the last has been run — so a pass that would
+        #   run more than it answers gives the states back to after `token`: a kept draft that is an end token, or one with
+        #   no room left for the token after it
+        while len(out) < n:
+            self._run("(begin (check %d %d %d %d) (type x))" % (token, draft, pos, pos + 1), "the check at %d" % pos)
+            passes += 1
+            y1 = m.must("(sys__node_array__get CHECK 0)", "the model's token after the token")
+            y2 = m.must("(sys__node_array__get CHECK 1)", "the model's token after the draft")
+            if y1 == draft and (draft in stop or len(out) + 1 >= n):
+                out.append(draft)
+                self._run("(restore)", "the DeltaNet states given back")
+                self._run("(begin (nn__vector__copy hA hB %d) (type hB))" % self.H, "the state at %d" % pos)
+                self._mtp_have, self._mtp_hid, self._mtp_next = pos - 1, pos, None
+                return out, passes
+            if y1 == draft:
+                out += [draft, y2]
+                # the MTP layer at pos (the draft, the state at pos) and at pos + 1 (y2, the state at pos + 1): the next draft
+                self._run("(begin (mtp_cache_from %d %d hA) (type x))" % (draft, pos), "the MTP layer at %d" % pos)
+                draft = self._run("(mtp_from %d %d hB)" % (y2, pos + 1), "the draft at %d" % (pos + 1))
+                token, pos, self._mtp_have, self._mtp_hid = y2, pos + 2, pos + 1, pos + 1
+            else:
+                out.append(y1)
+                self._run("(restore)", "the DeltaNet states given back")
+                self._run("(begin (nn__vector__copy hA hB %d) (type hB))" % self.H, "the state at %d" % pos)
+                draft = self._run("(mtp_from %d %d hA)" % (y1, pos), "the draft at %d" % pos)
+                token, pos, self._mtp_have, self._mtp_hid = y1, pos + 1, pos, pos
+            if out[-1] in stop:
+                break
+        self._mtp_next = (pos, token, draft)
+        return out[:n], passes
+
+    def _mtp_prime(self, p, tok):
+        """The MTP layer at `p - 1` from the token at `p` and the head state at `p - 1`, where hB holds it."""
+        if self.MTP is not None and p > 0 and self._mtp_hid == p - 1:
+            self._run("(begin (mtp_cache_from %d %d hB) (type x))" % (tok, p - 1), "the MTP layer at %d" % (p - 1))
+            self._mtp_have = p - 1
 
     # ── pictures: the tower's rows in place of their pads, and M-RoPE's positions ─────────────────────────────
     def vision(self):
@@ -1342,6 +1641,21 @@ class Qwen35(Generates):
             self._run("(begin (set! ROWPOS %s) %s (rows %d %d) (set! ROWPOS (< 1 0)) (type xs))"
                       % ("(< 0 1)" if given else "(< 1 0)", start, first + at, len(chunk)), "the rows from %d" % (first + at))
             last = len(chunk) - 1
+            if self.MTP is not None and given:
+                self._mtp_hid = -1                     # a picture's prompt: the MTP layer is given none of it
+            if self.MTP is not None and not given:
+                # ⭐ THE MTP LAYER GIVEN THE PROMPT'S LAST MTP_HISTORY ROWS (None: every row) — each row's normed hidden, the
+                #   layer at the row before with the row's token, its cache's row written (▶ glm5.py's `prefill`)
+                end = first + len(tokens)
+                begin = first if self.MTP_HISTORY is None else end - self.MTP_HISTORY
+                for r, tok in enumerate(chunk):
+                    p = first + at + r
+                    if p < begin - 1 and p != end - 1:
+                        continue
+                    if p >= begin:
+                        self._mtp_prime(p, tok)
+                    self._run("(row_hidden %d)" % r, "row %d's state" % r)
+                    self._mtp_hid = p
         head = sample or ("(head)" if greedy else "(head_logits)")
         return self._run("(begin (nn__vector__add (nn__vector__range xs %d %d) zero_h x %d) %s)"
                          % (last * self.H, self.H, self.H, head), "the prompt's last row")
@@ -1490,6 +1804,8 @@ class Qwen35(Generates):
         row, section by section in the cards' order, are one card's row."""
         out = []
         for l in self.run_layers:
+            if l == self.MTP:                           # the MTP layer's cache is drafts', no conversation's: not saved
+                continue
             if self.kinds[l] == "d":
                 ch = lambda heads: heads * self.LH * 3 * 2                                  # noqa: E731
                 out += [(l, self.SPLAN.at_up_data, 1, [self.S_BYTES]),
@@ -1559,3 +1875,4 @@ class Qwen35(Generates):
                 self.m.write(at[l] + off, np.concatenate(mine, axis=1).tobytes())
         if P > 1:
             self.m.act_as(-1)
+        self._mtp_have, self._mtp_hid, self._mtp_next = -1, -1, None   # another conversation's: the MTP layer held nothing

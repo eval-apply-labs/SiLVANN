@@ -79,7 +79,9 @@ static sys__heap_node ai_qwen_3__moe__zzabi_apply(const sys__heap_node* argv, un
      *   residual rotated the normed input is already what every gate_up reads, so it lands where the rotation would */
     const bool rotated = ai_qwen_3__table__zzpackage_flag(table, AI_QWEN_3__MOE__RESIDUAL_ROTATED);
     const uint64_t normed = rotated ? hmrot : hm;
-    doors->rmsnorm((uint16_t*)(uintptr_t)normed, (const uint16_t*)(uintptr_t)h1_at, (const uint16_t*)(uintptr_t)at[AI_QWEN_3__MOE__NORM], H, AI_QWEN_3__RMS_NORM_EPS, over);
+    if (rotated) doors->rmsnorm((uint16_t*)(uintptr_t)normed, (const uint16_t*)(uintptr_t)h1_at, (const uint16_t*)(uintptr_t)at[AI_QWEN_3__MOE__NORM], H, AI_QWEN_3__RMS_NORM_EPS, over);
+    else doors->rmsnorm_rotate((uint16_t*)(uintptr_t)hmrot, (uint16_t*)(uintptr_t)hm, (const uint16_t*)(uintptr_t)h1_at,       /* ③ with ① */
+                               (const uint16_t*)(uintptr_t)at[AI_QWEN_3__MOE__NORM], (const uint16_t*)(uintptr_t)signs, H, AI_QWEN_3__RMS_NORM_EPS, over);
     doors->turboquant_gemv((uint16_t*)(uintptr_t)logits, (const uint8_t*)(uintptr_t)at[AI_QWEN_3__MOE__ROUTER], room[AI_QWEN_3__MOE__ROUTER],
                            (const uint8_t*)(uintptr_t)at[AI_QWEN_3__MOE__ROUTER_LUT], room[AI_QWEN_3__MOE__ROUTER_LUT],
                            (const uint16_t*)(uintptr_t)normed, v[AI_QWEN_3__MOE__ROUTER_D], E, H, over);
@@ -91,8 +93,7 @@ static sys__heap_node ai_qwen_3__moe__zzabi_apply(const sys__heap_node* argv, un
     (void)sys__heap_object__release(picks);
     if (landed != 0u) return sys__engine__abi__error(landed);
 
-    /* ③ the normed input rotated once, for every gate_up; ④ every gate_up in one launch */
-    if (!rotated) doors->hadamard_rotate((uint16_t*)(uintptr_t)hmrot, (const uint16_t*)(uintptr_t)hm, (const uint16_t*)(uintptr_t)signs, H, over);
+    /* ③ the normed input rotated once, for every gate_up — by ①'s door, with the norm; ④ every gate_up in one launch */
     nn__turboquant__groups up = {};
     for (uint64_t j = 0u; j < K; ++j) {
         sys__heap_node me;
@@ -153,6 +154,114 @@ static sys__heap_node ai_qwen_3__moe__zzabi_apply(const sys__heap_node* argv, un
 
 SYS__ENGINE__ABI__BRIDGE(ai_qwen_3__moe__zzabi_adapter, ai_qwen_3__moe__zzabi_apply)
 
+/* `(ai_qwen_3__moe_n h1s planes outs n)` -> `outs`: `ai_qwen_3__moe` for `n` positions (1 … 4), their rows `HIDDEN` apart — a
+ * draft's check. ⭐ EACH ROW IS THE ONE-POSITION VERB'S TO THE BIT, in fewer launches and ONE wait: the norm over every row,
+ *   each row's router and top k, then one read of every row's picks; the rotation, the swiglus, the activations' rotation
+ *   and the shared gate's sigmoid over every row at once; each row's gate_ups and downs as the one-position verb groups
+ *   them (its own experts). A table with a mask is refused (a draft's check has none). */
+static sys__heap_node ai_qwen_3__moe_n__zzabi_apply(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx) {
+    if (argc != 4u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
+    uint64_t h1_at = 0, h1_room = 0, out_at = 0, out_room = 0;
+    if (!sys__heap_node__carries_reference(argv[1].dtype) || !sys__node_array__is(argv[1].args[0]) || argv[3].dtype != SYS__KIND__VALUE_INT
+     || !nn__primitives__room(&argv[0], &h1_at, &h1_room) || !nn__primitives__room(&argv[2], &out_at, &out_room))
+        return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
+    const uint64_t table = argv[1].args[0], T = argv[3].args[0];
+    uint64_t at[AI_QWEN_3__MOE__TABLE], room[AI_QWEN_3__MOE__TABLE], v[AI_QWEN_3__MOE__TABLE];
+    if (!ai_qwen_3__table__zzpackage_read(table, AI_QWEN_3__MOE__LAYER, AI_QWEN_3__MOE__TABLE, at, room, v))
+        return sys__engine__abi__error(AI_QWEN_3__MOE__FAULT_TABLE);
+    const uint64_t H = v[AI_QWEN_3__MOE__HIDDEN], I = v[AI_QWEN_3__MOE__INTER], E = v[AI_QWEN_3__MOE__EXPERTS];
+    const uint64_t K = v[AI_QWEN_3__MOE__TOP_K], layer = v[AI_QWEN_3__MOE__LAYER], type = v[AI_QWEN_3__MOE__EXPERT_TYPE];
+    if (H == 0u || I == 0u || E == 0u || K == 0u || K > E || K > AI_QWEN_3__TOP_K_MAX || K + 3u > NN__TURBOQUANT__GROUPS_MAX
+     || H > (1ull << 24) || I > (1ull << 24) || E > (1ull << 24) || I % 8u != 0u || T == 0u || T > 4u
+     || !nn__primitives__fits(T * H, h1_room) || !nn__primitives__fits(T * H, out_room) || !nn__primitives__fits(H, room[AI_QWEN_3__MOE__NORM]))
+        return sys__engine__abi__error(AI_QWEN_3__MOE__FAULT_TABLE);
+    uint64_t mk[3], mroom[3];
+    bool masked = false, shared_masked = false;
+    if (!ai_qwen_3__table__zzpackage_mask(table, AI_QWEN_3__MOE__MASK, mk, mroom, &masked)
+     || !ai_qwen_3__table__zzpackage_mask(table, AI_QWEN_3__MOE__SHARED_MASK, mk, mroom, &shared_masked) || masked || shared_masked)
+        return sys__engine__abi__error(AI_QWEN_3__MOE__FAULT_TABLE);
+    /* the scratch, in halves, `T` rows each: hm · hmrot · logits · weights · gate_ups (each row's K + 1 pairs together) ·
+     * the shared logits (8 a row) · activations · rotated ones · the picks' landing (4 halves a pick). Every cut on 8 halves */
+    const uint64_t n_hm = (H + 7u) / 8u * 8u, n_logits = (E + 7u) / 8u * 8u, n_w = 16u, n_gu = (K + 1u) * 2u * I, n_act = (K + 1u) * I;
+    const uint64_t need = T * (2u * n_hm + n_logits + n_w + n_gu + 8u + 2u * n_act + 4u * K);
+    if (!nn__primitives__fits(need, room[AI_QWEN_3__MOE__SCRATCH])) return sys__engine__abi__error(AI_QWEN_3__MOE__FAULT_ROOM);
+    const uint64_t hm = at[AI_QWEN_3__MOE__SCRATCH], hmrot = hm + 2u * T * n_hm, logits = hmrot + 2u * T * n_hm;
+    const uint64_t w = logits + 2u * T * n_logits, gu = w + 2u * T * n_w, lg = gu + 2u * T * n_gu, act = lg + 2u * T * 8u;
+    const uint64_t actr = act + 2u * T * n_act, landing = actr + 2u * T * n_act;
+    const uint64_t signs = at[AI_QWEN_3__MOE__SIGNS], sd = v[AI_QWEN_3__MOE__SHARED_D];
+    const nn__doors* doors = nn__doors_for(ctx);
+    if (doors == 0) return sys__engine__abi__error(NN__PRIMITIVES__FAULT_NO_DEVICE);
+    unsigned int* over = ctx->fault_word;
+
+    const bool rotated = ai_qwen_3__table__zzpackage_flag(table, AI_QWEN_3__MOE__RESIDUAL_ROTATED);
+    const uint64_t normed = rotated ? hmrot : hm;
+    const bool each = !rotated && H % NN__HADAMARD__WHOLE_BELOW == 0u;     /* each row normed and rotated in one door */
+    for (uint64_t r = 0u; r < T; ++r) {
+        if (each) doors->rmsnorm_rotate((uint16_t*)(uintptr_t)(hmrot + 2u * r * n_hm), (uint16_t*)(uintptr_t)(hm + 2u * r * n_hm),
+                                        (const uint16_t*)(uintptr_t)(h1_at + 2u * r * H), (const uint16_t*)(uintptr_t)at[AI_QWEN_3__MOE__NORM],
+                                        (const uint16_t*)(uintptr_t)signs, H, AI_QWEN_3__RMS_NORM_EPS, over);
+        else doors->rmsnorm((uint16_t*)(uintptr_t)(normed + 2u * r * n_hm), (const uint16_t*)(uintptr_t)(h1_at + 2u * r * H),
+                            (const uint16_t*)(uintptr_t)at[AI_QWEN_3__MOE__NORM], H, AI_QWEN_3__RMS_NORM_EPS, over);
+    }
+    for (uint64_t r = 0u; r < T; ++r)
+        doors->turboquant_gemv((uint16_t*)(uintptr_t)(logits + 2u * r * n_logits), (const uint8_t*)(uintptr_t)at[AI_QWEN_3__MOE__ROUTER],
+                               room[AI_QWEN_3__MOE__ROUTER], (const uint8_t*)(uintptr_t)at[AI_QWEN_3__MOE__ROUTER_LUT],
+                               room[AI_QWEN_3__MOE__ROUTER_LUT], (const uint16_t*)(uintptr_t)(normed + 2u * r * n_hm),
+                               v[AI_QWEN_3__MOE__ROUTER_D], E, H, over);
+    /* every row's picks, one wait: each row's top k into the landing, its weights at `w + r·n_w` */
+    uint64_t chosen[4u * AI_QWEN_3__TOP_K_MAX];
+    for (uint64_t r = 0u; r < T; ++r)
+        doors->vector_top_k((uint64_t*)(uintptr_t)(landing + 8u * r * K), 1ull, (uint16_t*)(uintptr_t)(w + 2u * r * n_w),
+                            (const uint16_t*)(uintptr_t)(logits + 2u * r * n_logits), E, K);
+    if (!sys__gpu__memory_read(ctx->family, chosen, (const void*)(uintptr_t)landing, (size_t)(8u * T * K)))
+        return sys__engine__abi__error(NN__PRIMITIVES__FAULT_NO_DEVICE);
+
+    if (!rotated && !each) doors->hadamard_rotate((uint16_t*)(uintptr_t)hmrot, (const uint16_t*)(uintptr_t)hm, (const uint16_t*)(uintptr_t)signs, T * n_hm, over);
+    /* each row's gate_ups: its experts and the shared gate and up into its K + 1 pairs, the shared logit into `lg` */
+    for (uint64_t r = 0u; r < T; ++r) {
+        nn__turboquant__groups up = {};
+        const uint64_t gu_r = gu + 2u * r * n_gu;
+        for (uint64_t j = 0u; j < K; ++j) {
+            sys__heap_node me;
+            const uint64_t e = chosen[r * K + j];
+            if (e >= E || !nn__expert__slot(layer, type, e, &me) || me.args[NN__EXPERT__SLOT_AT] == 0ull
+             || me.args[NN__EXPERT__SLOT_TYPE] != type) return sys__engine__abi__error(AI_QWEN_3__MOE__FAULT_EXPERT);
+            const uint64_t slot = me.args[NN__EXPERT__SLOT_AT];
+            up.codes[j] = slot; up.luts[j] = slot + v[AI_QWEN_3__MOE__EXPERT_UP_LUT];
+            up.rows[j] = 2u * I; up.d[j] = v[AI_QWEN_3__MOE__EXPERT_D]; up.out_at[j] = j * 2u * I;
+            chosen[r * K + j] = slot;                    /* from here on, the slot: the downs need it too */
+        }
+        up.codes[K] = at[AI_QWEN_3__MOE__SHARED_GATE];      up.luts[K] = at[AI_QWEN_3__MOE__SHARED_GATE_LUT];
+        up.rows[K] = I; up.d[K] = sd; up.out_at[K] = K * 2u * I;
+        up.codes[K + 1u] = at[AI_QWEN_3__MOE__SHARED_UP];   up.luts[K + 1u] = at[AI_QWEN_3__MOE__SHARED_UP_LUT];
+        up.rows[K + 1u] = I; up.d[K + 1u] = sd; up.out_at[K + 1u] = K * 2u * I + I;
+        up.codes[K + 2u] = at[AI_QWEN_3__MOE__SHARED_LOGIT]; up.luts[K + 2u] = at[AI_QWEN_3__MOE__SHARED_LOGIT_LUT];
+        up.rows[K + 2u] = 1u; up.d[K + 2u] = sd; up.out_at[K + 2u] = (lg + 2u * r * 8u - gu_r) / 2u;
+        up.count = K + 3u;
+        doors->turboquant_gemv_groups((uint16_t*)(uintptr_t)gu_r, up, (const uint16_t*)(uintptr_t)(hmrot + 2u * r * n_hm), H, over);
+    }
+    /* every row's swiglus, activations' rotation and shared gate at once: each row's pairs follow the last row's */
+    doors->swiglu_pairs((uint16_t*)(uintptr_t)act, (const uint16_t*)(uintptr_t)gu, T * (K + 1u), I, over);
+    doors->hadamard_rotate((uint16_t*)(uintptr_t)actr, (const uint16_t*)(uintptr_t)act, (const uint16_t*)(uintptr_t)signs, T * n_act, over);
+    for (uint64_t r = 0u; r < T; ++r)
+        doors->sigmoid((uint16_t*)(uintptr_t)(w + 2u * (r * n_w + K)), (const uint16_t*)(uintptr_t)(lg + 2u * r * 8u), 1u, over);
+    for (uint64_t r = 0u; r < T; ++r) {
+        nn__turboquant__groups down = {};
+        for (uint64_t j = 0u; j < K; ++j) {
+            down.codes[j] = chosen[r * K + j] + v[AI_QWEN_3__MOE__EXPERT_DOWN];
+            down.luts[j] = chosen[r * K + j] + v[AI_QWEN_3__MOE__EXPERT_DOWN_LUT];
+            down.rows[j] = H; down.d[j] = v[AI_QWEN_3__MOE__EXPERT_D]; down.out_at[j] = j;
+        }
+        down.codes[K] = at[AI_QWEN_3__MOE__SHARED_DOWN]; down.luts[K] = at[AI_QWEN_3__MOE__SHARED_DOWN_LUT];
+        down.rows[K] = H; down.d[K] = sd; down.out_at[K] = K;
+        down.count = K + 1u;
+        doors->turboquant_gemv_groups_sum((uint16_t*)(uintptr_t)(out_at + 2u * r * H), down, (const uint16_t*)(uintptr_t)(actr + 2u * r * n_act),
+                                          (const uint16_t*)(uintptr_t)(w + 2u * r * n_w), (const uint16_t*)(uintptr_t)(h1_at + 2u * r * H), H, I, over);
+    }
+    return nn__doors_answer(&argv[2]);
+}
+SYS__ENGINE__ABI__BRIDGE(ai_qwen_3__moe_n__zzabi_adapter, ai_qwen_3__moe_n__zzabi_apply)
+
 /* ══ ⭐⭐ THE SAME BLOCK CUT AT THE DEVICE SEAMS — ⚖ *"a single word opcode for … the expert, the part before
  * the expert and the part after. this way we can do the disjointed setup for models that are too big"* ═════
  *   pre_expert    the norm, the router, its picks and weights, the normed input rotated, the whole shared
@@ -193,14 +302,15 @@ static sys__heap_node ai_qwen_3__pre_expert__zzabi_apply(const sys__heap_node* a
     /* ⭐ THE RESIDUAL ROTATED: the normed input goes straight into the hand-off, where the rotated one would have */
     const bool rotated = ai_qwen_3__table__zzpackage_flag(argv[1].args[0], AI_QWEN_3__PRE__RESIDUAL_ROTATED);
     const uint64_t normed = rotated ? hmrot : hm;
-    doors->rmsnorm((uint16_t*)(uintptr_t)normed, (const uint16_t*)(uintptr_t)h1_at, (const uint16_t*)(uintptr_t)at[AI_QWEN_3__PRE__NORM], H, AI_QWEN_3__RMS_NORM_EPS, over);
+    if (rotated) doors->rmsnorm((uint16_t*)(uintptr_t)normed, (const uint16_t*)(uintptr_t)h1_at, (const uint16_t*)(uintptr_t)at[AI_QWEN_3__PRE__NORM], H, AI_QWEN_3__RMS_NORM_EPS, over);
+    else doors->rmsnorm_rotate((uint16_t*)(uintptr_t)hmrot, (uint16_t*)(uintptr_t)hm, (const uint16_t*)(uintptr_t)h1_at,   /* the rotation with the norm */
+                               (const uint16_t*)(uintptr_t)at[AI_QWEN_3__PRE__NORM], (const uint16_t*)(uintptr_t)signs, H, AI_QWEN_3__RMS_NORM_EPS, over);
     doors->turboquant_gemv((uint16_t*)(uintptr_t)logits, (const uint8_t*)(uintptr_t)at[AI_QWEN_3__PRE__ROUTER], room[AI_QWEN_3__PRE__ROUTER],
                            (const uint8_t*)(uintptr_t)at[AI_QWEN_3__PRE__ROUTER_LUT], room[AI_QWEN_3__PRE__ROUTER_LUT],
                            (const uint16_t*)(uintptr_t)normed, v[AI_QWEN_3__PRE__ROUTER_D], E, H, over);
     uint64_t chosen[AI_QWEN_3__TOP_K_MAX];
     const uint64_t landed = nn__routed__top_k(ctx, doors, argv[3].args[0], w, logits, 0u, 1.0f, E, K, chosen);
     if (landed != 0u) return sys__engine__abi__error(landed);
-    if (!rotated) doors->hadamard_rotate((uint16_t*)(uintptr_t)hmrot, (const uint16_t*)(uintptr_t)hm, (const uint16_t*)(uintptr_t)signs, H, over);
     nn__turboquant__groups sh = {};
     sh.codes[0] = at[AI_QWEN_3__PRE__SHARED_GATE];  sh.luts[0] = at[AI_QWEN_3__PRE__SHARED_GATE_LUT];  sh.rows[0] = I; sh.d[0] = sd; sh.out_at[0] = 0u;
     sh.codes[1] = at[AI_QWEN_3__PRE__SHARED_UP];    sh.luts[1] = at[AI_QWEN_3__PRE__SHARED_UP_LUT];    sh.rows[1] = I; sh.d[1] = sd; sh.out_at[1] = I;
@@ -518,7 +628,7 @@ static sys__heap_node ai_qwen_3__experts_down__zzabi_apply(const sys__heap_node*
 /* ══ ⭐⭐ A PROMPT AS ROWS WITH THE EXPERTS ON THE CPU — the three words over a chunk ═════════════════════════════
  * The card routes every row into its hand row (`AI_QWEN_3__HAND__ROW`: the hand, then its picks as words) and runs its
  * shared expert's gate and up; the CPU runs each expert the chunk used ONCE over every row that picked it, reading its
- * weights once a chunk, in integers; the card closes every row. ▶ ai_glm_5_3's `experts_rows`, which this follows. */
+ * weights once a chunk, in integers; the card closes every row. ▶ ai_z__glm_5_3's `experts_rows`, which this follows. */
 
 /* `(ai_qwen_3__pre_expert_rows h1s planes hands n)` -> `hands`: `pre_expert` for each of `n` rows, its picks into its
  * hand row. */
@@ -556,13 +666,14 @@ static sys__heap_node ai_qwen_3__pre_expert_rows__zzabi_apply(const sys__heap_no
         const uint64_t h1 = h1s + 2u * t * H, hand = hands + t * row;
         const uint64_t hmrot = hand, w = hand + 2u * H, sactr = w + 2u * AI_QWEN_3__HAND__WEIGHTS;
         const uint64_t normed = rotated ? hmrot : hm;
-        doors->rmsnorm((uint16_t*)(uintptr_t)normed, (const uint16_t*)(uintptr_t)h1, (const uint16_t*)(uintptr_t)at[AI_QWEN_3__PRE__NORM], H, AI_QWEN_3__RMS_NORM_EPS, over);
+        if (rotated) doors->rmsnorm((uint16_t*)(uintptr_t)normed, (const uint16_t*)(uintptr_t)h1, (const uint16_t*)(uintptr_t)at[AI_QWEN_3__PRE__NORM], H, AI_QWEN_3__RMS_NORM_EPS, over);
+        else doors->rmsnorm_rotate((uint16_t*)(uintptr_t)hmrot, (uint16_t*)(uintptr_t)hm, (const uint16_t*)(uintptr_t)h1,   /* the rotation with the norm */
+                                   (const uint16_t*)(uintptr_t)at[AI_QWEN_3__PRE__NORM], (const uint16_t*)(uintptr_t)signs, H, AI_QWEN_3__RMS_NORM_EPS, over);
         doors->turboquant_gemv((uint16_t*)(uintptr_t)logits, (const uint8_t*)(uintptr_t)at[AI_QWEN_3__PRE__ROUTER], room[AI_QWEN_3__PRE__ROUTER],
                                (const uint8_t*)(uintptr_t)at[AI_QWEN_3__PRE__ROUTER_LUT], room[AI_QWEN_3__PRE__ROUTER_LUT],
                                (const uint16_t*)(uintptr_t)normed, v[AI_QWEN_3__PRE__ROUTER_D], E, H, over);
         doors->vector_top_k((uint64_t*)(uintptr_t)(hand + AI_QWEN_3__HAND__PICKS(H, I)), 1ull, (uint16_t*)(uintptr_t)w,
                             (const uint16_t*)(uintptr_t)logits, E, K);
-        if (!rotated) doors->hadamard_rotate((uint16_t*)(uintptr_t)hmrot, (const uint16_t*)(uintptr_t)hm, (const uint16_t*)(uintptr_t)signs, H, over);
         doors->turboquant_gemv_groups((uint16_t*)(uintptr_t)sgu, sh, (const uint16_t*)(uintptr_t)hmrot, H, over);
         doors->swiglu_pairs((uint16_t*)(uintptr_t)sact, (const uint16_t*)(uintptr_t)sgu, 1u, I, over);
         doors->hadamard_rotate((uint16_t*)(uintptr_t)sactr, (const uint16_t*)(uintptr_t)sact, (const uint16_t*)(uintptr_t)signs, I, over);

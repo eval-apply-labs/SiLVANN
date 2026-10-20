@@ -23,6 +23,7 @@ import html.parser
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -32,6 +33,7 @@ import urllib.request
 
 from . import skills as _skills
 from .composer import ComposerError, Text, read, to_text
+from .system import WINDOWS
 
 ANSWER_MAX = 16384               # the most characters an answer carries back; the rest is said to be cut
 READ_LINES = 200                 # the lines `read` answers when it is not told how many
@@ -46,6 +48,11 @@ FETCH_BYTES = 4 << 20            # the most of a page `fetch` reads
 #   command asks; `(help)` names them. `exit`, a REPL's way out, is `reset`: the session's next form starts afresh.
 ALIASES = {"read-file": "read", "slurp-file": "read", "read-all": "read", "cat": "read", "slurp": "read",
            "system": "bash", "shell": "bash", "sh": "bash", "exit": "reset"}
+if WINDOWS:
+    # ⚖ 2026-10-18, the architect: *"if we dont require wsl anymore it might mean that wsl is not there. give it a
+    #   powershell command alongside bash, so when it does help it tells the llm it is on windows and it will pick the
+    #   right tool"* — a shell's other names are PowerShell's on Windows
+    ALIASES.update({"system": "powershell", "shell": "powershell", "cmd": "powershell", "pwsh": "powershell"})
 
 
 class Sym(str):
@@ -287,17 +294,50 @@ def _builtins(session):
     }
 
 
-def _run(shell, command, cwd, seconds):
-    """(what it printed, its exit code, why it was stopped or None): the command in a session of its own, so that it and
-    what it started are stopped together — after `seconds`, or once it has printed RUN_BYTES."""
-    p = subprocess.Popen([shell, "-c", command], cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                         stderr=subprocess.STDOUT, start_new_session=hasattr(os, "killpg"))
+def _bash():
+    """The bash a command runs in, or None. On Windows Git for Windows' — on the PATH or where its installer puts it —
+    and never the `bash.exe` in Windows' own folder or its app aliases: that one is WSL's, which runs the command inside
+    a Linux the PC may not have."""
+    if not WINDOWS:
+        return shutil.which("bash") or "/bin/sh"
+    windows = os.path.normcase(os.environ.get("SystemRoot", r"C:\Windows"))
+    places = [os.path.join(d, "bash.exe") for d in os.environ.get("PATH", "").split(os.pathsep) if d]
+    places.append(os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), "Git", "bin", "bash.exe"))
+    for b in places:
+        at = os.path.normcase(os.path.abspath(b))
+        if os.path.isfile(b) and not at.startswith(windows) and "windowsapps" not in at:
+            return b
+    return None
+
+
+def _powershell_exe():
+    return shutil.which("pwsh") or shutil.which("powershell") or "powershell"
+
+
+def _powershell(command):
+    """The command line PowerShell runs a command with: PowerShell 7 where it is, else the Windows PowerShell every
+    Windows has; its output UTF-8, as the answer is read."""
+    return [_powershell_exe(), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command",
+            "[Console]::OutputEncoding = [Text.Encoding]::UTF8; " + command]
+
+
+def _run(argv, cwd, seconds):
+    """(what it printed, its exit code, why it was stopped or None): the command in a session of its own — a process
+    group on Windows — so that it and what it started are stopped together, after `seconds` or once it has printed
+    RUN_BYTES."""
+    p = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                         start_new_session=not WINDOWS,
+                         creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if WINDOWS else 0)
     out, why = bytearray(), []
 
     def stop(reason):
         why.append(reason)
         try:
-            os.killpg(p.pid, signal.SIGKILL) if hasattr(os, "killpg") else p.kill()
+            if WINDOWS:                               # no group to signal: the process and every one it started
+                subprocess.run(["taskkill", "/F", "/T", "/PID", str(p.pid)], stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL)
+            else:
+                os.killpg(p.pid, signal.SIGKILL)
         except OSError:
             pass
 
@@ -498,7 +538,11 @@ def _commands(session):
             for alias, name in ALIASES.items():
                 also.setdefault(name, []).append(alias)
             skilled = ["(%s) %s" % (c.name, c.line) for c in session.skill_commands.values()]
-            return Text("\n".join("(%s) %s" % (c.name, c.line) for c in session.commands.values())
+            system = ""
+            if WINDOWS and "powershell" in session.commands:
+                system = ("This machine runs Windows: (powershell \"…\") runs its commands, %s.\n"
+                          % ("(bash \"…\") Git's bash" if _bash() else "and it has no bash"))
+            return Text(system + "\n".join("(%s) %s" % (c.name, c.line) for c in session.commands.values())
                         + ("\nSkills — (skills) says whose:\n" + "\n".join(skilled) if skilled else "")
                         + "\nAlso: " + "; ".join("%s %s %s" % (_names(a), "is" if len(a) == 1 else "are", n)
                                                  for n, a in also.items()) + "."
@@ -545,17 +589,26 @@ def _commands(session):
             f.write(text)
         return Text("%s: %d characters %s" % (path, len(text), "added" if how is not None else "written"))
 
-    def bash(command, seconds=RUN_SECONDS):
-        _text(command, "a command")
+    def shell(argv, command, seconds):
         _num(seconds)
         session.classifier.check("run", command)
-        out, code, said = _run(shutil.which("bash") or "/bin/sh", command, session.cwd,
-                               max(1, min(seconds, RUN_SECONDS_MAX)))
+        out, code, said = _run(argv, session.cwd, max(1, min(seconds, RUN_SECONDS_MAX)))
         text, note = out.decode("utf-8", errors="replace"), said or ("" if code == 0 else "\n[exit %d]" % code)
         keep = ANSWER_MAX // 2 - len(note) - 64       # cut here, not by the answer's cap: the note is kept, and a text
         if len(text) > keep:                           # written back may grow by its escapes
             text = text[:keep] + "\n[… %d more characters]" % (len(text) - keep)
         return Text(text + note)
+
+    def bash(command, seconds=RUN_SECONDS):
+        _text(command, "a command")
+        b = _bash()
+        if b is None:
+            raise Fault("this Windows PC has no bash (Git for Windows brings one): (powershell \"…\") runs its commands")
+        return shell([b, "-c", command], command, seconds)
+
+    def powershell(command, seconds=RUN_SECONDS):
+        _text(command, "a command")
+        return shell(_powershell(command), command, seconds)
 
     def fetch(url):
         _text(url, "a URL")
@@ -704,6 +757,11 @@ def _commands(session):
                 "(bash \"command\") runs it with bash in the working folder and answers what it printed, its errors "
                 "too, and [exit N] when it fails; it is stopped after %d seconds, or (bash \"command\" 300) after 300 "
                 "(at most %d). Nothing is typed into it." % (RUN_SECONDS, RUN_SECONDS_MAX), "run"),
+        Command("powershell", powershell, "a PowerShell command run in the working folder: (powershell \"Get-ChildItem\" "
+                "[seconds])", "(powershell \"command\") runs it with PowerShell in the working folder and answers what "
+                "it printed, its errors too, and [exit N] when it fails; it is stopped after %d seconds, or (powershell "
+                "\"command\" 300) after 300 (at most %d). Nothing is typed into it." % (RUN_SECONDS, RUN_SECONDS_MAX),
+                "run"),
         Command("fetch", fetch, "a web page's text: (fetch \"https://…\")", "(fetch \"url\") reads an http or https "
                 "address and answers its text — a page's words without its markup."
                 " Read on in a long page with Lisp: (substring (fetch \"…\") 16000 32000).", "net"),
@@ -730,6 +788,8 @@ def _commands(session):
         Command("forget", forget, "a kept definition removed: (forget 'name)", "(forget 'name) takes it out of the "
                 "library; a session that imported it keeps its own."),
     ]
+    if not WINDOWS:                                   # PowerShell is Windows' shell: elsewhere bash is the one
+        table = [c for c in table if c.name != "powershell"]
     if session.whoami is not None:
         table.append(Command("whoami", whoami, "which model you are, and what (agent …) can reach: (whoami)",
                              "(whoami) answers which model you are and under which LoRA, the cards you run on, your "
@@ -809,8 +869,16 @@ def _skill_command(session, skill, cmd):
                 raise
             except Exception as ex:                       # noqa: BLE001 — what it raised: an error the model reads
                 raise Fault("(%s …): %s: %s" % (cmd.name, type(ex).__name__, ex))
-        argv = _skills.program_argv(cmd, skill.folder, [str(a) if isinstance(a, str) else write(a) for a in args])
-        out, code, said = _run(shutil.which("bash") or "/bin/sh", argv, session.cwd, RUN_SECONDS)
+        args = [str(a) if isinstance(a, str) else write(a) for a in args]
+        if WINDOWS:                                   # the program itself, no shell between: a .sh by Git's bash
+            b = _bash()
+            if cmd.run.endswith(".sh") and b is None:
+                raise Fault("(%s …) is a bash program, and this Windows PC has no bash (Git for Windows brings one)"
+                            % cmd.name)
+            argv = _skills.program_argv(cmd, skill.folder, args, bash=b, powershell=_powershell_exe())
+        else:
+            argv = [_bash(), "-c", shlex.join(_skills.program_argv(cmd, skill.folder, args))]
+        out, code, said = _run(argv, session.cwd, RUN_SECONDS)
         text = out.decode("utf-8", errors="replace")
         if code != 0 or said:
             raise Fault("(%s …) failed%s: %s" % (cmd.name, said.strip() if said else " [exit %d]" % code,

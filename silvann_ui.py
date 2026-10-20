@@ -381,11 +381,11 @@ DATA_DIR = Path(os.environ.get("SILVANN_DATA") or REPO_ROOT)
 MODELS_DIR = DATA_DIR / "models"                     # models/<name>/ — self-contained model folders
 LAST_START = DATA_DIR / "ui_last_start.json"         # the model a --local UI starts again when it starts
 TOKEN_FILE = DATA_DIR / ".huggingface_token"         # the Hugging Face token, as silvann_core.py's hf-token saves it
-# the documents: docs/ beside the UI in a release, backstage/release/ in the development tree
-RELEASE_DIR = REPO_ROOT if (REPO_ROOT / "docs" / "users.md").exists() else REPO_ROOT.parent / "backstage" / "release"
+# the documents: docs/ beside the UI in a release, release/ in the development tree
+RELEASE_DIR = REPO_ROOT if (REPO_ROOT / "docs" / "users.md").exists() else REPO_ROOT.parent / "release"
 DOCS_DIR = RELEASE_DIR / "docs"
-# the engine's source and the licence: in a release beside the docs, in the development tree backstage/src and its root
-ENGINE_SRC = RELEASE_DIR / "engine" / "src" if (RELEASE_DIR / "engine" / "src").is_dir() else REPO_ROOT.parent / "backstage" / "src"
+# the engine's source and the licence: in a release beside the docs, in the development tree src and its root
+ENGINE_SRC = RELEASE_DIR / "engine" / "src" if (RELEASE_DIR / "engine" / "src").is_dir() else REPO_ROOT.parent / "src"
 LICENCE_DIR = RELEASE_DIR if (RELEASE_DIR / "LICENSE").exists() else REPO_ROOT.parent
 
 
@@ -437,6 +437,8 @@ QWEN_OPTIONS = {
     "picture_pixels": "default 4194304: the largest picture the card makes room for; 0 reads pictures on the CPU",
     "picture_weights": "\"auto\" (default), \"card\" or \"ram\": the vision tower's weights",
     "tensor_parallel": "1 (default), 2, 4: a dense model over that many cards of one size (AMD, a developer preview)",
+    "mtp": "\"no\" (default) or \"yes\": the MTP layer drafts the token after next and the model checks both at once — a "
+           "greedy answer the same tokens; not faster yet on the 35B",
 }
 GLM_OPTIONS = {
     "experts_from": "\"auto\", \"ram\", \"disk\" or \"mapped\": where the routed experts are read from",
@@ -450,6 +452,8 @@ GLM_OPTIONS = {
     "lend_cache": "true (default) or false: an inclusive tier also holds experts in the latent cache's rows a "
                   "conversation has not reached, given back as it grows",
     "picture_pixels": "default 4194304: the largest picture the card makes room for",
+    "mtp": "\"no\" (default) or \"yes\": the MTP layer drafts the token after next and the model checks both at once — a "
+           "greedy answer the same tokens, faster",
 }
 
 
@@ -505,7 +509,7 @@ HELP_DOCS = [
     ("Developing", "Package sys", ENGINE_SRC / "packages" / "sys" / "README.md"),
     ("Developing", "Package nn", ENGINE_SRC / "packages" / "nn" / "README.md"),
     ("Developing", "Package ai_qwen_3", ENGINE_SRC / "packages" / "ai_qwen_3" / "README.md"),
-    ("Developing", "Package ai_glm_5_3", ENGINE_SRC / "packages" / "ai_glm_5_3" / "README.md"),
+    ("Developing", "Package ai_z__glm_5_3", ENGINE_SRC / "packages" / "ai_z__glm_5_3" / "README.md"),
     ("Developing", "Package ai_qwen_image", ENGINE_SRC / "packages" / "ai_qwen_image" / "README.md"),
     ("Developing", "Adding a silicon family", ENGINE_SRC / "silicon_families" / "add_a_family.md"),
     ("Developing", "OpenCL 1.2 for integrated GPUs", ENGINE_SRC / "silicon_families" / "khronos_opencl1_igpu" / "README.md"),

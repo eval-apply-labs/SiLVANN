@@ -259,6 +259,9 @@ POLICY = [
     # experts) and the hyper-connections' small tensors (at most 24 x 16384) — kept exact, for nothing
     (r"e_score_correction_bias$",                             RAW),
     (r"\.hc_(attn|ffn)_(base|fn|scale)$",                     RAW),
+    # DeepSeek-V4.1: a sink logit a head (64 values) and the engram gate's two small maps (4 x 5120)
+    (r"\.attn_sink$",                                        RAW),
+    (r"\.engram\.[qk]_weight$",                              RAW),
 ]
 
 
@@ -805,7 +808,7 @@ def read_tensor(raw, name, expert=None):
     idx = _index(raw)
     if idx["weight_map"].get(name) == PER_EXPERT:
         return _read_per_expert(raw, idx, name, expert)
-    return _read_from(raw, idx["weight_map"][name], stored_name(idx, name), expert)
+    return _read_from(raw, idx["weight_map"][name], stored_name(idx, name), expert, view=name)
 
 
 def stored_name(idx, name):
@@ -829,14 +832,101 @@ def _read_per_expert(raw, idx, name, expert):
     return np.stack([one(e) for e in range(n)])
 
 
-def _read_from(raw, f, name, expert=None):
+def _header(raw, f):
     if f not in _HDR:
         with open(os.path.join(raw, f), "rb") as fh:
             hl = int.from_bytes(fh.read(8), "little")
             _HDR[f] = (hl, json.loads(fh.read(hl)))
-    hl, head = _HDR[f]
+    return _HDR[f]
+
+
+def _bytes(raw, f, name):
+    hl, head = _header(raw, f)
+    a, b = head[name]["data_offsets"]
+    with open(os.path.join(raw, f), "rb") as fh:
+        fh.seek(8 + hl + a)
+        return np.frombuffer(fh.read(b - a), dtype=np.uint8)
+
+
+def _e4m3_table():
+    """The 256 values of an FP8 E4M3 (fn) byte: bias 7, no infinities, 0x7F and 0xFF NaN."""
+    b = np.arange(256)
+    e, m = (b >> 3) & 0xF, b & 0x7
+    v = np.where(e == 0, m / 8.0 * 2.0 ** -6, (1 + m / 8.0) * 2.0 ** (e - 7.0))
+    v = np.where(b & 0x80, -v, v)
+    v[(b & 0x7F) == 0x7F] = np.nan
+    return v.astype(np.float32)
+
+
+E4M3 = _e4m3_table()
+# the 16 values of an e2m1 nibble
+E2M1 = np.array([0, .5, 1, 1.5, 2, 3, 4, 6, -0., -.5, -1, -1.5, -2, -3, -4, -6], dtype=np.float32)
+# a block-scaled weight's scale, named from the weight's stem: DeepSeek's `.scale`, MiMo's `.weight_scale`, the FP8
+# checkpoints' `.weight_scale_inv`
+SCALE_NAMES = (".scale", ".weight_scale", ".weight_scale_inv")
+
+
+def _scale_where(raw, name):
+    """Where a quantised weight's scale is: (file, its name in the file). A view lists it in `scale_map` under the
+    weight's own name (▶ `nn_rename_view.py`); a checkpoint keeps it beside the weight, named from its stem."""
+    idx = _index(raw) if index_file(raw) else {}
+    if name in idx.get("scale_map", {}):
+        return tuple(idx["scale_map"][name])
+    wm = idx.get("weight_map", {})
+    stem = name[:-len(".weight")] if name.endswith(".weight") else name
+    for suffix in SCALE_NAMES:
+        if stem + suffix in wm:
+            return wm[stem + suffix], stored_name(idx, stem + suffix)
+    return None
+
+
+def _scale_of(raw, name):
+    """The block scale stored beside a quantised weight, as fp32 (E8M0 bytes decoded as powers of two) — or None."""
+    where = _scale_where(raw, name)
+    if where is None:
+        return None
+    f, s = where
+    t = _header(raw, f)[1][s]
+    b = _bytes(raw, f, s)
+    if t["dtype"] in ("F8_E8M0", "U8"):
+        v = np.ldexp(np.float32(1), b.astype(np.int32) - 127).astype(np.float32)
+    elif t["dtype"] == "F32":
+        v = b.view("<f4").astype(np.float32)
+    elif t["dtype"] == "BF16":
+        v = (b.view("<u2").astype(np.uint32) << 16).view(np.float32)
+    else:
+        raise ValueError("%s is %s — a scale dtype this reader does not know" % (s, t["dtype"]))
+    return v.reshape(t["shape"])
+
+
+def _dequantised(raw, f, name, t, view=None):
+    """A block-scaled FP8 weight (F8_E4M3) or a packed FP4 one (I8/U8: two e2m1 a byte, the low nibble first) as fp32.
+
+    The block comes from the two shapes: a scale [⌈O/bo⌉, ⌈I/bi⌉] over a weight [O, I] — 32 × 32 or 128 × 128 for FP8
+    weights, 1 × 32 for FP4 and for DeepSeek's engram rows. The fp32 it returns is exact: every FP8 or FP4 value times a
+    power of two is a float32."""
+    b = _bytes(raw, f, name)
+    if t["dtype"] == "F8_E4M3":
+        w = E4M3[b].reshape(t["shape"])
+    else:
+        w = np.stack([E2M1[b & 0x0F], E2M1[b >> 4]], axis=-1).reshape(*t["shape"][:-1], 2 * t["shape"][-1])
+    s = _scale_of(raw, view or name)
+    if s is None:
+        raise ValueError("%s is %s with no scale beside it (%s)" % (name, t["dtype"], ", ".join(SCALE_NAMES)))
+    rows, cols = w.shape[-2:]
+    bo, bi = -(-rows // s.shape[-2]), -(-cols // s.shape[-1])
+    full = np.repeat(np.repeat(s, bo, axis=-2), bi, axis=-1)[..., :rows, :cols]
+    return (w * full).astype(np.float32)
+
+
+def _read_from(raw, f, name, expert=None, view=None):
+    hl, head = _header(raw, f)
     t = head[name]
     shape, start, dtype = t["shape"], t["data_offsets"][0], t["dtype"]
+    if dtype in ("F8_E4M3", "I8", "U8"):
+        if expert is not None:
+            raise ValueError("%s is %s — a stacked expert tensor in this dtype is not read by slice" % (name, dtype))
+        return _dequantised(raw, f, name, t, view)
     size = {"BF16": 2, "F16": 2, "F32": 4}.get(dtype)
     if size is None:
         raise ValueError("%s is %s — a dtype this reader does not know" % (name, dtype))

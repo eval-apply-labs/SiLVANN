@@ -2,8 +2,7 @@
 #define SILVANN__PACKAGES_NN_CPU_LOADER__IMPL_CUH
 
 /* What this file needs, named where a reader — and an editor — can follow it. */
-#include <pthread.h>
-#include <time.h>
+#include "../../../operating_systems/os.cuh"   /* threads, locks, conditions and the clock: the system's */
 #include <stdlib.h>
 #include "expert__header.cuh"                           /* the index this reads into, and what it publishes */
 #include "../../sys/cpu/silicon/silicon__header.cuh"   /* the family's file_read */
@@ -55,10 +54,10 @@ typedef struct nn__loader__read {
 #define NN__LOADER__ADMITTED(r)   ((r)->job == NN__LOADER__JOB_READ || (r)->job == NN__LOADER__JOB_GATHER)
 
 static nn__loader__read nn__loader__zzprivate_reads[NN__EXPERT__FLIGHT_MAX];
-static pthread_mutex_t  nn__loader__zzprivate_lock = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t   nn__loader__zzprivate_work = PTHREAD_COND_INITIALIZER;   /* a read was queued */
-static pthread_cond_t   nn__loader__zzprivate_done = PTHREAD_COND_INITIALIZER;   /* a read finished   */
-static pthread_t        nn__loader__zzprivate_threads[NN__EXPERT__LOADERS_MAX];
+static sys__os__lock    nn__loader__zzprivate_lock = SYS__OS__LOCK_INIT;
+static sys__os__condition nn__loader__zzprivate_work = SYS__OS__CONDITION_INIT;   /* a read was queued */
+static sys__os__condition nn__loader__zzprivate_done = SYS__OS__CONDITION_INIT;   /* a read finished   */
+static sys__os__thread  nn__loader__zzprivate_threads[NN__EXPERT__LOADERS_MAX];
 static unsigned         nn__loader__zzprivate_started = 0u;
 static bool             nn__loader__zzprivate_stopping = false;
 static uint64_t         nn__loader__zzprivate_count[NN__EXPERT__COUNTS];
@@ -125,7 +124,7 @@ static bool nn__loader__zzprivate_write(const nn__loader__read* r) {
 
 static void* nn__loader__zzprivate_run(void* unused) {
     (void)unused;
-    pthread_mutex_lock(&nn__loader__zzprivate_lock);
+    sys__os__lock_take(&nn__loader__zzprivate_lock);
     for (;;) {
         /* the oldest queued first — so a layer's promotions land in the order its verb will compute them */
         nn__loader__read* job = 0;
@@ -134,22 +133,23 @@ static void* nn__loader__zzprivate_run(void* unused) {
                 job = &nn__loader__zzprivate_reads[i];
         if (job == 0) {
             if (nn__loader__zzprivate_stopping) break;
-            pthread_cond_wait(&nn__loader__zzprivate_work, &nn__loader__zzprivate_lock);
+            sys__os__condition_wait(&nn__loader__zzprivate_work, &nn__loader__zzprivate_lock);
             continue;
         }
         job->state = NN__LOADER__READING;
         const nn__loader__read r = *job;
-        pthread_mutex_unlock(&nn__loader__zzprivate_lock);
+        sys__os__lock_give(&nn__loader__zzprivate_lock);
         bool ok = true;
         if (r.job == NN__LOADER__JOB_EVACUATE) ok = nn__loader__zzprivate_evacuate(&r);
         else if (r.job == NN__LOADER__JOB_WRITE) ok = nn__loader__zzprivate_write(&r);
         else if (r.gather) ok = nn__loader__zzprivate_gather(&r);
         for (unsigned i = 0u; ok && r.job == NN__LOADER__JOB_READ && i < NN__EXPERT__SLICES; ++i) {
             if (r.backing.bytes[i] == 0ull) continue;
-            ok = sys__gpu__file_read(r.family, r.backing.file, r.backing.from[i] + r.expert * r.backing.bytes[i], r.backing.bytes[i],
+            const uint64_t step = r.backing.stride[i] != 0ull ? r.backing.stride[i] : r.backing.bytes[i];
+            ok = sys__gpu__file_read(r.family, r.backing.file, r.backing.from[i] + r.expert * step, r.backing.bytes[i],
                                      (void*)(uintptr_t)(r.room + r.backing.into[i]));
         }
-        pthread_mutex_lock(&nn__loader__zzprivate_lock);
+        sys__os__lock_take(&nn__loader__zzprivate_lock);
         if (r.job == NN__LOADER__JOB_WRITE) {
             /* a write frees itself: its expert is in RAM now, its channel one reader fewer. ⛔ A FAILED WRITE IS LOUD — the
              *   expert's RAM slot holds the wrong bytes, and nothing could tell — so it is counted, and the run stops */
@@ -161,9 +161,9 @@ static void* nn__loader__zzprivate_run(void* unused) {
         } else {
             job->state = ok ? NN__LOADER__DONE : NN__LOADER__FAILED;
         }
-        pthread_cond_broadcast(&nn__loader__zzprivate_done);
+        sys__os__condition_wake_all(&nn__loader__zzprivate_done);
     }
-    pthread_mutex_unlock(&nn__loader__zzprivate_lock);
+    sys__os__lock_give(&nn__loader__zzprivate_lock);
     return 0;
 }
 
@@ -176,7 +176,7 @@ static bool nn__loader__zzprivate_start(void) {
     if (want > NN__EXPERT__LOADERS_MAX) want = NN__EXPERT__LOADERS_MAX;
     nn__loader__zzprivate_stopping = false;
     for (unsigned t = 0u; t < want; ++t) {
-        if (pthread_create(&nn__loader__zzprivate_threads[t], 0, nn__loader__zzprivate_run, 0) != 0) break;
+        if (!sys__os__thread_start(&nn__loader__zzprivate_threads[t], nn__loader__zzprivate_run, 0)) break;
         ++nn__loader__zzprivate_started;
     }
     return nn__loader__zzprivate_started != 0u;
@@ -184,13 +184,13 @@ static bool nn__loader__zzprivate_start(void) {
 
 /* The package's teardown: every thread told to stop once the queue is empty, and joined. */
 static void nn__loader__zzpackage_stop(void) {
-    pthread_mutex_lock(&nn__loader__zzprivate_lock);
+    sys__os__lock_take(&nn__loader__zzprivate_lock);
     const unsigned n = nn__loader__zzprivate_started;
     nn__loader__zzprivate_stopping = true;
-    pthread_cond_broadcast(&nn__loader__zzprivate_work);
-    pthread_mutex_unlock(&nn__loader__zzprivate_lock);
-    for (unsigned t = 0u; t < n; ++t) pthread_join(nn__loader__zzprivate_threads[t], 0);
-    pthread_mutex_lock(&nn__loader__zzprivate_lock);
+    sys__os__condition_wake_all(&nn__loader__zzprivate_work);
+    sys__os__lock_give(&nn__loader__zzprivate_lock);
+    for (unsigned t = 0u; t < n; ++t) sys__os__thread_join(nn__loader__zzprivate_threads[t]);
+    sys__os__lock_take(&nn__loader__zzprivate_lock);
     nn__loader__zzprivate_started = 0u;
     /* ⛔⛔ AND NOTHING OF THIS MACHINE'S IS LEFT FOR THE NEXT. A read or a promotion that landed and was never settled
      *   stays in the table, and a machine booted after this one in the same process — the text model booted again after a
@@ -207,7 +207,7 @@ static void nn__loader__zzpackage_stop(void) {
         nn__loader__zzprivate_channels[c].pending = 0u;
     }
     nn__loader__zzprivate_writes_out = 0ull;
-    pthread_mutex_unlock(&nn__loader__zzprivate_lock);
+    sys__os__lock_give(&nn__loader__zzprivate_lock);
 }
 
 /* This worker's read of `expert` in flight, or none. Called with the lock held. ⛳ A READ IS ITS WORKER'S: two workers of
@@ -274,24 +274,24 @@ static __device__ inline int nn__expert__request(sys__silicon_family__id family,
         return nn__expert__touch(layer, type, expert) ? NN__EXPERT__RESIDENT : NN__EXPERT__REFUSED;
     }
     const uint64_t owner = nn__expert__zzpackage_owner();
-    pthread_mutex_lock(&nn__loader__zzprivate_lock);
+    sys__os__lock_take(&nn__loader__zzprivate_lock);
     nn__loader__read* r = nn__loader__zzprivate_find(owner, layer, type, expert);
     if (r != 0) {
         if (!predicted && r->predicted) { r->predicted = false; ++nn__loader__zzprivate_count[NN__EXPERT__COUNT_PREDICTED_USED]; }
-        pthread_mutex_unlock(&nn__loader__zzprivate_lock);
+        sys__os__lock_give(&nn__loader__zzprivate_lock);
         return NN__EXPERT__ARRIVING;
     }
-    pthread_mutex_unlock(&nn__loader__zzprivate_lock);
+    sys__os__lock_give(&nn__loader__zzprivate_lock);
     if (backing == 0 || backing->file == 0ull) return NN__EXPERT__REFUSED;
 
     uint64_t slot = 0ull, room = 0ull;
     if (!nn__loader__zzprivate_room(layer, type, pinned, npinned, &slot, &room)) return NN__EXPERT__REFUSED;
-    pthread_mutex_lock(&nn__loader__zzprivate_lock);
+    sys__os__lock_take(&nn__loader__zzprivate_lock);
     nn__loader__read* free_read = 0;
     for (unsigned i = 0u; i < NN__EXPERT__FLIGHT_MAX && free_read == 0; ++i)
         if (nn__loader__zzprivate_reads[i].state == NN__LOADER__FREE) free_read = &nn__loader__zzprivate_reads[i];
     if (free_read == 0 || !nn__loader__zzprivate_start()) {
-        pthread_mutex_unlock(&nn__loader__zzprivate_lock);
+        sys__os__lock_give(&nn__loader__zzprivate_lock);
         (void)nn__expert__type_give(type, slot);
         return NN__EXPERT__REFUSED;
     }
@@ -306,8 +306,8 @@ static __device__ inline int nn__expert__request(sys__silicon_family__id family,
     free_read->job = NN__LOADER__JOB_READ;
     free_read->seq = ++nn__loader__zzprivate_seq;
     ++nn__loader__zzprivate_count[predicted ? NN__EXPERT__COUNT_PREDICTED : NN__EXPERT__COUNT_MISSES];
-    pthread_cond_signal(&nn__loader__zzprivate_work);
-    pthread_mutex_unlock(&nn__loader__zzprivate_lock);
+    sys__os__condition_wake_one(&nn__loader__zzprivate_work);
+    sys__os__lock_give(&nn__loader__zzprivate_lock);
     return NN__EXPERT__ARRIVING;
 }
 
@@ -316,7 +316,7 @@ static __device__ inline int nn__expert__request(sys__silicon_family__id family,
 /* Now, in ns, for the gathers' time to land. */
 static inline uint64_t nn__loader__zzprivate_now_ns(void) {
     struct timespec a;
-    clock_gettime(CLOCK_MONOTONIC, &a);
+    sys__os__clock(&a);
     return (uint64_t)a.tv_sec * 1000000000ull + (uint64_t)a.tv_nsec;
 }
 
@@ -329,9 +329,9 @@ static inline void nn__loader__zzprivate_landed(const nn__loader__read* r) {
 
 static inline void nn__loader__zzprivate_wait(void) {
     struct timespec a, b;
-    clock_gettime(CLOCK_MONOTONIC, &a);
-    pthread_cond_wait(&nn__loader__zzprivate_done, &nn__loader__zzprivate_lock);
-    clock_gettime(CLOCK_MONOTONIC, &b);
+    sys__os__clock(&a);
+    sys__os__condition_wait(&nn__loader__zzprivate_done, &nn__loader__zzprivate_lock);
+    sys__os__clock(&b);
     nn__loader__zzprivate_count[NN__EXPERT__COUNT_WAIT_NS] += (uint64_t)(b.tv_sec - a.tv_sec) * 1000000000ull + (uint64_t)(b.tv_nsec - a.tv_nsec);
     ++nn__loader__zzprivate_count[NN__EXPERT__COUNT_WAITS];
 }
@@ -339,7 +339,7 @@ static inline void nn__loader__zzprivate_wait(void) {
 static __device__ inline bool nn__expert__settle(uint64_t layer, uint64_t type) {
     bool ok = true;
     const uint64_t owner = nn__expert__zzpackage_owner();
-    pthread_mutex_lock(&nn__loader__zzprivate_lock);
+    sys__os__lock_take(&nn__loader__zzprivate_lock);
     for (;;) {
         bool waiting = false;
         for (unsigned i = 0u; i < NN__EXPERT__FLIGHT_MAX; ++i) {
@@ -358,7 +358,7 @@ static __device__ inline bool nn__expert__settle(uint64_t layer, uint64_t type) 
         if (!waiting) break;
         nn__loader__zzprivate_wait();
     }
-    pthread_mutex_unlock(&nn__loader__zzprivate_lock);
+    sys__os__lock_give(&nn__loader__zzprivate_lock);
     return ok;
 }
 
@@ -369,24 +369,24 @@ static __device__ inline int nn__expert__promote(sys__silicon_family__id family,
         return NN__EXPERT__REFUSED;
     if (me.args[NN__EXPERT__SLOT_AT] != 0ull) return NN__EXPERT__RESIDENT;
     const uint64_t owner = nn__expert__zzpackage_owner(), bytes = nn__expert__type_bytes(type);
-    pthread_mutex_lock(&nn__loader__zzprivate_lock);
+    sys__os__lock_take(&nn__loader__zzprivate_lock);
     nn__loader__read* free_read = 0;
     for (unsigned i = 0u; i < NN__EXPERT__FLIGHT_MAX; ++i) {
         nn__loader__read* r = &nn__loader__zzprivate_reads[i];
         if (r->state != NN__LOADER__FREE && NN__LOADER__ADMITTED(r) && r->owner == owner && r->layer == layer && r->type == type
          && r->expert == expert) {
-            pthread_mutex_unlock(&nn__loader__zzprivate_lock);
+            sys__os__lock_give(&nn__loader__zzprivate_lock);
             return NN__EXPERT__ARRIVING;
         }
         if (r->state == NN__LOADER__FREE && free_read == 0) free_read = r;
     }
-    pthread_mutex_unlock(&nn__loader__zzprivate_lock);
+    sys__os__lock_give(&nn__loader__zzprivate_lock);
     if (free_read == 0 || bytes == 0ull) return NN__EXPERT__REFUSED;      /* no room in flight: the CPU keeps it this time */
     uint64_t slot = 0ull, room = 0ull;
     if (!nn__loader__zzprivate_room(layer, type, pinned, npinned, &slot, &room)) return NN__EXPERT__REFUSED;
-    pthread_mutex_lock(&nn__loader__zzprivate_lock);
+    sys__os__lock_take(&nn__loader__zzprivate_lock);
     if (free_read->state != NN__LOADER__FREE || !nn__loader__zzprivate_start()) {
-        pthread_mutex_unlock(&nn__loader__zzprivate_lock);
+        sys__os__lock_give(&nn__loader__zzprivate_lock);
         (void)nn__expert__type_give(type, slot);
         return NN__EXPERT__REFUSED;
     }
@@ -401,23 +401,23 @@ static __device__ inline int nn__expert__promote(sys__silicon_family__id family,
     free_read->seq = ++nn__loader__zzprivate_seq;
     free_read->queued_ns = nn__loader__zzprivate_now_ns();
     ++nn__loader__zzprivate_count[NN__EXPERT__COUNT_PROMOTED];
-    pthread_cond_signal(&nn__loader__zzprivate_work);
-    pthread_mutex_unlock(&nn__loader__zzprivate_lock);
+    sys__os__condition_wake_one(&nn__loader__zzprivate_work);
+    sys__os__lock_give(&nn__loader__zzprivate_lock);
     return NN__EXPERT__ARRIVING;
 }
 
 static __device__ inline unsigned nn__expert__flight_free(void) {
     unsigned n = 0u;
-    pthread_mutex_lock(&nn__loader__zzprivate_lock);
+    sys__os__lock_take(&nn__loader__zzprivate_lock);
     for (unsigned i = 0u; i < NN__EXPERT__FLIGHT_MAX; ++i) n += nn__loader__zzprivate_reads[i].state == NN__LOADER__FREE;
-    pthread_mutex_unlock(&nn__loader__zzprivate_lock);
+    sys__os__lock_give(&nn__loader__zzprivate_lock);
     return n;
 }
 
 static __device__ inline bool nn__expert__settle_ready(uint64_t layer, uint64_t type) {
     bool ok = true;
     const uint64_t owner = nn__expert__zzpackage_owner();
-    pthread_mutex_lock(&nn__loader__zzprivate_lock);
+    sys__os__lock_take(&nn__loader__zzprivate_lock);
     for (unsigned i = 0u; i < NN__EXPERT__FLIGHT_MAX; ++i) {
         nn__loader__read* r = &nn__loader__zzprivate_reads[i];
         if (!NN__LOADER__ADMITTED(r) || r->owner != owner || r->layer != layer || r->type != type) continue;
@@ -431,14 +431,14 @@ static __device__ inline bool nn__expert__settle_ready(uint64_t layer, uint64_t 
             ok = false;
         }
     }
-    pthread_mutex_unlock(&nn__loader__zzprivate_lock);
+    sys__os__lock_give(&nn__loader__zzprivate_lock);
     return ok;
 }
 
 static __device__ inline bool nn__expert__settle_one(uint64_t layer, uint64_t type, uint64_t expert) {
     bool ok = true;
     const uint64_t owner = nn__expert__zzpackage_owner();
-    pthread_mutex_lock(&nn__loader__zzprivate_lock);
+    sys__os__lock_take(&nn__loader__zzprivate_lock);
     for (;;) {
         nn__loader__read* r = nn__loader__zzprivate_find(owner, layer, type, expert);
         if (r == 0) break;
@@ -455,7 +455,7 @@ static __device__ inline bool nn__expert__settle_one(uint64_t layer, uint64_t ty
         }
         break;
     }
-    pthread_mutex_unlock(&nn__loader__zzprivate_lock);
+    sys__os__lock_give(&nn__loader__zzprivate_lock);
     return ok;
 }
 
@@ -465,27 +465,36 @@ static __device__ inline bool nn__expert__in_memory(sys__silicon_family__id fami
 
 static __device__ inline uint64_t nn__expert__count(unsigned which) {
     if (which >= NN__EXPERT__COUNTS) return 0ull;
-    pthread_mutex_lock(&nn__loader__zzprivate_lock);
+    sys__os__lock_take(&nn__loader__zzprivate_lock);
     const uint64_t n = nn__loader__zzprivate_count[which];
-    pthread_mutex_unlock(&nn__loader__zzprivate_lock);
+    sys__os__lock_give(&nn__loader__zzprivate_lock);
     return n;
 }
 
 static __device__ inline bool nn__expert__backing_of(uint64_t array, nn__expert__backing* backing) {
-    if (backing == 0 || !sys__node_array__is(array) || sys__node_array__length(array) < NN__EXPERT__BACKING__LENGTH) return false;
-    uint64_t v[NN__EXPERT__BACKING__LENGTH];
+    if (backing == 0 || !sys__node_array__is(array)) return false;
+    const uint64_t length = sys__node_array__length(array);
+    const bool four = length >= NN__EXPERT__BACKING__FOUR && length < NN__EXPERT__BACKING__LENGTH;
+    const unsigned cells = four ? NN__EXPERT__BACKING__FOUR : NN__EXPERT__BACKING__LENGTH;
+    if (length < cells) return false;
+    uint64_t v[NN__EXPERT__BACKING__LENGTH] = {};
     sys__node_array_walk w;
     if (!sys__node_array__walk(array, 0ull, &w)) return false;
-    for (unsigned i = 0u; i < NN__EXPERT__BACKING__LENGTH; ++i, sys__node_array__next(&w)) {
+    for (unsigned i = 0u; i < cells; ++i, sys__node_array__next(&w)) {
         const sys__heap_node* n = sys__node_array__walk_cell(&w);
         if (n == 0 || n->dtype != SYS__KIND__VALUE_INT) return false;
         v[i] = n->args[0];
     }
+    const nn__expert__backing none = {};
+    *backing = none;
     backing->file = v[NN__EXPERT__BACKING__FILE];
     for (unsigned i = 0u; i < NN__EXPERT__SLICES; ++i) {
-        backing->from[i] = v[NN__EXPERT__BACKING__FROM(i)];
-        backing->bytes[i] = v[NN__EXPERT__BACKING__BYTES(i)];
-        backing->into[i] = v[NN__EXPERT__BACKING__INTO(i)];
+        if (four && i >= 4u) break;
+        /* the thirteen: a slice is three integers and steps by its length */
+        backing->from[i] = v[four ? 1u + 3u * i : NN__EXPERT__BACKING__FROM(i)];
+        backing->bytes[i] = v[four ? 2u + 3u * i : NN__EXPERT__BACKING__BYTES(i)];
+        backing->into[i] = v[four ? 3u + 3u * i : NN__EXPERT__BACKING__INTO(i)];
+        backing->stride[i] = four ? 0ull : v[NN__EXPERT__BACKING__STRIDE(i)];
     }
     return true;
 }
@@ -607,7 +616,7 @@ static nn__expert_tier__out nn__expert_tier__zzprivate_out[NN__EXPERT_TIER__OUTG
 /* Nanoseconds since `a`. */
 static inline uint64_t nn__loader__zzprivate_since(const struct timespec* a) {
     struct timespec b;
-    clock_gettime(CLOCK_MONOTONIC, &b);
+    sys__os__clock(&b);
     return (uint64_t)(b.tv_sec - a->tv_sec) * 1000000000ull + (uint64_t)(b.tv_nsec - a->tv_nsec);
 }
 
@@ -640,11 +649,11 @@ static int nn__loader__zzprivate_channel_take(sys__silicon_family__id family, ui
             if (r->state == NN__LOADER__WAITING && r->job == NN__LOADER__JOB_WRITE && r->channel == (unsigned)pending) {
                 r->state = NN__LOADER__QUEUED;
                 r->seq = ++nn__loader__zzprivate_seq;
-                pthread_cond_broadcast(&nn__loader__zzprivate_work);
+                sys__os__condition_wake_all(&nn__loader__zzprivate_work);
             }
         }
         struct timespec a;
-        clock_gettime(CLOCK_MONOTONIC, &a);
+        sys__os__clock(&a);
         nn__loader__zzprivate_wait();
         nn__loader__zzprivate_count[NN__EXPERT__COUNT_CHANNEL_WAIT_NS] += nn__loader__zzprivate_since(&a);
     }
@@ -720,16 +729,16 @@ static __device__ inline int nn__expert_tier__promote(sys__silicon_family__id fa
     if (me.args[NN__EXPERT__SLOT_AT] != 0ull) return NN__EXPERT__RESIDENT;
     nn__expert__gather g;
     if (bytes == 0ull || !nn__expert_tier__stitch(t, x, &g)) return NN__EXPERT__REFUSED;     /* not in RAM: none to gather */
-    pthread_mutex_lock(&nn__loader__zzprivate_lock);
-    if (nn__loader__zzprivate_find(owner, layer, type, x) != 0) { pthread_mutex_unlock(&nn__loader__zzprivate_lock); return NN__EXPERT__ARRIVING; }
+    sys__os__lock_take(&nn__loader__zzprivate_lock);
+    if (nn__loader__zzprivate_find(owner, layer, type, x) != 0) { sys__os__lock_give(&nn__loader__zzprivate_lock); return NN__EXPERT__ARRIVING; }
     /* ⛳ AN EXPERT STILL BEING WRITTEN INTO RAM — demoted a moment ago — is not gathered back from bytes not yet there */
-    if (nn__loader__zzprivate_writing(layer, t->part_type, x)) { pthread_mutex_unlock(&nn__loader__zzprivate_lock); return NN__EXPERT__REFUSED; }
+    if (nn__loader__zzprivate_writing(layer, t->part_type, x)) { sys__os__lock_give(&nn__loader__zzprivate_lock); return NN__EXPERT__REFUSED; }
     /* ⛳ THE CHANNEL FIRST: taking one may wait for a pending one, and a wait lets the lock go — so nothing is reserved
      *   until the last wait is behind */
     const int channel = nn__loader__zzprivate_channel_take(family, bytes);
-    if (channel < 0) { pthread_mutex_unlock(&nn__loader__zzprivate_lock); return NN__EXPERT__REFUSED; }
+    if (channel < 0) { sys__os__lock_give(&nn__loader__zzprivate_lock); return NN__EXPERT__REFUSED; }
     nn__loader__channel* ch = &nn__loader__zzprivate_channels[channel];
-    if (nn__loader__zzprivate_find(owner, layer, type, x) != 0) { ch->held = false; pthread_mutex_unlock(&nn__loader__zzprivate_lock); return NN__EXPERT__ARRIVING; }
+    if (nn__loader__zzprivate_find(owner, layer, type, x) != 0) { ch->held = false; sys__os__lock_give(&nn__loader__zzprivate_lock); return NN__EXPERT__ARRIVING; }
     nn__expert_tier__out* o = 0;
     for (unsigned i = 0u; i < NN__EXPERT_TIER__OUTGOING && o == 0; ++i)
         if (!nn__expert_tier__zzprivate_out[i].used) o = &nn__expert_tier__zzprivate_out[i];
@@ -744,7 +753,7 @@ static __device__ inline int nn__expert_tier__promote(sys__silicon_family__id fa
      || !nn__expert__slot(vl, type, v, &vm) || vm.args[NN__EXPERT__SLOT_AT] == 0ull || !nn__loader__zzprivate_start()
      || !nn__expert__type_take(type, &slot, &room)) {
         ch->held = false;
-        pthread_mutex_unlock(&nn__loader__zzprivate_lock);
+        sys__os__lock_give(&nn__loader__zzprivate_lock);
         return NN__EXPERT__REFUSED;                                   /* no room in flight, no candidate, no FREE slot */
     }
     rg->state = NN__LOADER__QUEUED;
@@ -760,8 +769,8 @@ static __device__ inline int nn__expert_tier__promote(sys__silicon_family__id fa
     re->seq = ++nn__loader__zzprivate_seq;
     o->used = true; o->owner = owner; o->lx = layer; o->x = x; o->lv = vl; o->v = v; o->channel = (unsigned)channel; o->evacuate = re;
     ++nn__loader__zzprivate_count[NN__EXPERT__COUNT_PROMOTED];
-    pthread_cond_broadcast(&nn__loader__zzprivate_work);
-    pthread_mutex_unlock(&nn__loader__zzprivate_lock);
+    sys__os__condition_wake_all(&nn__loader__zzprivate_work);
+    sys__os__lock_give(&nn__loader__zzprivate_lock);
     return NN__EXPERT__ARRIVING;
 }
 
@@ -775,7 +784,7 @@ static void nn__loader__zzprivate_release_writes(uint64_t by) {
         r->seq = ++nn__loader__zzprivate_seq;
         any = true;
     }
-    if (any) pthread_cond_broadcast(&nn__loader__zzprivate_work);
+    if (any) sys__os__condition_wake_all(&nn__loader__zzprivate_work);
 }
 
 /* One cell of the tier's sources — part `p` of expert `e` of layer `l` — set to `at` (0: on the card). */
@@ -796,7 +805,7 @@ static __device__ inline bool nn__expert_tier__commit(sys__silicon_family__id fa
     const uint64_t owner = nn__expert__zzpackage_owner(), type = t->type, P = t->parts;
     const int acting = sys__silicon__host_acting_as();
     bool ok = true;
-    pthread_mutex_lock(&nn__loader__zzprivate_lock);
+    sys__os__lock_take(&nn__loader__zzprivate_lock);
     /* ⛳ writes still held from an earlier commit go now — a program that never says its CPUs are done must not leave
      *   their channels pending for ever */
     nn__loader__zzprivate_release_writes(owner);
@@ -822,7 +831,7 @@ static __device__ inline bool nn__expert_tier__commit(sys__silicon_family__id fa
             if (nn__expert__slot(o->lx, type, o->x, &lm) && lm.args[NN__EXPERT__SLOT_AT] != 0ull) {
                 re->state = NN__LOADER__QUEUED;
                 re->seq = ++nn__loader__zzprivate_seq;
-                pthread_cond_broadcast(&nn__loader__zzprivate_work);
+                sys__os__condition_wake_all(&nn__loader__zzprivate_work);
                 continue;
             }
             re->state = NN__LOADER__FAILED;                          /* the gather failed: undone below */
@@ -876,9 +885,9 @@ static __device__ inline bool nn__expert_tier__commit(sys__silicon_family__id fa
         sys__silicon__host_act_as(acting);
         ch->held = false;
         ++nn__loader__zzprivate_count[NN__EXPERT__COUNT_DEMOTED];
-        pthread_cond_broadcast(&nn__loader__zzprivate_work);
+        sys__os__condition_wake_all(&nn__loader__zzprivate_work);
     }
-    pthread_mutex_unlock(&nn__loader__zzprivate_lock);
+    sys__os__lock_give(&nn__loader__zzprivate_lock);
     return ok;
 }
 
@@ -890,7 +899,7 @@ static __device__ inline void nn__expert__wait_written(uint64_t layer, uint64_t 
      *   tier's promotions */
     if (__atomic_load_n(&nn__loader__zzprivate_writes_out, __ATOMIC_ACQUIRE) == 0ull) return;
     const uint64_t owner = nn__expert__zzpackage_owner();
-    pthread_mutex_lock(&nn__loader__zzprivate_lock);
+    sys__os__lock_take(&nn__loader__zzprivate_lock);
     for (;;) {
         bool writing = false;
         for (unsigned i = 0u; i < NN__EXPERT__FLIGHT_MAX && !writing; ++i) {
@@ -900,24 +909,24 @@ static __device__ inline void nn__expert__wait_written(uint64_t layer, uint64_t 
             if (writing && r->state == NN__LOADER__WAITING) {
                 r->state = NN__LOADER__QUEUED;
                 r->seq = ++nn__loader__zzprivate_seq;
-                pthread_cond_broadcast(&nn__loader__zzprivate_work);
+                sys__os__condition_wake_all(&nn__loader__zzprivate_work);
             }
         }
         if (!writing) break;
         struct timespec a;
-        clock_gettime(CLOCK_MONOTONIC, &a);
+        sys__os__clock(&a);
         nn__loader__zzprivate_wait();
         nn__loader__zzprivate_count[NN__EXPERT__COUNT_WRITTEN_WAIT_NS] += nn__loader__zzprivate_since(&a);
     }
-    pthread_mutex_unlock(&nn__loader__zzprivate_lock);
+    sys__os__lock_give(&nn__loader__zzprivate_lock);
 }
 
 /* ⭐ THE CPUS ARE DONE: the writes this worker's commits held back go now, while the card computes what comes next. */
 static __device__ inline void nn__expert_tier__written(void) {
     const uint64_t owner = nn__expert__zzpackage_owner();
-    pthread_mutex_lock(&nn__loader__zzprivate_lock);
+    sys__os__lock_take(&nn__loader__zzprivate_lock);
     nn__loader__zzprivate_release_writes(owner);
-    pthread_mutex_unlock(&nn__loader__zzprivate_lock);
+    sys__os__lock_give(&nn__loader__zzprivate_lock);
 }
 
 static __device__ inline bool nn__expert_tier__visit(sys__silicon_family__id family, const nn__expert_tier* t, const uint64_t* ids,
@@ -939,13 +948,13 @@ static __device__ inline bool nn__expert_tier__visit(sys__silicon_family__id fam
     }
     {
         const uint64_t owner = nn__expert__zzpackage_owner();
-        pthread_mutex_lock(&nn__loader__zzprivate_lock);
+        sys__os__lock_take(&nn__loader__zzprivate_lock);
         nn__loader__zzprivate_count[NN__EXPERT__COUNT_PICKS] += k;
         nn__loader__zzprivate_count[NN__EXPERT__COUNT_HITS] += hits;
         for (unsigned j = 0u; j < k; ++j)
             if (!held[j] && nn__loader__zzprivate_find(owner, layer, type, ids[j]) != 0)
                 ++nn__loader__zzprivate_count[NN__EXPERT__COUNT_PICKED_ARRIVING];
-        pthread_mutex_unlock(&nn__loader__zzprivate_lock);
+        sys__os__lock_give(&nn__loader__zzprivate_lock);
     }
     /* ⚖ 2026-10-06 — HOW MANY TO COPY IS A FUNCTION OF HOW LONG THE CPUS TAKE: above the line of hits one, at or below it
      *   the tier's `landing` — few picks on the card leave the CPUs a long share, and two copies hide behind it.

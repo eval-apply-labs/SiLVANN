@@ -19,8 +19,9 @@
 #include "sys/language_contract.cuh"
 #include "nn/language_contract.cuh"
 #include "ai_qwen_3/language_contract.cuh"
-#include "ai_glm_5_3/language_contract.cuh"
+#include "ai_z__glm_5_3/language_contract.cuh"
 #include "ai_qwen_image/language_contract.cuh"
+#include "ai_deepseek_4/language_contract.cuh"
 
 /* Every package has now written its rows, and the tag that makes a kind unique is applied once, here,
  * for all of them. */
@@ -30,8 +31,9 @@
 #include "sys/manifest__header.cuh"
 #include "nn/manifest__header.cuh"
 #include "ai_qwen_3/manifest__header.cuh"
-#include "ai_glm_5_3/manifest__header.cuh"
+#include "ai_z__glm_5_3/manifest__header.cuh"
 #include "ai_qwen_image/manifest__header.cuh"
+#include "ai_deepseek_4/manifest__header.cuh"
 
 #define PACKAGE_HEADER_PRESENT_CHECK(id, name, ...) \
     static_assert(PACKAGE_##name##_HEADER_PRESENT == 1, \
@@ -52,8 +54,9 @@ PACKAGE_LIST(PACKAGE_HEADER_PRESENT_CHECK)
 #include "sys/manifest.cuh"
 #include "nn/manifest.cuh"
 #include "ai_qwen_3/manifest.cuh"
-#include "ai_glm_5_3/manifest.cuh"
+#include "ai_z__glm_5_3/manifest.cuh"
 #include "ai_qwen_image/manifest.cuh"
+#include "ai_deepseek_4/manifest.cuh"
 
 #define PACKAGE_PRESENT_CHECK(id, name, ...) \
     static_assert(PACKAGE_##name##_PRESENT == 1, \

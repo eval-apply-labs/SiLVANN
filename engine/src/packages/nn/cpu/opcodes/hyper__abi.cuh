@@ -55,6 +55,47 @@ static sys__heap_node nn__hyper__zzabi_apply_post(const sys__heap_node* argv, un
     return nn__doors_answer(&argv[3]);
 }
 
+/* `(nn__hyper__collapse streams mix out hidden mult)` — the streams collapsed into `out` by the `pre` weights `mix` already
+ * holds (its first `mult` floats): DeepSeek-V4's sites, each collapsing by the weights its previous site computed. */
+static sys__heap_node nn__hyper__zzabi_apply_collapse(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx) {
+    if (argc != 5u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
+    uint64_t at[3] = {0}, room[3] = {0};
+    for (unsigned i = 0u; i < 3u; ++i)
+        if (!nn__primitives__room(&argv[i], &at[i], &room[i])) return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
+    if (argv[3].dtype != SYS__KIND__VALUE_INT || argv[4].dtype != SYS__KIND__VALUE_INT) return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
+    const uint64_t hidden = argv[3].args[0], mult = argv[4].args[0];
+    if (hidden == 0ull || hidden > (1ull << 24) || mult == 0ull || mult > NN__HYPER__MULT_MAX) return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
+    if (!nn__primitives__fits(mult * hidden, room[0]) || mult * 4ull > room[1] || !nn__primitives__fits(hidden, room[2]))
+        return sys__engine__abi__error(NN__PRIMITIVES__FAULT_BOUNDS);
+    const nn__doors* doors = nn__doors_for(ctx);
+    if (doors == 0) return sys__engine__abi__error(NN__PRIMITIVES__FAULT_NO_DEVICE);
+    doors->hyper_collapse((uint16_t*)(uintptr_t)at[2], (const float*)(uintptr_t)at[1], (const uint16_t*)(uintptr_t)at[0], hidden, mult,
+                          ctx->fault_word);
+    return nn__doors_answer(&argv[2]);
+}
+
+/* `(nn__engram__gate streams kv w hidden mult eps)` — DeepSeek-V4's n-gram memory's write: each of the `mult` streams takes
+ * the value (`kv`'s last `hidden` halves) gated by how well it matches its key (`kv`'s first `mult · hidden`), `w` the gate's
+ * maps' product a row a stream. In place. ▶ the door in `gpu/kernels/kernels.cuh`. */
+static sys__heap_node nn__engram__zzabi_apply_gate(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx) {
+    if (argc != 6u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
+    uint64_t at[3] = {0}, room[3] = {0};
+    for (unsigned i = 0u; i < 3u; ++i)
+        if (!nn__primitives__room(&argv[i], &at[i], &room[i])) return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
+    if (argv[3].dtype != SYS__KIND__VALUE_INT || argv[4].dtype != SYS__KIND__VALUE_INT || argv[5].dtype != SYS__KIND__VALUE_FLOAT)
+        return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
+    const uint64_t hidden = argv[3].args[0], mult = argv[4].args[0];
+    if (hidden == 0ull || hidden > (1ull << 24) || mult == 0ull || mult > NN__HYPER__MULT_MAX) return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
+    if (!nn__primitives__fits(mult * hidden, room[0]) || !nn__primitives__fits((mult + 1ull) * hidden, room[1])
+     || !nn__primitives__fits(mult * hidden, room[2]))
+        return sys__engine__abi__error(NN__PRIMITIVES__FAULT_BOUNDS);
+    const nn__doors* doors = nn__doors_for(ctx);
+    if (doors == 0) return sys__engine__abi__error(NN__PRIMITIVES__FAULT_NO_DEVICE);
+    doors->engram_gate((uint16_t*)(uintptr_t)at[0], (const uint16_t*)(uintptr_t)at[1], (const uint16_t*)(uintptr_t)at[2], hidden, mult,
+                       (float)sys__heap_node__real(argv[5].args[0]), ctx->fault_word);
+    return nn__doors_answer(&argv[0]);
+}
+
 /* `(nn__kda__step state conved fb dt_bias a_log gate w out heads head_dim lower eps)` — one step of Kimi Delta Attention,
  * every head: `conved` is q · k · v after their conv, `fb` the forget gate's projection (heads·head_dim) then the β logits
  * (heads) — the two gemvs' outputs side by side, which keeps the verb inside the bridge's twelve arguments — `dt_bias` and
@@ -87,5 +128,7 @@ static sys__heap_node nn__kda__zzabi_apply_step(const sys__heap_node* argv, unsi
 SYS__ENGINE__ABI__BRIDGE(nn__kda__zzabi_adapter_step,   nn__kda__zzabi_apply_step)
 SYS__ENGINE__ABI__BRIDGE(nn__hyper__zzabi_adapter_pre,  nn__hyper__zzabi_apply_pre)
 SYS__ENGINE__ABI__BRIDGE(nn__hyper__zzabi_adapter_post, nn__hyper__zzabi_apply_post)
+SYS__ENGINE__ABI__BRIDGE(nn__hyper__zzabi_adapter_collapse, nn__hyper__zzabi_apply_collapse)
+SYS__ENGINE__ABI__BRIDGE(nn__engram__zzabi_adapter_gate,     nn__engram__zzabi_apply_gate)
 
 #endif /* SILVANN__PACKAGES_NN_CPU_OPCODES_HYPER__ABI_CUH */

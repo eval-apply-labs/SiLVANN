@@ -20,15 +20,12 @@ import os
 import numpy as np
 
 from .model_folder import Refused
+from .system import BINARY, WINDOWS, memory, write_at
 
 
 def available():
     """The memory the system says it can give without swapping, in bytes."""
-    with open("/proc/meminfo") as f:
-        for line in f:
-            if line.startswith("MemAvailable:"):
-                return int(line.split()[1]) * 1024
-    return 0
+    return memory()[1]
 
 
 def limit():
@@ -98,6 +95,9 @@ def choose(experts_from, need, video=0):
         raise Refused("experts_from is 'auto', 'ram', 'disk' or 'mapped', not %r" % (experts_from,))
     if experts_from == "auto":
         return "ram" if in_ram(need, video=video) else "disk"
+    if experts_from == "mapped" and WINDOWS:
+        raise Refused("experts_from 'mapped' maps the file over memory the program holds, which the engine does not do on "
+                      "Windows: 'disk' reads the experts from it as they are wanted")
     return experts_from
 
 
@@ -157,23 +157,87 @@ def ensure(bundle, workers, plan, layers, experts, directory, pieces, all_layers
 
 def cache_experts(m, bundle, workers, plan, layers, experts, directory, pieces, all_layers, expert_type=0,
                   progress=None):
-    """Every layer's experts on each CPU worker as a CACHE in its own memory, read from the worker's file as they are
-    wanted (nn's loader, straight from the drive) — the file written first if it is not there. Answers each worker's
+    """Every layer's experts on each CPU worker as a CACHE in its own memory, read as they are wanted (nn's loader,
+    straight from the drive) — from the pack itself where its experts lie as the slots take them (`_in_place`, NN-97:
+    nothing written beside it), else from the worker's file, written first if it is not there. Answers each worker's
     backing tables, {(worker, layer): name}, for the experts tables to name. ▶ nn's `nn__expert__backing`."""
-    paths = ensure(bundle, workers, plan, layers, experts, directory, pieces, all_layers, progress)
+    lie = _in_place(bundle, workers, layers, experts, pieces)
+    paths = None if lie is not None else ensure(bundle, workers, plan, layers, experts, directory, pieces, all_layers,
+                                                progress)
     names = {}
     for w, part, parts in workers:
         m.act_as(w)
         loader = m.loader()
         for l in layers:
             loader.layer_width(l, expert_type, experts)
-        kind, handle = m.run("(sys__file__open '%s)" % paths[part])
-        if kind != m.K["sys__value_int"] or handle == 0:
-            raise Refused("the experts' file %s could not be opened" % paths[part])
+        handles = {}
         for i, l in enumerate(layers):
+            if lie is not None:
+                path, slices = lie[part][l]
+                if path not in handles:
+                    handles[path] = _open(m, path, "the pack's")
+                row = [handles[path]] + [v for s in slices for v in s]
+            else:
+                if part not in handles:
+                    handles[part] = _open(m, paths[part], "the experts' file")
+                row = [handles[part], i * experts * plan.slot_bytes, plan.slot_bytes, 0, plan.slot_bytes]
             names[(w, l)] = "bk%d_%d" % (l, w)
-            m.table(names[(w, l)], [handle, i * experts * plan.slot_bytes, plan.slot_bytes, 0] + [0] * 9)
+            m.table(names[(w, l)], row + [0] * (CELLS - len(row)))
     return names
+
+
+SLICES = 8      # an expert's byte runs a backing names (nn's `NN__EXPERT__SLICES`)
+CELLS = 1 + 4 * SLICES      # a backing as a program holds it: the file, then each slice's start, bytes, place, stride
+_UNSPELLED = set(" \t\r\n()'\"")    # what ends a name in a program: a path holding one cannot be handed as a name
+
+
+def _in_place(bundle, workers, layers, experts, pieces):
+    """Where a worker's experts lie in the pack itself — {part: {layer: (its file, [(expert 0's slice there, its bytes,
+    its place in the slot, the step to the next expert's), ...])}} — when every piece `pieces` cuts, of every expert, is
+    a run of its layer's mapped file and each slice steps by one stride; else None, and the file is written (NN-97).
+    A Qwen layer's four slices, its experts stacked by tensor, and GLM's six on one socket lie so; a socket's share of
+    GLM's down rows (a column cut of each) and a LoRA's experts (another file) do not."""
+    found = {}
+    for _, part, _parts in workers:
+        found[part] = {}
+        for l in layers:
+            view = np.frombuffer(bundle.blob(l), dtype=np.uint8)
+            base, end = view.ctypes.data, view.ctypes.data + view.nbytes
+
+            def runs(x):
+                out = []
+                for into, piece in pieces(view, l, x, part):
+                    a = piece.ctypes.data
+                    if not (piece.flags.c_contiguous and base <= a and a + piece.nbytes <= end):
+                        return None
+                    out.append((a - base, piece.nbytes, into))
+                return out
+            first = runs(0)
+            if first is None or not first or len(first) > SLICES:
+                return None
+            later = runs(1) if experts > 1 else first
+            if later is None or len(later) != len(first):
+                return None
+            step = [b[0] - a[0] for a, b in zip(first, later)]
+            for x in range(2, experts):
+                got = runs(x)
+                if got is None or len(got) != len(first) or any(
+                        g != (f[0] + x * s, f[1], f[2]) for g, f, s in zip(got, first, step)):
+                    return None
+            path = os.path.join(bundle.layer_dir(l), bundle.manifest["layout"]["weights_bin"])
+            found[part][l] = (path, [(f[0], f[1], f[2], s) for f, s in zip(first, step)])
+    return found
+
+
+def _open(m, path, what):
+    """`path` opened by the worker's family (`sys__file__open`), its handle."""
+    if _UNSPELLED & set(path):
+        raise Refused("%s %r holds a space or a bracket, which a program cannot name: move the models to a folder "
+                      "without one (`silvann models <folder>`)" % (what, path))
+    kind, handle = m.run("(sys__file__open '%s)" % path)
+    if kind != m.K["sys__value_int"] or handle == 0:
+        raise Refused("%s %s could not be opened" % (what, path))
+    return handle
 
 
 def _write(bundle, todo, plan, layers, experts, directory, pieces, progress):
@@ -183,7 +247,7 @@ def _write(bundle, todo, plan, layers, experts, directory, pieces, progress):
     for path, ident, size, part, parts, off in todo:
         if os.path.exists(path + ".json"):
             os.remove(path + ".json")
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | BINARY, 0o644)
         os.ftruncate(fd, size)
         fds.append(fd)
     slot = np.zeros(plan.slot_bytes, np.uint8)
@@ -193,7 +257,7 @@ def _write(bundle, todo, plan, layers, experts, directory, pieces, progress):
             for x in range(experts):
                 for into, piece in pieces(view, l, x, part):
                     slot[into:into + piece.nbytes] = piece
-                os.pwrite(fd, slot, off[(l, x)])
+                write_at(fd, slot, off[(l, x)])
         if progress:
             progress(i + 1, len(layers))
     for fd, (path, ident, size, part, parts, _) in zip(fds, todo):

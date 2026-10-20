@@ -49,6 +49,26 @@ static sys__heap_node nn__vector__zzabi_apply_zero(const sys__heap_node* argv, u
     return nn__doors_answer(&argv[0]);
 }
 
+/* ── `(nn__vector__copy from to n)` — `n` halves of `from` into `to`, on the device, as they are ───────── */
+/* `(nn__vector__copy from to n)` -> `to`. Bit for bit — a float's two halves as they lie — so a state of floats is kept
+ * and given back whole. Either side a buffer or a plane of a slot (a KDA layer's state). ⛳ ON THE DEVICE, QUEUED: not
+ * `nn__buffer__copy`, which is a crossing between workers — it waits for the card and goes through RAM. ⚖ 2026-10-19:
+ * a draft's check keeps each KDA layer's state after its first position, to give it back if the draft is refused. */
+static sys__heap_node nn__vector__zzabi_apply_copy(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx) {
+    if (argc != 3u) return nn__vector__zzabi_error(SYS__OPCODES__FAULT_ARITY);
+    uint64_t f_at = 0, f_room = 0, t_at = 0, t_room = 0;
+    if (argv[2].dtype != SYS__KIND__VALUE_INT || !nn__primitives__room(&argv[0], &f_at, &f_room)
+     || !nn__primitives__room(&argv[1], &t_at, &t_room))
+        return nn__vector__zzabi_error(SYS__OPCODES__FAULT_TYPE);
+    const uint64_t n = argv[2].args[0];
+    if (!nn__primitives__fits(n, f_room) || !nn__primitives__fits(n, t_room)) return nn__vector__zzabi_error(NN__PRIMITIVES__FAULT_BOUNDS);
+    if ((f_at < t_at + 2u * n) && (t_at < f_at + 2u * n)) return nn__vector__zzabi_error(NN__PRIMITIVES__FAULT_BOUNDS);
+    const nn__doors* doors = nn__doors_for(ctx);
+    if (doors == 0) return nn__vector__zzabi_error(NN__PRIMITIVES__FAULT_NO_DEVICE);
+    doors->vector_copy((uint16_t*)(uintptr_t)t_at, (const uint16_t*)(uintptr_t)f_at, n);
+    return nn__doors_answer(&argv[1]);
+}
+
 /* `(nn__vector__exp x out n)` and `(nn__vector__softplus x out n)` — one input, one output, the same
  * checks; only the door differs, so one body serves both. */
 static inline sys__heap_node nn__vector__zzabi_zzprivate_unary(const sys__heap_node* argv, unsigned argc,
@@ -181,6 +201,7 @@ static sys__heap_node nn__vector__zzabi_apply_scale_at(const sys__heap_node* arg
  * drift from them. */
 SYS__ENGINE__ABI__BRIDGE(nn__vector__zzabi_adapter_add,           nn__vector__zzabi_apply_add)
 SYS__ENGINE__ABI__BRIDGE(nn__vector__zzabi_adapter_zero,          nn__vector__zzabi_apply_zero)
+SYS__ENGINE__ABI__BRIDGE(nn__vector__zzabi_adapter_copy,          nn__vector__zzabi_apply_copy)
 SYS__ENGINE__ABI__BRIDGE(nn__vector__zzabi_adapter_exp,           nn__vector__zzabi_apply_exp)
 SYS__ENGINE__ABI__BRIDGE(nn__vector__zzabi_adapter_softplus,      nn__vector__zzabi_apply_softplus)
 SYS__ENGINE__ABI__BRIDGE(nn__vector__zzabi_adapter_l2norm,        nn__vector__zzabi_apply_l2norm)
@@ -198,7 +219,8 @@ SYS__ENGINE__ABI__BRIDGE(nn__vector__zzabi_adapter_l2norm,        nn__vector__zz
 /* The top-k's body, the plain softmax's or — `bias` not zero — the biased sigmoid router's: the picks into the node
  * array's value words (written on the card where the heap is registered with it, landed and copied otherwise), the
  * weights into `w`. */
-static sys__heap_node nn__vector__zzprivate_top_k(const sys__heap_node* argv, sys__engine__ctx* ctx, uint64_t bias, float scale) {
+static sys__heap_node nn__vector__zzprivate_top_k(const sys__heap_node* argv, sys__engine__ctx* ctx, uint64_t bias, float scale,
+                                                   uint64_t score) {
     uint64_t x_at = 0, x_room = 0, w_at = 0, w_room = 0;
     if (argv[1].dtype != SYS__KIND__VALUE_INT || argv[2].dtype != SYS__KIND__VALUE_INT
      || !sys__heap_node__carries_reference(argv[3].dtype) || !sys__node_array__is(argv[3].args[0])
@@ -213,14 +235,14 @@ static sys__heap_node nn__vector__zzprivate_top_k(const sys__heap_node* argv, sy
         return sys__engine__abi__error(NN__PRIMITIVES__FAULT_BOUNDS);
     const nn__doors* doors = nn__doors_for(ctx);
     if (doors == 0) return sys__engine__abi__error(NN__PRIMITIVES__FAULT_NO_DEVICE);
-    const uint64_t fault = nn__routed__top_k(ctx, doors, picks, w_at, x_at, bias, scale, n, k, 0);
+    const uint64_t fault = nn__routed__top_k_scored(ctx, doors, picks, w_at, x_at, bias, scale, n, k, score, 0);
     if (fault != 0u) return sys__engine__abi__error(fault);
     return nn__doors_answer(&argv[3]);
 }
 
 static sys__heap_node nn__vector__zzabi_apply_top_k(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx) {
     if (argc != 5u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
-    return nn__vector__zzprivate_top_k(argv, ctx, 0ull, 1.0f);
+    return nn__vector__zzprivate_top_k(argv, ctx, 0ull, 1.0f, NN__ROUTED__BIASED);
 }
 
 /* `(nn__vector__top_k_biased logits n k picks weights bias scale)` — GLM 5.3's and DeepSeek V3's router: the `k` experts
@@ -232,7 +254,19 @@ static sys__heap_node nn__vector__zzabi_apply_top_k_biased(const sys__heap_node*
     if (!nn__primitives__room(&argv[5], &b_at, &b_room) || argv[6].dtype != SYS__KIND__VALUE_FLOAT
      || argv[1].dtype != SYS__KIND__VALUE_INT || !nn__primitives__fits(argv[1].args[0], b_room) || b_at == 0ull)
         return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
-    return nn__vector__zzprivate_top_k(argv, ctx, b_at, (float)sys__heap_node__real(argv[6].args[0]));
+    return nn__vector__zzprivate_top_k(argv, ctx, b_at, (float)sys__heap_node__real(argv[6].args[0]), NN__ROUTED__BIASED);
+}
+
+/* `(nn__vector__top_k_scored logits n k picks weights bias scale score)` — `top_k_biased` with the router's score a choice:
+ * `score` 0 the logit as it is, 1 its sigmoid, 2 √softplus (DeepSeek-V4's) — ▶ `NN__VECTOR__SCORE_*`. */
+static sys__heap_node nn__vector__zzabi_apply_top_k_scored(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx) {
+    if (argc != 8u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
+    uint64_t b_at = 0, b_room = 0;
+    if (!nn__primitives__room(&argv[5], &b_at, &b_room) || argv[6].dtype != SYS__KIND__VALUE_FLOAT || argv[7].dtype != SYS__KIND__VALUE_INT
+     || argv[1].dtype != SYS__KIND__VALUE_INT || !nn__primitives__fits(argv[1].args[0], b_room) || b_at == 0ull
+     || argv[7].args[0] > NN__VECTOR__SCORE_SQRT_SOFTPLUS)
+        return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
+    return nn__vector__zzprivate_top_k(argv, ctx, b_at, (float)sys__heap_node__real(argv[6].args[0]), argv[7].args[0]);
 }
 
 /* `(nn__vector__penalize x n ids count penalty)` — the repetition penalty over the `n` logits of `x`, in place: each token
@@ -285,6 +319,7 @@ static sys__heap_node nn__vector__zzabi_apply_penalize(const sys__heap_node* arg
 
 SYS__ENGINE__ABI__BRIDGE(nn__vector__zzabi_adapter_top_k,         nn__vector__zzabi_apply_top_k)
 SYS__ENGINE__ABI__BRIDGE(nn__vector__zzabi_adapter_top_k_biased,  nn__vector__zzabi_apply_top_k_biased)
+SYS__ENGINE__ABI__BRIDGE(nn__vector__zzabi_adapter_top_k_scored,  nn__vector__zzabi_apply_top_k_scored)
 SYS__ENGINE__ABI__BRIDGE(nn__vector__zzabi_adapter_penalize,      nn__vector__zzabi_apply_penalize)
 SYS__ENGINE__ABI__BRIDGE(nn__vector__zzabi_adapter_pointwise_mul, nn__vector__zzabi_apply_pointwise_mul)
 SYS__ENGINE__ABI__BRIDGE(nn__vector__zzabi_adapter_scale,         nn__vector__zzabi_apply_scale)

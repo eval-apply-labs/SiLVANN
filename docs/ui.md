@@ -116,5 +116,5 @@ removes it (not the model). [`config.md`](config.md) says what each key does. Fo
   UI, on its machine, for this browser — in `.nicegui/` beside `silvann_ui.py`, or the volume's `/data/.nicegui` in the
   Docker image. The passwords are there as you typed them.
 - **The Hugging Face token** that Options saves: `.huggingface_token` in the data folder, readable by its owner alone.
-  An export of the Docker image's volume carries it, and the UI's settings with the passwords: **forget** the token,
-  and remove `.nicegui/`, before giving an export to someone else.
+  A copy of the data folder (or of a container's volume) carries it, and the UI's settings with the passwords:
+  **forget** the token, and remove `.nicegui/`, before giving such a copy to someone else.

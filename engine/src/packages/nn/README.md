@@ -30,7 +30,7 @@ with this package's id so no two packages collide. From Python, `e.kinds()` and 
 alongside the language's. Count them rather than trusting a number here (today 3 kinds and 73 verbs):
 
 ```bash
-cd backstage/src/packages/nn
+cd src/packages/nn
 grep -c 'X(PKG' contracts/macros/language_contract__kinds.cuh
 grep -c 'X(PKG' contracts/macros/language_contract__verbs.cuh
 ```
@@ -76,8 +76,12 @@ attention           nn__rope__angles  nn__rope__apply  nn__attention__decode
                     nn__attention__absorb  nn__attention__expand — latent attention: the query absorbed into the
                     cached latent, the answer expanded by each head's value rows
                     nn__attention__rows — a prompt chunk through a plain grouped-query attention, over a plane table
+                    nn__rope__interleaved — a head's part turned on adjacent pairs, and back (DeepSeek-V4's, GLM 5.3's)
+                    nn__attention__softmax_sink — the scores' softmax, its sum taking a sink a head (DeepSeek-V4's)
 hyper-connection    nn__hyper__pre  nn__hyper__post — several residual streams collapsed into a sublayer's input,
                     and mixed again after it
+                    nn__hyper__collapse — the streams collapsed by the weights an earlier site computed (DeepSeek-V4's)
+n-gram memory       nn__engram__gate — looked-up rows' value into each stream, gated by its key's match (DeepSeek-V4's)
 deltanet            nn__deltanet__rank_1_update  nn__deltanet__readout  nn__deltanet__conv_step
                     nn__deltanet__step — one step, every head in one launch
                     nn__kda__step — Kimi Delta Attention's step, GLM 5.3 Flash's linear attention
@@ -98,6 +102,7 @@ a card's tier       nn__expert_tier__note — a prompt chunk's picks the tier ta
                     rows a conversation has not reached, and how many are live
 routing             nn__vector__top_k
                     nn__vector__top_k_biased — chosen by σ + bias, weighed by σ alone (GLM 5.3)
+                    nn__vector__top_k_scored — the same, the score a choice: the logit, σ, or √softplus (DeepSeek-V4)
 sampling            nn__vector__penalize  nn__vector__draw — the repetition penalty in place, and one draw
                     from top_k's weights after the top-p cut
 tensor parallel     nn__partials__join  nn__partials__reduce — a group's partial sums added up a tree onto
@@ -276,14 +281,14 @@ nn__argmax__find                152064         295 µs             serial it was
 
 ⭐ **And the whole of Qwen2.5-7B, fp16 on one MI50**, a position at a time through all 28 layers and each
 position one program: **41 ms a position** after the first, every token Hugging Face's greedy token in
-fp32 on the CPU, its top five logits within 0.1. ▶ `backstage/test/src_qwen25_7b_decode.py`.
+fp32 on the CPU, its top five logits within 0.1. ▶ `test/src_qwen25_7b_decode.py`.
 
 The matvec got there with `x` held in registers, 960 blocks striding the rows (`NN__KERNELS__BLOCKS_MAX`,
 swept to a plateau at 960–1920), eight halves a load, and `nn__silicon__half_to_float` — without that last
 step the software conversion held it at 188 GB/s. OpenCL runs `multiply_fp16` at 615–628 GB/s, with one
 context per card: a context over several cards puts a coarse-grained allocation in host RAM, and every
 weight is then read at PCIe speed. ▶ `silicon_families/khronos_opencl2/sys.cuh`.
-Re-derive from the commits: `git log --oneline -8 -- ':(top)backstage/src/packages/nn'`, then read the
+Re-derive from the commits: `git log --oneline -8 -- ':(top)src/packages/nn'`, then read the
 messages.
 
 ## What is built and what is not
@@ -291,7 +296,7 @@ messages.
 Built: the activation pool, the cartridge's addressing (the four tiers, the resolver behind
 `nn__kv__reference`, the layer table read from the config key `nn__model__layer_types`), the expert index and the load
 protocol, the byte doors, and the verbs above. Composed programs are checked against Hugging Face and
-numpy by the oracles in `backstage/test/` — `src_weights_oracle.py`, `src_mlp_oracle.py`,
+numpy by the oracles in `test/` — `src_weights_oracle.py`, `src_mlp_oracle.py`,
 `src_deltanet_oracle.py`, `src_deltanet_layer_oracle.py`, `src_attention_program.py`,
 `src_gaussian_oracle.py`, and the whole of Qwen2.5-7B by `src_qwen25_7b_decode.py`.
 

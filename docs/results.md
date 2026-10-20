@@ -265,6 +265,11 @@ The card has twice the 5060 Ti's memory bandwidth (896 GB/s against 448, by NVID
 1.5 times as fast. Through v0.11.0's server, which paid the draw's slow top k, the same PC streamed Ministral at 46.0
 tokens a second and the 35B at 39.7; Docker Desktop on Windows on the same PC, read from the chat's meter, at 37 and 22.
 
+**Natively on Windows** (v0.12.0, built from source with CUDA 13.4, the chat's meter): Ministral 3 14B `D4` on the card
+at 58 tokens a second, on a PC with the same card, processor and RAM. The same server's reading under Linux on it is
+still to be taken; until then it stands beside Linux's harness above (74.6 on a short prompt), which takes the most
+likely token and has no sampler or server to pay.
+
 ## What limits the experts on the disk: the drive
 
 With the experts on the CPU, each is kept in the engine's own memory once it has been used, and one that is not is read

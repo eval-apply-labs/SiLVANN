@@ -48,7 +48,7 @@
 #define CL_TARGET_OPENCL_VERSION 120
 #include "../../packages/sys/cpu/silicon/file.cuh"   /* opening and reading a file, written once for every family */
 #include <CL/cl.h>
-#include <pthread.h>
+#include "../../operating_systems/os.cuh"   /* threads, locks and conditions: the system's */
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -101,8 +101,8 @@ typedef struct khronos_opencl1_igpu__state {
 } khronos_opencl1_igpu__state;
 
 static khronos_opencl1_igpu__state khronos_opencl1_igpu__zzprivate_state;
-static pthread_mutex_t        khronos_opencl1_igpu__zzpackage_lock = PTHREAD_MUTEX_INITIALIZER;   /* the arenas, the live list, a kernel's arguments */
-static pthread_once_t         khronos_opencl1_igpu__zzprivate_once = PTHREAD_ONCE_INIT;
+static sys__os__lock          khronos_opencl1_igpu__zzpackage_lock = SYS__OS__LOCK_INIT;   /* the arenas, the live list, a kernel's arguments */
+static sys__os__once          khronos_opencl1_igpu__zzprivate_once = SYS__OS__ONCE_INIT;
 static __thread uint32_t      khronos_opencl1_igpu__zzprivate_bound = 0u;
 
 /* A device's name as the roster's rows spell it: an NVIDIA card's compute capability, any other's device name. */
@@ -156,7 +156,7 @@ static void khronos_opencl1_igpu__zzprivate_stand_up(void) {
 }
 
 static inline khronos_opencl1_igpu__state* khronos_opencl1_igpu__zzpackage_up(void) {
-    (void)pthread_once(&khronos_opencl1_igpu__zzprivate_once, khronos_opencl1_igpu__zzprivate_stand_up);
+    sys__os__once_run(&khronos_opencl1_igpu__zzprivate_once, khronos_opencl1_igpu__zzprivate_stand_up);
     return khronos_opencl1_igpu__zzprivate_state.count > 0u ? &khronos_opencl1_igpu__zzprivate_state : 0;
 }
 
@@ -304,12 +304,12 @@ static inline void* khronos_opencl1_igpu__zzprivate_allocate(size_t bytes, bool 
     if (want > KHRONOS_OPENCL1_IGPU__OFFSET_MASK) return 0;
     uint8_t* copy = 0;
     if (mapped) {
-        copy = (uint8_t*)aligned_alloc(4096u, (size_t)((want + 4095ull) & ~4095ull));
+        copy = (uint8_t*)sys__os__memory_aligned(4096u, (size_t)((want + 4095ull) & ~4095ull));
         if (copy == 0) return 0;
         memset(copy, 0, (size_t)want);
     }
     uint64_t at = 0u;
-    pthread_mutex_lock(&khronos_opencl1_igpu__zzpackage_lock);
+    sys__os__lock_take(&khronos_opencl1_igpu__zzpackage_lock);
     khronos_opencl1_igpu__allocation** list = mapped ? &s->mapped : &s->live;
     size_t* count = mapped ? &s->mapped_count : &s->live_count;
     size_t* room  = mapped ? &s->mapped_room  : &s->live_room;
@@ -318,8 +318,8 @@ static inline void* khronos_opencl1_igpu__zzprivate_allocate(size_t bytes, bool 
         khronos_opencl1_igpu__allocation* l = &(*list)[(*count)++];
         l->at = at; l->bytes = want; l->host = copy; l->card_newer = false;
     }
-    pthread_mutex_unlock(&khronos_opencl1_igpu__zzpackage_lock);
-    if (at == 0u) { free(copy); return 0; }
+    sys__os__lock_give(&khronos_opencl1_igpu__zzpackage_lock);
+    if (at == 0u) { sys__os__memory_aligned_free(copy); return 0; }
     if (host) *host = copy;
     return (void*)(uintptr_t)at;
 }
@@ -328,7 +328,7 @@ static inline void* khronos_opencl1_igpu__zzprivate_allocate(size_t bytes, bool 
 static inline void khronos_opencl1_igpu__zzprivate_release(const void* at, bool mapped) {
     khronos_opencl1_igpu__state* s = khronos_opencl1_igpu__zzpackage_up();
     if (s == 0 || at == 0) return;
-    pthread_mutex_lock(&khronos_opencl1_igpu__zzpackage_lock);
+    sys__os__lock_take(&khronos_opencl1_igpu__zzpackage_lock);
     khronos_opencl1_igpu__allocation* list = mapped ? s->mapped : s->live;
     size_t* count = mapped ? &s->mapped_count : &s->live_count;
     for (size_t i = 0u; i < *count; ++i) {
@@ -336,10 +336,10 @@ static inline void khronos_opencl1_igpu__zzprivate_release(const void* at, bool 
         if (mapped ? (const void*)l.host != at : (const void*)(uintptr_t)l.at != at) continue;
         list[i] = list[--*count];
         khronos_opencl1_igpu__zzprivate_unspan(s, l.at, l.bytes);
-        free(l.host);
+        sys__os__memory_aligned_free(l.host);
         break;
     }
-    pthread_mutex_unlock(&khronos_opencl1_igpu__zzpackage_lock);
+    sys__os__lock_give(&khronos_opencl1_igpu__zzpackage_lock);
 }
 
 /* ── MAPPED RAM'S TWO COPIES ─────────────────────────────────────────────────────────────────────────── */
@@ -384,13 +384,13 @@ static inline bool khronos_opencl1_igpu__zzpackage_launching(khronos_opencl1_igp
 /* Every mapped allocation of `card` whose card copy is the newer, read back — after the card's queue has drained. */
 static inline bool khronos_opencl1_igpu__zzprivate_catch_up(khronos_opencl1_igpu__state* s, uint32_t card) {
     bool ok = true;
-    pthread_mutex_lock(&khronos_opencl1_igpu__zzpackage_lock);
+    sys__os__lock_take(&khronos_opencl1_igpu__zzpackage_lock);
     for (size_t i = 0u; i < s->mapped_count; ++i) {
         khronos_opencl1_igpu__allocation* m = &s->mapped[i];
         if (m->card_newer && (uint32_t)((m->at >> 48) & 0xFFull) == card)
             ok = khronos_opencl1_igpu__zzprivate_across(s, m, s->queue[card], false) && ok;
     }
-    pthread_mutex_unlock(&khronos_opencl1_igpu__zzpackage_lock);
+    sys__os__lock_give(&khronos_opencl1_igpu__zzpackage_lock);
     return ok;
 }
 
@@ -411,14 +411,14 @@ static inline bool khronos_opencl1_igpu__zzprivate_end(khronos_opencl1_igpu__sta
     if (!khronos_opencl1_igpu__zzprivate_where(at, &card, &slot, &offset)) { e->host = (uint8_t*)(uintptr_t)at; return true; }
     if (card >= s->count) return false;
     bool ok = true;
-    pthread_mutex_lock(&khronos_opencl1_igpu__zzpackage_lock);
+    sys__os__lock_take(&khronos_opencl1_igpu__zzpackage_lock);
     const khronos_opencl1_igpu__arena a = s->arena[card][slot];
     khronos_opencl1_igpu__allocation* m = khronos_opencl1_igpu__zzprivate_mapped(s, (uint64_t)(uintptr_t)at);
     if (m) {
         if (m->card_newer) ok = clFinish(s->queue[card]) == CL_SUCCESS && khronos_opencl1_igpu__zzprivate_across(s, m, s->queue[card], false);
         e->host = m->host + ((uint64_t)(uintptr_t)at - m->at);
     }
-    pthread_mutex_unlock(&khronos_opencl1_igpu__zzpackage_lock);
+    sys__os__lock_give(&khronos_opencl1_igpu__zzpackage_lock);
     e->owner = card;
     if (m) return ok;
     if (a.buffer == 0 || offset > a.bytes) return false;

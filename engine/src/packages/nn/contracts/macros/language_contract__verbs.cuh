@@ -84,7 +84,7 @@
     /* What the table would wait on when it comes back: its key exists (an expert's type,              */ \
     /* `contracts/objects/expert.cuh`) and its value does not — a type records its bytes, slots and    */ \
     /* anchoring, not whether its slots hold fp16 or a Gaussian width. ▶                               */ \
-    /* `docs/next_release_backlog.md`.                                                                 */ \
+    /* the archive's `docs/next_release_backlog.md`.                                                   */ \
     X(PKG, 16, "nn__expert__multiply_fp16", nn__expert__zzabi_adapter_multiply_fp16,                 \
       NN__EXPERT__MULTIPLY_FP16)                                                                                  \
     /* ⭐⭐ THE TWO THE ROUTER NEEDS, AND THEY ARE THE LAST TWO THAT CARRY NO DESIGN. A softmax and a  */ \
@@ -99,7 +99,7 @@
     /* `sigmoid(shared_expert_gate(h)) * shared_expert_output` is a SCALAR times a vector — that      */ \
     /* gate is `nn.Linear(hidden, 1)`, so the `*` is a broadcast and `nn__vector__scale` serves it.   */ \
     /* ⇒ ★ A PYTORCH `*` IS NOT EVIDENCE OF AN ELEMENTWISE OPERATION. ⚖ Kept and flagged.             */ \
-    /* ▶ `docs_history_internal/nn_retired_symbols.md`.                                               */ \
+    /* ▶ the archive's `docs_history_internal/nn_retired_symbols.md`.                                 */ \
     X(PKG, 19, "nn__vector__pointwise_mul", nn__vector__zzabi_adapter_pointwise_mul,                 \
       NN__VECTOR__POINTWISE_MUL)                                                                        \
     /* ⭐⭐ AND THE DOT PRODUCT IS A DIFFERENT VERB, NOT A SECOND NAME. The pointwise product answers */ \
@@ -253,6 +253,16 @@
     /* ⭐ SLOTS LENT TO A COLLECTION (NN-93): a card's tier holding experts in the attention caches' rows a conversation  */ \
     /* has not reached, and how many of them are live as it grows. ▶ `cpu/opcodes/expert__abi.cuh`.                     */ \
     X(PKG, 71, "nn__expert__lend",    nn__expert__zzabi_adapter_lend,              NN__EXPERT__LEND) \
-    X(PKG, 72, "nn__expert__lent",    nn__expert__zzabi_adapter_lent,              NN__EXPERT__LENT)
+    X(PKG, 72, "nn__expert__lent",    nn__expert__zzabi_adapter_lent,              NN__EXPERT__LENT) \
+    /* ⭐ DEEPSEEK-V4's WORDS (NN-95), and GLM 5.3's interleaved rope: a head's tail turned on adjacent pairs and back, a    */ \
+    /* softmax whose sum takes a sink, the streams collapsed by an earlier site's weights, and a router whose score is a    */ \
+    /* choice. ▶ `cpu/opcodes/attention__abi.cuh`, `hyper__abi.cuh`, `vector__abi.cuh`.                                   */ \
+    X(PKG, 73, "nn__rope__interleaved", nn__rope__zzabi_adapter_interleaved,       NN__ROPE__INTERLEAVED) \
+    X(PKG, 74, "nn__attention__softmax_sink", nn__attention__zzabi_adapter_softmax_sink, NN__ATTENTION__SOFTMAX_SINK) \
+    X(PKG, 75, "nn__hyper__collapse", nn__hyper__zzabi_adapter_collapse,           NN__HYPER__COLLAPSE) \
+    X(PKG, 76, "nn__vector__top_k_scored", nn__vector__zzabi_adapter_top_k_scored, NN__VECTOR__TOP_K_SCORED) \
+    X(PKG, 77, "nn__engram__gate",    nn__engram__zzabi_adapter_gate,              NN__ENGRAM__GATE) \
+    X(PKG, 78, "nn__vector__copy",    nn__vector__zzabi_adapter_copy,              NN__VECTOR__COPY) \
+    X(PKG, 79, "nn__turboquant__gemv_n", nn__turboquant__zzabi_adapter_gemv_n,    NN__TURBOQUANT__GEMV_N)
 
 #endif /* SILVANN__PACKAGES_NN_CONTRACTS_MACROS_LANGUAGE_CONTRACT__VERBS_CUH */

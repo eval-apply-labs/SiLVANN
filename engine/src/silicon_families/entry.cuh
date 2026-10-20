@@ -6,6 +6,7 @@
 #include "../packages/sys/contracts/abi/gpu.cuh"              /* sys's doors, the first table it carries */
 #include "../packages/manifest__header.cuh"                    /* the packages the door tables are gathered over */
 #include "roster.cuh"                                          /* the family's number */
+#include "../operating_systems/os.cuh"                         /* how a library offers a function by name */
 
 /* ══ ⭐⭐⭐ THE ENTRY POINT EVERY FAMILY EXPORTS — WRITTEN ONCE, FOR EVERY FAMILY ════════════════════════
  *
@@ -60,7 +61,7 @@ static const sys__silicon_family silicon_families__zzprivate_this = {
  * speak is refused rather than answered with its own, because a program reading a table of another shape
  * would call through whichever pointer happened to sit where it expected one. */
 extern "C" {
-__attribute__((visibility("default")))
+SYS__OS__EXPORT
 const sys__silicon_family* silvann_silicon_family_get(uint32_t abi_version) {
 #ifdef SYS__SILICON_FAMILY__OVERRIDE_DOORS
     /* ⛳ A FAMILY WITH `overrides/` PUTS ITS FASTER DOORS INTO THE TABLES HERE, once, before anyone reads them:

@@ -3,6 +3,14 @@
 
 /* What this file needs, named where a reader — and an editor — can follow it. */
 #include <immintrin.h>
+#if defined(_MSC_VER) && defined(__clang__)
+/* clang-cl's immintrin.h, like MSVC's, may leave out the AVX-512 headers a build without -mavx512f does not ask for;
+ * the functions below ask for AVX-512 themselves (X86_AVX2__ZZPRIVATE_AVX512), so their headers are named here.
+ * ASSUMED for clang 19 until a Windows build: unneeded there, harmless (each header is guarded). */
+#include <avx512fintrin.h>
+#include <avx512bwintrin.h>
+#include <avx512dqintrin.h>
+#endif
 #include <stdint.h>
 #include <stdlib.h>
 #include "../primitives/pool.cuh"   /* the threads the rows are spread over */
@@ -14,7 +22,7 @@
  * built). ⛳ EVERY ONE FALLS BACK TO nn's GENERIC DOOR for what it does not cover — another width, a row
  * that is not aligned — so an override can only ever be faster, never different in what it accepts, and
  * deleting this file loses nothing but speed.
- * The kernels are the ones measured in `backstage/scripts/tq_cpu_probe.c`
+ * The kernels are the ones measured in `scripts/tq_cpu_probe.c`
  * (`measurements/2026-09-27_avx2_expert_gemv.md`): at 4 bits the levels through `pshufb` and F16C, at 8
  * bits gathered; and the int8 route's levels through one `pshufb` and `pmaddubsw`. */
 
@@ -141,31 +149,33 @@ static __thread uint64_t x86_avx2__zzprivate_rows_room_n = 0;
  *   2026-10-14 on node03 (measurements/2026-10-14_v080rc1_on_node03.md), the 35B with its experts on the CPU lost 4.6 MB a
  *   prompt's chunk and 37 KB a token, without end. A key's destructor frees a thread's scratch as the thread ends; the
  *   family is never unloaded, so the destructor outlives every thread that names it. */
-static pthread_key_t  x86_avx2__zzprivate_scratch_key;
-static pthread_once_t x86_avx2__zzprivate_scratch_once = PTHREAD_ONCE_INIT;
+static sys__os__key   x86_avx2__zzprivate_scratch_key;
+static sys__os__once x86_avx2__zzprivate_scratch_once = SYS__OS__ONCE_INIT;
 static void x86_avx2__zzprivate_scratch_free(void* held) {
     (void)held;
-    free(x86_avx2__zzprivate_xf); free(x86_avx2__zzprivate_xd); free(x86_avx2__zzprivate_xq); free(x86_avx2__zzprivate_xs);
-    free(x86_avx2__zzprivate_rows_room);
+    sys__os__memory_aligned_free(x86_avx2__zzprivate_xf); sys__os__memory_aligned_free(x86_avx2__zzprivate_xd);
+    sys__os__memory_aligned_free(x86_avx2__zzprivate_xq); sys__os__memory_aligned_free(x86_avx2__zzprivate_xs);
+    sys__os__memory_aligned_free(x86_avx2__zzprivate_rows_room);
     x86_avx2__zzprivate_xf = 0; x86_avx2__zzprivate_xd = 0; x86_avx2__zzprivate_xq = 0; x86_avx2__zzprivate_xs = 0;
     x86_avx2__zzprivate_x_room = 0; x86_avx2__zzprivate_rows_room = 0; x86_avx2__zzprivate_rows_room_n = 0;
 }
 static void x86_avx2__zzprivate_scratch_key_make(void) {
-    (void)pthread_key_create(&x86_avx2__zzprivate_scratch_key, x86_avx2__zzprivate_scratch_free);
+    (void)sys__os__key_make(&x86_avx2__zzprivate_scratch_key, x86_avx2__zzprivate_scratch_free);
 }
 static inline void x86_avx2__zzprivate_scratch_held(void) {
-    pthread_once(&x86_avx2__zzprivate_scratch_once, x86_avx2__zzprivate_scratch_key_make);
-    (void)pthread_setspecific(x86_avx2__zzprivate_scratch_key, (void*)1);
+    sys__os__once_run(&x86_avx2__zzprivate_scratch_once, x86_avx2__zzprivate_scratch_key_make);
+    sys__os__key_set(x86_avx2__zzprivate_scratch_key, (void*)1);
 }
 
 static inline bool x86_avx2__zzprivate_x_room_for(uint64_t cols) {
     if (cols <= x86_avx2__zzprivate_x_room) return true;
     x86_avx2__zzprivate_scratch_held();
-    free(x86_avx2__zzprivate_xf); free(x86_avx2__zzprivate_xd); free(x86_avx2__zzprivate_xq); free(x86_avx2__zzprivate_xs);
-    x86_avx2__zzprivate_xf = (float*)aligned_alloc(64, ((cols * 4u + 63u) / 64u) * 64u);
-    x86_avx2__zzprivate_xd = (float*)aligned_alloc(64, ((cols * 4u + 63u) / 64u) * 64u);
-    x86_avx2__zzprivate_xq = (int8_t*)aligned_alloc(64, ((cols + 63u) / 64u) * 64u);
-    x86_avx2__zzprivate_xs = (float*)aligned_alloc(64, ((cols / 32u * 4u + 64u) / 64u) * 64u);
+    sys__os__memory_aligned_free(x86_avx2__zzprivate_xf); sys__os__memory_aligned_free(x86_avx2__zzprivate_xd);
+    sys__os__memory_aligned_free(x86_avx2__zzprivate_xq); sys__os__memory_aligned_free(x86_avx2__zzprivate_xs);
+    x86_avx2__zzprivate_xf = (float*)sys__os__memory_aligned(64, ((cols * 4u + 63u) / 64u) * 64u);
+    x86_avx2__zzprivate_xd = (float*)sys__os__memory_aligned(64, ((cols * 4u + 63u) / 64u) * 64u);
+    x86_avx2__zzprivate_xq = (int8_t*)sys__os__memory_aligned(64, ((cols + 63u) / 64u) * 64u);
+    x86_avx2__zzprivate_xs = (float*)sys__os__memory_aligned(64, ((cols / 32u * 4u + 64u) / 64u) * 64u);
     x86_avx2__zzprivate_x_room = (x86_avx2__zzprivate_xf && x86_avx2__zzprivate_xd && x86_avx2__zzprivate_xq && x86_avx2__zzprivate_xs)
                                ? cols : 0u;
     return x86_avx2__zzprivate_x_room != 0u;
@@ -178,8 +188,8 @@ static inline bool x86_avx2__zzprivate_x_room_for(uint64_t cols) {
 static inline float* x86_avx2__zzprivate_rows_scratch(uint64_t floats) {
     if (floats > x86_avx2__zzprivate_rows_room_n) {
         x86_avx2__zzprivate_scratch_held();
-        free(x86_avx2__zzprivate_rows_room);
-        x86_avx2__zzprivate_rows_room = (float*)aligned_alloc(64, ((floats * 4u + 63u) / 64u) * 64u);
+        sys__os__memory_aligned_free(x86_avx2__zzprivate_rows_room);
+        x86_avx2__zzprivate_rows_room = (float*)sys__os__memory_aligned(64, ((floats * 4u + 63u) / 64u) * 64u);
         x86_avx2__zzprivate_rows_room_n = x86_avx2__zzprivate_rows_room ? floats : 0u;
     }
     return x86_avx2__zzprivate_rows_room;
@@ -461,31 +471,48 @@ static void x86_avx2__override_gemv_groups_sum_int8(uint16_t* out, nn__turboquan
 }
 
 /* ── THE ROTATION: an fp32 butterfly a 512-block, a block a pool block, rounded to a half once ───────────── */
-typedef struct x86_avx2__rotate_call { uint16_t* out; const uint16_t* in; const uint16_t* sign; unsigned int* over; } x86_avx2__rotate_call;
+typedef struct x86_avx2__rotate_call {
+    uint16_t* out; const uint16_t* in; const uint16_t* sign; unsigned int* over;
+    uint64_t whole, n;             /* the whole 512-blocks' halves, and every half */
+} x86_avx2__rotate_call;
+/* Pool block `b`'s place and size: the whole 512-blocks first, then nn's tail — a 256-block where 256 or more are left, then
+ *   a 128-block (▶ nn's `nn__hadamard__zzabi_body_rotate`). */
+static inline void x86_avx2__zzprivate_rotate_block(const x86_avx2__rotate_call* c, uint64_t b, uint64_t* at, uint32_t* size) {
+    const uint64_t whole_blocks = c->whole / 512u, rest = c->n - c->whole;
+    if (b < whole_blocks) { *at = b * 512u; *size = 512u; return; }
+    if (b == whole_blocks && rest >= 256u) { *at = c->whole; *size = 256u; return; }
+    *at = c->whole + (rest >= 256u ? 256u : 0u); *size = 128u;
+}
 static void x86_avx2__zzprivate_rotate(void* a) {
     const x86_avx2__rotate_call* c = (const x86_avx2__rotate_call*)a;
-    const uint64_t at = (uint64_t)nn__silicon__block() * 512u;
+    uint64_t at = 0u; uint32_t B = 512u;
+    x86_avx2__zzprivate_rotate_block(c, (uint64_t)nn__silicon__block(), &at, &B);
     float v[512] __attribute__((aligned(32)));
-    for (uint32_t i = 0u; i < 512u; ++i) v[i] = _cvtsh_ss(c->in[at + i]) * _cvtsh_ss(c->sign[i]);
+    for (uint32_t i = 0u; i < B; ++i) v[i] = _cvtsh_ss(c->in[at + i]) * _cvtsh_ss(c->sign[i]);
     for (uint32_t h = 1u; h < 8u; h <<= 1)
-        for (uint32_t i = 0u; i < 512u; i += 2u * h)
+        for (uint32_t i = 0u; i < B; i += 2u * h)
             for (uint32_t j = i; j < i + h; ++j) { const float x = v[j], y = v[j + h]; v[j] = x + y; v[j + h] = x - y; }
-    for (uint32_t h = 8u; h < 512u; h <<= 1)
-        for (uint32_t i = 0u; i < 512u; i += 2u * h)
+    for (uint32_t h = 8u; h < B; h <<= 1)
+        for (uint32_t i = 0u; i < B; i += 2u * h)
             for (uint32_t j = i; j < i + h; j += 8u) {
                 const __m256 x = _mm256_load_ps(v + j), y = _mm256_load_ps(v + j + h);
                 _mm256_store_ps(v + j, _mm256_add_ps(x, y)); _mm256_store_ps(v + j + h, _mm256_sub_ps(x, y));
             }
-    const float inv = 1.0f / sqrtf(512.0f);
-    for (uint32_t i = 0u; i < 512u; ++i) c->out[at + i] = nn__kernels__zzabi_to_half(v[i] * inv, c->over);
+    const float inv = 1.0f / sqrtf((float)B);
+    for (uint32_t i = 0u; i < B; ++i) c->out[at + i] = nn__kernels__zzabi_to_half(v[i] * inv, c->over);
 }
-/* ⭐ Whole 512-blocks, `out` apart from `in`: in place, nn's definition is its one-lane butterfly, rounded a stage at a
- *   time, so that is the generic door's. */
+/* ⭐ Whole 512-blocks and nn's 256 and 128 tail, `out` apart from `in`: in place, nn's definition is its one-lane butterfly,
+ *   rounded a stage at a time, so that is the generic door's. ⚖ THE TAIL ON THE FAST PATH TOO — `MEASURED` 2026-10-19 node-01:
+ *   DeepSeek-V4.1's experts are 2304 wide (four 512s and a 256) and rotated a pick at a time, and the generic door took
+ *   ~0.7 ms a pick on the CPU (a dot product an element), 4.0 of the experts' 6.1 ms a layer; whole 512-blocks, 13,824
+ *   halves, 0.19 ms. */
 static void x86_avx2__override_hadamard_rotate(uint16_t* out, const uint16_t* in, const uint16_t* sign, uint64_t n, unsigned int* over) {
     const bool apart = out + n <= in || in + n <= out;
-    if (n == 0u || n % 512u != 0u || !apart) { nn__hadamard__zzabi_launch_rotate(out, in, sign, n, over); return; }
-    x86_avx2__rotate_call c = { out, in, sign, over };
-    x86_avx2__zzpackage_run((uint32_t)(n / 512u), x86_avx2__zzprivate_rotate, &c);
+    if (n < 512u || n % 128u != 0u || !apart) { nn__hadamard__zzabi_launch_rotate(out, in, sign, n, over); return; }
+    const uint64_t whole = n / 512u * 512u, rest = n - whole;
+    x86_avx2__rotate_call c = { out, in, sign, over, whole, n };
+    x86_avx2__zzpackage_run((uint32_t)(whole / 512u + (rest >= 256u ? 1u : 0u) + (rest % 256u == 128u ? 1u : 0u)),
+                            x86_avx2__zzprivate_rotate, &c);
 }
 
 /* ── THE DELTANET STEP: a head a pool block, eight of its state's columns at a time ──────────────────────── */
@@ -2014,7 +2041,7 @@ static inline void x86_avx2__override_doors(nn__doors* doors) {
     const uint16_t* lev = nn__turboquant__zzabi_levels(8u);
     for (int i = 0; i < 256; ++i) x86_avx2__zzprivate_levels8[i] = _cvtsh_ss(lev[i]);
     x86_avx2__zzprivate_install_wide();
-    const long l2 = sysconf(_SC_LEVEL2_CACHE_SIZE);   /* the core's L2, for the GEMM's blocks of pairs */
+    const long l2 = sys__os__cpu_l2_bytes();   /* the core's L2, for the GEMM's blocks of pairs */
     if (l2 > 0) x86_avx2__zzprivate_l2 = (uint64_t)l2;
     doors->turboquant_gemv      = x86_avx2__override_turboquant_gemv;
     doors->turboquant_gemv_int8 = x86_avx2__override_turboquant_gemv_int8;

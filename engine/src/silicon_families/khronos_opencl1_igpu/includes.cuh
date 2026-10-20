@@ -3,6 +3,7 @@
 
 /* What this file needs, named where a reader — and an editor — can follow it. */
 #include "../card.cuh"   /* what a card's name is */
+#include "../opencl_versions.cuh"   /* which cards' OpenCL is 1.2 */
 
 /* ══ THE CARDS THIS FAMILY TAKES ═════════════════════════════════════════════════════════════════════
  *
@@ -16,14 +17,17 @@
  * ⛳ A CARD IS NAMED AS ITS VENDOR'S FAMILY NAMES IT: an NVIDIA card by its compute capability (`sm_120`),
  *   which its OpenCL answers through `cl_nv_device_attribute_query`; any other by its OpenCL device name.
  *   `nvidia_cuda12` takes these cards first — the roster's preference — so this family has one only when
- *   it is asked for by name, or when CUDA will not open. */
+ *   it is asked for by name, or when CUDA will not open.
+ * ⭐ AND EVERY CARD WHOSE OPENCL IS 1.2, BEYOND THE ONES RUN (NN-96) — a best guess, `silicon_families__opencl1_only`:
+ *   every NVIDIA card (Kepler to Volta here, as CUDA 13 builds none; Turing and after when CUDA will not open), the
+ *   Intel iGPUs before Gen9, AMD's TeraScale and GCN 1. A card the targets row does not name is a developer preview. */
 #define KHRONOS_OPENCL1_IGPU__TARGETS(X)  X(sm_120)
 
 static inline bool khronos_opencl1_igpu__includes(const char* card) {
 #define KHRONOS_OPENCL1_IGPU__ZZPRIVATE_IS(T)  if (silicon_families__card_is(card, #T)) return true;
     KHRONOS_OPENCL1_IGPU__TARGETS(KHRONOS_OPENCL1_IGPU__ZZPRIVATE_IS)
 #undef KHRONOS_OPENCL1_IGPU__ZZPRIVATE_IS
-    return false;
+    return silicon_families__opencl1_only(card);
 }
 
 #endif /* SILVANN__SILICON_FAMILIES_KHRONOS_OPENCL1_IGPU_INCLUDES_CUH */

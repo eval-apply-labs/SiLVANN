@@ -17,15 +17,17 @@
 #include "sys/language_contract.cuh"
 #include "nn/language_contract.cuh"
 #include "ai_qwen_3/language_contract.cuh"
-#include "ai_glm_5_3/language_contract.cuh"
+#include "ai_z__glm_5_3/language_contract.cuh"
 #include "ai_qwen_image/language_contract.cuh"
+#include "ai_deepseek_4/language_contract.cuh"
 #include "language_contract_kinds.cuh"
 
 /* Each package's card side. */
 #include "sys/manifest__gpu.cuh"
 #include "nn/manifest__gpu.cuh"
 #include "ai_qwen_3/manifest__gpu.cuh"
-#include "ai_glm_5_3/manifest__gpu.cuh"
+#include "ai_z__glm_5_3/manifest__gpu.cuh"
 #include "ai_qwen_image/manifest__gpu.cuh"
+#include "ai_deepseek_4/manifest__gpu.cuh"
 
 #endif /* SILVANN__PACKAGES_MANIFEST__GPU_CUH */

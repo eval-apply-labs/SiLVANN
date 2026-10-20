@@ -12,7 +12,7 @@ the Neural Network library       what a model is built with: buffers, experts, a
 A model is a **program** in this language: a list of forms that name `nn`'s verbs and its own package's, run
 by the evaluator, with the heavy arithmetic launched on a graphics card or on the CPU's cores. Three model
 packages ship: `packages/ai_qwen_3` (Qwen 3.5, 3.6 and 3.8, dense and mixture of experts),
-`packages/ai_glm_5_3` (GLM 5.3 Flash) and `packages/ai_qwen_image` (Qwen-Image 2.1's diffusion transformer and its
+`packages/ai_z__glm_5_3` (GLM 5.3 Flash) and `packages/ai_qwen_image` (Qwen-Image 2.1's diffusion transformer and its
 picture decoder). The Python side that boots a model folder onto the machine is `silvann_runtime`.
 
 ## How it runs
@@ -79,7 +79,7 @@ The language is written as text through a small composer, `python/silvann_runtim
 
 ```python
 import silvann_engine_cpu as e
-from src_composer import Composer            # backstage/test/
+from src_composer import Composer            # test/
 
 e.boot()
 c = Composer(e, e.bindings_create(8))

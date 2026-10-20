@@ -39,7 +39,7 @@ has run on, an RTX 5060 Ti through NVIDIA's OpenCL, the 27B D4 decodes 1.61 toke
 - **258 ms are the kernels:** nn's generic bodies, with no overrides. As OpenCL C 1.2 they run about 1.9× slower than
   CUDA's compile of the same bodies, which takes 135 ms for the whole token.
 
-▶ `backstage/measurements/2026-10-13_khronos_opencl1.md` (written under the family's first name, `khronos_opencl1`).
+▶ `measurements/2026-10-13_khronos_opencl1.md` (written under the family's first name, `khronos_opencl1`).
 
 **On an integrated GPU the two copies should be one,** because the card's memory is the host's RAM
 (`CL_DEVICE_HOST_UNIFIED_MEMORY`). That leaves the kernels to compete with the machine's own CPU. `REASONED`, not built:

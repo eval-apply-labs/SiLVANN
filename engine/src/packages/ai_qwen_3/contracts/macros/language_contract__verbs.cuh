@@ -48,6 +48,10 @@
     /* text model's width. ▶ `cpu/opcodes/vision__abi.cuh`, `contracts/objects/vision.cuh`.                        */ \
     X(PKG, 20, "ai_qwen_3__vision_embed",  ai_qwen_3__vision_embed__zzabi_adapter,  AI_QWEN_3__VISION_EMBED) \
     X(PKG, 21, "ai_qwen_3__vision_block",  ai_qwen_3__vision_block__zzabi_adapter,  AI_QWEN_3__VISION_BLOCK) \
-    X(PKG, 22, "ai_qwen_3__vision_merger", ai_qwen_3__vision_merger__zzabi_adapter, AI_QWEN_3__VISION_MERGER)
+    X(PKG, 22, "ai_qwen_3__vision_merger", ai_qwen_3__vision_merger__zzabi_adapter, AI_QWEN_3__VISION_MERGER) \
+    /* ⭐ A DRAFT'S CHECK — a few positions through the one-position words at once, each row theirs to the bit, the      */ \
+    /* matrices read once for all of them. ▶ `cpu/opcodes/mixer__abi.cuh`.                                              */ \
+    X(PKG, 23, "ai_qwen_3__deltanet_n",    ai_qwen_3__deltanet_n__zzabi_adapter,    AI_QWEN_3__DELTANET_N) \
+    X(PKG, 24, "ai_qwen_3__moe_n",         ai_qwen_3__moe_n__zzabi_adapter,         AI_QWEN_3__MOE_N)
 
 #endif /* SILVANN__PACKAGES_AI_QWEN_3_CONTRACTS_MACROS_LANGUAGE_CONTRACT__VERBS_CUH */

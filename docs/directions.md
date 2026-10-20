@@ -40,7 +40,7 @@ scale at one, so small changes are safe and large ones need measuring; the norm 
 of any change to the stream's overall size.
 
 *Today:* the weighted sums happen in nn's `nn__routed__position` and `nn__routed__rows`
-(`engine/src/packages/nn/cpu/routed__impl.cuh`), which `ai_qwen_3__experts` and `ai_glm_5_3__experts` call, and
+(`engine/src/packages/nn/cpu/routed__impl.cuh`), which `ai_qwen_3__experts` and `ai_z__glm_5_3__experts` call, and
 inside `ai_qwen_3__moe` and `ai_qwen_3__moe_rows`, which weigh the downs in nn's grouped launches on the card; the
 scalars would go between each expert's output and that sum.
 

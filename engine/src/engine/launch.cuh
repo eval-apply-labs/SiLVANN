@@ -35,7 +35,7 @@
  */
 
 
-#include <pthread.h>
+#include "../operating_systems/os.cuh"   /* threads, locks and conditions: the system's */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -101,11 +101,11 @@ static void eng__launch__zzprivate_refuse(unsigned int block) {
  * ⛳ ONE LAUNCH AT A TIME GOES THROUGH THE RUNNERS. A launch that finds them busy — started from inside a runner, or
  *   from another host thread — starts threads of its own for its blocks and joins them (`eng__launch__zzprivate_fresh`),
  *   so neither waits on the other. A launch is synchronous either way: it returns when every block has. */
-static pthread_mutex_t     eng__launch__zzprivate_pool_one   = PTHREAD_MUTEX_INITIALIZER;   /* held for a launch */
-static pthread_mutex_t     eng__launch__zzprivate_pool_lock  = PTHREAD_MUTEX_INITIALIZER;   /* guards the words below */
-static pthread_cond_t      eng__launch__zzprivate_pool_go    = PTHREAD_COND_INITIALIZER;
-static pthread_cond_t      eng__launch__zzprivate_pool_done  = PTHREAD_COND_INITIALIZER;
-static pthread_t           eng__launch__zzprivate_pool_thread[SYS__SILICON__HOST_MAX_RUNNERS];
+static sys__os__lock       eng__launch__zzprivate_pool_one   = SYS__OS__LOCK_INIT;   /* held for a launch */
+static sys__os__lock       eng__launch__zzprivate_pool_lock  = SYS__OS__LOCK_INIT;   /* guards the words below */
+static sys__os__condition  eng__launch__zzprivate_pool_go    = SYS__OS__CONDITION_INIT;
+static sys__os__condition  eng__launch__zzprivate_pool_done  = SYS__OS__CONDITION_INIT;
+static sys__os__thread     eng__launch__zzprivate_pool_thread[SYS__SILICON__HOST_MAX_RUNNERS];
 static unsigned long long  eng__launch__zzprivate_pool_born[SYS__SILICON__HOST_MAX_RUNNERS];   /* the launch it started at */
 static unsigned int        eng__launch__zzprivate_pool_size  = 0u;     /* runners started */
 static unsigned long long  eng__launch__zzprivate_pool_round = 0ull;   /* launches handed to them */
@@ -118,19 +118,19 @@ static const void*         eng__launch__zzprivate_pool_args  = 0;
  * again. A runner past the launch's blocks sits it out. */
 static void* eng__launch__zzprivate_parked(void* at) {
     const unsigned int b = (unsigned int)(uintptr_t)at;
-    pthread_mutex_lock(&eng__launch__zzprivate_pool_lock);
+    sys__os__lock_take(&eng__launch__zzprivate_pool_lock);
     unsigned long long seen = eng__launch__zzprivate_pool_born[b];
     for (;;) {
         while (eng__launch__zzprivate_pool_round == seen)
-            pthread_cond_wait(&eng__launch__zzprivate_pool_go, &eng__launch__zzprivate_pool_lock);
+            sys__os__condition_wait(&eng__launch__zzprivate_pool_go, &eng__launch__zzprivate_pool_lock);
         seen = eng__launch__zzprivate_pool_round;
         if (b >= eng__launch__zzprivate_pool_n) continue;
         eng__launch__runner_start start;
         start.block = b; start.run = eng__launch__zzprivate_pool_run; start.args = eng__launch__zzprivate_pool_args;
-        pthread_mutex_unlock(&eng__launch__zzprivate_pool_lock);
+        sys__os__lock_give(&eng__launch__zzprivate_pool_lock);
         eng__launch__zzprivate_begin(&start);
-        pthread_mutex_lock(&eng__launch__zzprivate_pool_lock);
-        if (--eng__launch__zzprivate_pool_left == 0u) pthread_cond_signal(&eng__launch__zzprivate_pool_done);
+        sys__os__lock_take(&eng__launch__zzprivate_pool_lock);
+        if (--eng__launch__zzprivate_pool_left == 0u) sys__os__condition_wake_one(&eng__launch__zzprivate_pool_done);
     }
     return 0;
 }
@@ -150,32 +150,32 @@ static inline void eng__launch__spread(unsigned int n, eng__launch__runner run, 
         run(args);
         return;
     }
-    if (n > SYS__SILICON__HOST_MAX_RUNNERS || pthread_mutex_trylock(&eng__launch__zzprivate_pool_one) != 0) {
+    if (n > SYS__SILICON__HOST_MAX_RUNNERS || !sys__os__lock_try(&eng__launch__zzprivate_pool_one)) {
         eng__launch__zzprivate_fresh(n, run, args);
         return;
     }
     sys__silicon__host_set_runner_count(n);
-    pthread_mutex_lock(&eng__launch__zzprivate_pool_lock);
+    sys__os__lock_take(&eng__launch__zzprivate_pool_lock);
     for (; eng__launch__zzprivate_pool_size < n; ++eng__launch__zzprivate_pool_size) {
         const unsigned int b = eng__launch__zzprivate_pool_size;
         eng__launch__zzprivate_pool_born[b] = eng__launch__zzprivate_pool_round;
-        if (pthread_create(&eng__launch__zzprivate_pool_thread[b], 0, eng__launch__zzprivate_parked, (void*)(uintptr_t)b) != 0)
+        if (!sys__os__thread_start(&eng__launch__zzprivate_pool_thread[b], eng__launch__zzprivate_parked, (void*)(uintptr_t)b))
             eng__launch__zzprivate_refuse(b);
     }
     eng__launch__zzprivate_pool_n = n; eng__launch__zzprivate_pool_run = run; eng__launch__zzprivate_pool_args = args;
     eng__launch__zzprivate_pool_left = n;
     ++eng__launch__zzprivate_pool_round;
-    pthread_cond_broadcast(&eng__launch__zzprivate_pool_go);
+    sys__os__condition_wake_all(&eng__launch__zzprivate_pool_go);
     while (eng__launch__zzprivate_pool_left != 0u)
-        pthread_cond_wait(&eng__launch__zzprivate_pool_done, &eng__launch__zzprivate_pool_lock);
-    pthread_mutex_unlock(&eng__launch__zzprivate_pool_lock);
-    pthread_mutex_unlock(&eng__launch__zzprivate_pool_one);
+        sys__os__condition_wait(&eng__launch__zzprivate_pool_done, &eng__launch__zzprivate_pool_lock);
+    sys__os__lock_give(&eng__launch__zzprivate_pool_lock);
+    sys__os__lock_give(&eng__launch__zzprivate_pool_one);
 }
 
 /* A launch the runners cannot take: a thread a block, started together and joined. */
 static inline void eng__launch__zzprivate_fresh(unsigned int n, eng__launch__runner run, const void* args) {
     sys__silicon__host_set_runner_count(n);
-    pthread_t*                    pool   = (pthread_t*)malloc(n * sizeof(pthread_t));
+    sys__os__thread*              pool   = (sys__os__thread*)malloc(n * sizeof(sys__os__thread));
     eng__launch__runner_start* starts =
         (eng__launch__runner_start*)malloc(n * sizeof(eng__launch__runner_start));
     if (pool == 0 || starts == 0) eng__launch__zzprivate_refuse(0u);
@@ -183,10 +183,10 @@ static inline void eng__launch__zzprivate_fresh(unsigned int n, eng__launch__run
         starts[b].block = b;
         starts[b].run   = run;
         starts[b].args  = args;
-        if (pthread_create(&pool[b], 0, eng__launch__zzprivate_enter, &starts[b]) != 0)
+        if (!sys__os__thread_start(&pool[b], eng__launch__zzprivate_enter, &starts[b]))
             eng__launch__zzprivate_refuse(b);
     }
-    for (unsigned int b = 0; b < n; ++b) pthread_join(pool[b], 0);
+    for (unsigned int b = 0; b < n; ++b) sys__os__thread_join(pool[b]);
     free(starts);
     free(pool);
 }
@@ -226,7 +226,7 @@ static inline void eng__launch__zzprivate_fresh(unsigned int n, eng__launch__run
  * ⛳ ONE RESIDENT LAUNCH AT A TIME — the engine refuses a second while one is up — so the pool is one
  *   list. ⚠ Standing down is owed before exit, which is what shutting the engine down does. */
 #define ENG__LAUNCH__RESIDENT_ARG_BYTES 64u
-static pthread_t*                    eng__launch__zzprivate_resident        = 0;
+static sys__os__thread*              eng__launch__zzprivate_resident        = 0;
 static eng__launch__runner_start* eng__launch__zzprivate_resident_starts = 0;
 static unsigned int                  eng__launch__zzprivate_resident_count  = 0;
 static unsigned char eng__launch__zzprivate_resident_args[ENG__LAUNCH__RESIDENT_ARG_BYTES];
@@ -236,7 +236,7 @@ static inline bool eng__launch__start_resident(unsigned int n, eng__launch__runn
     if (bytes > sizeof eng__launch__zzprivate_resident_args) return false;
     if (n == 0u) n = 1u;
     memcpy(eng__launch__zzprivate_resident_args, args, bytes);
-    eng__launch__zzprivate_resident        = (pthread_t*)malloc(n * sizeof(pthread_t));
+    eng__launch__zzprivate_resident        = (sys__os__thread*)malloc(n * sizeof(sys__os__thread));
     eng__launch__zzprivate_resident_starts =
         (eng__launch__runner_start*)malloc(n * sizeof(eng__launch__runner_start));
     if (eng__launch__zzprivate_resident == 0 || eng__launch__zzprivate_resident_starts == 0)
@@ -246,8 +246,7 @@ static inline bool eng__launch__start_resident(unsigned int n, eng__launch__runn
         eng__launch__zzprivate_resident_starts[b].block = b;
         eng__launch__zzprivate_resident_starts[b].run   = run;
         eng__launch__zzprivate_resident_starts[b].args  = eng__launch__zzprivate_resident_args;
-        if (pthread_create(&eng__launch__zzprivate_resident[b], 0, eng__launch__zzprivate_enter,
-                           &eng__launch__zzprivate_resident_starts[b]) != 0)
+        if (!sys__os__thread_start(&eng__launch__zzprivate_resident[b], eng__launch__zzprivate_enter, &eng__launch__zzprivate_resident_starts[b]))
             eng__launch__zzprivate_refuse(b);
         eng__launch__zzprivate_resident_count = b + 1u;
     }
@@ -256,7 +255,7 @@ static inline bool eng__launch__start_resident(unsigned int n, eng__launch__runn
 
 static inline bool eng__launch__join_resident(void) {
     for (unsigned int b = 0; b < eng__launch__zzprivate_resident_count; ++b)
-        pthread_join(eng__launch__zzprivate_resident[b], 0);
+        sys__os__thread_join(eng__launch__zzprivate_resident[b]);
     free(eng__launch__zzprivate_resident_starts);
     free(eng__launch__zzprivate_resident);
     eng__launch__zzprivate_resident        = 0;

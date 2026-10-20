@@ -8,8 +8,28 @@
 
 /* ══ A MODEL'S ROUTED EXPERTS, AS nn RUNS THEM — ▶ `routed__header.cuh` ══════════════════════════════════════════════ */
 
+/* The router's door: plain top-k without a bias, GLM's sigmoid-and-bias door where `score` is `NN__ROUTED__BIASED`, and
+ * the scored door — its score `score` names (▶ `NN__VECTOR__SCORE_*`) — otherwise. */
+static void nn__routed__zzprivate_pick(const nn__doors* doors, uint64_t* values, uint64_t stride, uint64_t weights, uint64_t logits,
+                                       uint64_t bias, float scale, uint64_t n, uint64_t k, uint64_t score) {
+    if (bias == 0ull)
+        doors->vector_top_k(values, stride, (uint16_t*)(uintptr_t)weights, (const uint16_t*)(uintptr_t)logits, n, k);
+    else if (score == NN__ROUTED__BIASED)
+        doors->vector_top_k_biased(values, stride, (uint16_t*)(uintptr_t)weights, (const uint16_t*)(uintptr_t)logits,
+                                   (const uint16_t*)(uintptr_t)bias, n, k, scale);
+    else
+        doors->vector_top_k_scored(values, stride, (uint16_t*)(uintptr_t)weights, (const uint16_t*)(uintptr_t)logits,
+                                   (const uint16_t*)(uintptr_t)bias, n, k, scale, score);
+}
+
 static uint64_t nn__routed__top_k(sys__engine__ctx* ctx, const nn__doors* doors, uint64_t picks, uint64_t weights, uint64_t logits,
                                   uint64_t bias, float scale, uint64_t n, uint64_t k, uint64_t* chosen) {
+    return nn__routed__top_k_scored(ctx, doors, picks, weights, logits, bias, scale, n, k, NN__ROUTED__BIASED, chosen);
+}
+
+static uint64_t nn__routed__top_k_scored(sys__engine__ctx* ctx, const nn__doors* doors, uint64_t picks, uint64_t weights,
+                                         uint64_t logits, uint64_t bias, float scale, uint64_t n, uint64_t k, uint64_t score,
+                                         uint64_t* chosen) {
     if (k == 0ull || k > NN__VECTOR__TOP_K_MAX || (bias != 0ull && k > NN__VECTOR__ROUTER_K_MAX) || sys__node_array__length(picks) < k)
         return NN__PRIMITIVES__FAULT_BOUNDS;
     /* ⛔ ONLY VALUE WORDS ARE WRITTEN, AND ONLY INTO ELEMENTS THAT HOLD NO REFERENCE: an int is written over, a null
@@ -29,11 +49,7 @@ static uint64_t nn__routed__top_k(sys__engine__ctx* ctx, const nn__doors* doors,
     const uint64_t words = (uint64_t)(&cells[1].args[0] - &cells[0].args[0]);
     if (ctx->heap_card != 0 && cells >= ctx->heap_host && (uint64_t)(cells - ctx->heap_host) + k <= ctx->heap_nodes) {
         sys__heap_node* card = ctx->heap_card + (cells - ctx->heap_host);
-        if (bias != 0ull)
-            doors->vector_top_k_biased(&card[0].args[0], words, (uint16_t*)(uintptr_t)weights, (const uint16_t*)(uintptr_t)logits,
-                                       (const uint16_t*)(uintptr_t)bias, n, k, scale);
-        else
-            doors->vector_top_k(&card[0].args[0], words, (uint16_t*)(uintptr_t)weights, (const uint16_t*)(uintptr_t)logits, n, k);
+        nn__routed__zzprivate_pick(doors, &card[0].args[0], words, weights, logits, bias, scale, n, k, score);
         if (!sys__gpu__compute_completed(ctx->family)) return NN__PRIMITIVES__FAULT_NO_DEVICE;
         if (chosen != 0) for (uint64_t j = 0u; j < k; ++j) chosen[j] = cells[j].args[0];
         return 0u;
@@ -41,16 +57,27 @@ static uint64_t nn__routed__top_k(sys__engine__ctx* ctx, const nn__doors* doors,
     void* landing = 0;
     uint64_t got[NN__VECTOR__TOP_K_MAX];
     if (!sys__gpu__memory_allocate(ctx->family, &landing, k * sizeof(uint64_t))) return NN__PRIMITIVES__FAULT_NO_DEVICE;
-    if (bias != 0ull)
-        doors->vector_top_k_biased((uint64_t*)landing, 1ull, (uint16_t*)(uintptr_t)weights, (const uint16_t*)(uintptr_t)logits,
-                                   (const uint16_t*)(uintptr_t)bias, n, k, scale);
-    else
-        doors->vector_top_k((uint64_t*)landing, 1ull, (uint16_t*)(uintptr_t)weights, (const uint16_t*)(uintptr_t)logits, n, k);
+    nn__routed__zzprivate_pick(doors, (uint64_t*)landing, 1ull, weights, logits, bias, scale, n, k, score);
     const bool read = sys__gpu__memory_read(ctx->family, got, landing, k * sizeof(uint64_t));
     sys__gpu__memory_free(ctx->family, landing);
     if (!read) return NN__PRIMITIVES__FAULT_NO_DEVICE;
     for (uint64_t j = 0u; j < k; ++j) { cells[j].args[0] = got[j]; if (chosen != 0) chosen[j] = got[j]; }
     return 0u;
+}
+
+/* `n` picks' activations rotated, each its own `I` halves: one launch where `I` is a whole number of the rotation's 512
+ * blocks — the picks' blocks then never straddle two picks — and a launch a pick otherwise, as DeepSeek-V4's 2304 = four
+ * blocks of 512 and one of 256 needs (one launch over the picks would join a pick's 256 to the next pick's first 256). */
+static void nn__routed__zzprivate_rotate(const nn__doors* doors, unsigned int* over, const nn__routed* r, uint64_t actr, uint64_t act,
+                                         uint64_t n) {
+    const uint64_t I = r->inter;
+    if (I % 512u == 0u) {
+        doors->hadamard_rotate((uint16_t*)(uintptr_t)actr, (const uint16_t*)(uintptr_t)act, (const uint16_t*)(uintptr_t)r->signs, n * I, over);
+        return;
+    }
+    for (uint64_t i = 0u; i < n; ++i)
+        doors->hadamard_rotate((uint16_t*)(uintptr_t)(actr + 2u * i * I), (const uint16_t*)(uintptr_t)(act + 2u * i * I),
+                               (const uint16_t*)(uintptr_t)r->signs, I, over);
 }
 
 /* The activation of `pairs` gate-and-up pairs: SwiGLU, clamped where the model's is. */
@@ -87,7 +114,7 @@ static void nn__routed__zzprivate_down(const nn__doors* doors, unsigned int* ove
     }
     down.count = n;
     nn__routed__zzprivate_activate(doors, over, r, act, gu, n);
-    doors->hadamard_rotate((uint16_t*)(uintptr_t)actr, (const uint16_t*)(uintptr_t)act, (const uint16_t*)(uintptr_t)r->signs, n * I, over);
+    nn__routed__zzprivate_rotate(doors, over, r, actr, act, n);
     if (r->int8)
         doors->turboquant_gemv_groups_sum_int8((uint16_t*)(uintptr_t)routed, down, (const uint16_t*)(uintptr_t)actr,
                                                (const uint16_t*)(uintptr_t)(hand + 2u * H), (const uint16_t*)(uintptr_t)r->zero, H, I, over);
@@ -332,8 +359,7 @@ static uint64_t nn__routed__rows(sys__engine__ctx* ctx, const nn__doors* doors, 
         /* the batch's picks: every pick where it is one batch of all, else its experts' run of them, in order */
         const uint64_t p0 = begin[order[b0]], p1 = begin[order[b1 - 1u]] + picked[order[b1 - 1u]];
         nn__routed__zzprivate_activate(doors, over, r, act + 2u * p0 * I, gu + 4u * p0 * I, p1 - p0);
-        doors->hadamard_rotate((uint16_t*)(uintptr_t)(actr + 2u * p0 * I), (const uint16_t*)(uintptr_t)(act + 2u * p0 * I),
-                               (const uint16_t*)(uintptr_t)r->signs, (p1 - p0) * I, over);
+        nn__routed__zzprivate_rotate(doors, over, r, actr + 2u * p0 * I, act + 2u * p0 * I, p1 - p0);
         for (uint64_t o = b0; o < b1 && fault == 0u; ++o) {
             const uint64_t e = order[o];
             const uint64_t at = nn__routed__zzprivate_slot(r, e);

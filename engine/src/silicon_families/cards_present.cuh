@@ -4,8 +4,7 @@
 /* What this file needs, named where a reader — and an editor — can follow it. */
 #include <stdio.h>
 #include <string.h>
-#include <dirent.h>
-#include <dlfcn.h>
+#include "../operating_systems/os.cuh"   /* the system's cards, the NVIDIA driver's library: the system's */
 #include <stdint.h>
 
 /* ══ ⭐⭐ THE CARDS THIS MACHINE HAS, BY NAME, BEFORE ANY FAMILY IS LOADED ══════════════════════════════
@@ -14,14 +13,13 @@
  * offers each name to the families that include it (`choose.cuh`), and opens only the binaries of those. So the question is answered without a vendor runtime in the process: loading ROCm to learn that a
  * card needs a different ROCm would already be two ROCms in one process.
  *
- *     AMD       the kernel driver's topology, `/sys/class/kfd/kfd/topology/nodes/<n>/properties`: every
- *               GPU node carries `gfx_target_version` as a number, major·10000 + minor·100 + stepping,
- *               and its name is `gfx` then the major in decimal and the other two in hex — 90006 is
- *               `gfx906`, 90010 `gfx90a`, 110000 `gfx1100`. A CPU node carries 0 and is skipped.
+ *     the system's  the GPUs the system itself names (`sys__os__cards`): on Linux the AMD kernel driver's
+ *               topology (`gfx906`), on Windows OpenCL's loader — every GPU but NVIDIA's, by its OpenCL
+ *               device name, an AMD card's its `gfx`.
  *     NVIDIA    the driver library, `libcuda.so.1`, which every NVIDIA box has and which is not a CUDA
  *               runtime: `cuInit`, then each device's compute capability. No library, no NVIDIA cards.
  *
- * ⛳ ONLY THE PROGRAM'S SIDE CALLS THIS — the wheel, on Linux. It is a question about the machine and not
+ * ⛳ ONLY THE PROGRAM'S SIDE CALLS THIS — the wheel. It is a question about the machine and not
  *   about the silicon, so it lives beside the roster and in no family.
  * ⚠ THE ORDER IS THE DRIVERS' — kfd's node order and CUDA's device order — and nothing here promises it
  *   matches the order a family numbers its devices in. A family counts its own devices from its own
@@ -32,35 +30,20 @@
 /* The cards present, up to `most`, each name written into `names[i]`. Answers how many were written. */
 static inline uint32_t silicon_families__cards_present(char (*names)[SILICON_FAMILIES__CARD_NAME_BYTES],
                                                        uint32_t most) {
-    uint32_t n = 0u;
-
-    /* AMD. ⛳ The nodes are read in numeric order, so the answer is the same on every read. */
-    for (uint32_t node = 0u; node < 256u && n < most; ++node) {
-        char path[96];
-        snprintf(path, sizeof path, "/sys/class/kfd/kfd/topology/nodes/%u/properties", node);
-        FILE* f = fopen(path, "r");
-        if (f == 0) break;               /* no kfd at all, or past the last node: they are numbered densely */
-        char key[64];
-        unsigned long long value = 0ull, version = 0ull;
-        while (fscanf(f, "%63s %llu", key, &value) == 2)
-            if (strcmp(key, "gfx_target_version") == 0) version = value;
-        fclose(f);
-        if (version == 0ull) continue;   /* a CPU node */
-        snprintf(names[n++], SILICON_FAMILIES__CARD_NAME_BYTES, "gfx%llu%llx%llx",
-                 version / 10000ull, (version / 100ull) % 100ull, version % 100ull);
-    }
+    /* The system's own. */
+    uint32_t n = most == 0u ? 0u : sys__os__cards(names[0], SILICON_FAMILIES__CARD_NAME_BYTES, most);
 
     /* NVIDIA. ⛳ The driver's own four entry points, by name, so nothing here links against it. */
-    void* cuda = dlopen("libcuda.so.1", RTLD_NOW | RTLD_LOCAL);
+    const sys__os__library cuda = sys__os__library_open(SYS__OS__NVIDIA_DRIVER);
     if (cuda != 0) {
         typedef int (*init_fn)(unsigned int);
         typedef int (*count_fn)(int*);
         typedef int (*get_fn)(int*, int);
         typedef int (*attribute_fn)(int*, int, int);
-        const init_fn      init      = (init_fn)dlsym(cuda, "cuInit");
-        const count_fn     count     = (count_fn)dlsym(cuda, "cuDeviceGetCount");
-        const get_fn       get       = (get_fn)dlsym(cuda, "cuDeviceGet");
-        const attribute_fn attribute = (attribute_fn)dlsym(cuda, "cuDeviceGetAttribute");
+        const init_fn      init      = (init_fn)sys__os__library_find(cuda, "cuInit");
+        const count_fn     count     = (count_fn)sys__os__library_find(cuda, "cuDeviceGetCount");
+        const get_fn       get       = (get_fn)sys__os__library_find(cuda, "cuDeviceGet");
+        const attribute_fn attribute = (attribute_fn)sys__os__library_find(cuda, "cuDeviceGetAttribute");
         int devices = 0;
         if (init && count && get && attribute && init(0u) == 0 && count(&devices) == 0) {
             for (int i = 0; i < devices && n < most; ++i) {

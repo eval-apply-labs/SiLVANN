@@ -523,7 +523,7 @@ static __device__ inline uint64_t nn__expert__index_layers(void) {
  * `layers x 2 x MAX_TYPES` NODES** — a band and an ends row apiece — at 64 B a node. Derive it from the
  * constant, which is the one thing that cannot drift away from what the code does.
  * ⇒ ★ A TRADE IS ONLY WORTH ACCEPTING AGAINST A PRICE, so a stale price is worse than none: it argues
- * for the trade using evidence nobody re-checked. ▶ `nn_retired_symbols.md`, `NN__EXPERT__MAX_TYPES`.
+ * for the trade using evidence nobody re-checked. ▶ the archive's `nn_retired_symbols.md`, `NN__EXPERT__MAX_TYPES`.
  *
  * ⭐⭐ AND THE LRU MOVED DOWN WITH IT — ONE CHAIN PER (LAYER, TYPE), NOT PER LAYER. That is not
  * symmetry for its own sake, it is a CORRECTNESS argument: the LRU exists to choose a victim whose

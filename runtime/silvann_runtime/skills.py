@@ -28,8 +28,8 @@ heading a command — the command as it is called, its `touches` and `run` lines
             folder `cwd`, the `workspace`, the skill's `folder`, and `check(touches, target)`, the classifier's own ask
             for a path a command chooses); what it answers comes back as the REPL's values (str as text, a dict as
             (key value) pairs), and what it raises as an error.
-            `program` — a file in the skill's folder run as a command (a `.py` by this Python, a `.sh` by bash, any
-            other as it is), its arguments the form's as texts, in the session's working folder, stopped after a
+            `program` — a file in the skill's folder run as a command (a `.py` by this Python, a `.sh` by bash, a
+            `.ps1` by PowerShell, any other as it is), its arguments the form's as texts, in the session's working folder, stopped after a
             command's time: what it prints is the answer, and a failing exit an error.
 A skill's commands never take a built-in's name, nor one an earlier skill took: `(skills)` says which were left out,
 and why. A skill is code the user installs: it runs as the server's user, as the REPL's commands do.
@@ -38,7 +38,6 @@ import importlib.util
 import inspect
 import os
 import re
-import shlex
 import sys
 
 TOUCHES = ("none", "read", "write", "run", "net")
@@ -167,12 +166,16 @@ def takes_context(fn):
         return False
 
 
-def program_argv(cmd, folder, args):
+def program_argv(cmd, folder, args, bash="bash", powershell="powershell"):
+    """A program's command as a list: a `.py` by this Python, a `.sh` by `bash`, a `.ps1` by `powershell`, anything
+    else run itself."""
     path = os.path.join(folder, cmd.run)
     if path.endswith(".py"):
         head = [sys.executable, path]
     elif path.endswith(".sh"):
-        head = ["bash", path]
+        head = [bash, path]
+    elif path.endswith(".ps1"):
+        head = [powershell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", path]
     else:
         head = [path]
-    return shlex.join(head + [str(a) for a in args])
+    return head + [str(a) for a in args]

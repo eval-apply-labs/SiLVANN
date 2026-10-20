@@ -59,6 +59,7 @@ import subprocess
 from . import experts_file
 from .machine import Machine
 from .model_folder import ModelFolder, Refused
+from .system import LIBRARY_SUFFIX, memory
 from .vision import video_ram
 
 PLACEMENT = ("experts_on", "experts_from", "card_experts_gb")
@@ -220,11 +221,7 @@ def _freed(then, now):
 def _ram_gb():
     """The machine's RAM as a boot sees it, steady from one boot to the next: the cgroup's limit where there is one,
     else the total (not what is free now, which moves with the system's cache)."""
-    total = 0
-    with open("/proc/meminfo") as f:
-        for line in f:
-            if line.startswith("MemTotal:"):
-                total = int(line.split()[1]) * 1024
+    total = memory()[0]
     try:
         with open("/proc/self/cgroup") as f:
             path = next(l.strip().split(":", 2)[2] for l in f if l.startswith("0::"))
@@ -245,7 +242,7 @@ def _release(engine, silicon):
     `MEASURED` 2026-10-17 on the precision (measurements/2026-10-17_v0110rc2_artifacts, server_tests.log): the 35B started
     in 54 and 66 s choosing against 34-40 s keeping."""
     lib = os.path.dirname(os.path.abspath(engine))
-    family = "libsilvann_%s.so" % silicon
+    family = "libsilvann_%s%s" % (silicon, LIBRARY_SUFFIX)
     files = ([engine] + [os.path.join(lib, d, family) for d in ("silicon_families", os.path.join("build", "silicon_families"))]
              + sorted(glob.glob(os.path.join(os.path.dirname(os.path.abspath(__file__)), "*.py"))))
     h = hashlib.md5()

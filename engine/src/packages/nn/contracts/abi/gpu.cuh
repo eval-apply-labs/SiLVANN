@@ -20,6 +20,21 @@ typedef struct nn__turboquant__groups {
     uint64_t count;
 } nn__turboquant__groups;
 
+/* ⭐ INPUT `k`'S PLACE IN `turboquant_gemv_groups_n`'s ANSWERS: `out_stride` apart (`*out` moved on), or with `out_stride` 0
+ *   each group's answers one input after another — `g` with each group's `out_at` moved on `k` of its rows. */
+#if defined(__HIPCC__) || defined(__CUDACC__)
+#define NN__TURBOQUANT__ZZPRIVATE_BOTH __host__ __device__   /* a family's launch reads it, and its kernels' bodies */
+#else
+#define NN__TURBOQUANT__ZZPRIVATE_BOTH
+#endif
+static inline NN__TURBOQUANT__ZZPRIVATE_BOTH nn__turboquant__groups nn__turboquant__groups_input(const nn__turboquant__groups* g, uint16_t** out,
+                                                                                      uint64_t k, uint64_t out_stride) {
+    nn__turboquant__groups gk = *g;
+    if (out_stride != 0u) { *out += k * out_stride; return gk; }
+    for (uint64_t i = 0u; i < gk.count && i < NN__TURBOQUANT__GROUPS_MAX; ++i) gk.out_at[i] += k * gk.rows[i];
+    return gk;
+}
+
 /* ⭐ SEVERAL EXPERTS, EACH OVER ITS OWN ROWS, FOR ONE LAUNCH — what `expert_groups` takes, by value. Group
  * `i` is a matrix of `out_rows[i]` rows at width `d[i]`, applied to the rows its pairs name: its pairs are
  * `pairs[i]` entries of the door's `rows` list starting at pair `pairs_at[i]`, and its answers go to
@@ -180,7 +195,14 @@ typedef struct nn__gemm__tile {
     X(PKG, void, attention_residual_mix_rows, nn__attention__zzabi_launch_residual_mix_rows, (float* res, const float* p, const uint16_t* v, uint64_t q_heads, uint64_t kv_heads, uint64_t head_dim, uint64_t first, uint64_t rows)) \
     X(PKG, void, attention_weights_tq_rows, nn__attention__zzabi_launch_weights_tq_rows, (float* p, float* res, const uint16_t* q, const uint8_t* codes, const uint16_t* scales, uint64_t q_heads, uint64_t kv_heads, uint64_t head_dim, uint64_t length, uint64_t d, uint64_t rows)) \
     X(PKG, void, attention_residual_mix_tq_rows, nn__attention__zzabi_launch_residual_mix_tq_rows, (float* res, const float* p, const uint8_t* codes, const uint16_t* scales, uint64_t q_heads, uint64_t kv_heads, uint64_t head_dim, uint64_t length, uint64_t d, uint64_t rows)) \
-    X(PKG, void, vector_sum,               nn__vector__zzabi_launch_sum,               (uint16_t* out, nn__vector__parts parts, uint64_t n, unsigned int* over))
+    X(PKG, void, vector_sum,               nn__vector__zzabi_launch_sum,               (uint16_t* out, nn__vector__parts parts, uint64_t n, unsigned int* over)) \
+    X(PKG, void, rope_interleaved,         nn__rope__zzabi_launch_interleaved,         (uint16_t* o, const uint16_t* x, const float* cs, uint64_t heads, uint64_t head_stride, uint64_t rot, uint64_t inverse, unsigned int* over)) \
+    X(PKG, void, attention_softmax_sink,   nn__attention__zzabi_launch_softmax_sink,   (float* p, const uint16_t* sink, uint64_t rows, uint64_t length)) \
+    X(PKG, void, hyper_collapse,           nn__hyper__zzabi_launch_collapse,           (uint16_t* out, const float* mix, const uint16_t* streams, uint64_t hidden, uint64_t mult, unsigned int* over)) \
+    X(PKG, void, vector_top_k_scored,      nn__vector__zzabi_launch_top_k_scored,      (uint64_t* values, uint64_t stride, uint16_t* weights, const uint16_t* x, const uint16_t* bias, uint64_t n, uint64_t k, float scale, uint64_t score)) \
+    X(PKG, void, engram_gate,              nn__engram__zzabi_launch_gate,              (uint16_t* streams, const uint16_t* kv, const uint16_t* w, uint64_t hidden, uint64_t mult, float eps, unsigned int* over)) \
+    X(PKG, void, turboquant_gemv_groups_n, nn__turboquant__zzabi_launch_gemv_groups_n, (uint16_t* out, nn__turboquant__groups g, const uint16_t* x, uint64_t cols, uint64_t n, uint64_t out_stride, unsigned int* over)) \
+    X(PKG, void, rmsnorm_rotate,           nn__rmsnorm__zzabi_launch_rotate,           (uint16_t* rot, uint16_t* o, const uint16_t* x, const uint16_t* w, const uint16_t* sign, uint64_t n, float eps, unsigned int* over))
 
 /* ⛳ THE TABLE AND THE LAUNCH ARE THE HOST'S SIDE OF A FAMILY, so a family whose kernels are compiled as
  * OpenCL C does not see them there: that language has no function pointers, and `kernel` is a keyword. */

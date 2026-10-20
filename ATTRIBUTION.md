@@ -18,18 +18,21 @@ permission to convey the resulting work.
 
 The licensor is Eval-Apply, the Owner under `CLA.md`, through which every contribution is licensed to it. The permission
 is what lets a binary of the `nvidia_cuda12` family — which links the CUDA runtime statically — be conveyed with the
-rest of SiLVANN under the AGPL, as the Docker image (§6) conveys one. The CUDA runtime itself stays under NVIDIA's terms.
+rest of SiLVANN under the AGPL, as the prebuilt Windows libraries (§7) and a Docker image built from the release (§6)
+convey one. The CUDA runtime itself stays under NVIDIA's terms.
 
 ## 2. Third-party code in the source tree
 
-One parser, carried unchanged in `engine/scripts/third_party/` (its README says why). The engine, the runtime and
-the other build scripts are original work. The release is source: `install.sh` builds the engine on the user's own
-machine, so it redistributes no vendor binary. The Docker image is the exception, and §6 says what it carries.
+One parser and the OpenCL API's headers, carried unchanged in `engine/scripts/third_party/` (its README says why). The engine, the runtime and
+the other build scripts are original work. The release is source: `install.sh` and `build.ps1` build the engine on the
+user's own machine. Two things carry binaries: the prebuilt Windows libraries attached to a release, which §7 lists, and
+a Docker image built from the release, which §6 lists.
 
 | component | version | licence | its notice | used by |
 |---|---|---|---|---|
 | pycparser (Eli Bendersky) | 2.22 | BSD-3-Clause | `engine/scripts/third_party/pycparser/LICENSE` | `engine/scripts/opencl1_kernel_source.py`, which writes nn's kernels as OpenCL C 1.2 for the `khronos_opencl1_igpu` family |
 | PLY (David M. Beazley), the copy pycparser carries | 3.9 | BSD-3-Clause | the header of each file in `engine/scripts/third_party/pycparser/ply/` | pycparser |
+| OpenCL-Headers (The Khronos Group): `cl.h`, `cl_platform.h`, `cl_version.h` | v2022.01.04 | Apache-2.0 | `engine/scripts/third_party/OpenCL-Headers/LICENSE`, and the header of each file | `build.py`, which compiles the OpenCL families against them on Windows |
 
 ## 3. What the build compiles against, and what the runtime imports
 
@@ -75,7 +78,8 @@ model's.
 ## 5. How to re-derive this file
 
 ```bash
-# third-party source in the tree (expect: nothing in engine/src and runtime; pycparser and its PLY in engine/scripts)
+# third-party source in the tree (expect: nothing in engine/src and runtime; pycparser, its PLY and the OpenCL headers in
+# engine/scripts)
 grep -rlE "Copyright|SPDX-License" engine/src runtime engine/scripts
 grep -h "__version__ =" engine/scripts/third_party/pycparser/__init__.py engine/scripts/third_party/pycparser/ply/__init__.py
 # the headers the build includes
@@ -86,9 +90,9 @@ python3 -c "import importlib.metadata as md; [print(n, md.metadata(n).get('Licen
 
 ## 6. The Docker image
 
-`ghcr.io/eval-apply-labs/silvann` (`docker/`) is the release built: what it holds is listed, each part with its licence,
-in `/opt/silvann/IMAGE_NOTICES.md`, which `docker/image_notices.py` writes from what is installed when the image is
-built.
+`docker/`'s Dockerfile builds the release into an image (published as `ghcr.io/eval-apply-labs/silvann` up to v0.11.1,
+not since): what it holds is listed, each part with its licence, in `/opt/silvann/IMAGE_NOTICES.md`, which
+`docker/image_notices.py` writes from what is installed when the image is built.
 
 | part | licence | its notice in the image |
 |---|---|---|
@@ -99,3 +103,19 @@ built.
 
 Not in it: PyAV (`requirements-nonfree.txt`, §3), which the scripts' `install_nonfree` fetches from PyPI into the user's
 volume; NVIDIA's driver, which the container toolkit hands in from the host when the container starts; the models.
+
+## 7. The prebuilt Windows libraries
+
+`silvann_windows_x64.zip`, attached to a release on GitHub, is the release's `lib\` built by
+`.github/workflows/windows-libraries.yml` on GitHub's Windows runners; `install.ps1` takes it. Its `NOTICES.md` lists
+what it holds, and `windows_libraries.txt` the commit it was built from, which is its corresponding source.
+
+| part | licence | its notice in the zip |
+|---|---|---|
+| SiLVANN: the evaluator (`silvann_engine_cpu.*.pyd`, one a Python version) and the silicon families (`silicon_families\*.dll`) | AGPL-3.0 with the §1 additional permission | `NOTICES.md`; the release's `LICENSE` and this file |
+| NVIDIA's CUDA runtime, linked statically into `libsilvann_nvidia_cuda12.dll` | NVIDIA CUDA Toolkit EULA (a redistributable component) | `notices/CUDA_EULA.txt`, `notices/CUDA_VERSION.txt` |
+| pybind11, compiled into the evaluator | BSD-3-Clause (§3) | `notices/PYBIND11_LICENSE.txt` |
+| LLVM's compiler-rt builtins, linked into each library (`__builtin_cpu_supports`) | Apache-2.0 WITH LLVM-exception, which asks no notice of a binary | `NOTICES.md` |
+
+Not in it: Microsoft's Visual C++ runtime, which the libraries load from Windows (the installer names the `winget` line
+that installs it where it is missing), and the card's driver.

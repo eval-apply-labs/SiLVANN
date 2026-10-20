@@ -21,18 +21,9 @@
 #define AMD_ROCM6_WAVE64__ZZPRIVATE_ROT_BLOCK 512u
 #define AMD_ROCM6_WAVE64__ZZPRIVATE_ROT_EACH  8u       /* elements a lane holds: 512 / 64 */
 
-static __device__ inline void amd_rocm6_wave64__zzprivate_rotate_block(uint16_t* out, const uint16_t* in, const uint16_t* sign,
-                                                                        uint64_t blocks, unsigned int* over) {
-    const uint32_t lane = (uint32_t)(nn__silicon__lane() % AMD_ROCM6_WAVE64__ZZPRIVATE_WAVE);
-    const uint64_t block = nn__silicon__block() * AMD_ROCM6_WAVE64__ZZPRIVATE_ROWS
-                         + nn__silicon__lane() / AMD_ROCM6_WAVE64__ZZPRIVATE_WAVE;
-    if (block >= blocks) return;
-    const uint64_t at = block * AMD_ROCM6_WAVE64__ZZPRIVATE_ROT_BLOCK;
-    const uint32_t c0 = lane * AMD_ROCM6_WAVE64__ZZPRIVATE_ROT_EACH;
-    float v[AMD_ROCM6_WAVE64__ZZPRIVATE_ROT_EACH];
-#pragma unroll
-    for (uint32_t e = 0u; e < AMD_ROCM6_WAVE64__ZZPRIVATE_ROT_EACH; ++e)
-        v[e] = nn__silicon__half_to_float(in[at + c0 + e]) * nn__silicon__half_to_float(sign[c0 + e]);
+/* The butterfly of a 512-block whose lane `lane` holds elements `8·lane … 8·lane + 7` in `v`: the three stages inside a lane,
+ * the six across lanes. Unscaled; the caller divides by √512 and rounds. */
+static __device__ __forceinline__ void amd_rocm6_wave64__zzpackage_butterfly8(float* v, uint32_t lane) {
 #pragma unroll
     for (uint32_t h = 1u; h < AMD_ROCM6_WAVE64__ZZPRIVATE_ROT_EACH; h <<= 1) {          /* inside the lane */
 #pragma unroll
@@ -53,6 +44,21 @@ static __device__ inline void amd_rocm6_wave64__zzprivate_rotate_block(uint16_t*
             v[e] = low ? v[e] + other : other - v[e];
         }
     }
+}
+
+static __device__ inline void amd_rocm6_wave64__zzprivate_rotate_block(uint16_t* out, const uint16_t* in, const uint16_t* sign,
+                                                                        uint64_t blocks, unsigned int* over) {
+    const uint32_t lane = (uint32_t)(nn__silicon__lane() % AMD_ROCM6_WAVE64__ZZPRIVATE_WAVE);
+    const uint64_t block = nn__silicon__block() * AMD_ROCM6_WAVE64__ZZPRIVATE_ROWS
+                         + nn__silicon__lane() / AMD_ROCM6_WAVE64__ZZPRIVATE_WAVE;
+    if (block >= blocks) return;
+    const uint64_t at = block * AMD_ROCM6_WAVE64__ZZPRIVATE_ROT_BLOCK;
+    const uint32_t c0 = lane * AMD_ROCM6_WAVE64__ZZPRIVATE_ROT_EACH;
+    float v[AMD_ROCM6_WAVE64__ZZPRIVATE_ROT_EACH];
+#pragma unroll
+    for (uint32_t e = 0u; e < AMD_ROCM6_WAVE64__ZZPRIVATE_ROT_EACH; ++e)
+        v[e] = nn__silicon__half_to_float(in[at + c0 + e]) * nn__silicon__half_to_float(sign[c0 + e]);
+    amd_rocm6_wave64__zzpackage_butterfly8(v, lane);
     const float inv = 1.0f / nn__silicon__sqrtf((float)AMD_ROCM6_WAVE64__ZZPRIVATE_ROT_BLOCK);
     /* every half made before any is written, so the eight leave as one write */
     uint16_t h[AMD_ROCM6_WAVE64__ZZPRIVATE_ROT_EACH];

@@ -50,7 +50,7 @@
  * DISPATCH reads the number and the wrapper and discards the spelling, but the spelling leaves the build
  * anyway: `ENG__ABI__VERB_ROW` in `engine/abi.cuh` gathers these rows into a {spelling, id} table, the C
  * interface publishes it through `eng_abi_verb_count`/`_name`/`_id`, pybind hands it over as `verbs()`,
- * and the composer in `backstage/python/silvann_runtime/composer.py` resolves every word a program writes through that
+ * and the composer in `python/silvann_runtime/composer.py` resolves every word a program writes through that
  * map. ⇒ ★ A WORD TYPED IN A TEST REACHES A VERB BY THIS COLUMN AND BY NOTHING ELSE.
  * ⛳ IT IS NOT THE DANGEROUS KIND OF ROW — that one is a method that runs and does nothing, and leaks while
  * every counter balances. A spelling cannot fail; it can only go stale, and it goes stale the moment

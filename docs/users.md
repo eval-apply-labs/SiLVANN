@@ -1,10 +1,9 @@
 # Running SiLVANN
 
-This is a **developer preview (v0.11.0)**. It is tested on Linux with AMD Instinct MI50 cards (gfx906, ROCm 6), with an
-NVIDIA GeForce RTX 5060 Ti (sm_120, CUDA 12.9), and on the CPU alone with AVX2 and with AVX-512 — on Ubuntu 22.04. On a
-Windows PC, boot Linux from an SSD (below); the Docker image runs as fast as the install on Linux, but well below Linux
-on the same PC under Windows, so there it is for evaluating SiLVANN. Windows itself and other NVIDIA generations are
-untested, Apple silicon is not supported yet. If something does not build or does not run on your
+This is a **developer preview (v0.12.0)**. It is tested on Linux with AMD Instinct MI50 cards (gfx906, ROCm 6), with an
+NVIDIA GeForce RTX 5060 Ti (sm_120, CUDA 12.9), and on the CPU alone with AVX2 and with AVX-512 — on Ubuntu 22.04 — and
+natively on Windows on one PC, with an RTX 5070 Ti ([below](#on-windows)). Other NVIDIA generations are untested, Apple
+silicon is not supported yet. If something does not build or does not run on your
 machine, you are expected to be able to read the error and the source.
 
 ## 1. Build
@@ -45,36 +44,71 @@ generation only, which is much faster than building for every one, and `SILVANN_
 (the number is the card's compute capability: 120 for the RTX 50 series, 89 for the 40, 86 for the 30). A card is given
 to the family that includes it when the server starts; a model's config only picks which card (`card`, in [`config.md`](config.md)).
 
-### On Windows: the Docker image
+### On Windows
 
-⚠ **On Windows the Docker image is for evaluating SiLVANN: it runs well below what the same PC gives under Linux** (on
-Linux the image runs as fast as the install, below). On one PC (an RTX 5070 Ti, a Ryzen 7 5800X, 32 GB of RAM), Docker Desktop answered at 37 tokens a second
-with Ministral 3 14B `D4`, where Linux gives 46, and at 22 with the Qwen 3.6 35B-A3B `D8E4`, its experts in RAM and a
-tier of them on the card, where Linux gives 40 — the model that goes between the card and the CPU at every layer loses
-the most. To use SiLVANN, run Linux on an SSD, [below](#on-windows-linux-on-a-usb-ssd).
+SiLVANN runs natively on Windows 10 and 11 (64-bit x86) from v0.12.0. It needs Python 3.10 to 3.14 (`winget install -e
+--id Python.Python.3.12`), Git (`winget install -e --id Git.Git`) and the card's own driver. In PowerShell, in the
+folder you want SiLVANN under:
 
-SiLVANN runs on Linux, and on Windows it runs in Linux through WSL 2: the Docker image holds the release, its
-environment and its build for an NVIDIA card or the CPU, and Docker Desktop runs it, with the chat in the browser. The
-models are downloaded from the UI into the image's volume. [`docker/README.md`](../docker/README.md) has the steps and
-the scripts: `silvann_install`, `silvann_start`, `silvann_stop`, and `silvann_export` / `silvann_import` to carry it,
-models and all, to another drive or PC. It has been run on Linux (Docker, an RTX 5060 Ti: the 27B and the 35B against
-Hugging Face as outside it, at the same speed) and on two Windows PCs with NVIDIA cards: on Windows 11 well; on
-Windows 10 the card's shared memory misled the setup's choice of where the experts go — name it, as below.
+```powershell
+curl.exe -fsSLO https://raw.githubusercontent.com/eval-apply-labs/SiLVANN/HEAD/install.ps1
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+It fetches the release into `.\silvann` (a git clone), makes its Python environment and takes the libraries GitHub built
+for the release — `silvann_windows_x64.zip` on the release's page, used when git's hashes of the engine and `build.py`
+it was built from are the folder's — then writes `silvann.cmd` and `silvann_cli.cmd` into the folder and puts the folder
+on your PATH, from the next PowerShell you open (in the one it ran in, `.\silvann\silvann`). The `silvann` command is
+Linux's: `list`, `download`, `serve`, `ui`, `models <folder>`, `update`, `build`, `help`. Where the libraries are not the
+folder's — a branch, a change of your own — it builds them, as `build.ps1` does. It installs nothing system-wide and
+asks for no administrator. The prebuilt evaluator uses Microsoft's Visual C++ runtime, which most PCs have; the
+installer names the `winget` line that installs it if it is missing. Run from a clone's own folder, `install.ps1` and
+`build.ps1` install into that folder.
+
+**Building on the PC** (`build.ps1` in the folder, `silvann build` again): Visual Studio's Build Tools with the C++
+workload and its *C++ Clang tools for Windows* — `winget install -e --id Microsoft.VisualStudio.2022.BuildTools
+--override "--passive --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended --add
+Microsoft.VisualStudio.Component.VC.Llvm.Clang --add Microsoft.VisualStudio.Component.VC.Llvm.ClangToolset"` — and for
+an NVIDIA card CUDA's toolkit, 12 or 13 (13 needs driver 580 or newer). The evaluator and the CPU's family are built
+with clang-cl, NVIDIA's family with nvcc over MSVC for the compute capability `nvidia-smi` reports, and an AMD or Intel
+GPU's OpenCL families against its driver's `OpenCL.dll`; the build's output goes to `build.log`, each library's to its
+`.log` under `lib\`.
+
+**Smart App Control.** SiLVANN's libraries — the release's and those built on the PC — are not signed yet. Where
+Windows 11's Smart App Control is on, Windows refuses to load them (*"An Application Control policy has blocked this
+file"*), and the installer says so: turn it off — Windows Security → App & browser control → Smart App Control
+settings → Off; on most PCs it cannot be turned on again without resetting Windows — or run SiLVANN on Linux
+([below](#on-windows-linux-on-a-usb-ssd)). Signed libraries are planned.
+A PC upgraded from Windows 10, or one where it is off, is not affected.
+
+**What differs from Linux:** a model's experts are never mapped from their file — `experts_from` `"mapped"` is refused,
+and `"disk"` reads them as they are wanted; the processors count as one NUMA node; the model's tool has `(powershell …)`
+beside `(bash …)`, bash being Git for Windows' ([`tools.md`](tools.md)). It has run on one PC — an RTX 5070 Ti, a Ryzen
+7 5800X, 32 GB of RAM — built from source with CUDA 13.4: Ministral 3 14B `D4` on the card answered in the chat at 58
+tokens a second. The prebuilt libraries, the CPU alone, the experts on the CPU or read from the disk, and AMD's and
+Intel's GPUs have not run on Windows yet: tell us in Discussions how they do.
 
 **A model larger than the card, on Windows.** NVIDIA's Windows driver lets a program use more memory than the card has,
 the rest in the PC's RAM ("shared GPU memory" in Task Manager), so a model too large for the card starts on it all the
 same and then reads that rest over PCIe at every token. On one PC (an RTX 4060 Ti 16 GB) the Qwen 3.6 35B-A3B `D8E4`
-started with all its experts on the card, 4 GB of them in shared memory, and answered at 6 tokens a second. The CUDA family now
+started with all its experts on the card, 4 GB of them in shared memory, and answered at 6 tokens a second (under
+Docker Desktop, which v0.11 ran on Windows). The CUDA family
 refuses an allocation past the card's free memory, which has not been checked on Windows yet; until it is, name the placement in the model's config (the Options view): the experts on the CPU, and a tier
 of them on the card that leaves Task Manager's shared GPU memory near 0 —
 `"options": {"kv": "tiered", "tiers": [256, 4096, "rest"], "experts_on": "cpu", "experts_from": "ram",
 "card_experts_gb": 6}` answered at 16 tokens a second there. The driver's "CUDA - Sysmem Fallback Policy" set to
 "Prefer No Sysmem Fallback" left CUDA in WSL 2 without the card on that PC: keep it at its default.
 
+### On Windows: the Docker image
+
+From v0.12.0 there is none, and no scripts to run one: SiLVANN runs natively ([above](#on-windows)). Under Docker Desktop
+on WSL 2 it ran well below what the PC gives — on one PC (an RTX 5070 Ti, a Ryzen 7 5800X, 32 GB of RAM) 37 tokens a
+second with Ministral 3 14B `D4` and 22 with the Qwen 3.6 35B-A3B `D8E4`, where the same version installed on Linux gave
+46 and 40. [`docker/README.md`](../docker/README.md) keeps the Dockerfile, for a container of your own.
+
 ### On Windows: Linux on a USB SSD
 
-SiLVANN runs on Linux: it loads its libraries, pins its threads and reads the experts from the disk through Linux's own
-calls, so it does not run as a Windows program or in PowerShell. **The path we support is Linux installed on a USB SSD**
+Linux is where SiLVANN is tested most, and it can run beside Windows without touching it: Linux installed on a USB SSD
 — a real installation, not a live session, which forgets the card's driver and the build at every shutdown — booted
 from the PC's boot menu, the Windows disk untouched:
 
@@ -148,7 +182,7 @@ and 12 s for 2044 x 2044 on an MI50.
 
 **Videos**, for the Qwen models and GLM, are attached with the same button: an animated GIF, WebP or PNG is read as it
 is, any other video file (MP4 and the like) through PyAV, which `install.sh` installs from `requirements-nonfree.txt`
-(the Docker image leaves it out, and its scripts' `install_nonfree` adds it). Its frames are taken
+(an image built from `docker/` leaves it out: [`docker/README.md`](../docker/README.md)). Its frames are taken
 at 2 a second, two frames read together as one picture, each pair's time written into the message as the model's own
 processor writes it (Qwen's before the pair, the middle of its two frames: "<1.2 seconds>"; GLM's after it, its first
 frame's: "1.0 seconds"); a video is made at most half the conversation's context in tokens, the Qwen models also keep
@@ -301,10 +335,12 @@ the one coming in has arrived.
 
 ## 5. The experts on the disk
 
-With `experts_from: "disk"`, the first start writes the model's experts to `models/<name>/experts/` in the layout
-the CPU reads them in — about 150 GB for GLM 5.3 Flash, 55 GB for the 122B, 16 GB for the 35B — and later starts
-map that file. The
-disk should be an NVMe drive: RAM keeps the experts that are used, and every other one is read from the disk
+With `experts_from: "disk"`, a Qwen model's experts are read from its pack as they are wanted: nothing is written
+beside it. Where they do not lie in the pack as the CPU reads them — GLM 5.3 Flash, whose pack keeps an expert's
+records in the order of their names, or a model under a LoRA that holds experts of its own — they are written once, at
+the first start, to `models/<name>/experts/` in that layout (about 150 GB for GLM 5.3 Flash), and later starts read the
+file. Before v0.12.0 a Qwen model's were written so too: its `experts/` folder (55 GB for the 122B, 16 GB for the 35B)
+is not read any more on one socket, and can be deleted. The disk should be an NVMe drive: RAM keeps the experts that are used, and every other one is read from the disk
 when a token picks it, so the disk's speed is the answer's speed. On our test machine GLM 5.3 Flash answered at
 5.7 tokens a second with 128 GB of RAM from a disk that reads 5 GB/s. Keep the disk cool: a hot NVMe drive slows itself down. Every measurement: [`results.md`](results.md). The engine keeps as many experts
 as the memory there is allows — the process's own limit when it has one — less a quarter of it for everything else,

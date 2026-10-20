@@ -5,8 +5,7 @@
  * cards' memory in place, and the order between cards is sys's marks: the reading card's queue waits for the writing
  * card's mark, so no card waits for the host and the host waits for no card. ▶ `contracts/objects/partials.cuh` for the
  * words, the tree and what a rank may not write between two calls. */
-#include <sched.h>
-#include <time.h>
+#include "../../../../operating_systems/os.cuh"   /* the clock and a yield: the system's */
 #include "../doors.cuh"
 #include "../../contracts/objects/partials.cuh"
 
@@ -45,13 +44,13 @@ static inline void nn__partials__zzprivate_leave(nn__partials__group* g, uint32_
 static inline bool nn__partials__zzprivate_await(const uint64_t* gen, uint64_t want) {
     if (__atomic_load_n(gen, __ATOMIC_ACQUIRE) >= want) return true;
     struct timespec t0, t;
-    clock_gettime(CLOCK_MONOTONIC, &t0);
+    sys__os__clock(&t0);
     for (uint32_t spin = 1u;; ++spin) {
         if (__atomic_load_n(gen, __ATOMIC_ACQUIRE) >= want) return true;
         if (spin < 256u) continue;
-        sched_yield();
+        sys__os__yield();
         if ((spin & 1023u) != 0u) continue;
-        clock_gettime(CLOCK_MONOTONIC, &t);
+        sys__os__clock(&t);
         if ((uint64_t)(t.tv_sec - t0.tv_sec) > (uint64_t)NN__PARTIALS__PATIENCE) return false;
     }
 }

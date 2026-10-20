@@ -5,6 +5,7 @@
  * arithmetic is the door's. ▶ `vector__abi.cuh` for the shape and the refusals. */
 
 #include "../doors.cuh"
+#include "../../../../operating_systems/os.cuh"   /* the duplex copy's two threads and the clock: the system's */
 
 /* ── ⭐⭐⭐ THE fp16 MATVEC — ▶ `expert__header.cuh` for why it is its own verb ──────────────────────── */
 /* `(nn__expert__multiply_fp16 W x out rows cols)` — `out = W x`, W rows × cols as stored, every operand
@@ -171,7 +172,7 @@ static void* nn__expert_tier__zzprivate_duplex_copy(void* a) {
 }
 static double nn__expert_tier__zzprivate_seconds(void) {
     struct timespec t;
-    clock_gettime(CLOCK_MONOTONIC, &t);
+    sys__os__clock(&t);
     return (double)t.tv_sec + 1e-9 * (double)t.tv_nsec;
 }
 static sys__heap_node nn__expert_tier__zzabi_apply_duplex(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx) {
@@ -190,11 +191,11 @@ static sys__heap_node nn__expert_tier__zzabi_apply_duplex(const sys__heap_node* 
         double t0 = nn__expert_tier__zzprivate_seconds();
         nn__expert_tier__zzprivate_duplex_copy(&up);
         const double a = nn__expert_tier__zzprivate_seconds() - t0;
-        pthread_t th[2];
+        sys__os__thread th[2];
         t0 = nn__expert_tier__zzprivate_seconds();
-        ok = pthread_create(&th[0], 0, nn__expert_tier__zzprivate_duplex_copy, &up) == 0;
-        ok = ok && pthread_create(&th[1], 0, nn__expert_tier__zzprivate_duplex_copy, &down) == 0;
-        if (ok) { pthread_join(th[0], 0); pthread_join(th[1], 0); }
+        ok = sys__os__thread_start(&th[0], nn__expert_tier__zzprivate_duplex_copy, &up);
+        ok = ok && sys__os__thread_start(&th[1], nn__expert_tier__zzprivate_duplex_copy, &down);
+        if (ok) { sys__os__thread_join(th[0]); sys__os__thread_join(th[1]); }
         const double b = nn__expert_tier__zzprivate_seconds() - t0;
         ok = ok && up.ok && down.ok;
         if (rep > 0) { if (a < alone) alone = a; if (b < both) both = b; }    /* the first is a warm-up */

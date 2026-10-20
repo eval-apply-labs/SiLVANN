@@ -28,7 +28,7 @@
  * ⇒ ★ THE ONLY FIGURE THAT CANNOT BE WRONG IS THE ONE NOBODY WRITES.
  * ⛳ A CONFIG NAMING NO nn KEY THEREFORE TAKES NO SPAN AT ALL, which is a state the rest of this package
  * is written to stand in — ▶ the opcode init, which settles rather than refusing when its hatch entry is
- * empty. ▶ `docs_history_internal/nn_retired_symbols.md` for what this replaced and what that cost.
+ * empty. ▶ the archive's `docs_history_internal/nn_retired_symbols.md` for what this replaced and what that cost.
  *
  * ⛳ THE TERM COUNT BELOW IS NOT A SIZE — it is how many figures the span is the sum of, and it lives here
  * because the loop that reads them and the loop that counts them must agree. Adding a fifth term means

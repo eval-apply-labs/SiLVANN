@@ -3,6 +3,9 @@
 
 /* What this file needs, named where a reader — and an editor — can follow it. */
 #include "../../contracts/abi/gpu.cuh"   /* the arithmetic it asks a family for */
+#if defined(_MSC_VER) && !defined(__clang__)
+#include <math.h>                          /* C's INFINITY, for MSVC (▶ NN__KERNELS__INFINITY) */
+#endif
 
 /* ══ ⭐⭐⭐ THE COMPUTE, WITHOUT THE LANGUAGE — WHAT BECOMES A KERNEL ══════════════════════════════════
  */
@@ -134,8 +137,13 @@ static __device__ inline void nn__vector__zzabi_body_pointwise_mul(uint16_t* z, 
     }
 }
 
-/* A float infinity, from the compiler itself: every family's compiler has it, and no header is needed. */
+/* A float infinity, from the compiler itself: every family's compiler has it, and no header is needed — but MSVC, nvcc's
+ * host compiler on Windows, which has C's own. */
+#if defined(_MSC_VER) && !defined(__clang__)
+#define NN__KERNELS__INFINITY INFINITY
+#else
 #define NN__KERNELS__INFINITY __builtin_inff()
+#endif
 
 /* ── REDUCTIONS THAT BROADCAST BACK ──────────────────────────────────────────────────────────────
  * ⭐ WIDE OVER ONE BLOCK. Each lane takes items `lane`, `lane + lanes`, … of the reduction, the block's
@@ -314,6 +322,10 @@ static __device__ inline uint64_t nn__argmax__zzabi_body(const uint16_t* x, uint
  *   sixteen, as its only callers are routers. */
 #define NN__VECTOR__TOP_K_MAX 64u
 #define NN__VECTOR__ROUTER_K_MAX 16u
+/* a router's score function (▶ `nn__vector__zzabi_body_top_k_scored`) */
+#define NN__VECTOR__SCORE_GIVEN        0ull
+#define NN__VECTOR__SCORE_SIGMOID      1ull
+#define NN__VECTOR__SCORE_SQRT_SOFTPLUS 2ull
 static __device__ inline void nn__vector__zzabi_body_top_k(uint64_t* values, uint64_t stride, uint16_t* weights,
                                                             const uint16_t* x, uint64_t n, uint64_t k) {
     const uint64_t lane = nn__silicon__lane(), lanes = nn__silicon__lanes();
@@ -889,6 +901,27 @@ static __device__ inline void nn__attention__zzabi_body_softmax_rows(float* p, u
     }
 }
 
+/* ⭐ THE ROW SOFTMAX WITH A SINK — DeepSeek-V4's attention: row `r`'s weights over its `length` scores, its sum taking one
+ * more term, `exp(sink[r])`, that weighs nothing — so a row can give less than all of itself to the positions. The top
+ * the exponents are taken from includes the sink, so a large sink cannot overflow them. */
+static __device__ inline void nn__attention__zzabi_body_softmax_sink(float* p, const uint16_t* sink, uint64_t rows, uint64_t length) {
+    const uint64_t lane = nn__silicon__lane(), lanes = nn__silicon__lanes();
+    for (uint64_t r = nn__silicon__block(); r < rows; r += nn__silicon__blocks()) {
+        float* ph = p + r * length;
+        const float sk = nn__silicon__half_to_float(sink[r]);
+        float top = sk;
+        for (uint64_t t = lane; t < length; t += lanes) if (ph[t] > top) top = ph[t];
+        top = nn__silicon__lanes_max(top);
+        float part = 0.0f;
+        for (uint64_t t = lane; t < length; t += lanes) {
+            ph[t] = nn__silicon__expf(ph[t] - top);
+            part += ph[t];
+        }
+        const float inv = 1.0f / (nn__silicon__lanes_sum(part) + nn__silicon__expf(sk - top));
+        for (uint64_t t = lane; t < length; t += lanes) ph[t] *= inv;
+    }
+}
+
 static __device__ inline void nn__attention__zzabi_body_scores(float* p, const uint16_t* q, const uint16_t* k,
                                                                 uint64_t q_heads, uint64_t kv_heads,
                                                                 uint64_t head_dim, uint64_t length) {
@@ -1200,6 +1233,18 @@ static __device__ inline void nn__turboquant__zzabi_body_gemv_groups(uint16_t* o
     }
 }
 
+/* ⭐ THE GROUPS OVER `n` INPUTS: input `k` at `x + k·cols`, its answers at `out + k·out_stride` — or, `out_stride` 0, each
+ *   group's answers one input after another — the one-input body an input at a time, so each answer is its own (a family
+ *   reads each matrix once for all of them). */
+static __device__ inline void nn__turboquant__zzabi_body_gemv_groups_n(uint16_t* out, nn__turboquant__groups g, const uint16_t* x,
+                                                                       uint64_t cols, uint64_t n, uint64_t out_stride, unsigned int* over) {
+    for (uint64_t k = 0ull; k < n; ++k) {
+        uint16_t* o = out;
+        const nn__turboquant__groups gk = nn__turboquant__groups_input(&g, &o, k, out_stride);
+        nn__turboquant__zzabi_body_gemv_groups(o, gk, x + k * cols, cols, over);
+    }
+}
+
 /* ⭐ AND THE WEIGHTED SUM: `out[r] = residual[r] + Σ_i w[out_at[i]] · (W_i[r] · x_i)`, `x_i` at `x + i·cols` — a block a
  *   row, every group's part for that row added before the one fold, so the sum needs no second pass and no
  *   atomics. `residual` may be `out` itself: a row reads its own element before writing it, and no other row
@@ -1439,6 +1484,27 @@ static __device__ inline void nn__rope__zzabi_body_rows(uint16_t* o, const uint1
         if (hit) *over = NN__KERNELS__OVERFLOWED;
         hit = false;
         o[at + pairs] = nn__primitives__zzpackage_float_to_half(b * c + a * s, &hit);
+        if (hit) *over = NN__KERNELS__OVERFLOWED;
+    }
+}
+
+/* ⭐ ROPE ON ADJACENT PAIRS — DeepSeek-V4's and GLM 5.3's `rope_interleave`: pair `k` of a head is its elements `2k` and
+ * `2k + 1`, turned as the complex number `x[2k] + i·x[2k+1]` by the angle whose cosine `cs` holds at `k` and sine at
+ * `rot/2 + k` (as `nn__rope__angles` writes them). `x` and `o` point at the first rotated element of head 0 and a head is
+ * `head_stride` halves on, so the rotated part may be a head's tail. `inverse` turns the other way — the sines negated. */
+static __device__ inline void nn__rope__zzabi_body_interleaved(uint16_t* o, const uint16_t* x, const float* cs, uint64_t heads,
+                                                               uint64_t head_stride, uint64_t rot, uint64_t inverse,
+                                                               unsigned int* over) {
+    const uint64_t pairs = rot / 2ull, n = heads * pairs;
+    for (uint64_t i = nn__kernels__zzprivate_first(); i < n; i += nn__kernels__zzprivate_stride()) {
+        const uint64_t h = i / pairs, k = i - h * pairs, at = h * head_stride + 2ull * k;
+        const float a = nn__silicon__half_to_float(x[at]), b = nn__silicon__half_to_float(x[at + 1ull]);
+        const float c = cs[k], sn = inverse != 0ull ? -cs[pairs + k] : cs[pairs + k];
+        bool hit = false;
+        o[at] = nn__primitives__zzpackage_float_to_half(a * c - b * sn, &hit);
+        if (hit) *over = NN__KERNELS__OVERFLOWED;
+        hit = false;
+        o[at + 1ull] = nn__primitives__zzpackage_float_to_half(b * c + a * sn, &hit);
         if (hit) *over = NN__KERNELS__OVERFLOWED;
     }
 }
@@ -1927,7 +1993,7 @@ static __device__ inline void nn__hadamard__zzabi_body_rotate(uint16_t* out, con
  * orders by dependency or not at all. */
 
 /* ══ GAUSSIAN TABLE — GENERATED, BEGIN ══════════════════════════════════════════════════ */
-/* ⛔⛔ GENERATED BY `backstage/scripts/nn_gaussian_tables.py` — DO NOT HAND-EDIT.
+/* ⛔⛔ GENERATED BY `scripts/nn_gaussian_tables.py` — DO NOT HAND-EDIT.
  * Regenerate with `--emit`; `--check` fails the build if this block and the script
  * disagree. ▶ that script for the construction, and for what it validates.
  * 318 fp16 entries: 2@D1 + 4@D2 + 8@D3 + 16@D4 + 32@D5 + 256@D8.
@@ -2806,6 +2872,55 @@ static __device__ inline void nn__hyper__zzabi_body_post(uint16_t* out, const ui
     }
 }
 
+/* The streams collapsed by the `pre` weights a mix already holds (its first `mult` floats) — DeepSeek-V4's sites, each of
+ * which collapses by the weights the site before it computed: `out = Σ_i mix_i · stream_i`. */
+static __device__ inline void nn__hyper__zzabi_body_collapse(uint16_t* out, const float* mix, const uint16_t* streams, uint64_t hidden,
+                                                              uint64_t mult, unsigned int* over) {
+    for (uint64_t e = nn__kernels__zzprivate_first(); e < hidden; e += nn__kernels__zzprivate_stride()) {
+        float sum = 0.0f;
+        for (uint64_t i = 0ull; i < mult; ++i) sum += mix[i] * nn__silicon__half_to_float(streams[i * hidden + e]);
+        bool hit = false;
+        out[e] = nn__primitives__zzpackage_float_to_half(sum, &hit);
+        if (hit) *over = NN__KERNELS__OVERFLOWED;
+    }
+}
+
+/* ⭐ AN N-GRAM MEMORY'S WRITE INTO THE STREAMS — DeepSeek-V4's engram. `kv` is the looked-up rows through their map: a key
+ * for each of the `mult` streams (`hidden` halves each), then one value. Stream `j` takes the value, gated by how well it
+ * matches its key: the dot of the stream with `w_j ⊙ key_j` (`w` the gate's two maps' product, a row a stream), over
+ * both their rms and √hidden; the gate σ of its signed square root (its size at least 1e-6) — the model's `Engram`,
+ * normalised a stream at a time, not over the streams together. A block a stream. */
+static __device__ inline void nn__engram__zzabi_body_gate(uint16_t* streams, const uint16_t* kv, const uint16_t* w, uint64_t hidden,
+                                                          uint64_t mult, float eps, unsigned int* over) {
+    const uint64_t lane = nn__silicon__lane(), lanes = nn__silicon__lanes();
+    const uint16_t* value = kv + mult * hidden;
+    for (uint64_t j = nn__silicon__block(); j < mult; j += nn__silicon__blocks()) {
+        uint16_t* s = streams + j * hidden;
+        const uint16_t* key = kv + j * hidden;
+        const uint16_t* wj = w + j * hidden;
+        float hh = 0.0f, kk = 0.0f, dot = 0.0f;
+        for (uint64_t c = lane; c < hidden; c += lanes) {
+            const float h = nn__silicon__half_to_float(s[c]), k = nn__silicon__half_to_float(key[c]);
+            hh += h * h;
+            kk += k * k;
+            dot += h * nn__silicon__half_to_float(wj[c]) * k;
+        }
+        hh = nn__silicon__lanes_sum(hh);
+        kk = nn__silicon__lanes_sum(kk);
+        dot = nn__silicon__lanes_sum(dot);
+        const float n = (float)(uint32_t)hidden;
+        const float d = dot / nn__silicon__sqrtf(hh / n + eps) / nn__silicon__sqrtf(kk / n + eps) / nn__silicon__sqrtf(n);
+        const float a = d < 0.0f ? -d : d;
+        const float root = nn__silicon__sqrtf(a > 1e-6f ? a : 1e-6f);
+        const float gate = 1.0f / (1.0f + nn__silicon__expf(d < 0.0f ? root : -root));
+        for (uint64_t c = lane; c < hidden; c += lanes) {
+            bool hit = false;
+            s[c] = nn__primitives__zzpackage_float_to_half(nn__silicon__half_to_float(s[c]) + gate * nn__silicon__half_to_float(value[c]), &hit);
+            if (hit) *over = NN__KERNELS__OVERFLOWED;
+        }
+    }
+}
+
 /* ⭐ THE SAME THREE OVER `rows` ROWS — a row a position, its streams `mult · hidden` halves, its output `hidden`, and its
  * weights a record of `mix_stride` floats: `pre · post · comb`, then the logits the map gives. */
 static __device__ inline void nn__hyper__zzabi_body_logits_rows(float* lg, const uint16_t* streams, const uint16_t* fn,
@@ -2988,6 +3103,49 @@ static __device__ inline void nn__vector__zzabi_body_top_k_biased(uint64_t* valu
     float s[NN__VECTOR__ROUTER_K_MAX], sum = 0.0f;
     for (uint64_t r = 0ull; r < k; ++r) {
         s[r] = chosen[r] < n ? 1.0f / (1.0f + nn__silicon__expf(-nn__silicon__half_to_float(x[chosen[r]]))) : 0.0f;
+        sum += s[r];
+    }
+    for (uint64_t r = 0ull; r < k; ++r) {
+        values[r * stride] = chosen[r];
+        bool hit = false;
+        weights[r] = nn__primitives__zzpackage_float_to_half(s[r] / (sum + 1e-20f) * scale, &hit);
+    }
+}
+
+/* A router's score of a logit: the logit itself, its sigmoid (GLM's, DeepSeek-V3's) or √softplus (DeepSeek-V4's), softplus
+ * the logit itself past 20 as torch's is. ▶ `NN__VECTOR__SCORE_*`. */
+static __device__ inline float nn__vector__zzprivate_score(float x, uint64_t score) {
+    if (score == NN__VECTOR__SCORE_SIGMOID) return 1.0f / (1.0f + nn__silicon__expf(-x));
+    if (score == NN__VECTOR__SCORE_SQRT_SOFTPLUS) return nn__silicon__sqrtf(x > 20.0f ? x : nn__silicon__logf(1.0f + nn__silicon__expf(x)));
+    return x;
+}
+
+/* ⭐ THE BIASED ROUTER, ITS SCORE A CHOICE — `top_k_biased`'s rule with the score `score` names: the `k` experts whose
+ * score + bias is largest, weighed by their scores alone, normalised to one (+1e-20) and scaled. */
+static __device__ inline void nn__vector__zzabi_body_top_k_scored(uint64_t* values, uint64_t stride, uint16_t* weights,
+                                                                  const uint16_t* x, const uint16_t* bias, uint64_t n,
+                                                                  uint64_t k, float scale, uint64_t score) {
+    const uint64_t lane = nn__silicon__lane(), lanes = nn__silicon__lanes();
+    uint64_t chosen[NN__VECTOR__ROUTER_K_MAX];
+    for (uint64_t r = 0ull; r < k; ++r) {
+        uint64_t best_i = n;
+        float    best_v = -NN__KERNELS__INFINITY;
+        for (uint64_t i = lane; i < n; i += lanes) {
+            bool taken = false;
+            for (uint64_t q = 0ull; q < r; ++q) taken = taken || chosen[q] == i;
+            const float v = nn__vector__zzprivate_score(nn__silicon__half_to_float(x[i]), score) + nn__silicon__half_to_float(bias[i]);
+            if (taken || v != v) continue;
+            if (best_i == n || v > best_v) { best_v = v; best_i = i; }
+        }
+        const float top = nn__silicon__lanes_max(best_v);
+        const float first = nn__silicon__lanes_max(best_i != n && best_v == top ? -(float)(uint32_t)best_i
+                                                                                : -NN__KERNELS__INFINITY);
+        chosen[r] = first == -NN__KERNELS__INFINITY ? n : (uint64_t)(-first);
+    }
+    if (lane != 0ull || nn__silicon__block() != 0u) return;
+    float s[NN__VECTOR__ROUTER_K_MAX], sum = 0.0f;
+    for (uint64_t r = 0ull; r < k; ++r) {
+        s[r] = chosen[r] < n ? nn__vector__zzprivate_score(nn__silicon__half_to_float(x[chosen[r]]), score) : 0.0f;
         sum += s[r];
     }
     for (uint64_t r = 0ull; r < k; ++r) {

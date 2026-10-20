@@ -23,6 +23,7 @@
 /* The verb itself, in the ruled shape: the same bounds checks and `room()` calls as every buffer verb. */
 static sys__heap_node nn__vector__zzabi_apply_add(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx);
 static sys__heap_node nn__vector__zzabi_apply_zero(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx);
+static sys__heap_node nn__vector__zzabi_apply_copy(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx);
 static sys__heap_node nn__vector__zzabi_apply_exp(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx);
 static sys__heap_node nn__vector__zzabi_apply_softplus(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx);
 static sys__heap_node nn__vector__zzabi_apply_l2norm(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx);
@@ -36,6 +37,7 @@ static sys__heap_node nn__vector__zzabi_apply_scale_at(const sys__heap_node* arg
  * line in somebody else's package. */
 static __device__ __noinline__ void nn__vector__zzabi_adapter_add(sys__heap_node* base, uint64_t form);
 static __device__ __noinline__ void nn__vector__zzabi_adapter_zero(sys__heap_node* base, uint64_t form);
+static __device__ __noinline__ void nn__vector__zzabi_adapter_copy(sys__heap_node* base, uint64_t form);
 static __device__ __noinline__ void nn__vector__zzabi_adapter_exp(sys__heap_node* base, uint64_t form);
 static __device__ __noinline__ void nn__vector__zzabi_adapter_softplus(sys__heap_node* base, uint64_t form);
 static __device__ __noinline__ void nn__vector__zzabi_adapter_l2norm(sys__heap_node* base, uint64_t form);
@@ -46,6 +48,8 @@ static sys__heap_node nn__vector__zzabi_apply_top_k(const sys__heap_node* argv, 
 static __device__ __noinline__ void nn__vector__zzabi_adapter_top_k(sys__heap_node* base, uint64_t form);
 static sys__heap_node nn__vector__zzabi_apply_top_k_biased(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx);
 static __device__ __noinline__ void nn__vector__zzabi_adapter_top_k_biased(sys__heap_node* base, uint64_t form);
+static sys__heap_node nn__vector__zzabi_apply_top_k_scored(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx);
+static __device__ __noinline__ void nn__vector__zzabi_adapter_top_k_scored(sys__heap_node* base, uint64_t form);
 static sys__heap_node nn__vector__zzabi_apply_penalize(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx);
 static __device__ __noinline__ void nn__vector__zzabi_adapter_penalize(sys__heap_node* base, uint64_t form);
 

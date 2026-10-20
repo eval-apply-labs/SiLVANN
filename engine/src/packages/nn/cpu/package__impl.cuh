@@ -85,7 +85,7 @@ static __device__ __noinline__ void nn__package__zzpackage_apply_init(sys__heap_
      * itself, since both come from the same lines.
      * ⛔ WHAT THE CARVE DOES CHECK IS THAT ITS RUNS FIT THE ROOM, which is a different question and the one
      * with no later symptom: a run that walks past the end hands out addresses belonging to nobody.
-     * ▶ `docs_history_internal/nn_retired_symbols.md`. */
+     * ▶ the archive's `docs_history_internal/nn_retired_symbols.md`. */
     /* ⭐⭐ AND HERE IS WHAT THE SPAN WAS FOR: the buffer classes are cut out of it and their free lists
      * filled, which is every line of it making a heap object — so it belongs on this side of the boot
      * split and could never have been the host init's.

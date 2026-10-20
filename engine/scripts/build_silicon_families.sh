@@ -85,7 +85,7 @@ for P in $(echo "${SILVANN_SILICON_FAMILIES:-$ALL}" | tr ',' ' '); do
             || { echo "⛔ amd_rocm6_wave64:"; grep -m10 error "$OUT/amd_rocm6_wave64.log"; }
         built amd_rocm6_wave64 "$OUT/libsilvann_amd_rocm6_wave64.so" ;;
     nvidia_cuda12)
-        NVCC=${SILVANN_NVCC:-$(command -v nvcc || echo "$(cd ../.. && pwd)/toolchains/cuda-12.9/bin/nvcc")}
+        NVCC=${SILVANN_NVCC:-$(command -v nvcc || echo "$(cd .. && pwd)/toolchains/cuda-12.9/bin/nvcc")}
         [ -x "$NVCC" ] || { echo "⛔ nvidia_cuda12: no nvcc (set SILVANN_NVCC)"; FAILED=1; continue; }
         tu nvidia_cuda12 > "$OUT/nvidia_cuda12.cu"
         WANT=$(targets nvidia_cuda12 NVIDIA_CUDA12__TARGETS | sed 's/^sm_//' | paste -sd,)

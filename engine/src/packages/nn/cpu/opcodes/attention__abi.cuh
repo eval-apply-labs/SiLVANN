@@ -55,6 +55,46 @@ static sys__heap_node nn__rope__zzabi_apply(const sys__heap_node* argv, unsigned
     return nn__doors_answer(&argv[2]);
 }
 
+/* `(nn__rope__interleaved x cs out heads head_stride rot inverse)` — the first `rot` halves of each of `heads` heads, a head
+ * `head_stride` halves on, turned on adjacent pairs at the position `cs` holds (`rot/2` cosines then `rot/2` sines, fp32);
+ * `inverse` 1 turns them back. `x` and `out` point at head 0's first turned half — a head's tail is reached through a range
+ * — and `out` may be `x`. */
+static sys__heap_node nn__rope__zzabi_apply_interleaved(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx) {
+    if (argc != 7u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
+    uint64_t x_at = 0, c_at = 0, o_at = 0, x_room = 0, c_room = 0, o_room = 0, heads = 0, stride = 0, rot = 0;
+    if (!nn__primitives__room(&argv[0], &x_at, &x_room)
+     || !nn__primitives__room(&argv[1], &c_at, &c_room)
+     || !nn__primitives__room(&argv[2], &o_at, &o_room)
+     || !nn__attention__zzprivate_dim(&argv[3], &heads)
+     || !nn__attention__zzprivate_dim(&argv[4], &stride)
+     || !nn__attention__zzprivate_dim(&argv[5], &rot)
+     || argv[6].dtype != SYS__KIND__VALUE_INT || argv[6].args[0] > 1ull) return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
+    const uint64_t span = (heads - 1ull) * stride + rot;
+    if (rot % 2ull != 0ull || rot > stride || !nn__primitives__fits(span, x_room) || !nn__primitives__fits(span, o_room)
+     || !nn__primitives__fits(2ull * rot, c_room)) return sys__engine__abi__error(NN__PRIMITIVES__FAULT_BOUNDS);
+    const nn__doors* doors = nn__doors_for(ctx);
+    if (doors == 0) return sys__engine__abi__error(NN__PRIMITIVES__FAULT_NO_DEVICE);
+    doors->rope_interleaved((uint16_t*)(uintptr_t)o_at, (const uint16_t*)(uintptr_t)x_at, (const float*)(uintptr_t)c_at, heads, stride,
+                            rot, argv[6].args[0], ctx->fault_word);
+    return nn__doors_answer(&argv[2]);
+}
+
+/* `(nn__attention__softmax_sink p sink rows length)` — each of `rows` rows of `length` scores (fp32) made weights, its sum
+ * taking one more term `exp(sink[r])` (`sink` rows halves): DeepSeek-V4's attention sink. In place. */
+static sys__heap_node nn__attention__zzabi_apply_softmax_sink(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx) {
+    if (argc != 4u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
+    uint64_t p_at = 0, p_room = 0, s_at = 0, s_room = 0, rows = 0, length = 0;
+    if (!nn__primitives__room(&argv[0], &p_at, &p_room) || !nn__primitives__room(&argv[1], &s_at, &s_room)
+     || !nn__attention__zzprivate_dim(&argv[2], &rows) || !nn__attention__zzprivate_dim(&argv[3], &length))
+        return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
+    if (!nn__primitives__fits(2ull * rows * length, p_room) || !nn__primitives__fits(rows, s_room))
+        return sys__engine__abi__error(NN__PRIMITIVES__FAULT_BOUNDS);
+    const nn__doors* doors = nn__doors_for(ctx);
+    if (doors == 0) return sys__engine__abi__error(NN__PRIMITIVES__FAULT_NO_DEVICE);
+    doors->attention_softmax_sink((float*)(uintptr_t)p_at, (const uint16_t*)(uintptr_t)s_at, rows, length);
+    return nn__doors_answer(&argv[0]);
+}
+
 /* `(nn__rope__angles cs position theta head_dim)` — the cosines and sines of one position into `cs`, fp32:
  * `head_dim/2` cosines then `head_dim/2` sines, which is what `nn__rope__apply` reads. One call a position
  * serves every layer, as HF's rotary does once a forward. `theta` is an integer or a float — every base in
@@ -235,6 +275,8 @@ SYS__ENGINE__ABI__BRIDGE(nn__attention__zzabi_adapter_residual_tq, nn__attention
 SYS__ENGINE__ABI__BRIDGE(nn__rope__zzabi_adapter,             nn__rope__zzabi_apply)
 SYS__ENGINE__ABI__BRIDGE(nn__attention__zzabi_adapter_decode, nn__attention__zzabi_apply_decode)
 SYS__ENGINE__ABI__BRIDGE(nn__rope__zzabi_adapter_angles,      nn__rope__zzabi_apply_angles)
+SYS__ENGINE__ABI__BRIDGE(nn__rope__zzabi_adapter_interleaved, nn__rope__zzabi_apply_interleaved)
+SYS__ENGINE__ABI__BRIDGE(nn__attention__zzabi_adapter_softmax_sink, nn__attention__zzabi_apply_softmax_sink)
 SYS__ENGINE__ABI__BRIDGE(nn__attention__zzabi_adapter_residual, nn__attention__zzabi_apply_residual)
 SYS__ENGINE__ABI__BRIDGE(nn__attention__zzabi_adapter_merge,    nn__attention__zzabi_apply_merge)
 SYS__ENGINE__ABI__BRIDGE(nn__attention__zzabi_adapter_finish,   nn__attention__zzabi_apply_finish)

@@ -361,7 +361,7 @@ def frames_of(data, pick=None, fit=None):
         import av
     except ImportError:
         raise Refused("not a picture Pillow reads; a video file is read through PyAV, which is not installed: "
-                      "`pip install -r requirements-nonfree.txt` (in the Docker image, its scripts' install_nonfree)")
+                      "`pip install -r requirements-nonfree.txt`")
     with av.open(io.BytesIO(data)) as container:
         stream = container.streams.video[0]
         fps = float(stream.average_rate or stream.guessed_rate or 24)

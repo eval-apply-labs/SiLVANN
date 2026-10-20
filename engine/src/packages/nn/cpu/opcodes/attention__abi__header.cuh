@@ -7,6 +7,10 @@ static __device__ __noinline__ void nn__rope__zzabi_adapter(sys__heap_node* base
 static __device__ __noinline__ void nn__attention__zzabi_adapter_decode(sys__heap_node* base, uint64_t form);
 static sys__heap_node nn__rope__zzabi_apply_angles(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx);
 static __device__ __noinline__ void nn__rope__zzabi_adapter_angles(sys__heap_node* base, uint64_t form);
+static sys__heap_node nn__rope__zzabi_apply_interleaved(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx);
+static __device__ __noinline__ void nn__rope__zzabi_adapter_interleaved(sys__heap_node* base, uint64_t form);
+static sys__heap_node nn__attention__zzabi_apply_softmax_sink(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx);
+static __device__ __noinline__ void nn__attention__zzabi_adapter_softmax_sink(sys__heap_node* base, uint64_t form);
 static sys__heap_node nn__attention__zzabi_apply_residual(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx);
 static sys__heap_node nn__attention__zzabi_apply_merge(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx);
 static sys__heap_node nn__attention__zzabi_apply_finish(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx);

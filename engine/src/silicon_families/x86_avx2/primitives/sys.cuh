@@ -6,12 +6,9 @@
  * a launch has finished by the time it returns (`pool.cuh`). What differs is the device: there is one, and
  * it is only there when the processors have what this family's bodies were compiled for. */
 #include "../../../packages/sys/cpu/silicon/file.cuh"   /* opening and reading a file, written once for every family */
-#include <pthread.h>
+#include "../../../operating_systems/os.cuh"   /* threads, locks, conditions and pages: the system's */
 #include <stdlib.h>
 #include <string.h>
-#include <sys/mman.h>
-#include <sys/syscall.h>
-#include <unistd.h>
 #include "../../../packages/sys/cpu/silicon/silicon_family.cuh"   /* the table it offers itself into */
 #include "../../roster.cuh"                                       /* its number */
 #include "pool.cuh"                                               /* the threads a launch runs on */
@@ -38,8 +35,8 @@ static inline bool x86_avx2__memory_allocate(void** at, size_t bytes) {
     if (bytes == 0u) bytes = 64u;
     const int node = x86_avx2__zzpackage_node_of(x86_avx2__zzpackage_device);
     if (node < 0 && bytes < X86_AVX2__ZZPRIVATE_LARGE) {
-        void* base = 0;
-        if (posix_memalign(&base, 64u, bytes + 64u) != 0 || base == 0) return false;
+        void* base = sys__os__memory_aligned(64u, bytes + 64u);
+        if (base == 0) return false;
         /* ⛔ the header just before the address, where `x86_avx2__memory_free` reads it — not at `base`. Written at `base`
          *   (until 2026-10-07), free read 16 bytes nobody wrote: zero by luck freed it right, anything else munmapped a
          *   garbage length of the process's heap at `at - 4096` — a later large allocation then mapped into the hole,
@@ -50,8 +47,8 @@ static inline bool x86_avx2__memory_allocate(void** at, size_t bytes) {
         return true;
     }
     const size_t mapped = (bytes + 2u * X86_AVX2__ZZPRIVATE_PAGE - 1u) / X86_AVX2__ZZPRIVATE_PAGE * X86_AVX2__ZZPRIVATE_PAGE;
-    void* base = mmap(0, mapped, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
-    if (base == MAP_FAILED) return false;
+    void* base = sys__os__memory_map(mapped);
+    if (base == 0) return false;
     /* ⭐ THE WHOLE MACHINE'S LARGE MEMORY INTERLEAVED OVER ITS NODES, a page a node in turn: its threads are on every
      *   socket and each reads the rows its block was given, so a matrix spread evenly draws on every node's memory
      *   controllers at once, where pages left where they were first touched drew unevenly (14 GiB and 22 on this box).
@@ -65,7 +62,7 @@ static inline bool x86_avx2__memory_allocate(void** at, size_t bytes) {
             all[n / (8 * sizeof(unsigned long))] |= 1ul << (n % (8 * sizeof(unsigned long)));
         }
         if (interleave)
-            (void)syscall(SYS_mbind, base, mapped, 3 /* MPOL_INTERLEAVE */, all, (unsigned long)X86_AVX2__ZZPRIVATE_NODES + 1ul, 0u);
+            (void)sys__os__memory_interleave(base, mapped, all, (unsigned long)X86_AVX2__ZZPRIVATE_NODES + 1ul);
     }
     x86_avx2__held* h = (x86_avx2__held*)((uint8_t*)base + X86_AVX2__ZZPRIVATE_PAGE - sizeof *h);
     if (node < 0) {
@@ -75,9 +72,9 @@ static inline bool x86_avx2__memory_allocate(void** at, size_t bytes) {
     }
     unsigned long mask[X86_AVX2__ZZPRIVATE_NODES / (8 * sizeof(unsigned long))] = {0};
     mask[node / (8 * sizeof(unsigned long))] = 1ul << (node % (8 * sizeof(unsigned long)));
-    /* MPOL_BIND: the node, and no other — a page that cannot be had there is a failed allocation, not a far one */
-    if (syscall(SYS_mbind, base, mapped, 2 /* MPOL_BIND */, mask, (unsigned long)X86_AVX2__ZZPRIVATE_NODES + 1ul, 0u) != 0) {
-        munmap(base, mapped);
+    /* bound: the node, and no other — a page that cannot be had there is a failed allocation, not a far one */
+    if (!sys__os__memory_bind(base, mapped, mask, (unsigned long)X86_AVX2__ZZPRIVATE_NODES + 1ul)) {
+        sys__os__memory_unmap(base, mapped);
         return false;
     }
     h->mapped = mapped; h->bytes = bytes;
@@ -87,9 +84,9 @@ static inline bool x86_avx2__memory_allocate(void** at, size_t bytes) {
 static inline void x86_avx2__memory_free(void* at) {
     if (at == 0) return;
     const x86_avx2__held* h = (const x86_avx2__held*)((uint8_t*)at - sizeof(x86_avx2__held));
-    if (h->mapped & X86_AVX2__ZZPRIVATE_GUARDED) munmap((uint8_t*)at - h->offset, h->mapped & ~X86_AVX2__ZZPRIVATE_GUARDED);
-    else if (h->mapped != 0u) munmap((uint8_t*)at - X86_AVX2__ZZPRIVATE_PAGE, h->mapped);
-    else free((uint8_t*)at - 64u);
+    if (h->mapped & X86_AVX2__ZZPRIVATE_GUARDED) sys__os__memory_unmap((uint8_t*)at - h->offset, h->mapped & ~X86_AVX2__ZZPRIVATE_GUARDED);
+    else if (h->mapped != 0u) sys__os__memory_unmap((uint8_t*)at - X86_AVX2__ZZPRIVATE_PAGE, h->mapped);
+    else sys__os__memory_aligned_free((uint8_t*)at - 64u);
 }
 static inline bool x86_avx2__memory_zerofill(void* at, size_t bytes) {
     if (at == 0) return false;
@@ -162,8 +159,7 @@ static inline bool x86_avx2__memory_map_file(void* at, size_t bytes, uint64_t ha
     if (at == 0 || bytes == 0u || handle == 0ull || (uintptr_t)at % X86_AVX2__ZZPRIVATE_PAGE != 0u
         || offset % X86_AVX2__ZZPRIVATE_PAGE != 0ull)
         return false;
-    void* got = mmap(at, bytes, PROT_READ, MAP_SHARED | MAP_FIXED, sys__file__zzabi_descriptor(handle), (off_t)offset);
-    return got == at;
+    return sys__os__memory_map_file(at, bytes, sys__file__zzabi_descriptor(handle), offset);
 }
 /* ⭐ THE PAGERS — a few threads that do nothing but bring a range's pages into memory, by touching them: a page not in
  * memory is read from the disk by the thread that touches it, so several of them keep the disk reading several
@@ -177,20 +173,20 @@ static uintptr_t       x86_avx2__zzprivate_pager_to[X86_AVX2__ZZPRIVATE_PAGER_RI
 static unsigned        x86_avx2__zzprivate_pager_head = 0u;
 static unsigned        x86_avx2__zzprivate_pager_tail = 0u;
 static unsigned        x86_avx2__zzprivate_pagers = 0u;
-static pthread_mutex_t x86_avx2__zzprivate_pager_lock = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t  x86_avx2__zzprivate_pager_work = PTHREAD_COND_INITIALIZER;
+static sys__os__lock x86_avx2__zzprivate_pager_lock = SYS__OS__LOCK_INIT;
+static sys__os__condition x86_avx2__zzprivate_pager_work = SYS__OS__CONDITION_INIT;
 static volatile uint64_t x86_avx2__zzprivate_pager_sink = 0u;
 
 static void* x86_avx2__zzprivate_pager(void* unused) {
     (void)unused;
     for (;;) {
-        pthread_mutex_lock(&x86_avx2__zzprivate_pager_lock);
+        sys__os__lock_take(&x86_avx2__zzprivate_pager_lock);
         while (x86_avx2__zzprivate_pager_head == x86_avx2__zzprivate_pager_tail)
-            pthread_cond_wait(&x86_avx2__zzprivate_pager_work, &x86_avx2__zzprivate_pager_lock);
+            sys__os__condition_wait(&x86_avx2__zzprivate_pager_work, &x86_avx2__zzprivate_pager_lock);
         const unsigned k = x86_avx2__zzprivate_pager_tail;
         const uintptr_t from = x86_avx2__zzprivate_pager_from[k], to = x86_avx2__zzprivate_pager_to[k];
         x86_avx2__zzprivate_pager_tail = (k + 1u) % X86_AVX2__ZZPRIVATE_PAGER_RING;
-        pthread_mutex_unlock(&x86_avx2__zzprivate_pager_lock);
+        sys__os__lock_give(&x86_avx2__zzprivate_pager_lock);
         uint64_t sum = 0u;
         for (uintptr_t a = from; a < to; a += X86_AVX2__ZZPRIVATE_PAGE) sum += *(volatile const uint8_t*)a;
         x86_avx2__zzprivate_pager_sink += sum;
@@ -202,16 +198,16 @@ static void* x86_avx2__zzprivate_pager(void* unused) {
  * ring drops the rest, which the computing thread then reads itself. */
 static void x86_avx2__zzprivate_page_in(uintptr_t from, uintptr_t to) {
     const uintptr_t piece = 64u * X86_AVX2__ZZPRIVATE_PAGE;
-    pthread_mutex_lock(&x86_avx2__zzprivate_pager_lock);
+    sys__os__lock_take(&x86_avx2__zzprivate_pager_lock);
     if (x86_avx2__zzprivate_pagers == 0u) {
         unsigned want = 4u;
         const char* said = getenv("SILVANN_PAGERS");
         if (said != 0) { const long n = strtol(said, 0, 10); if (n > 0) want = (unsigned)n; }
         if (want > X86_AVX2__ZZPRIVATE_PAGERS_MAX) want = X86_AVX2__ZZPRIVATE_PAGERS_MAX;
         for (unsigned t = 0u; t < want; ++t) {
-            pthread_t id;
-            if (pthread_create(&id, 0, x86_avx2__zzprivate_pager, 0) != 0) break;
-            pthread_detach(id);
+            sys__os__thread id;
+            if (!sys__os__thread_start(&id, x86_avx2__zzprivate_pager, 0)) break;
+            sys__os__thread_detach(id);
             ++x86_avx2__zzprivate_pagers;
         }
     }
@@ -222,11 +218,11 @@ static void x86_avx2__zzprivate_page_in(uintptr_t from, uintptr_t to) {
         x86_avx2__zzprivate_pager_to[x86_avx2__zzprivate_pager_head] = a + piece < to ? a + piece : to;
         x86_avx2__zzprivate_pager_head = next;
     }
-    pthread_cond_broadcast(&x86_avx2__zzprivate_pager_work);
-    pthread_mutex_unlock(&x86_avx2__zzprivate_pager_lock);
+    sys__os__condition_wake_all(&x86_avx2__zzprivate_pager_work);
+    sys__os__lock_give(&x86_avx2__zzprivate_pager_lock);
 }
 
-/* Whether every page of the range is in memory, from the system's own record (`mincore`), a page-aligned run at a time;
+/* Whether every page of the range is in memory, from the system's own record (`sys__os__memory_resident`), a page-aligned run at a time;
  * when one is not, the range is handed to the pagers and not waited for. Memory the program allocated is always in it. */
 static inline bool x86_avx2__memory_prefetch(const void* at, size_t bytes) {
     if (at == 0 || bytes == 0u) return true;
@@ -237,7 +233,7 @@ static inline bool x86_avx2__memory_prefetch(const void* at, size_t bytes) {
     for (uintptr_t a = first; a < end && all; a += sizeof in * X86_AVX2__ZZPRIVATE_PAGE) {
         const size_t pages = (end - a + X86_AVX2__ZZPRIVATE_PAGE - 1u) / X86_AVX2__ZZPRIVATE_PAGE;
         const size_t n = pages < sizeof in ? pages : sizeof in;
-        if (mincore((void*)a, n * X86_AVX2__ZZPRIVATE_PAGE, in) != 0) return true;   /* not a mapping it can say of */
+        if (!sys__os__memory_resident((const void*)a, n * X86_AVX2__ZZPRIVATE_PAGE, in)) return true;   /* not a mapping it can say of */
         for (size_t k = 0; k < n && all; ++k) all = (in[k] & 1u) != 0u;
     }
     if (all) return true;

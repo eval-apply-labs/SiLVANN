@@ -20,13 +20,16 @@ rows, and writes it as a C string the family's binary is linked with:
 The spellings OpenCL C lacks are mapped in the prelude: `constexpr` -> `const`, `static_assert`,
 `alignas`/`alignof` to their C11 forms, and the `<stdint.h>` names to OpenCL's own types.
 """
-import os, re, subprocess, sys, tempfile
+import os, re, shutil, subprocess, sys, tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SRC  = os.path.join(os.path.dirname(HERE), 'src')
 PK   = os.path.join(SRC, 'packages')
 OVERRIDES = os.path.join(SRC, 'silicon_families', 'khronos_opencl2', 'overrides', 'kernels.cuh')
 CLANG = '/opt/rocm/llvm/bin/clang'
+# the C preprocessor the card side is flattened with: gcc where it is, else clang (on Windows, Visual Studio's —
+# `build.py` names it), or SILVANN_CPP; each is asked for the same plain C output
+CPP = os.environ.get('SILVANN_CPP') or shutil.which('gcc') or shutil.which('clang') or 'gcc'
 
 FAKE = {
     'stdint.h': ('#pragma once\n'
@@ -93,7 +96,7 @@ def flatten(with_doors):
     open(tu, 'w').write('\n'.join(lines) + '\n')
     fast = os.environ.get('SILVANN_NN_ARITHMETIC_FAST')
     dial = ['-DNN__ARITHMETIC__FAST=%s' % fast] if fast else []
-    r = subprocess.run(['gcc', '-E', '-P', '-x', 'c', '-nostdinc', '-undef', '-D__OPENCL_C_VERSION__=200'] + dial +
+    r = subprocess.run([CPP, '-E', '-P', '-x', 'c', '-nostdinc', '-undef', '-D__OPENCL_C_VERSION__=200'] + dial +
                        ['-I', tmp, tu], capture_output=True, text=True)
     if r.returncode != 0:
         sys.exit('⛔ the card side would not preprocess as OpenCL C:\n' + r.stderr[:2000])

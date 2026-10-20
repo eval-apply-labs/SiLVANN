@@ -13,7 +13,7 @@ programs:
 ```
 That is the unfused layer, nn's words a layer. The fused one, the default, is the program in `lisp/glm5.lisp` — the
 model folder's — a loop over
-the layers, each ai_glm_5_3's sites over its tables, every CPU socket handed its share of a layer's picks. Either is
+the layers, each ai_z__glm_5_3's sites over its tables, every CPU socket handed its share of a layer's picks. Either is
 `(position tok pos)`, so an answer is `generate` on the card (▶ lisp/generate.lisp), only its tokens coming back.
 
 The mixer is the model's: KDA (`nn__kda__step` over a conv window and a state a layer) or MLA — the query absorbed into
@@ -56,7 +56,7 @@ class Glm5(Generates):
     def __init__(self, folder, machine, max_context=2048, layers=None, grid=True, fused=True, sockets=None, experts_int8=True,
                  experts_from="auto", experts_dir=None, chunk=256, experts_ram_gb=None, card_experts_gb=0, card_hot=None,
                  card_landing=1, card_line=None, card_exclusive=False, card_free=16, card_duplex_line=1200, card_duplex=None, card_landing_line=3,
-                 lend_cache=True, picture_pixels=1 << 22,
+                 lend_cache=True, picture_pixels=1 << 22, mtp=False, mtp_hidden="hn",
                  ):
         if folder.architecture not in ARCHITECTURES:
             raise Refused("%s is a %r model, not one of %s" % (folder.path, folder.architecture, ARCHITECTURES))
@@ -73,17 +73,55 @@ class Glm5(Generates):
             raise Refused("this MLA has a rotary part (%d) — the latent cache here carries none" % c["qk_rope_head_dim"])
         self.INTER, self.MINTER = c["intermediate_size"], c["moe_intermediate_size"]
         self.EXPERTS, self.TOPK = c["n_routed_experts"], c["num_experts_per_tok"]
-        # a hand row, as ai_glm_5_3 lays it out: the input, the weights, the picks as words — AI_GLM_5_3__HAND
+        # a hand row, as ai_z__glm_5_3 lays it out: the input, the weights, the picks as words — AI_Z__GLM_5_3__HAND
         self.HAND = ((2 * self.H + 2 * self.TOPK + 7) & ~7) + 8 * self.TOPK
         self.RSCALE, self.LIMIT = float(c["routed_scaling_factor"]), float(c["swiglu_limit"])
         self.max_context = max_context
         # the DSA indexer: past `topk` positions a query attends the top pools of `kpool` and the pool still filling
         self.IH, self.ID, self.KP, self.ITOPK = c["index_n_heads"], c["index_head_dim"], c["index_kpool"], c["index_topk"]
         self.GRID = grid               # a token as one program over both blocks, or a program a part driven from here
-        self.FUSED = fused             # the layer as ai_glm_5_3's verbs, a verb a device seam — or as nn's words
+        self.FUSED = fused             # the layer as ai_z__glm_5_3's verbs, a verb a device seam — or as nn's words
         self.run_layers = list(range(self.LAYERS)) if layers is None else list(layers)
         self.kinds = {l: ("f" if l in la["full_attn_layers"] else "d") for l in range(self.LAYERS)}
         self.moe = {l: "mlp.gate.weight" in b.names(l) for l in range(self.LAYERS)}
+        # ⭐ THE MULTI-TOKEN PREDICTION LAYER (layer 45, `num_nextn_predict_layers` 1) — packed with the model and, until
+        #   this, never loaded: `eh_proj` over [enorm(the next token's embedding) | hnorm(the model's hidden)], a DSA
+        #   attention and an MoE on one plain residual (no hyper-connection of its own), `shared_head.norm`, the model's
+        #   head — the token after next, a draft the model then checks. Held with the layers (its weights, its latent
+        #   cache, its experts), run by its own program (`mtp`), never by the layers' loop. ▶ `_mtp_procedures`
+        self.MTP = None
+        # ⚖ 2026-10-19: *"make mtp a options field (no or yes, defaults no)"*
+        if isinstance(mtp, str):
+            if mtp.lower() not in ("yes", "no", "true", "false", "1", "0"):
+                raise Refused("mtp is 'yes' or 'no', not %r" % (mtp,))
+            mtp = mtp.lower() in ("yes", "true", "1")
+        # the MTP layer's history: the last position its cache has (`_mtp_have`), the position whose head state is in hnB
+        # (`_mtp_hid`), and (pos, token, draft) to go on with
+        self._mtp_have, self._mtp_hid, self._mtp_next = -1, -1, None
+        # how much of a prompt the MTP layer is given (`MTP_HISTORY`): None every row, k the last k rows, 0 none but the last
+        # row's head state (which a draft needs); and what generate's drafts did, {"passes", "kept"}.
+        # ⭐ THE LAST 8 ROWS BY DEFAULT — `MEASURED` 2026-10-19 node-01 (test/src_glm5_mtp_history.py, a 1,600-token prompt,
+        #   the MTP layer's caches cleared between arms): drafts kept, none 76%, the last 8 79%, the last 64 76%, every row
+        #   81%; every row +11.7 s to the prompt (~7 ms a row, +12% — the precision ~12 ms, +10%), the last 8 +1.9 s. One
+        #   prompt: the differences are a prompt's noise as much as the history's
+        self.MTP_HISTORY, self.mtp_stats = 8, dict(passes=0, kept=0)
+        if mtp:
+            L = self.LAYERS
+            if int(c.get("num_nextn_predict_layers", 0)) < 1 or b.n_layers <= L or "eh_proj.weight" not in b.names(L):
+                raise Refused("%s carries no multi-token prediction layer (layer %d)" % (folder.path, L))
+            if L - 1 not in self.run_layers:
+                raise Refused("the MTP layer drafts from the last layer's hidden state, which this machine does not run")
+            if not fused:
+                raise Refused("the MTP layer runs in the fused layer — fused=True")
+            self.MTP = L
+            self.kinds[L], self.moe[L] = "f", "mlp.gate.weight" in b.names(L)
+            self.run_layers.append(L)
+        # which of the head's states is "the model's hidden" the MTP layer reads: the streams' mean after the final norm
+        # (`hn`, what the head reads) or before it (`hm`). ⛳ REASONED, not read in any reference code: the drafts' acceptance
+        # tells them apart (▶ test/src_glm5_mtp.py)
+        if mtp_hidden not in ("hn", "hm"):
+            raise Refused("mtp_hidden is 'hn' or 'hm', not %r" % (mtp_hidden,))
+        self.MTP_HIDDEN = mtp_hidden
         g = pickle.load(open(os.path.join(folder.path, "global.pkl"), "rb"))
         self.global_ = g
         self.head_rec, self.emb_rec = g["lm_head.weight"], g["model.language_model.embed_tokens.weight"]
@@ -99,10 +137,10 @@ class Glm5(Generates):
         if sockets is None:
             sockets = 2 if fused and machine is not None and machine.e.devices("x86_avx2") >= 3 else 1
         if not fused and max_context > self.ITOPK:
-            raise Refused("past %d positions GLM's attention needs the indexer, which ai_glm_5_3's verbs run — not nn's words"
+            raise Refused("past %d positions GLM's attention needs the indexer, which ai_z__glm_5_3's verbs run — not nn's words"
                           % self.ITOPK)
         if sockets > 1 and not fused:
-            raise Refused("the experts split over %d sockets are reached by ai_glm_5_3's verbs only" % sockets)
+            raise Refused("the experts split over %d sockets are reached by ai_z__glm_5_3's verbs only" % sockets)
         self.PARTS = sockets
         self.EXPERTS_INT8 = experts_int8   # the routed experts' products in integers on the CPU (nn's int8 gemvs)
         # ⭐ THE CARD'S TIER OF ROUTED EXPERTS (NN-48): `card_experts_gb` of whole experts on the card, which computes the
@@ -150,10 +188,10 @@ class Glm5(Generates):
         #   when a token picks one that is not there, straight from the drive (`O_DIRECT`), the layer's least recently used
         #   given up for it; and a prompt's, a batch at a time, the next batch read while one computes. ⚖ *"the engine
         #   layer should be in charge of dealing with this … we just get the data directly from the disk"*. `"mapped"`
-        #   maps the file instead, the system's page cache the cache. ▶ nn's loader, ai_glm_5_3's experts verbs.
+        #   maps the file instead, the system's page cache the cache. ▶ nn's loader, ai_z__glm_5_3's experts verbs.
         self.SLOTS = None
         # ⛔ the unfused layer names each expert's planes itself (`x%d`), so every expert must be resident: from the disk
-        #   they are a cache, admitted only by ai_glm_5_3's experts verbs, and a plane of one not there answers a refusal
+        #   they are a cache, admitted only by ai_z__glm_5_3's experts verbs, and a plane of one not there answers a refusal
         #   the next verb meets as a type fault (OPCT) at the first MoE layer
         if self.EXPERTS_FROM == "disk" and self.EPLAN is not None and not self.FUSED:
             raise Refused("the unfused layer reads every expert in place, and from the disk they are a cache — "
@@ -165,7 +203,7 @@ class Glm5(Generates):
             if self.SLOTS < 3 * 16 + self.TOPK:
                 raise Refused("%d experts a worker is too few for a cache of them — a prompt reads two batches of 16 at once"
                               % self.SLOTS)
-        # ⭐ A PROMPT AS ROWS, `chunk` positions at a time through each layer (ai_glm_5_3's `…_rows` verbs): a routed expert
+        # ⭐ A PROMPT AS ROWS, `chunk` positions at a time through each layer (ai_z__glm_5_3's `…_rows` verbs): a routed expert
         #   is read once for every row of the chunk that picked it. ⛳ `REASONED`: with the experts on the disk the chunk
         #   wants to be large — a chunk's picks reach most of a layer's experts, so each is streamed about once a chunk
         self.CH = max(1, min(chunk, max_context)) if fused else 0
@@ -307,7 +345,8 @@ class Glm5(Generates):
 
     def device_params(self):
         """The card's section and each CPU worker's: {worker: text}."""
-        kinds = "".join(self.kinds[l] for l in range(self.LAYERS))
+        # every layer the index has a place for — and the MTP layer after them, where it is held
+        kinds = "".join(self.kinds[l] for l in range(self.LAYERS + (1 if self.MTP is not None else 0)))
         big = max(8 << 20, 2 * self.QH * min(self.max_context, self.ITOPK + self.KP) * 4, self.VOCAB * 2)
         bigs = 3
         if self.CH:
@@ -323,7 +362,10 @@ class Glm5(Generates):
             n, P, I, H = self.CH, self.CH * self.TOPK, self.MINTER, self.H
             self.KRSCRATCH = 2 * n * H + 16 * P + 2 * P + 4 * P * I + 2 * P * I + 2 * P * I + 4 * P * H + 4096
             self.WORK, works, bigs = max(self.WORK, self.KRSCRATCH), 2, bigs + 1
-        card = self._section(big, self.arena, self.collections, kinds, bigs=bigs, mains=2 + (4 + len(self.CPUS) if self.CH else 0),
+        # ⛳ a draft's check keeps each KDA layer's state (4 MiB) after its first position: a main buffer each (▶ `_card_buffers`)
+        kept = sum(1 for l in self.run_layers if self.kinds[l] == "d") if self.MTP is not None else 0
+        card = self._section(big, self.arena, self.collections, kinds, bigs=bigs,
+                             mains=2 + (4 + len(self.CPUS) if self.CH else 0) + kept,
                              work=self.WORK, works=works)
         if self.LEND:                                  # the links for the slots the tier may be lent (▶ nn's `__lendable`)
             card += "nn__expert__type%d__lendable:%d\n" % (self.T_CEXP, self.LEND["regions"] * self.LEND["most"])
@@ -348,14 +390,14 @@ class Glm5(Generates):
         return out
 
     def _work_bytes(self):
-        """What the busiest rows verb takes of its `work` buffer for a chunk — ▶ ai_glm_5_3's `…_rows` verbs, whose carving
+        """What the busiest rows verb takes of its `work` buffer for a chunk — ▶ ai_z__glm_5_3's `…_rows` verbs, whose carving
         this follows, a 256-byte alignment a region."""
         n, H, KW, KD, KH = self.CH, self.H, self.KW, self.KD, self.KH
         QR, LAT, QH = self.QR, self.LAT, self.QH
         common = 24 * n + 256 * n + 3 * 2 * n * H
         kda = common + 2 * n * (3 * KW + 2 * KD + KH) + 2 * n * 3 * KW + 2 * 2 * n * KD + 4 * 2 * n * KW
         # ⛳ and a block of the rows that attend every position before them: its absorbed queries, its answers in the latent,
-        #   and its scores over at most the indexer's `topk` positions and a pool — ▶ AI_GLM_5_3__MLA__ROWS_BLOCK
+        #   and its scores over at most the indexer's `topk` positions and a pool — ▶ AI_Z__GLM_5_3__MLA__ROWS_BLOCK
         blk, span = min(32, n), min(self.max_context, self.ITOPK + self.KP)
         mla = (common + 2 * n * (QR + LAT) + 2 * 2 * n * QR + 2 * n * LAT + 2 * n * QH * self.NOPE + 2 * 2 * n * QH * self.VD
                + 2 * n * (self.IH * self.ID + 2 * self.ID + self.IH) + 2 * 2 * blk * QH * LAT + 4 * blk * QH * span)
@@ -443,7 +485,7 @@ class Glm5(Generates):
         self.CALIBRATION = expert_tier.calibrate(
             self.m, CARD, self.CPUS[0]["w"], self.KRS_AT, self.CPLAN.slot_bytes, self.at[self.cn(0, "hands")], self.HAND,
             2 * H, (2 * H + 2 * K + 7) & ~7, K, self.EXPERTS,
-            lambda n: "(ai_glm_5_3__experts_rows %s exr%d_0 %s %d)" % (self.cn(0, "hands"), next(l for l in self.run_layers if self.moe[l]),
+            lambda n: "(ai_z__glm_5_3__experts_rows %s exr%d_0 %s %d)" % (self.cn(0, "hands"), next(l for l in self.run_layers if self.moe[l]),
                                                                        self.cn(0, "rrows"), n),
             self.CH, fixed=self.CARD_LINE, pool=[x for x in range(self.EXPERTS) if x not in held])
         self.EXPERT_LINE = self.CALIBRATION["line"]
@@ -621,6 +663,26 @@ class Glm5(Generates):
                       ("gu", 2 * self.INTER), ("act", self.INTER), ("actr", self.INTER),
                       ("router", self.EXPERTS), ("sgu", 2 * self.MINTER), ("sact", self.MINTER), ("sactr", self.MINTER)):
             self.at[nm] = m.buffer(n * 2, nm)
+        if self.MTP is not None:
+            # the MTP layer's: its input's two halves and their rotation, its one residual, its head's norm and rotation
+            for nm, n in (("mcat", 2 * H), ("mcatr", 2 * H), ("mres", H), ("mhn", H), ("mhnr", H)):
+                self.at[nm] = m.buffer(n * 2, nm)
+            # ⭐ A DRAFT'S CHECK, TWO POSITIONS A LAYER (▶ `_check_procedures`): the second position's streams, hand and
+            #   routed sum, its MoE sites' own scratch (a site's carry lives in it from the router to the close), the head's
+            #   state at each of the two positions — and each KDA layer's state and window as they were after the first
+            #   position, given back when the draft is refused
+            self.STREAMS2_AT = m.buffer(self.MULT * H * 2, "streams2")
+            for nm, n in (("hand2", H + self.TOPK), ("routed2", H), ("hnA", H), ("hnB", H)):
+                self.at[nm] = m.buffer(n * 2, nm)
+            m.buffer(1 << 19, "gscratch2")
+            m.node_array("picks2", self.TOPK)
+            m.node_array("CHECK", 2)
+            for i in range(1, len(self.CPUS)):       # another socket's share of the second position's routed sum
+                m.buffer(2 * H, "routed2_%d" % i)
+            for l in self.run_layers:
+                if self.kinds[l] == "d":
+                    m.buffer(self.S_BYTES, "kbS%d" % l)
+                    m.buffer(self.W_BYTES, "kbW%d" % l)
         m.buffer(256, "mix")
         m.buffer(64, "weights")
         m.buffer(64, "res")
@@ -636,7 +698,7 @@ class Glm5(Generates):
                 m.buffer(2 * self.CH * H, "rrows_k")
                 self.KRS_AT = m.buffer(self.KRSCRATCH, "krscratch")
         self._answer_buffers()                      # what `generate` made, the end tokens it watches for
-        m.buffer(1 << 19, "gscratch")                          # ai_glm_5_3's scratch, its first bytes the MLP site's carry
+        m.buffer(1 << 19, "gscratch")                          # ai_z__glm_5_3's scratch, its first bytes the MLP site's carry
         self.at["hand"] = m.buffer(2 * (H + self.TOPK), "hand")
         # ⛳ a query attends at most `topk` positions and the filling pool's, so the scores need no more than that
         self.ATTEND = min(self.max_context, self.ITOPK + self.KP)
@@ -675,10 +737,13 @@ class Glm5(Generates):
         m.buffer(64, c("w"))
         m.buffer(2 * (H + self.TOPK), c("hand"))
         m.buffer(2 * H, c("zero"), _half(np.zeros(H)))
+        if self.MTP is not None:                      # a draft's check: the second position's hand and routed sum
+            m.buffer(2 * (H + self.TOPK), c("hand2"))
+            m.buffer(2 * H, c("routed2"))
         m.buffer(8 * self.TOPK * self.MINTER, c("scratch"))
         if self.CH:
             # a chunk's hands, its routed rows, and `experts_rows`' scratch: the inputs, the pairs and weights, the gate-and-up,
-            # activation and rotated rows of every pick, and a fp32 sum for every pick — ▶ ai_glm_5_3__experts_rows
+            # activation and rotated rows of every pick, and a fp32 sum for every pick — ▶ ai_z__glm_5_3__experts_rows
             CH, P, I = self.CH, self.CH * self.TOPK, self.PI
             self.at[c("hands")] = m.buffer(CH * self.HAND, c("hands"))
             m.buffer(CH * H * 2, c("rrows"))
@@ -777,7 +842,7 @@ class Glm5(Generates):
                 + self.gemv(l, pre + "down_proj.weight", actr, out))
 
     def _tables(self):
-        """ai_glm_5_3's plane tables: a layer's attention site (`at`), its MLP site (`ml` dense, `mo` with experts), and on
+        """ai_z__glm_5_3's plane tables: a layer's attention site (`at`), its MLP site (`ml` dense, `mo` with experts), and on
         the CPU its experts' (`ex`, and `exr` over a prompt's chunk). ▶ the package's `contracts/objects/layer.cuh` for what
         each cell is. Made at every boot; the programs that name them are `_procedures`'."""
         if self.FUSED:
@@ -790,10 +855,12 @@ class Glm5(Generates):
         pair = lambda l, n: [self.plane(l, n, "data"), self.plane(l, n, "lut")]
         data = lambda l, n: self.plane(l, n, "data")
         d = lambda l, n: b.record(l, n).d
-        hc = lambda l, site: [data(l, "hc_%s_%s" % (site, x)) for x in ("fn", "base", "scale")]
+        # ⛳ the MTP layer's sites are one plain residual (`MULT` 0 in its tables): its hyper-connection cells are never read
+        hc = lambda l, site: (["signs"] * 3 if l == self.MTP else [data(l, "hc_%s_%s" % (site, x)) for x in ("fn", "base", "scale")])
         fed = {}                       # the tier's layers fed from the sockets' memory, by layer
-        head = [H, self.MULT, self.ITERS]
+        heads = {l: [H, 0 if l == self.MTP else self.MULT, self.ITERS] for l in self.run_layers}
         for l in self.run_layers:
+            head = heads[l]
             if self.kinds[l] == "d":
                 mats = [s + n + ".weight" for n in ("q_proj", "k_proj", "v_proj", "f_a_proj", "g_a_proj", "b_proj",
                                                     "f_b_proj", "g_b_proj", "o_proj")]
@@ -810,7 +877,7 @@ class Glm5(Generates):
                            self.kv(l, "c"), "scores", "signs", "gscratch"]
                         + head + [self.QH, self.QR, self.LAT, self.NOPE, self.VD] + [d(l, n) for n in mats]
                         + [self.EPS, self.HC_EPS]
-                        # the indexer — ▶ the package's AI_GLM_5_3__IDX__ cells
+                        # the indexer — ▶ the package's AI_Z__GLM_5_3__IDX__ cells
                         + [c for n in ix for c in pair(l, n)]
                         + [data(l, s + "indexer.k_norm.weight"), data(l, s + "indexer.k_norm.bias"), "ape%d" % l,
                            self.kv(l, "ikeys"), self.kv(l, "igates"), self.kv(l, "ipool"), "iscores", "iindex", "igather"]
@@ -834,11 +901,14 @@ class Glm5(Generates):
                 if self.CH:
                     m.table("exkr%d" % l, ["signs", "zero_h", "krscratch"] + cells[3:])   # a prompt chunk's, its own scratch
             mats = ["mlp.shared_experts.%s_proj.weight" % n for n in ("gate", "up", "down")]
-            m.table("mo%d" % l, hc(l, "ffn") + [data(l, "post_attention_layernorm.weight"), data(l, "mlp.gate.weight"),
-                                                data(l, "mlp.gate.e_score_correction_bias")]
-                    + [c for n in mats for c in pair(l, n)] + ["signs", "gscratch"]
-                    + head + [self.EXPERTS, self.TOPK, self.MINTER] + [d(l, n) for n in mats]
-                    + [self.EPS, self.HC_EPS, self.RSCALE, self.LIMIT])
+            # ⛳ a draft's check runs a layer's MoE site for two positions at once: the second its own table over the same
+            #   planes, its scratch its own (`gscratch2`), so the first's carry is not written over (▶ `_check_procedures`)
+            for name, scratch in (("mo%d" % l, "gscratch"),) + ((("mo%db" % l, "gscratch2"),) if self.MTP is not None and l != self.MTP else ()):
+                m.table(name, hc(l, "ffn") + [data(l, "post_attention_layernorm.weight"), data(l, "mlp.gate.weight"),
+                                              data(l, "mlp.gate.e_score_correction_bias")]
+                        + [c for n in mats for c in pair(l, n)] + ["signs", scratch]
+                        + head + [self.EXPERTS, self.TOPK, self.MINTER] + [d(l, n) for n in mats]
+                        + [self.EPS, self.HC_EPS, self.RSCALE, self.LIMIT])
         if self.CPLAN is not None:
             # ⭐ THE CARD'S TIER, ONE FOR THE CARD: how one of its experts is cut, where the sockets keep every expert's parts
             #   a layer at a time, and the binding `nn__expert_tier` the programs hand the verbs (▶ `expert_tier.bind`)
@@ -874,19 +944,19 @@ class Glm5(Generates):
                 c = lambda name: self.cn(i, name)
                 for l in self.run_layers:
                     if self.moe[l]:
-                        m.picture("xf%d_%d" % (l, i), "(begin (nn__buffer__copy hand %d %s %d) (ai_glm_5_3__experts %s picks ex%d_%d %s))"
+                        m.picture("xf%d_%d" % (l, i), "(begin (nn__buffer__copy hand %d %s %d) (ai_z__glm_5_3__experts %s picks ex%d_%d %s))"
                                   % (CARD, c("hand"), 2 * (H + self.TOPK), c("hand"), l, i, c("routed")))
             m.act_as(CARD)
         layers = []
         for l in self.run_layers:
-            layers.append("(ai_glm_5_3__kda streams at%d)" % l if self.kinds[l] == "d" else "(ai_glm_5_3__mla streams at%d pos)" % l)
+            layers.append("(ai_z__glm_5_3__kda streams at%d)" % l if self.kinds[l] == "d" else "(ai_z__glm_5_3__mla streams at%d pos)" % l)
             if self.moe[l]:
                 # every socket handed its share of the picks, the shared expert on the card meanwhile, the shares summed
                 ws = [(i, c["w"]) for i, c in enumerate(self.CPUS)]
-                layers.append("(ai_glm_5_3__route streams mo%d hand picks) " % l
-                              + ("(ai_glm_5_3__experts hand picks exk%d routed_k %s) " % (l, expert_tier.BINDING) if self.CPLAN is not None else "")
+                layers.append("(ai_z__glm_5_3__route streams mo%d hand picks) " % l
+                              + ("(ai_z__glm_5_3__experts hand picks exk%d routed_k %s) " % (l, expert_tier.BINDING) if self.CPLAN is not None else "")
                               + " ".join("(sys__compute %d names xf%d_%d)" % (w, l, i) for i, w in ws)
-                              + " (ai_glm_5_3__shared hand mo%d) " % l
+                              + " (ai_z__glm_5_3__shared hand mo%d) " % l
                               + " ".join("(sys__result %d)" % w for _, w in ws) + " "
                               # the CPUs done: an exclusive tier's writes back to RAM, held on half duplex, go now
                               + ("(nn__expert_tier__written %s) " % expert_tier.BINDING if self.CPLAN is not None else "")
@@ -894,9 +964,9 @@ class Glm5(Generates):
                                                                             2 * H) for i, w in ws) + " "
                               + " ".join("(nn__vector__add routed routed%d routed %d)" % (i, H) for i, _ in ws if i > 0)
                               + (" (nn__vector__add routed routed_k routed %d)" % H if self.CPLAN is not None else "")
-                              + " (ai_glm_5_3__close streams mo%d routed)" % l)
+                              + " (ai_z__glm_5_3__close streams mo%d routed)" % l)
             else:
-                layers.append("(ai_glm_5_3__mlp streams ml%d)" % l)
+                layers.append("(ai_z__glm_5_3__mlp streams ml%d)" % l)
         return " ".join(x for x in layers if x)
 
     # ── ③ the names the program is written against, and the program ──────────────────────────────────────────
@@ -907,7 +977,7 @@ class Glm5(Generates):
         head = lambda at, size: "(nn__expert__plane 0 %d 0 %d %d)" % (self.T_HEAD, at, size)
         tier = self.CPLAN is not None
         m.bind_values(dict(HIDDEN=H, HIDDEN_BYTES=2 * H, MULT=self.MULT, MEAN=1.0 / self.MULT, VOCAB=self.VOCAB, EPS=self.EPS,
-                           RUN=len(run), EMB_HALVES=self.EMB_ROW_BYTES // 2, EMB_SCALES=self.EMB_DATA_BYTES // 2,
+                           RUN=len(run) - (1 if self.MTP is not None else 0), EMB_HALVES=self.EMB_ROW_BYTES // 2, EMB_SCALES=self.EMB_DATA_BYTES // 2,
                            EMB_BITS=self.EMB_BITS, STOPS=0, SEEN=sampling.SEEN,
                            HEAD_CODES=head(self.HPLAN.at_up_data, self.HPLAN.up_data),
                            HEAD_SCALES=head(self.HPLAN.at_down_lut, self.HPLAN.down_lut), HEAD_BITS=self.HEAD_BITS,
@@ -933,6 +1003,9 @@ class Glm5(Generates):
         for i in socket:
             m.array("EX_%d" % i, [("ex%d_" + str(i)) % l if self.moe[l] else 0 for l in run])
         m.array("EX", ["EX_%d" % i for i in socket])
+        if self.MTP is not None:                     # a draft's check: each socket's second hand and routed sum
+            m.array("C_HAND2", [self.cn(i, "hand2") for i in socket])
+            m.array("C_ROUTED2", [self.cn(i, "routed2") for i in socket])
         if self.CH:
             m.array("RROWS_INTO", ["rrows" if i == 0 else "rrows%d" % i for i in socket])
             m.array("C_HANDS", [self.cn(i, "hands") for i in socket])
@@ -952,6 +1025,164 @@ class Glm5(Generates):
         self.m.load_source(self.folder.program("generate"))
         if self.EPLAN is not None:
             self.m.load_source(self.folder.program("glm5_cpu"))
+        if self.MTP is not None:
+            self._mtp_procedures()
+
+    def _mtp_procedures(self):
+        """`(mtp tok pos)` -> the MTP layer's greedy draft of the token after `tok`: at position `pos` of its own cache,
+        `tok` the token at `pos + 1` and the model's hidden at `pos` the head's state the last `(logits)` left
+        (`MTP_HIDDEN`). Its MoE is the layers' own sockets and tier, at the MTP layer's place in the arrays (RUN). ⛳ It
+        leaves its logits in `logits_h`: the model's head is read first."""
+        m, H, l, s = self.m, self.H, self.MTP, "self_attn."
+        p = lambda n: self.plane(l, n, "data")
+        m.defun("(defun (mtp_input tok hid) (begin (embed_e tok) (nn__rmsnorm__apply e %s %s %d %r) (nn__rmsnorm__apply hid %s %s %d %r) "
+                "(nn__hadamard__rotate mcat signs mcatr %d) %s (type mres)))"
+                % (p("enorm.weight"), self.rng("mcat", 0, H), H, self.EPS, p("hnorm.weight"), self.rng("mcat", H, H),
+                   H, self.EPS, 2 * H, self.gemv(l, "eh_proj.weight", "mcatr", "mres")))
+        moe = ("(ai_z__glm_5_3__route mres (nth MO i) hand picks) "
+               "(if CARD_TIER (ai_z__glm_5_3__experts hand picks (nth EXK i) routed_k nn__expert_tier) 0) "
+               "(sockets_start i xf) (ai_z__glm_5_3__shared hand (nth MO i)) "
+               "(while '(< s SOCKETS) '(begin (sys__result (nth SOCKET s)) (set! s (+ s 1)))) "
+               "(if CARD_TIER (nn__expert_tier__written nn__expert_tier) 0) (sockets_sum) "
+               "(if CARD_TIER (nn__vector__add routed routed_k routed HIDDEN) 0) (ai_z__glm_5_3__close mres (nth MO i) routed)")
+        # the layer alone — what a prompt's positions give it, its cache's row written, no draft read
+        m.defun("(defun (mtp_cache_from tok pos hid) (let ((i RUN) (s 0)) (mtp_input tok hid) (ai_z__glm_5_3__mla mres (nth AT i) pos) %s "
+                "(type mres)))" % moe)
+        m.defun("(defun (mtp_logits_from tok pos hid) (begin (mtp_cache_from tok pos hid) "
+                "(nn__rmsnorm__apply mres %s mhn %d %r) (nn__hadamard__rotate mhn signs mhnr %d) "
+                "(nn__turboquant__gemv HEAD_CODES HEAD_SCALES mhnr logits_h VOCAB HIDDEN HEAD_BITS) (type mhn)))"
+                % (p("shared_head.norm.weight"), H, self.EPS, H))
+        if self.CH:
+            # a prompt row's head state — the streams' mean, the final norm — into hnB, as `(logits)` leaves it for a position
+            MH, rr = self.MULT * H, lambda j: "(nn__vector__range srows (+ (* r %d) %d) %d)" % (self.MULT * H, j * H, H)
+            m.defun("(defun (row_hidden r) (begin (nn__vector__add %s %s hm %d) %s (nn__vector__scale hm %r hm %d) "
+                    "(nn__rmsnorm__apply hm fnw hn %d %r) (nn__vector__copy %s hnB %d) (type hnB)))"
+                    % (rr(0), rr(1), H, " ".join("(nn__vector__add hm %s hm %d)" % (rr(j), H) for j in range(2, self.MULT)),
+                       1.0 / self.MULT, H, H, self.EPS, self.MTP_HIDDEN, H))
+        m.defun("(defun (mtp_logits tok pos) (mtp_logits_from tok pos %s))" % self.MTP_HIDDEN)
+        m.defun("(defun (mtp_from tok pos hid) (begin (mtp_logits_from tok pos hid) (nn__argmax__find logits_h res VOCAB) (nn__buffer__read res)))")
+        m.defun("(defun (mtp tok pos) (mtp_from tok pos %s))" % self.MTP_HIDDEN)
+        self._check_procedures()
+
+    def _check_procedures(self):
+        """⭐ A DRAFT'S CHECK, TWO POSITIONS A LAYER — composed of the one-position verbs (⚖ 2026-10-19: *"a lisp rewrite to do
+        two straight experts compute in a row rather than verbs"*; a verb of ai_z__glm_5_3 once it stands). `(check a b p q)`:
+        the token `a` at `p` and the draft `b` at `q` = p + 1 through every layer — each layer's attention for `p` then
+        `q` (a KDA layer's state and window kept between the two), both MoE routers, one hand-off to each socket for both
+        positions' experts while the card runs both shared experts, both closes — then both heads: CHECK holds the
+        greedy token after each, hnA and hnB the head's state at each (what the MTP layer reads). `(restore)` gives each
+        KDA layer its state as it was after `p`. ⛳ An MLA layer needs nothing given back: a position reads only rows it
+        has written, and `q`'s row is written again when `q` is run for real. MEASURED: ▶ test/src_glm5_mtp_generate.py"""
+        m, H, M, CPU0 = self.m, self.H, self.MULT, self.CPUS[0]["w"]
+        if self.CPLAN is not None:
+            raise Refused("a draft's check runs without a card tier of experts, for now")
+        # ⛔ NO BUFFER OR BINDING HERE — this composes programs, and a boot that reads them from programs.lisp never runs it:
+        #   the second position's buffers are `_card_buffers`', its arrays `_bindings`'. MEASURED 2026-10-19: made here, a
+        #   boot whose programs were read had no `routed2_1` and no C_HAND2, and its checks faulted OPCT at `xfb`
+        for cpu in self.CPUS:
+            m.act_as(cpu["w"])
+            m.picture("xfb", "(let ((s (- (sys__worker) 1))) "
+                      "(nn__buffer__copy hand %d (nth C_HAND s) HAND_BYTES) (nn__buffer__copy hand2 %d (nth C_HAND2 s) HAND_BYTES) "
+                      "(ai_z__glm_5_3__experts (nth C_HAND s) picks (nth (nth EX s) (nth HERE 0)) (nth C_ROUTED s)) "
+                      "(ai_z__glm_5_3__experts (nth C_HAND2 s) picks2 (nth (nth EX s) (nth HERE 0)) (nth C_ROUTED2 s)))" % (CARD, CARD))
+        m.act_as(CARD)
+        m.view("names")
+        rng = self.rng
+        m.defun("(defun (embed2 tok) (begin (embed_e tok) %s (type e)))"
+                % " ".join("(nn__vector__add e zero_h %s %d)" % (rng("streams2", j * H, H), H) for j in range(M)))
+        main = [l for l in self.run_layers if l != self.MTP]
+        for i, l in enumerate(main):
+            if self.kinds[l] == "d":
+                mix = ("(ai_z__glm_5_3__kda streams at%d) (nn__vector__copy %s kbS%d %d) (nn__vector__copy %s kbW%d %d) "
+                       "(ai_z__glm_5_3__kda streams2 at%d)" % (l, self.state(l, "S"), l, self.S_BYTES // 2, self.state(l, "W"), l,
+                                                           self.W_BYTES // 2, l))
+            else:
+                mix = "(ai_z__glm_5_3__mla streams at%d p) (ai_z__glm_5_3__mla streams2 at%d q)" % (l, l)
+            if self.moe[l]:
+                sums = []
+                for k, cpu in enumerate(self.CPUS):
+                    into, into2 = ("routed", "routed2") if k == 0 else ("routed%d" % k, "routed2_%d" % k)
+                    sums.append("(nn__buffer__copy %s %d %s %d) (nn__buffer__copy %s %d %s %d)"
+                                % (self.cn(k, "routed"), cpu["w"], into, 2 * H, self.cn(k, "routed2"), cpu["w"], into2, 2 * H))
+                    if k > 0:
+                        sums.append("(nn__vector__add routed %s routed %d) (nn__vector__add routed2 %s routed2 %d)" % (into, H, into2, H))
+                ffn = ("(ai_z__glm_5_3__route streams mo%d hand picks) (ai_z__glm_5_3__route streams2 mo%db hand2 picks2) "
+                       "(sys__node_array__set HERE 0 %d) %s (ai_z__glm_5_3__shared hand mo%d) (ai_z__glm_5_3__shared hand2 mo%db) %s %s "
+                       "(ai_z__glm_5_3__close streams mo%d routed) (ai_z__glm_5_3__close streams2 mo%db routed2)"
+                       % (l, l, i, " ".join("(sys__compute %d names xfb)" % c["w"] for c in self.CPUS), l, l,
+                          " ".join("(sys__result %d)" % c["w"] for c in self.CPUS), " ".join(sums), l, l))
+            else:
+                ffn = "(ai_z__glm_5_3__mlp streams ml%d) (ai_z__glm_5_3__mlp streams2 ml%d)" % (l, l)
+            m.defun("(defun (ck%d p q) (begin %s %s (type streams)))" % (l, mix, ffn))
+
+        def head(buf, cell, keep):
+            mean = ("(nn__vector__add %s %s hm %d) " % (rng(buf, 0, H), rng(buf, H, H), H)
+                    + " ".join("(nn__vector__add hm %s hm %d)" % (rng(buf, j * H, H), H) for j in range(2, M))
+                    + " (nn__vector__scale hm %r hm %d)" % (1.0 / M, H))
+            return (mean + " (nn__rmsnorm__apply hm fnw hn %d %r) (nn__hadamard__rotate hn signs hnr %d) "
+                    "(nn__turboquant__gemv HEAD_CODES HEAD_SCALES hnr logits_h VOCAB HIDDEN HEAD_BITS) "
+                    "(nn__argmax__find logits_h res VOCAB) (sys__node_array__set CHECK %d (nn__buffer__read res)) "
+                    "(nn__vector__copy %s %s %d)" % (H, self.EPS, H, cell, self.MTP_HIDDEN, keep, H))
+        m.defun("(defun (check_heads) (begin %s %s (type hnB)))" % (head("streams", 0, "hnA"), head("streams2", 1, "hnB")))
+        m.defun("(defun (check a b p q) (begin (embed a) (embed2 b) %s (check_heads) (type streams)))"
+                % " ".join("(ck%d p q)" % l for l in main))
+        for l in main:
+            if self.kinds[l] == "d":
+                m.defun("(defun (rs%d) (begin (nn__vector__copy kbS%d %s %d) (nn__vector__copy kbW%d %s %d) (type streams)))"
+                        % (l, l, self.state(l, "S"), self.S_BYTES // 2, l, self.state(l, "W"), self.W_BYTES // 2))
+        m.defun("(defun (restore) (begin %s (type streams)))" % " ".join("(rs%d)" % l for l in main if self.kinds[l] == "d"))
+
+    # ── a draft's check, from the host ──────────────────────────────────────────────────────────────────────────
+    def mtp_prime(self, tokens):
+        """A prompt a position at a time, the MTP layer given each position's history as it goes: answers the greedy token
+        after the prompt and the MTP layer's draft of the one after that. ⛳ A position at a time: the rows' path does not
+        leave each row's head state yet."""
+        m, nxt = self.m, None
+        for q, tok in enumerate(tokens):
+            if q > 0:      # the MTP layer at q-1: the token at q, the model's state at q-1 (kept in hnB)
+                self._run("(begin (mtp_logits_from %d %d hnB) (type mhn))" % (tok, q - 1), "the MTP layer at %d" % (q - 1))
+            nxt = self._run("(begin (position %d %d) (head))" % (tok, q), "position %d" % q)
+            self._run("(begin (nn__vector__copy %s hnB %d) (type hnB))" % (self.MTP_HIDDEN, self.H), "the state kept")
+        P = len(tokens)
+        draft = self._run("(mtp_from %d %d hnB)" % (nxt, P - 1), "the first draft")
+        self._mtp_have, self._mtp_hid, self._mtp_next = P - 1, P - 1, (P, nxt, draft)
+        return nxt, draft
+
+    def generate_mtp(self, token, pos, draft, n, stop=()):
+        """`n` greedy tokens from `token` at `pos` with the MTP layer's `draft` of the one after: each pass checks the
+        token and the draft together (`check`) — the draft kept when the model's own greedy token after `token` is the
+        draft, the token after the draft then the next; refused, the KDA states given back. Answers (tokens, passes)."""
+        m, out, passes = self.m, [], 0
+        # ⛳ WHAT `generate` PROMISES (▶ session.py): every token it answers but the last has been run — so a pass that would
+        #   run more than it answers gives the KDA states back to after `token`: a kept draft that is an end token, or
+        #   one with no room left for the token after it
+        while len(out) < n:
+            self._run("(begin (check %d %d %d %d) (type streams))" % (token, draft, pos, pos + 1), "the check at %d" % pos)
+            passes += 1
+            y1 = m.must("(sys__node_array__get CHECK 0)", "the model's token after the token")
+            y2 = m.must("(sys__node_array__get CHECK 1)", "the model's token after the draft")
+            if y1 == draft and (draft in stop or len(out) + 1 >= n):
+                out.append(draft)
+                self._run("(restore)", "the KDA states given back")
+                self._run("(begin (nn__vector__copy hnA hnB %d) (type hnB))" % self.H, "the state at %d" % pos)
+                self._mtp_have, self._mtp_hid, self._mtp_next = pos - 1, pos, None
+                return out, passes
+            if y1 == draft:
+                out += [draft, y2]
+                # the MTP layer at pos (the draft, the state at pos) and at pos + 1 (y2, the state at pos + 1): the next draft
+                self._run("(begin (mtp_cache_from %d %d hnA) (type mres))" % (draft, pos), "the MTP layer at %d" % pos)
+                draft = self._run("(mtp_from %d %d hnB)" % (y2, pos + 1), "the draft at %d" % (pos + 1))
+                token, pos, self._mtp_have, self._mtp_hid = y2, pos + 2, pos + 1, pos + 1
+            else:
+                out.append(y1)
+                self._run("(restore)", "the KDA states given back")
+                self._run("(begin (nn__vector__copy hnA hnB %d) (type hnB))" % self.H, "the state at %d" % pos)
+                draft = self._run("(mtp_from %d %d hnA)" % (y1, pos), "the draft at %d" % pos)
+                token, pos, self._mtp_have, self._mtp_hid = y1, pos + 1, pos, pos
+            if out[-1] in stop:
+                break
+        self._mtp_next = (pos, token, draft)
+        return out[:n], passes
 
     def _composed_procedures(self):
         """The unfused layer's procedures, nn's words a layer — and the fused layer's for a run that takes directions out
@@ -1060,22 +1291,22 @@ class Glm5(Generates):
             for l in self.run_layers:
                 if self.moe[l]:
                     m.picture("xr%d_%d" % (l, i), "(begin (nn__buffer__copy hands %d %s %d) "
-                              "(ai_glm_5_3__experts_rows %s exr%d_%d %s (sys__node_array__get nrows 0)))"
+                              "(ai_z__glm_5_3__experts_rows %s exr%d_%d %s (sys__node_array__get nrows 0)))"
                               % (CARD, c("hands"), self.CH * self.HAND, c("hands"), l, i, c("rrows")))
         m.act_as(CARD)
         ws = [(i, cpu["w"]) for i, cpu in enumerate(self.CPUS)]
         for l in self.run_layers:
-            body = ("(ai_glm_5_3__kda_rows srows at%d n rwork)" % l if self.kinds[l] == "d"
-                    else "(ai_glm_5_3__mla_rows srows at%d first n rwork)" % l)
+            body = ("(ai_z__glm_5_3__kda_rows srows at%d n rwork)" % l if self.kinds[l] == "d"
+                    else "(ai_z__glm_5_3__mla_rows srows at%d first n rwork)" % l)
             if self.moe[l]:
-                body += (" (ai_glm_5_3__route_rows srows mo%d hands carries n rwork) " % l
+                body += (" (ai_z__glm_5_3__route_rows srows mo%d hands carries n rwork) " % l
                          # the card's tier told of the chunk's picks, so the prompt warms it (NN-48)
                          + ("(nn__expert_tier__note hands %s %d n %d %d %s) " % (expert_tier.BINDING, l, self.HAND, self.HAND - 8 * self.TOPK,
                                                                        expert_tier.THRESHOLD)
                             if self.CPLAN is not None else "")
                          + " ".join("(sys__compute %d names xr%d_%d)" % (w, l, i) for i, w in ws) + " "
                          # the card's share computed while the CPUs compute theirs
-                         + ("(ai_glm_5_3__experts_rows hands exkr%d rrows_k n %s) " % (l, expert_tier.BINDING) if self.CPLAN is not None else "")
+                         + ("(ai_z__glm_5_3__experts_rows hands exkr%d rrows_k n %s) " % (l, expert_tier.BINDING) if self.CPLAN is not None else "")
                          # ⛳ WAITED FOR WITHOUT A BOUND: `sys__result` gives up after ~15 s, and a chunk's experts read
                          #   from the disk can take longer — so the card asks `sys__completed` until it says so, then
                          #   collects. `(< 1 0)` is #f: the loop runs while completed is #f
@@ -1086,9 +1317,9 @@ class Glm5(Generates):
                                                                        2 * H * self.CH) for i, w in ws) + " "
                          + " ".join("(nn__vector__add rrows rrows%d rrows %d)" % (i, H * self.CH) for i, _ in ws if i > 0)
                          + (" (nn__vector__add rrows rrows_k rrows %d)" % (H * self.CH) if self.CPLAN is not None else "")
-                         + " (ai_glm_5_3__close_rows srows mo%d rrows carries n rwork)" % l)
+                         + " (ai_z__glm_5_3__close_rows srows mo%d rrows carries n rwork)" % l)
             else:
-                body += " (ai_glm_5_3__mlp_rows srows ml%d n rwork)" % l
+                body += " (ai_z__glm_5_3__mlp_rows srows ml%d n rwork)" % l
             m.defun("(defun (r%d first n) (begin %s (type srows)))" % (l, body))
         # a token's row, un-rotated, into every stream of a row of the chunk, its streams at `at0 ..`
         m.defun("(defun (embed_row tok %s) (begin (embed_e tok) %s (type e)))"
@@ -1107,6 +1338,7 @@ class Glm5(Generates):
                           "(nn__vector__zero %s %d)" % (self.state(l, "W"), self.W_BYTES // 2)]
         self.m.must("(begin %s (type streams))" % " ".join(zeros), "the reset")
         self._room(0, exact=True)                       # a conversation from nothing: every lent slot the tier's again
+        self._mtp_have, self._mtp_hid, self._mtp_next = -1, -1, None
 
     def layer(self, l, pos):
         """One layer at one position, the streams in and out on the card."""
@@ -1137,8 +1369,24 @@ class Glm5(Generates):
         return got if greedy or sample else None
 
     def generate(self, token, pos, n, stop=(), sampler=None, lag=0):
-        """`Generates.generate`, the cache's rows it may write withheld from the tier first."""
-        self._room(pos + min(n, GENERATE_MOST) + 1)
+        """`Generates.generate`, the cache's rows it may write withheld from the tier first — or, with the MTP layer and a
+        greedy answer, two tokens a pass where its draft is kept (`generate_mtp`). ⛳ The draft goes on from where the last
+        prompt or answer left it; anywhere else (another conversation ran between) the answer is the plain one."""
+        self._room(pos + min(n, GENERATE_MOST) + 2)
+        n = min(n, GENERATE_MOST, self.max_context - pos - 1)
+        if self.MTP is not None and sampler is None and not lag and n > 0:
+            draft = None
+            if self._mtp_next is not None and self._mtp_next[:2] == (pos, token):
+                draft = self._mtp_next[2]
+            elif self._mtp_hid == pos - 1:          # a gap in the MTP layer's history only makes its drafts worse
+                draft = self._run("(mtp_from %d %d hnB)" % (token, pos - 1), "the draft at %d" % (pos - 1))
+            if draft is not None:
+                self._watch(())
+                out, passes = self.generate_mtp(token, pos, draft, n, set(stop))
+                self.mtp_stats["passes"] += passes
+                self.mtp_stats["kept"] += len(out) - passes
+                return out
+        self._mtp_have, self._mtp_hid, self._mtp_next = -1, -1, None   # the plain path runs on without the MTP layer
         return Generates.generate(self, token, pos, n, stop, sampler, lag)
 
     def _run(self, text, what):
@@ -1200,7 +1448,7 @@ class Glm5(Generates):
         IN, tokens = 3 * vc["temporal_patch_size"] * P * P, n // M
         pairs = lambda rows: (24 * rows + 255) & ~255
         step, step2 = min(self.VIS_CHUNK, n), min(self.VIS_CHUNK, tokens)
-        # ▶ ai_glm_5_3's `vision_block` and `vision_tail`: their scratch, one after the other in the same room
+        # ▶ ai_z__glm_5_3's `vision_block` and `vision_tail`: their scratch, one after the other in the same room
         block = pairs(n) + 2 * (n * H + max(n * H, step * I) + 3 * n * H + 2 * step * I + 2 * step * I + step * H) + 4 * n * hd
         big = max(n * H, tokens * out)
         tail = pairs(tokens) + 2 * (big + tokens * out + max(tokens * out, step2 * PI) + 2 * step2 * PI + 2 * step2 * PI)
@@ -1293,9 +1541,9 @@ class Glm5(Generates):
         m.write(base + self.VSCR["rc"][0], np.ascontiguousarray(rowcol, dtype="<u4").tobytes())
         P = self.VPLANES
         depth = vc["depth"] if blocks is None else blocks
-        words = (["(ai_glm_5_3__vision_embed %s GVE %d %s)" % (P["pix"], n, P["x"])]
-                 + ["(ai_glm_5_3__vision_block %s %s GVB%d %d)" % (P["x"], P["rc"], i, n) for i in range(depth)]
-                 + (["(ai_glm_5_3__vision_tail %s GVT %d %s)" % (P["x"], n, P["out"])] if blocks is None else []))
+        words = (["(ai_z__glm_5_3__vision_embed %s GVE %d %s)" % (P["pix"], n, P["x"])]
+                 + ["(ai_z__glm_5_3__vision_block %s %s GVB%d %d)" % (P["x"], P["rc"], i, n) for i in range(depth)]
+                 + (["(ai_z__glm_5_3__vision_tail %s GVT %d %s)" % (P["x"], n, P["out"])] if blocks is None else []))
         for word in words:
             # a word's answer is its out plane, or the error that says why it did not run
             if m.must("(type %s)" % word, "the tower's word %s" % word.split()[0][1:]) == self.m.K["sys__error"]:
@@ -1347,7 +1595,11 @@ class Glm5(Generates):
         if not rows:
             out = None
             for i, tok in enumerate(tokens):
+                self._mtp_prime(first + i, tok)
                 out = self.step(tok, first + i, greedy, sample if i == len(tokens) - 1 else None)
+                if self.MTP is not None:
+                    self._run("(begin (nn__vector__copy %s hnB %d) (type hnB))" % (self.MTP_HIDDEN, self.H), "the state kept")
+                    self._mtp_hid = first + i
             return out
         if first + len(tokens) > self.max_context:
             raise Refused("positions to %d are past the context of %d" % (first + len(tokens), self.max_context))
@@ -1357,7 +1609,26 @@ class Glm5(Generates):
             mine = {i - at: r for i, r in pictures.items() if at <= i < at + len(chunk)}
             out = self.forward_rows(first + at, tokens=chunk, head=at + self.CH >= len(tokens), greedy=greedy, sample=sample,
                                     rows=mine)
+            if self.MTP is not None:
+                # ⭐ THE MTP LAYER GIVEN THE CHUNK'S HISTORY: each row's head state from its streams, the layer at the row
+                #   before with the row's token — a position at a time, the layer's cache written, no draft read. With
+                #   `mtp_history` k, only the prompt's last k rows (and the head state of the one before them)
+                start = first if self.MTP_HISTORY is None else first + len(tokens) - self.MTP_HISTORY
+                for r, tok in enumerate(chunk):
+                    p = first + at + r
+                    if p < start - 1 and p != first + len(tokens) - 1:
+                        continue
+                    if p >= start:
+                        self._mtp_prime(p, tok)
+                    self._run("(row_hidden %d)" % r, "row %d's state" % r)
+                    self._mtp_hid = p
         return out
+
+    def _mtp_prime(self, p, tok):
+        """The MTP layer at `p - 1` from the token at `p` and the head state at `p - 1`, where that state is kept."""
+        if self.MTP is not None and p > 0 and self._mtp_hid == p - 1:
+            self._run("(begin (mtp_cache_from %d %d hnB) (type mres))" % (tok, p - 1), "the MTP layer at %d" % (p - 1))
+            self._mtp_have = p - 1
 
     # ── a pipeline stage (▶ `pipeline.py`): this machine's layers, the streams crossing between stages ─────────────
     def forward(self, pos, token=None, x=None, head=False):
@@ -1450,6 +1721,7 @@ class Glm5(Generates):
         self._room(length, exact=True)
         for (at, _), blob in zip([r for r in self.state_regions(length) if r[1]], blobs):
             self.m.write(at, blob)
+        self._mtp_have, self._mtp_hid, self._mtp_next = -1, -1, None   # another conversation's: the MTP layer's held nothing
 
     def state_regions(self, length, where=None):
         """(address, bytes) of everything a conversation of `length` positions has written: each KDA layer's state

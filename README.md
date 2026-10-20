@@ -1,8 +1,8 @@
 # SiLVANN
 
-> **Developer preview, v0.11.1.** It runs the models below well on the hardware it was tested on, and it is shared
-> for people who can find their way around a build and a stack trace. NVIDIA cards are tested on one, a GeForce
-> RTX 5060 Ti; Apple silicon is not tested yet.
+> **Developer preview, v0.12.0.** It runs the models below well on the hardware it was tested on, and it is shared
+> for people who can find their way around a build and a stack trace. NVIDIA cards are tested on two, a GeForce
+> RTX 5060 Ti and an RTX 5070 Ti; Windows natively on one PC; Apple silicon is not tested yet.
 
 **Silicon Linked Virtualized Architecture for Neural Networks** — a from-scratch inference engine for large language
 models, and the two things it is made of:
@@ -11,7 +11,7 @@ models, and the two things it is made of:
   silicon holds the data: a graphics card, or the CPU's own cores;
 - **the Neural Network library** (`nn`) — the arithmetic, the memory structures and the words a model is written in.
 
-A model is a program in that language (`engine/src/packages/ai_qwen_3`, `engine/src/packages/ai_glm_5_3`), and the
+A model is a program in that language (`engine/src/packages/ai_qwen_3`, `engine/src/packages/ai_z__glm_5_3`), and the
 weights are packed with TurboQuant: rotated rows at 4 or 8 bits, so a 35-billion-parameter model fits in 19 GB.
 
 ## Models, and what they run on
@@ -67,32 +67,34 @@ v0.11.1, the RTX 5070 Ti's with v0.11.0. v0.11.0's server drew each token with n
 card, through OpenCL and on the CPU alone: the 35B answered in the chat at 32-35 tokens a second on the RTX 5060 Ti,
 and answers at 67 now ([`docs/results.md`](docs/results.md)).
 
-**New in v0.11.1:** the server answers as fast as the card does — v0.11.0's server drew each token with a slow
-top k on an NVIDIA card, through OpenCL and on the CPU alone — and the chat follows the model the server serves.
+**New in v0.12.0:** SiLVANN runs natively on Windows — no WSL, no Docker — from the libraries the release was built
+with, or built on the PC.
 
-**The sampler's top k on CUDA, the CPU and OpenCL 2.0.** The server draws each token with the model's sampler on the
-card: its repetition penalty, temperature, top k and top p. In v0.11.0 CUDA, the CPU and OpenCL drew the top k with nn's
-generic body, which reads the whole vocabulary once for each of the `k` picks: 13.8 ms a token for the 35B's 248,320
-logits on the RTX 5060 Ti, nearly as long as the rest of the token. CUDA now has ROCm's top k, the CPU and OpenCL 2.0
-one of their own, with the same picks and weights to the bit: 0.024 ms on the RTX 5060 Ti, 0.03 ms on the CPU alone,
-0.89 ms on an MI50 through OpenCL. In the chat the 35B with its experts in RAM answers at 67 tokens a second on the RTX
-5060 Ti, where v0.11.0 gave 32 to 35, and Ministral 3 14B `D4` at 47 where it gave 35 to 37; the 35B on the CPU alone at
-10.5 against 8.4 to 8.7 on the RTX 5060 Ti's desktop, and on a short prompt at 16.6 against 11.4 on the R730; through
-OpenCL on an MI50 at 29.9 against 11.9. The rates after a prompt, which take the most likely token, are as they were
-([`docs/results.md`](docs/results.md)).
+**Windows, natively.** The engine's calls to the operating system — threads, libraries, files, memory, the processors —
+go through one layer, a folder a system (`engine/src/operating_systems/`), as its arithmetic goes through a silicon
+family. `install.ps1` fetches the release, makes its Python environment and takes the libraries GitHub built for the
+release (`silvann_windows_x64.zip`, on the release's page: the evaluator for Python 3.10 to 3.14, NVIDIA's family for
+every card it lists, the CPU's, and the two OpenCL families), so Python, Git and the card's driver are all a PC needs.
+`build.ps1` builds them on the PC instead, with Visual Studio's clang-cl and, for an NVIDIA card, CUDA's nvcc (12 or 13).
+AMD's and Intel's GPUs go through their driver's OpenCL. The model's tool has `(powershell …)` beside `(bash …)`, and
+`(help)` tells the model it runs on Windows ([`docs/tools.md`](docs/tools.md)). The libraries are not signed yet: where
+Windows 11's Smart App Control is on, Windows refuses them, and the installer says what to do
+([`docs/users.md`](docs/users.md#on-windows)). On an RTX 5070 Ti with a Ryzen 7 5800X,
+built from source with CUDA 13.4, Ministral 3 14B `D4` on the card answers in the chat at 58 tokens a second.
 
-**The chat follows the model.** When the server starts serving another model — from Options, or by anyone else — the
-chat closes the conversation the last model made, says which model serves now and lists that model's conversations; a
-model with none gets one, open and empty. In v0.11.0 the last model's conversation stayed in the chat. An answer running
-holds the chat as it is: a subagent the card is lent to shows its own model on the server until the answer is done
-([`docs/ui.md`](docs/ui.md)).
+**The experts read from the pack.** With `experts_from: "disk"` a Qwen model's experts are read where its pack holds
+them: the first start no longer writes them out again beside it — 55 GB for the 122B, 16 GB for the 35B. The logits are
+the file's to the bit; on the RTX 5060 Ti's desktop, from its NVMe drive, the 122B answers 2.7% and the 35B 3.4% below
+the file's rate. Their `experts/` folder an earlier release wrote is not read any more on one socket and can be deleted.
+GLM 5.3 Flash still writes its file: its pack keeps an expert's records in the order of their names
+([`docs/users.md`](docs/users.md#5-the-experts-on-the-disk)).
 
-**The docs.** The rates lead with the chat's — the server with the model's own config, as the chat's meter reads a
-short conversation — and the rates after a 2,000-position prompt beside them, every RTX 5060 Ti row measured again with
-v0.11.1; a new row, the 122B with its experts in 62 GB of RAM, answers in the chat at 20 tokens a second, against 8.5
-with 32 GB and its experts read from the disk. [`docs/results.md`](docs/results.md) is laid out by machine, each row
-naming its version. On Linux the Docker image runs as fast as the install; on Windows well below what the same PC gives
-under Linux, so there it is for evaluating SiLVANN ([`docker/README.md`](docker/README.md)).
+**No Docker image.** None is published from this release, and the scripts that ran one are gone: SiLVANN installs
+natively on Linux and on Windows. `docker/` keeps the Dockerfile, for a container of your own
+([`docker/README.md`](docker/README.md)).
+
+**In progress:** the engine carries the first part of DeepSeek V4.1 Flash's port (`ai_deepseek_4`); its pack is not
+published yet.
 
 Every release before this one, and this one's notes again: [`release_logs/v0.md`](release_logs/v0.md).
 
@@ -100,8 +102,8 @@ Every release before this one, and this one's notes again: [`release_logs/v0.md`
 
 | | |
 |---|---|
-| **Tested** | Linux with AMD Instinct MI50 (gfx906), ROCm 6 — a model on one card, and the 27B's layers over two and four (tensor parallelism); Linux with an NVIDIA GeForce RTX 5060 Ti (sm_120), CUDA 12.9, driver 595 — every pack but GLM's checked against Hugging Face, the 35B's tier of experts included; the CPU alone with AVX2 (Xeon E5-2680 v4) and with AVX-512 (Xeon W-2123); OpenCL 2.0 with sub-groups, on the MI50 — the 27B and the 35B checked against Hugging Face, the 27B answering at 9-11 tokens a second and reading a prompt at 49 positions a second; the 122B's tier of experts, 11.7 tokens a second with 18 GB of the card (9.7 without); OpenCL 1.2 through NVIDIA's OpenCL on the RTX 5060 Ti — the 27B checked against Hugging Face, at 1.6 tokens a second (the family is for integrated GPUs); Windows 11 and Windows 10 with an NVIDIA card, through the Docker image ([`docker/README.md`](docker/README.md)) — where the driver gives a model too large for the card the PC's RAM as shared memory, the placement is named in the model's config ([`docs/users.md`](docs/users.md#on-windows-the-docker-image)) |
-| **Untested** | Linux booted from a USB SSD; tensor parallelism on NVIDIA cards; other NVIDIA generations (the CUDA family is built for sm_75 to sm_120: Turing to Blackwell); GLM 5.3 Flash on an NVIDIA card; other AMD generations; OpenCL on other devices, the integrated GPUs `khronos_opencl1_igpu` is for among them; AVX-512 on processors other than Skylake (AMD's Zen 4 and 5, later Xeons) |
+| **Tested** | Linux with AMD Instinct MI50 (gfx906), ROCm 6 — a model on one card, and the 27B's layers over two and four (tensor parallelism); Linux with an NVIDIA GeForce RTX 5060 Ti (sm_120), CUDA 12.9, driver 595 — every pack but GLM's checked against Hugging Face, the 35B's tier of experts included; the CPU alone with AVX2 (Xeon E5-2680 v4) and with AVX-512 (Xeon W-2123); OpenCL 2.0 with sub-groups, on the MI50 — the 27B and the 35B checked against Hugging Face, the 27B answering at 9-11 tokens a second and reading a prompt at 49 positions a second; the 122B's tier of experts, 11.7 tokens a second with 18 GB of the card (9.7 without); OpenCL 1.2 through NVIDIA's OpenCL on the RTX 5060 Ti — the 27B checked against Hugging Face, at 1.6 tokens a second (the family is for integrated GPUs); Windows with an NVIDIA card (an RTX 5070 Ti, a Ryzen 7 5800X), natively: built from source with CUDA 13.4, Ministral 3 14B `D4` on the card ([`docs/users.md`](docs/users.md#on-windows)) |
+| **Untested** | on Windows: the prebuilt libraries on a PC (GitHub's runners, which build them, have no card), the CPU alone, a model's experts on the CPU or read from the disk, AMD's and Intel's GPUs through OpenCL; Linux booted from a USB SSD; tensor parallelism on NVIDIA cards; other NVIDIA generations (the CUDA family is built for sm_75 to sm_120: Turing to Blackwell; an older card — Kepler, Maxwell, Pascal, Volta — goes to OpenCL 1.2, the GTX 1080 first); GLM 5.3 Flash on an NVIDIA card; other AMD generations; OpenCL on other devices, the integrated GPUs `khronos_opencl1_igpu` is for among them — which card goes to OpenCL 1.2 and which to 2 is a best guess from the vendors' published versions (OpenCL 1.2: every NVIDIA card CUDA does not take, Intel's iGPUs before Gen9, AMD's TeraScale and GCN 1; OpenCL 2: the rest), and a card on the wrong one is an issue to open, with its `clinfo`; AVX-512 on processors other than Skylake (AMD's Zen 4 and 5, later Xeons) |
 | **Not yet** | Apple silicon |
 
 Pictures and videos are read by the Qwen models and GLM 5.3 Flash (v0.7.0: [`release_logs/v0.md`](release_logs/v0.md#v070)); Ministral 3 does not read them.
@@ -138,41 +140,29 @@ venv/bin/python start_silvann_server.py --model models/silvann_tq_D8E4_qwen3.6_3
 venv/bin/python silvann_ui.py --port 8090                          # a chat in the browser, on the server above (docs/ui.md)
 ```
 
-### Docker: on Linux at full speed, on Windows to evaluate
+### On Windows: `install.ps1`
 
-⚠ **On Linux the Docker image runs as fast as the install; on Windows it runs well below what the same PC gives under
-Linux, so there it is for evaluating SiLVANN.** On Linux (an RTX 5060 Ti), the image decoded the Qwen 3.6 35B-A3B
-`D8E4` at 55.2 and 55.5 tokens a second where the install gave 54.6 to 55.7. On Windows, on one PC (an RTX 5070 Ti, a
-Ryzen 7 5800X, 32 GB of RAM), Docker Desktop answered at 37 tokens a second with Ministral 3 14B `D4`, where Linux gives
-46, and at 22 with the 35B, its experts in RAM and a tier of them on the card, where Linux gives 40. To run SiLVANN on a
-Windows PC, run Linux on an NVMe drive — the PC's own, or one in a USB enclosure booted from the boot menu
-([`docs/users.md`](docs/users.md#on-windows-linux-on-a-usb-ssd)) — with the one-line install above.
+Python 3.10 to 3.14, Git and the card's own driver (`winget install -e --id Python.Python.3.12`, `winget install -e --id
+Git.Git`). In PowerShell, in the folder SiLVANN should go under:
 
-The image `ghcr.io/eval-apply-labs/silvann:main`, the nightly, is SiLVANN built for NVIDIA cards and the CPU, with the
-chat as the app in the browser; the models and the conversations live in a Docker volume, which an update keeps.
-
-On Windows, with WSL 2 (`wsl --install` in a PowerShell run as administrator, then restart), Docker Desktop and NVIDIA's
-ordinary driver: [download SiLVANN](https://github.com/eval-apply-labs/SiLVANN/archive/refs/heads/main.zip), unzip it,
-and in its `docker\windows` folder double-click
-
-1. `silvann_install.cmd` — it checks the PC, pulls the image and puts **SiLVANN** and **SiLVANN - stop** on the desktop;
-2. **SiLVANN** — the chat opens at http://localhost:8080, and its Options download a model and start it;
-3. `silvann_install_nonfree.cmd`, once, to read video files other than animated pictures (PyAV, which the image leaves
-   out).
-
-**SiLVANN data**, also on the desktop, opens the models and the conversations in Explorer: a model downloaded on another
-machine is pasted into its `models` folder.
-
-On Linux, with Docker Engine (or Podman) and NVIDIA's container toolkit for the card:
-
-```bash
-curl -fsSLO https://raw.githubusercontent.com/eval-apply-labs/SiLVANN/HEAD/docker/silvann_docker.sh
-bash silvann_docker.sh install            # the card checked, the image pulled, the volume made
-bash silvann_docker.sh start              # the chat at http://localhost:8080 — its Options download a model and start it
-bash silvann_docker.sh install_nonfree    # once, for video files (PyAV)
+```powershell
+curl.exe -fsSLO https://raw.githubusercontent.com/eval-apply-labs/SiLVANN/HEAD/install.ps1
+powershell -ExecutionPolicy Bypass -File .\install.ps1      # into .\silvann, and a `silvann` command
 ```
 
-Updating, stopping, sharing on the LAN, exporting to another machine: [`docker/README.md`](docker/README.md).
+Then, in a new PowerShell — the one the installer ran in does not have `silvann` on its PATH yet:
+
+```powershell
+silvann models E:\silvann_data                 # if you like: the models and the conversations on another drive
+silvann download silvann_tq_D4_ministral_3_14b
+silvann serve silvann_tq_D4_ministral_3_14b     # on port 8765
+silvann ui                                     # a chat in the browser, at http://localhost:8090
+```
+
+The installer takes the libraries GitHub built for the release when they were built from the folder's engine, and builds
+them otherwise. `build.ps1`, in the folder, builds them on the PC: it needs Visual Studio's Build Tools with their C++
+Clang tools, and CUDA's toolkit (12 or 13) for an NVIDIA card. Run `install.ps1` again — or `silvann update` — to
+update: the models, the conversations and their settings stay ([`docs/users.md`](docs/users.md#on-windows)).
 
 ### More info
 
@@ -191,11 +181,13 @@ end of a sentence, layers replaced by simpler programs, multi-token prediction a
 ## What is here
 
 ```
-install.sh          fetches, builds and installs the `silvann` command — the one-line install
-build.sh            builds the engine into lib/
-docker/             the Docker image, and the scripts that run it as an app on Windows and Linux
-engine/src/         the interpreter (engine, sys), the library (nn), the models (ai_qwen_3, ai_glm_5_3, ai_qwen_image), and
-                    silicon_families/ — one folder a kind of silicon, what it answers for the library
+install.sh          fetches, builds and installs the `silvann` command — the one-line install on Linux
+install.ps1         the same on Windows, with the libraries the release was built with; build.ps1 builds them on the PC
+build.sh, build.py  build the engine into lib/ — on Linux, on Windows
+docker/             a Dockerfile, for a container of your own — no image is published
+engine/src/         the interpreter (engine, sys), the library (nn), the models (ai_qwen_3, ai_z__glm_5_3, ai_qwen_image,
+                    ai_deepseek_4), silicon_families/ — one folder a kind of silicon, what it answers for the library —
+                    and operating_systems/ — one folder a system, what it answers for the engine
 runtime/            the Python side: a model folder booted onto the machine, conversations, the chat framing
 lisp/               each model family's program, in Lisp — a model folder carries its family's in its own lisp/
 silvann_core.py     download-model · list-models · hf-token
@@ -223,5 +215,6 @@ requests are made under the Contributor License Agreement in `CLA.md`, which a b
 ## Licence
 
 The engine is AGPL-3.0 (`LICENSE`), with an additional permission to convey it linked with NVIDIA's CUDA runtime
-(`ATTRIBUTION.md` §1). Third-party notices are in `ATTRIBUTION.md`, the Docker image's among them (§6). The model weights
+(`ATTRIBUTION.md` §1). Third-party notices are in `ATTRIBUTION.md`, an image built from `docker/`'s (§6) and the prebuilt Windows
+libraries' (§7) among them. The model weights
 keep their authors' licences.

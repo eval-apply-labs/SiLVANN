@@ -45,14 +45,14 @@ from pydantic import BaseModel
 
 ROOT = Path(__file__).resolve().parent
 # the skills the release ships (▶ silvann_runtime/skills.py): skills/ beside this file, or the development tree's
-SKILLS_SHIPPED = ROOT / "skills" if (ROOT / "skills").is_dir() else ROOT.parent / "backstage" / "release" / "skills"
+SKILLS_SHIPPED = ROOT / "skills" if (ROOT / "skills").is_dir() else ROOT.parent / "release" / "skills"
 # the tool's guide, which the REPL's (guide) answers: docs/ beside this file, or the development tree's
-TOOLS_GUIDE = ROOT / "docs" / "tools.md" if (ROOT / "docs").is_dir() else ROOT.parent / "backstage" / "release" / "docs" / "tools.md"
+TOOLS_GUIDE = ROOT / "docs" / "tools.md" if (ROOT / "docs").is_dir() else ROOT.parent / "release" / "docs" / "tools.md"
 # the conversations go beside the release, or in the folder SILVANN_DATA names (the Docker image's volume)
 DATA = Path(os.environ.get("SILVANN_DATA") or ROOT)
 # the runtime beside this file in a release, or the development tree's
 RUNTIME = Path(os.environ.get("SILVANN_RUNTIME", ROOT / "runtime" if (ROOT / "runtime").is_dir()
-                              else ROOT.parent / "backstage" / "python"))
+                              else ROOT.parent / "python"))
 # the silvann_core.py beside this file, imported before the runtime leads the path: the development tree's runtime
 # folder holds another package of that name
 from silvann_core import default_config                                   # noqa: E402
@@ -275,6 +275,8 @@ def _one_boot_at_a_time():
     try:
         import fcntl
     except ImportError:
+        fcntl = None
+    if fcntl is None:                                 # outside the except: what the boot raises is not chained to it
         yield
         return
     path = os.path.join(tempfile.gettempdir(), "silvann_boot.lock")

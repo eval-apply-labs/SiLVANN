@@ -110,6 +110,34 @@ static sys__heap_node nn__turboquant__zzabi_apply_gemv(const sys__heap_node* arg
     return nn__doors_answer(&argv[3]);
 }
 
+/* `(nn__turboquant__gemv_n codes scales x out rows cols d n)` — `nn__turboquant__gemv` for `n` inputs (1 … 4), `x`'s rows
+ * `cols` apart and `out`'s `rows` apart, each answer the one-input verb's to the bit: the matrix read once for all of them
+ * (a draft's check, both positions through the head). ▶ nn's `turboquant_gemv_groups_n`. */
+static sys__heap_node nn__turboquant__zzabi_apply_gemv_n(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx) {
+    if (argc != 8u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
+    uint64_t w_at = 0, l_at = 0, x_at = 0, d_at = 0, w_room = 0, l_room = 0, x_room = 0, d_room = 0;
+    if (argv[4].dtype != SYS__KIND__VALUE_INT || argv[5].dtype != SYS__KIND__VALUE_INT
+     || argv[6].dtype != SYS__KIND__VALUE_INT || argv[7].dtype != SYS__KIND__VALUE_INT
+     || !nn__primitives__room(&argv[0], &w_at, &w_room)
+     || !nn__primitives__room(&argv[1], &l_at, &l_room)
+     || !nn__primitives__room(&argv[2], &x_at, &x_room)
+     || !nn__primitives__room(&argv[3], &d_at, &d_room)) return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
+    const uint64_t rows = argv[4].args[0], cols = argv[5].args[0], d = argv[6].args[0], n = argv[7].args[0];
+    if (rows == 0ull || cols == 0ull || n == 0ull || n > 4ull) return sys__engine__abi__error(NN__TURBOQUANT__FAULT_BOUNDS);
+    if (!nn__turboquant__rate_is_known(d)) return sys__engine__abi__error(NN__TURBOQUANT__FAULT_RATE);
+    if (!nn__primitives__fits(n * cols, x_room) || !nn__primitives__fits(n * rows, d_room))
+        return sys__engine__abi__error(NN__TURBOQUANT__FAULT_BOUNDS);
+    if (!nn__turboquant__zzabi_zzprivate_rows_fit(w_at, w_room, l_at, l_room, d, rows, cols))
+        return sys__engine__abi__error(nn__turboquant__zzpackage_fault_for(d));
+
+    const nn__doors* doors = nn__doors_for(ctx);
+    if (doors == 0) return sys__engine__abi__error(NN__PRIMITIVES__FAULT_NO_DEVICE);
+    nn__turboquant__groups g = {};
+    g.codes[0] = w_at; g.luts[0] = l_at; g.rows[0] = rows; g.d[0] = d; g.out_at[0] = 0u; g.count = 1u;
+    doors->turboquant_gemv_groups_n((uint16_t*)(uintptr_t)d_at, g, (const uint16_t*)(uintptr_t)x_at, cols, n, rows, ctx->fault_word);
+    return nn__doors_answer(&argv[3]);
+}
+
 /* `(nn__turboquant__gemv_int8 codes scales x out rows cols d)` — the same product as `nn__turboquant__gemv`,
  * with `x` and the levels in int8 and the products in integers. ⚖ *"two different instructions so at boot
  * time the lisp can decide how to write its defun"*. ▶ `gpu/kernels/kernels.cuh` for what every family's body
@@ -165,5 +193,6 @@ SYS__ENGINE__ABI__BRIDGE(nn__turboquant__zzabi_adapter_encode, nn__turboquant__z
 SYS__ENGINE__ABI__BRIDGE(nn__turboquant__zzabi_adapter_decode, nn__turboquant__zzabi_apply_decode)
 SYS__ENGINE__ABI__BRIDGE(nn__turboquant__zzabi_adapter_gemv_int8, nn__turboquant__zzabi_apply_gemv_int8)
 SYS__ENGINE__ABI__BRIDGE(nn__turboquant__zzabi_adapter_gemv,   nn__turboquant__zzabi_apply_gemv)
+SYS__ENGINE__ABI__BRIDGE(nn__turboquant__zzabi_adapter_gemv_n, nn__turboquant__zzabi_apply_gemv_n)
 
 #endif /* SILVANN__PACKAGES_NN_CPU_OPCODES_TURBOQUANT__ABI_CUH */

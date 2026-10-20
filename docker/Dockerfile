@@ -9,7 +9,7 @@
 #   docker build -f docker/Dockerfile --build-context source=<a git checkout of a release> \
 #                --build-arg SILVANN_SOURCE=/source --build-arg SILVANN_REF=<branch> -t silvann .
 #                                                                                    a checkout on this machine
-#   docker run --gpus all -p 127.0.0.1:8080:8080 -v silvann-data:/data silvann     ▶ docker/README.md, its scripts
+#   docker run --gpus all -p 127.0.0.1:8080:8080 -v silvann-data:/data silvann     ▶ docker/README.md
 #
 # CUDA's runtime is linked into the family (`-cudart static`) and the container is handed the host's driver
 # (`--gpus all`, or CDI), so the final image carries no CUDA toolkit. What it holds, and each part's licence:

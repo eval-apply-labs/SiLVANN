@@ -26,7 +26,7 @@
 #define CL_TARGET_OPENCL_VERSION 200
 #include "../../packages/sys/cpu/silicon/file.cuh"   /* opening and reading a file, written once for every family */
 #include <CL/cl.h>
-#include <pthread.h>
+#include "../../operating_systems/os.cuh"   /* threads, locks and conditions: the system's */
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -46,13 +46,13 @@ typedef struct khronos_opencl2__state {
     cl_device_id     device[KHRONOS_OPENCL2__DEVICES_MAX];
     cl_context       context[KHRONOS_OPENCL2__DEVICES_MAX];     /* one each: ▶ the note above */
     cl_command_queue queue[KHRONOS_OPENCL2__DEVICES_MAX];       /* one in-order queue each */
-    pthread_mutex_t  lock;                                      /* the live list, and a kernel's arguments */
+    sys__os__lock    lock;                                      /* the live list, and a kernel's arguments */
     khronos_opencl2__allocation* live;                          /* every allocation not yet freed */
     size_t           live_count, live_room;
 } khronos_opencl2__state;
 
-static khronos_opencl2__state khronos_opencl2__zzprivate_state = { 0u, {0}, {0}, {0}, PTHREAD_MUTEX_INITIALIZER, 0, 0u, 0u };
-static pthread_once_t         khronos_opencl2__zzprivate_once  = PTHREAD_ONCE_INIT;
+static khronos_opencl2__state khronos_opencl2__zzprivate_state = { 0u, {0}, {0}, {0}, SYS__OS__LOCK_INIT, 0, 0u, 0u };
+static sys__os__once          khronos_opencl2__zzprivate_once  = SYS__OS__ONCE_INIT;
 static __thread uint32_t      khronos_opencl2__zzprivate_bound = 0u;
 
 /* Whether a device can do what this family asks of it: both kinds of shared virtual memory. */
@@ -89,7 +89,7 @@ static void khronos_opencl2__zzprivate_stand_up(void) {
 }
 
 static inline khronos_opencl2__state* khronos_opencl2__zzpackage_up(void) {
-    (void)pthread_once(&khronos_opencl2__zzprivate_once, khronos_opencl2__zzprivate_stand_up);
+    sys__os__once_run(&khronos_opencl2__zzprivate_once, khronos_opencl2__zzprivate_stand_up);
     return khronos_opencl2__zzprivate_state.count > 0u ? &khronos_opencl2__zzprivate_state : 0;
 }
 
@@ -102,7 +102,7 @@ static inline cl_command_queue khronos_opencl2__zzpackage_queue(void) {
 /* ── THE LIVE LIST ───────────────────────────────────────────────────────────────────────────────────── */
 static inline bool khronos_opencl2__zzprivate_keep(khronos_opencl2__state* s, void* at, size_t bytes, uint32_t card) {
     bool kept = true;
-    pthread_mutex_lock(&s->lock);
+    sys__os__lock_take(&s->lock);
     if (s->live_count == s->live_room) {
         size_t room = s->live_room ? 2u * s->live_room : 64u;
         khronos_opencl2__allocation* grown =
@@ -113,7 +113,7 @@ static inline bool khronos_opencl2__zzprivate_keep(khronos_opencl2__state* s, vo
         s->live[s->live_count].at = at; s->live[s->live_count].bytes = bytes; s->live[s->live_count].card = card;
         ++s->live_count;
     }
-    pthread_mutex_unlock(&s->lock);
+    sys__os__lock_give(&s->lock);
     return kept;
 }
 
@@ -121,21 +121,21 @@ static inline bool khronos_opencl2__zzprivate_keep(khronos_opencl2__state* s, vo
  * allocate — a host buffer, say. */
 static inline bool khronos_opencl2__zzpackage_owner(khronos_opencl2__state* s, const void* at, uint32_t* card) {
     bool found = false;
-    pthread_mutex_lock(&s->lock);
+    sys__os__lock_take(&s->lock);
     for (size_t i = 0u; i < s->live_count && !found; ++i)
         if ((const char*)at >= (const char*)s->live[i].at && (const char*)at < (const char*)s->live[i].at + s->live[i].bytes) {
             *card = s->live[i].card; found = true;
         }
-    pthread_mutex_unlock(&s->lock);
+    sys__os__lock_give(&s->lock);
     return found;
 }
 
 static inline bool khronos_opencl2__zzprivate_forget(khronos_opencl2__state* s, void* at, uint32_t* card) {
     bool found = false;
-    pthread_mutex_lock(&s->lock);
+    sys__os__lock_take(&s->lock);
     for (size_t i = 0u; i < s->live_count; ++i)
         if (s->live[i].at == at) { *card = s->live[i].card; s->live[i] = s->live[--s->live_count]; found = true; break; }
-    pthread_mutex_unlock(&s->lock);
+    sys__os__lock_give(&s->lock);
     return found;
 }
 

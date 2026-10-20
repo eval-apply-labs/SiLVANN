@@ -137,7 +137,7 @@ AT_DEFINITION = ('static inline __global uchar* %s(__global uchar* const* zz_are
 def preprocess(text, tmp, dial):
     tu = os.path.join(tmp, 'tu.c')
     open(tu, 'w').write(text)
-    r = subprocess.run(['gcc', '-E', '-P', '-x', 'c', '-nostdinc', '-undef', '-D__OPENCL_C_VERSION__=120'] + dial +
+    r = subprocess.run([two.CPP, '-E', '-P', '-x', 'c', '-nostdinc', '-undef', '-D__OPENCL_C_VERSION__=120'] + dial +
                        ['-I', tmp, tu], capture_output=True, text=True)
     if r.returncode != 0:
         sys.exit('⛔ the card side would not preprocess as OpenCL C 1.2:\n' + r.stderr[:2000])

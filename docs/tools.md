@@ -18,7 +18,8 @@ beside each conversation ([`users.md`](users.md#the-models-tool)).
 | `(ls "folder")` | The names in a folder; a folder's name ends in `/`. |
 | `(read "file")`, `(read "file" from count)` | A file's first 200 lines, or `count` of its lines from line `from`; a last line says how to read on. |
 | `(write "file" "text")`, `(write "file" "text" 'append)` | Writes the file, or adds to its end, making the folders it needs. |
-| `(bash "command")`, `(bash "command" seconds)` | Runs a shell command in the working folder. It is stopped after 60 seconds, or after `seconds` (at most 600). |
+| `(bash "command")`, `(bash "command" seconds)` | Runs a shell command in the working folder. It is stopped after 60 seconds, or after `seconds` (at most 600). On Windows it is Git for Windows' bash, where it is installed — never WSL's. |
+| `(powershell "command")`, `(powershell "command" seconds)` | On Windows: runs a PowerShell command in the working folder, stopped as `bash` is. `(help)` then opens by saying the machine runs Windows, so the model picks it. |
 | `(fetch "https://…")` | A web page's words, without its markup. |
 | `(cd "folder")`, `(pwd)` | The working folder. |
 | `(reset)` (or `(exit)`) | A fresh REPL: the names defined, the working folder and any once-allowances are gone. Files, allowed folders, the mode and the library stay. |
@@ -33,7 +34,7 @@ beside each conversation ([`users.md`](users.md#the-models-tool)).
 list words.
 
 **Other names for the same commands:** `read-file`, `slurp-file`, `read-all`, `cat` and `slurp` are `read`; `system`,
-`shell` and `sh` are `bash`.
+`shell` and `sh` are `bash` — on Windows `system`, `shell`, `cmd` and `pwsh` are `powershell`, and `sh` is `bash`.
 
 **State:** a conversation's REPL keeps what the model defines from one call to the next until `(reset)`. A server's
 restart starts every REPL afresh.
@@ -223,7 +224,8 @@ function that takes a long time holds the conversation's turn until it returns.
 
 `run:` can name a file in the skill's folder rather than `file.py:function`:
 
-- **How it runs:** a `.sh` by bash, a `.py` by the server's Python, any other file as an executable. It runs in the
+- **How it runs:** a `.sh` by bash, a `.py` by the server's Python, a `.ps1` by PowerShell, any other file as an
+  executable. It runs in the
   REPL's working folder, with the form's arguments as its command-line arguments, all as texts.
 - **The answer:** what it prints, as text.
 - **Failure:** a failing exit is an error, with the end of its output.

@@ -2,14 +2,11 @@
 #define SILVANN__SILICON_FAMILIES_X86_AVX2_PRIMITIVES_POOL_CUH
 
 /* What this file needs, named where a reader — and an editor — can follow it. */
-#include <pthread.h>
-#include <sched.h>
+#include "../../../operating_systems/os.cuh"   /* threads, locks, the clock and the processors: the system's */
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
-#include <unistd.h>
 #include <immintrin.h>
 
 /* ══ ⭐⭐ THE POOL — ONE THREAD A FREE CORE, AND A LAUNCH IS THEIR BLOCKS ══════════════════════════════
@@ -23,9 +20,9 @@
  * (`measurements/2026-09-27_avx2_expert_gemv.md`): with 28 of 56 logical CPUs busy, taking all 56 cost 3x
  * against taking the 28 free ones, because a layer ends at a barrier and one preempted thread stalls all
  * of them. So the pool is sized to what is FREE, once, when the family binds its device:
- *     allowed   the CPUs this process may run on (`sched_getaffinity` — `taskset`, a cgroup's cpuset)
+ *     allowed   the CPUs this process may run on (`sys__os__cpus_of_thread` — `taskset`, a cgroup's cpuset)
  *     cores     one per physical core among them, a sibling hyperthread never counted twice
- *     free      a core whose every CPU was idle more than half of a 50 ms sample of `/proc/stat`
+ *     free      a core whose every CPU was idle more than half of a 50 ms sample of its ticks (`/proc/stat`)
  *     minus     one: the caller's own core — it runs blocks too, and it is the evaluator's runner
  *     capped    by `SILVANN_CPU_THREADS` when it is set above zero
  * and the threads are pinned one to a core, alternating sockets so a small pool still spans both.
@@ -54,9 +51,9 @@
 typedef struct x86_avx2__pool {
     uint32_t          workers;                 /* threads beside the caller */
     int               cpu[X86_AVX2__THREADS_MAX];
-    pthread_t         thread[X86_AVX2__THREADS_MAX];
-    pthread_mutex_t   lock;
-    pthread_cond_t    wake;
+    sys__os__thread   thread[X86_AVX2__THREADS_MAX];
+    sys__os__lock     lock;
+    sys__os__condition wake;
     /* the launch in flight */
     void            (*fn)(void*);
     void*             arg;
@@ -66,22 +63,17 @@ typedef struct x86_avx2__pool {
     uint32_t          generation;              /* one a launch, so a thread knows there is new work */
     int               started;
     int               node;                    /* the NUMA node it and its memory are on, or -1: every one */
-    cpu_set_t         own;                     /* the whole machine's: the CPUs of the caller's core, left free for it */
-    cpu_set_t         worked;                  /* ...and the CPUs of the cores the threads are on, siblings included */
+    sys__os__cpus     own;                     /* the whole machine's: the CPUs of the caller's core, left free for it */
+    sys__os__cpus     worked;                  /* ...and the CPUs of the cores the threads are on, siblings included */
 } x86_avx2__pool;
 
 static x86_avx2__pool x86_avx2__zzprivate_pools[X86_AVX2__DEVICES_MAX];
-static pthread_mutex_t x86_avx2__zzprivate_pools_lock = PTHREAD_MUTEX_INITIALIZER;
+static sys__os__lock x86_avx2__zzprivate_pools_lock = SYS__OS__LOCK_INIT;
 /* the device the calling thread has bound — whose pool its launches run on, and whose node its memory is on */
 static __thread uint32_t x86_avx2__zzpackage_device = 0u;
 /* the block a thread is running, and how many the launch has — what nn's `block()` / `blocks()` answer */
 static __thread uint32_t x86_avx2__zzpackage_block  = 0u;
 static __thread uint32_t x86_avx2__zzpackage_blocks = 1u;
-
-static inline void x86_avx2__zzprivate_pin(int cpu) {
-    cpu_set_t set; CPU_ZERO(&set); CPU_SET(cpu, &set);
-    (void)pthread_setaffinity_np(pthread_self(), sizeof set, &set);
-}
 
 /* Take blocks of launch `generation` until there are none left.
  * ⛔ THE CLAIM CARRIES THE GENERATION, AND THAT IS NOT DECORATION: a worker that wakes late for one launch
@@ -124,7 +116,7 @@ static inline void x86_avx2__zzprivate_take(x86_avx2__pool* p, uint32_t generati
  *   sleeps, so an idle engine still costs no core. */
 static inline uint64_t x86_avx2__zzprivate_now_ns(void) {
     struct timespec t;
-    clock_gettime(CLOCK_MONOTONIC, &t);
+    sys__os__clock(&t);
     return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec;
 }
 static inline uint64_t x86_avx2__zzprivate_spin_ns(void) {
@@ -142,7 +134,7 @@ static inline uint64_t x86_avx2__zzprivate_spin_ns(void) {
 static void* x86_avx2__zzprivate_worker(void* a) {
     x86_avx2__pool* p = &x86_avx2__zzprivate_pools[(uintptr_t)a >> 16];
     const int i = (int)((uintptr_t)a & 0xFFFFu);
-    x86_avx2__zzprivate_pin(p->cpu[i]);
+    sys__os__cpu_pin_thread(p->cpu[i]);
     const uint64_t window = x86_avx2__zzprivate_spin_ns();
     uint32_t seen = 0u;
     for (;;) {
@@ -154,9 +146,9 @@ static void* x86_avx2__zzprivate_worker(void* a) {
             if ((spin & 255u) == 0u && x86_avx2__zzprivate_now_ns() - since > window) break;   /* the clock, now and then */
         }
         if (g == seen) {
-            pthread_mutex_lock(&p->lock);
-            while ((g = __atomic_load_n(&p->generation, __ATOMIC_ACQUIRE)) == seen) pthread_cond_wait(&p->wake, &p->lock);
-            pthread_mutex_unlock(&p->lock);
+            sys__os__lock_take(&p->lock);
+            while ((g = __atomic_load_n(&p->generation, __ATOMIC_ACQUIRE)) == seen) sys__os__condition_wait(&p->wake, &p->lock);
+            sys__os__lock_give(&p->lock);
         }
         seen = g;
         x86_avx2__zzprivate_take(p, g);
@@ -165,31 +157,23 @@ static void* x86_avx2__zzprivate_worker(void* a) {
 }
 
 /* ── WHERE: the CPUs this process may use, and the nodes they are on ───────────────────────────────── */
-static inline int x86_avx2__zzprivate_read_int(const char* path) {
-    FILE* f = fopen(path, "r"); int v = -1;
-    if (f) { if (fscanf(f, "%d", &v) != 1) v = -1; fclose(f); }
-    return v;
-}
 enum { X86_AVX2__ZZPRIVATE_CPUS = 1024, X86_AVX2__ZZPRIVATE_NODES = 64 };
 /* ⛳ READ ONCE, BEFORE ANY THREAD IS PINNED: binding a socket device pins the thread that binds it, and a thread's
- *   affinity is what `sched_getaffinity` answers — so a later read on a pinned thread would see one core. */
-static cpu_set_t x86_avx2__zzprivate_allowed;
+ *   affinity is what `sys__os__cpus_of_thread` answers — so a later read on a pinned thread would see one core. */
+static sys__os__cpus x86_avx2__zzprivate_allowed;
 static int       x86_avx2__zzprivate_cpu_node[X86_AVX2__ZZPRIVATE_CPUS];
 static int       x86_avx2__zzprivate_node[X86_AVX2__DEVICES_MAX - 1u];   /* socket device 1 + s is node [s] */
 static uint32_t  x86_avx2__zzprivate_nodes = 0u;
-static pthread_once_t x86_avx2__zzprivate_where_once = PTHREAD_ONCE_INIT;
+static sys__os__once x86_avx2__zzprivate_where_once = SYS__OS__ONCE_INIT;
 static void x86_avx2__zzprivate_where(void) {
-    CPU_ZERO(&x86_avx2__zzprivate_allowed);
-    if (sched_getaffinity(0, sizeof x86_avx2__zzprivate_allowed, &x86_avx2__zzprivate_allowed) != 0) return;
+    sys__os__cpus_clear(&x86_avx2__zzprivate_allowed);
+    if (!sys__os__cpus_of_thread(&x86_avx2__zzprivate_allowed)) return;
     int seen[X86_AVX2__ZZPRIVATE_NODES] = {0};
-    for (int cpu = 0; cpu < X86_AVX2__ZZPRIVATE_CPUS && cpu < CPU_SETSIZE; ++cpu) {
+    for (int cpu = 0; cpu < X86_AVX2__ZZPRIVATE_CPUS && cpu < SYS__OS__CPUS_MOST; ++cpu) {
         x86_avx2__zzprivate_cpu_node[cpu] = -1;
-        if (!CPU_ISSET(cpu, &x86_avx2__zzprivate_allowed)) continue;
-        char path[128];
-        for (int n = 0; n < X86_AVX2__ZZPRIVATE_NODES; ++n) {
-            snprintf(path, sizeof path, "/sys/devices/system/cpu/cpu%d/node%d", cpu, n);
-            if (access(path, F_OK) == 0) { x86_avx2__zzprivate_cpu_node[cpu] = n; seen[n] = 1; break; }
-        }
+        if (!sys__os__cpus_has(&x86_avx2__zzprivate_allowed, cpu)) continue;
+        const int n = sys__os__cpu_node(cpu);
+        if (n >= 0 && n < X86_AVX2__ZZPRIVATE_NODES) { x86_avx2__zzprivate_cpu_node[cpu] = n; seen[n] = 1; }
     }
     for (int n = 0; n < X86_AVX2__ZZPRIVATE_NODES && x86_avx2__zzprivate_nodes < X86_AVX2__DEVICES_MAX - 1u; ++n)
         if (seen[n]) x86_avx2__zzprivate_node[x86_avx2__zzprivate_nodes++] = n;
@@ -198,55 +182,38 @@ static void x86_avx2__zzprivate_where(void) {
 }
 /* How many devices: the whole machine, and a socket device a node when there is more than one. */
 static inline uint32_t x86_avx2__zzpackage_devices(void) {
-    pthread_once(&x86_avx2__zzprivate_where_once, x86_avx2__zzprivate_where);
+    sys__os__once_run(&x86_avx2__zzprivate_where_once, x86_avx2__zzprivate_where);
     return 1u + x86_avx2__zzprivate_nodes;
 }
 /* The node device `index` is on, or -1 for the whole machine. */
 static inline int x86_avx2__zzpackage_node_of(uint32_t index) {
-    pthread_once(&x86_avx2__zzprivate_where_once, x86_avx2__zzprivate_where);
+    sys__os__once_run(&x86_avx2__zzprivate_where_once, x86_avx2__zzprivate_where);
     return index == 0u || index > x86_avx2__zzprivate_nodes ? -1 : x86_avx2__zzprivate_node[index - 1u];
 }
 
 /* ── HOW MANY: the free physical cores of the device ───────────────────────────────────────────────── */
-/* Each CPU's busy and total ticks from `/proc/stat`, indexed by CPU number. */
-static inline void x86_avx2__zzprivate_ticks(unsigned long long* busy, unsigned long long* total, int most) {
-    FILE* f = fopen("/proc/stat", "r"); char line[512];
-    if (!f) return;
-    while (fgets(line, sizeof line, f)) {
-        int cpu; unsigned long long u, n, s, idle, io, irq, sirq, steal;
-        if (sscanf(line, "cpu%d %llu %llu %llu %llu %llu %llu %llu %llu", &cpu, &u, &n, &s, &idle, &io, &irq, &sirq, &steal) == 9
-            && cpu >= 0 && cpu < most) {
-            busy[cpu] = u + n + s + irq + sirq + steal; total[cpu] = busy[cpu] + idle + io;
-        }
-    }
-    fclose(f);
-}
-/* ⛳ THE TOPOLOGY IN ONE PLACE: a CPU's package and physical core, from Linux's `/sys`. Where they cannot be read — a
- *   container without `/sys`, another system — the CPU counts as a core of its own on package 0, so the pool has a thread
+/* ⛳ THE TOPOLOGY IN ONE PLACE: a CPU's package and physical core, the system's (`sys__os__cpu_core`). Where they cannot
+ *   be read — a container without `/sys` — the CPU counts as a core of its own on package 0, so the pool has a thread
  *   a free CPU; unread, every CPU would match one unknown core and the pool would be the caller alone. */
 static inline void x86_avx2__zzprivate_core_of(int cpu, int* pkg, int* id) {
-    char path[128];
-    snprintf(path, sizeof path, "/sys/devices/system/cpu/cpu%d/topology/physical_package_id", cpu);
-    *pkg = x86_avx2__zzprivate_read_int(path);
-    snprintf(path, sizeof path, "/sys/devices/system/cpu/cpu%d/topology/core_id", cpu);
-    *id = x86_avx2__zzprivate_read_int(path);
+    sys__os__cpu_core(cpu, pkg, id);
     if (*pkg < 0 || *id < 0) { *pkg = 0; *id = X86_AVX2__ZZPRIVATE_CPUS + cpu; }
 }
 /* The pool's threads' CPUs into `cpus_out`, and their count. On the whole machine the caller's own core is left
  * out, as it always was — it runs blocks too; on a node every free core has a thread, and the caller runs none. */
-static inline uint32_t x86_avx2__zzprivate_size(int* cpus_out, int node, cpu_set_t* own, cpu_set_t* worked) {
+static inline uint32_t x86_avx2__zzprivate_size(int* cpus_out, int node, sys__os__cpus* own, sys__os__cpus* worked) {
     enum { MOST = X86_AVX2__ZZPRIVATE_CPUS };
     static unsigned long long b0[MOST], t0[MOST], b1[MOST], t1[MOST];
     memset(b0, 0, sizeof b0); memset(t0, 0, sizeof t0); memset(b1, 0, sizeof b1); memset(t1, 0, sizeof t1);
-    x86_avx2__zzprivate_ticks(b0, t0, MOST);
+    sys__os__cpu_ticks(b0, t0, MOST);
     const struct timespec nap = { 0, 50 * 1000 * 1000 };
-    nanosleep(&nap, 0);
-    x86_avx2__zzprivate_ticks(b1, t1, MOST);
+    sys__os__sleep(&nap);
+    sys__os__cpu_ticks(b1, t1, MOST);
     /* per physical core (package, core id): its first allowed CPU, and whether every CPU of it is idle */
     int core_cpu[MOST], core_pkg[MOST], core_id[MOST], core_busy[MOST], core_of[MOST], cores = 0;
     for (int cpu = 0; cpu < MOST; ++cpu) core_of[cpu] = -1;
-    for (int cpu = 0; cpu < MOST && cpu < CPU_SETSIZE; ++cpu) {
-        if (!CPU_ISSET(cpu, &x86_avx2__zzprivate_allowed)) continue;
+    for (int cpu = 0; cpu < MOST && cpu < SYS__OS__CPUS_MOST; ++cpu) {
+        if (!sys__os__cpus_has(&x86_avx2__zzprivate_allowed, cpu)) continue;
         if (node >= 0 && x86_avx2__zzprivate_cpu_node[cpu] != node) continue;
         int pkg, id;
         x86_avx2__zzprivate_core_of(cpu, &pkg, &id);
@@ -268,7 +235,7 @@ static inline uint32_t x86_avx2__zzprivate_size(int* cpus_out, int node, cpu_set
                 if (core_pkg[k] == pkg && !core_busy[k] && seen++ == round) order[n++] = core_cpu[k];
         }
     /* on the whole machine, minus the caller's own core; capped by the setting */
-    const int self = node >= 0 ? -1 : sched_getcpu();
+    const int self = node >= 0 ? -1 : sys__os__cpu_now();
     const uint32_t caller = node >= 0 ? 0u : 1u;             /* whether the caller is one of the threads */
     uint32_t workers = 0u;
     const char* cap_s = getenv("SILVANN_CPU_THREADS");
@@ -286,13 +253,13 @@ static inline uint32_t x86_avx2__zzprivate_size(int* cpus_out, int node, cpu_set
     }
     if (caller == 1u && n > 0 && workers + 1u > (uint32_t)n) workers = (uint32_t)n - 1u;
     /* the CPUs of the threads' cores, and on the whole machine those of the caller's own core when it is free */
-    CPU_ZERO(own); CPU_ZERO(worked);
+    sys__os__cpus_clear(own); sys__os__cpus_clear(worked);
     for (uint32_t w = 0u; w < workers; ++w)
-        for (int cpu = 0; cpu < MOST && cpu < CPU_SETSIZE; ++cpu)
-            if (core_of[cpu] >= 0 && core_of[cpu] == core_of[cpus_out[w]]) CPU_SET(cpu, worked);
-    if (self >= 0 && self < MOST && core_of[self] >= 0 && !core_busy[core_of[self]] && !CPU_ISSET(self, worked))
-        for (int cpu = 0; cpu < MOST && cpu < CPU_SETSIZE; ++cpu)
-            if (core_of[cpu] == core_of[self]) CPU_SET(cpu, own);
+        for (int cpu = 0; cpu < MOST && cpu < SYS__OS__CPUS_MOST; ++cpu)
+            if (core_of[cpu] >= 0 && core_of[cpu] == core_of[cpus_out[w]]) sys__os__cpus_add(worked, cpu);
+    if (self >= 0 && self < MOST && core_of[self] >= 0 && !core_busy[core_of[self]] && !sys__os__cpus_has(worked, self))
+        for (int cpu = 0; cpu < MOST && cpu < SYS__OS__CPUS_MOST; ++cpu)
+            if (core_of[cpu] == core_of[self]) sys__os__cpus_add(own, cpu);
     return workers;
 }
 
@@ -302,14 +269,14 @@ static inline x86_avx2__pool* x86_avx2__zzpackage_start(void) {
     const uint32_t device = x86_avx2__zzpackage_device < x86_avx2__zzpackage_devices() ? x86_avx2__zzpackage_device : 0u;
     x86_avx2__pool* p = &x86_avx2__zzprivate_pools[device];
     if (__atomic_load_n(&p->started, __ATOMIC_ACQUIRE)) return p;
-    pthread_mutex_lock(&x86_avx2__zzprivate_pools_lock);
+    sys__os__lock_take(&x86_avx2__zzprivate_pools_lock);
     if (!p->started) {
-        pthread_mutex_init(&p->lock, 0);
-        pthread_cond_init(&p->wake, 0);
+        sys__os__lock_init(&p->lock);
+        sys__os__condition_init(&p->wake);
         p->node = x86_avx2__zzpackage_node_of(device);
         p->workers = x86_avx2__zzprivate_size(p->cpu, p->node, &p->own, &p->worked);
         for (uint32_t i = 0u; i < p->workers; ++i)
-            if (pthread_create(&p->thread[i], 0, x86_avx2__zzprivate_worker, (void*)(uintptr_t)((device << 16) | i)) != 0) { p->workers = i; break; }
+            if (!sys__os__thread_start(&p->thread[i], x86_avx2__zzprivate_worker, (void*)(uintptr_t)((device << 16) | i))) { p->workers = i; break; }
         /* ⛳ `SILVANN_CPU_POOL_REPORT=1` says what was chosen: the size is decided from the machine's load at
          *   the moment of binding, so the one way to know it is to be told. */
         if (getenv("SILVANN_CPU_POOL_REPORT") != 0) {
@@ -320,7 +287,7 @@ static inline x86_avx2__pool* x86_avx2__zzpackage_start(void) {
         }
         __atomic_store_n(&p->started, 1, __ATOMIC_RELEASE);
     }
-    pthread_mutex_unlock(&x86_avx2__zzprivate_pools_lock);
+    sys__os__lock_give(&x86_avx2__zzprivate_pools_lock);
     return p;
 }
 
@@ -350,21 +317,21 @@ static inline void x86_avx2__zzpackage_run(uint32_t blocks, void (*fn)(void*), v
  *   later onto a sibling of a pool thread's core, where two of a launch's runners share a core while another idles: the
  *   placement a bad sizing gave, 131 against 110 ms a 35B token on the CPU alone (`MEASURED`, ▶ the sizing). So a launch
  *   that finds its caller on a pool thread's core moves it to its own for the launch and hands its affinity back after: a
- *   `sched_getcpu` a launch, and a move only when the caller was misplaced (`REASONED`; the case after a good sizing is not
+ *   `sys__os__cpu_now` a launch, and a move only when the caller was misplaced (`REASONED`; the case after a good sizing is not
  *   one this box has been seen to produce). */
-static inline bool x86_avx2__zzprivate_caller_to_own(const x86_avx2__pool* p, cpu_set_t* saved) {
-    if (p->node >= 0 || CPU_COUNT(&p->own) == 0) return false;
-    const int cpu = sched_getcpu();
-    if (cpu < 0 || cpu >= CPU_SETSIZE || !CPU_ISSET(cpu, &p->worked)) return false;
-    return sched_getaffinity(0, sizeof *saved, saved) == 0 && sched_setaffinity(0, sizeof p->own, &p->own) == 0;
+static inline bool x86_avx2__zzprivate_caller_to_own(const x86_avx2__pool* p, sys__os__cpus* saved) {
+    if (p->node >= 0 || sys__os__cpus_count(&p->own) == 0) return false;
+    const int cpu = sys__os__cpu_now();
+    if (cpu < 0 || cpu >= SYS__OS__CPUS_MOST || !sys__os__cpus_has(&p->worked, cpu)) return false;
+    return sys__os__cpus_of_thread(saved) && sys__os__cpus_to_thread(&p->own);
 }
 static inline void x86_avx2__zzprivate_run_body(uint32_t blocks, void (*fn)(void*), void* arg) {
     x86_avx2__pool* p = x86_avx2__zzpackage_start();
     if (blocks == 0u) return;
-    cpu_set_t saved;
+    sys__os__cpus saved;
     const bool moved = p->workers != 0u && blocks > 1u && x86_avx2__zzprivate_caller_to_own(p, &saved);
     x86_avx2__zzprivate_launch(p, blocks, fn, arg);
-    if (moved) (void)sched_setaffinity(0, sizeof saved, &saved);
+    if (moved) (void)sys__os__cpus_to_thread(&saved);
 }
 static inline void x86_avx2__zzprivate_launch(x86_avx2__pool* p, uint32_t blocks, void (*fn)(void*), void* arg) {
     if (p->workers == 0u || blocks == 1u) {
@@ -385,10 +352,10 @@ static inline void x86_avx2__zzprivate_launch(x86_avx2__pool* p, uint32_t blocks
     __atomic_store_n(&p->next, (uint64_t)g << 32, __ATOMIC_RELEASE);
     p->fn = fn; p->arg = arg; p->blocks = blocks;
     __atomic_store_n(&p->done, 0u, __ATOMIC_RELAXED);
-    pthread_mutex_lock(&p->lock);
+    sys__os__lock_take(&p->lock);
     __atomic_store_n(&p->generation, g, __ATOMIC_RELEASE);
-    pthread_cond_broadcast(&p->wake);
-    pthread_mutex_unlock(&p->lock);
+    sys__os__condition_wake_all(&p->wake);
+    sys__os__lock_give(&p->lock);
     if (p->node < 0) x86_avx2__zzprivate_take(p, g);         /* on a node the caller only waits */
     while (__atomic_load_n(&p->done, __ATOMIC_ACQUIRE) < blocks) _mm_pause();
     x86_avx2__zzpackage_block = 0u; x86_avx2__zzpackage_blocks = 1u;

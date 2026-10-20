@@ -4,7 +4,7 @@
 ⚖ ARCHITECT, 2026-09-20: *"build that quant format with the global nf table, fwht row scaler and no
 block scaler."*
 
-⛔⛔ THIS IS A REFERENCE PACKER, NOT THE SHIPPING ONE. `backstage/python/nn_compressor.py` is what packs
+⛔⛔ THIS IS A REFERENCE PACKER, NOT THE SHIPPING ONE. `python/nn_compressor.py` is what packs
 a release; this file exists so the FORMAT has a producer that can be read against the decoder in
 `src/packages/nn/vbr__impl.cuh`, and so the oracle has something to compare.
 
@@ -247,7 +247,7 @@ def pack_row(row, d, k=None):
 #   ⇒ ★ THE VALUABLE PART OF A SECOND IMPLEMENTATION IS THE PART THAT SHARES NO ASSUMPTIONS, and the
 #   layout was never it.
 #
-# ▶ `python/nn_compressor.py` is the producer. `backstage/test/src_device_selftest.py` carries a
+# ▶ `python/nn_compressor.py` is the producer. `test/src_device_selftest.py` carries a
 #   third implementation of the layout, written from the format, for what this file no longer does.
 
 

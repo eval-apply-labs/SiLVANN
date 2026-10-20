@@ -23,7 +23,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 # the runtime beside this file in a release, or the development tree's
-_HERE = ROOT / "runtime" if (ROOT / "runtime").is_dir() else ROOT.parent / "backstage" / "python"
+_HERE = ROOT / "runtime" if (ROOT / "runtime").is_dir() else ROOT.parent / "python"
 sys.path.insert(0, os.environ.get("SILVANN_RUNTIME", str(_HERE)))
 from silvann_runtime.fetch import KNOWN, ensure_model, present     # noqa: E402
 from silvann_runtime.model_folder import Refused                   # noqa: E402
