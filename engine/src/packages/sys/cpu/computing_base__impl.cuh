@@ -820,7 +820,7 @@ static __device__ inline sys__heap_node* sys__computing_base__get(uint32_t block
  * ordinary object, and raising is what makes that visible at the moment it happens rather than as a
  * block that stops making sense some time later.
  * ────────────────────────────────────────────────────────────────────────────────────────────────── */
-static __device__ __noinline__ void sys__computing_base__zzpackage_never_release_internal(sys__heap_node* head,
+static __device__ SYS__NOINLINE void sys__computing_base__zzpackage_never_release_internal(sys__heap_node* head,
                                                                                    uint64_t* releaser_stack) {
     (void)releaser_stack;
     sys__fault__raise(0ull, SYS__HEAP_OBJECT__FAULT_NEVER_ENDS);

@@ -150,7 +150,7 @@ static __device__ inline bool nn__expert__hand_over(uint64_t lf, uint64_t from, 
  * nothing and returns at once; a buffer view moves the object it retained onto the chain the release
  * loop drains. ⛳ IT LETS GO OF NOTHING ITSELF, which is what keeps a chain of nested views from
  * recursing on a device with no stack to spare. */
-static __device__ __noinline__ void nn__weights__zzpackage_release_internal(sys__heap_node* head,
+static __device__ SYS__NOINLINE void nn__weights__zzpackage_release_internal(sys__heap_node* head,
                                                                            uint64_t* releaser_stack);
 
 /* The LRU's two ends of one (layer, type) band, as EXPERT IDS. False when that band holds nothing
@@ -282,12 +282,12 @@ static void nn__loader__zzpackage_stop(void);
  * ⛳ THEY ARE VERBS AND NOT RAW ABI DOORS, AND THE CHOICE WAS MADE FOR US: the page index lives in the
  * device heap, so anything that walks it runs on the card. ⛳ COST, `REASONED`: ~10k experts on the 35B
  * at ~15 µs a settling launch is ~150 ms of one-time load, which is not a hot path. */
-static __device__ __noinline__ void nn__expert__zzpackage_apply_reserve(sys__heap_node* base, uint64_t form);
-static __device__ __noinline__ void nn__expert__zzpackage_apply_assign(sys__heap_node* base, uint64_t form);
-static __device__ __noinline__ void nn__expert__zzpackage_apply_revoke(sys__heap_node* base, uint64_t form);
+static __device__ SYS__NOINLINE void nn__expert__zzpackage_apply_reserve(sys__heap_node* base, uint64_t form);
+static __device__ SYS__NOINLINE void nn__expert__zzpackage_apply_assign(sys__heap_node* base, uint64_t form);
+static __device__ SYS__NOINLINE void nn__expert__zzpackage_apply_revoke(sys__heap_node* base, uint64_t form);
 
 /* ⛳ AND ONE READER, because the handed list is only worth having if somebody can ask it. */
-static __device__ __noinline__ void nn__expert__zzpackage_apply_handed(sys__heap_node* base, uint64_t form);
+static __device__ SYS__NOINLINE void nn__expert__zzpackage_apply_handed(sys__heap_node* base, uint64_t form);
 
 /* ⭐⭐ AND THE WORD THAT MAKES A LAYER EXIST AT ALL, WHICH THE PROTOCOL ABOVE NEEDED AND DID NOT HAVE.
  * ⚖ *"lets keep the indexes for everyone but they'd point at a null subarray"* — the index is sparse, so
@@ -298,7 +298,7 @@ static __device__ __noinline__ void nn__expert__zzpackage_apply_handed(sys__heap
  * loader is the only thing that knows — the count is in the model's file, not on the card.
  * ⛳ It refuses a second stand rather than silently re-making the array: that would strand every expert
  * already recorded in it, with the layer still reading the right width. */
-static __device__ __noinline__ void nn__expert__zzpackage_apply_layer(sys__heap_node* base, uint64_t form);
+static __device__ SYS__NOINLINE void nn__expert__zzpackage_apply_layer(sys__heap_node* base, uint64_t form);
 
 /* ══ ⭐⭐⭐ THE INDEX IS THREE DEEP — `[layer][type][expert]` ══════════════════════════════════════════
  *
@@ -336,7 +336,7 @@ static __device__ __noinline__ void nn__expert__zzpackage_apply_layer(sys__heap_
  * door inside the language would be that same promise made to every program rather than to one host.
  * ⛳ THE `offset` IS WHAT MAKES ONE SLOT HOLD SEVERAL PLANES, which the real bundle requires: an expert
  * is `gate_up` + `down` in one slot, and each is codes then scales at its own offset. ▶ `weight_load.md` §②. */
-static __device__ __noinline__ void nn__expert__zzpackage_apply_plane(sys__heap_node* base, uint64_t form);
+static __device__ SYS__NOINLINE void nn__expert__zzpackage_apply_plane(sys__heap_node* base, uint64_t form);
 
 /* ══ ⭐⭐⭐ `nn__expert__multiply_fp16` — THE MATVEC AT FULL PRECISION ════════════════════════════════
  *

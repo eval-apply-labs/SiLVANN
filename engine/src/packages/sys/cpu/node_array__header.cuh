@@ -159,7 +159,7 @@ static __device__ inline bool       sys__node_array__set(uint64_t array_base, ui
 /* What an array was holding when it died: every element that named an object, moved onto the chain the
  * release loop drains. It lets go of nothing itself — see the paragraph above for why that distinction is
  * what keeps a deep structure from unwinding through the call stack. */
-static __device__ __noinline__ void sys__node_array__zzpackage_release_internal(sys__heap_node* head,
+static __device__ SYS__NOINLINE void sys__node_array__zzpackage_release_internal(sys__heap_node* head,
                                                                           uint64_t* releaser_stack);
 
 /* Building one from a program. It takes one argument — how many elements — so it is expressible with the

@@ -79,6 +79,10 @@ DISK_CHUNK = 1024        # GLM's prompt rows a step with its experts on the disk
 FREED_GB = 1             # a card this much emptier than when a kept choice was made chooses again (`_freed`)
 RULES = 6                # the rules' version, in what a kept choice was made for: a change to them chooses again
 CARD_CONTEXT = 32768     # growing, the experts stay on the card where it holds this much context beside them (NN-93)
+FILES_SHARE = 0.10       # what DeepSeek's experts in RAM leave of what this process may hold, beside the spare: the system's
+                         # own and the files it reads in place (its n-gram tables, its layers mapped from their files).
+                         # MEASURED node03 2026-10-21: with none left, 38 of its 40 layers in RAM filled the swap
+                         # (measurements/2026-10-21_deepseek_chat_node03.md)
 
 
 def refused_by_card(ex):
@@ -363,9 +367,14 @@ def choose(path, max_context, options=None, silicon=None, fresh=False, log=print
 
 
 def model_length(folder):
-    """The longest conversation the model was made for: its configuration's `max_position_embeddings`."""
+    """The longest conversation the model was made for: its configuration's `max_position_embeddings` — or less where its
+    runtime holds less (its architecture's `longest_context`: DeepSeek's, to its candidate blocks)."""
     c = folder.config
-    return int((c.get("text_config") or c).get("max_position_embeddings") or NO_CARD_CONTEXT)
+    length = int((c.get("text_config") or c).get("max_position_embeddings") or NO_CARD_CONTEXT)
+    from . import ARCHITECTURES
+    longest = getattr(ARCHITECTURES.get(folder.architecture), "longest_context", None)
+    held = longest(c) if longest else None
+    return min(length, held) if held else length
 
 
 def _most(p, options, top):
@@ -405,6 +414,22 @@ def _setup(p, ctx, options, takes, grow=False):
             return _most(p, opts, ctx)
         return ctx if p.boots(ctx, opts) else None
 
+    # DeepSeek's experts: on the CPU, the first layers' in RAM and the rest mapped from their files — as many layers in
+    #   RAM as fit beside the server's own memory, the spare and FILES_SHARE (`experts_file.in_ram`'s rule, a layer at a
+    #   time, less the share the files it reads in place need)
+    if "experts_in_ram" in takes and "experts_from" not in options:
+        whole = p.model(MIN_CONTEXT, dict(options, experts_from="ram"))
+        layers, held = len(whole.run_layers), experts_file.limit()
+        a_layer = whole.cpu_arena // layers
+        room = held * (1 - FILES_SHARE) - experts_file.OWN - experts_file.SPARE - video_ram(p.folder.config, p.video_tokens)
+        n = int(max(0, min(layers, room // a_layer)))
+        placed = (dict(options, experts_from="ram") if n == layers else
+                  dict(options, experts_from="mapped", experts_in_ram=n))
+        why = ("the experts on the CPU, in RAM" if n == layers else
+               "the experts on the CPU, %d of %d layers' in RAM and the rest mapped from their files" % (n, layers))
+        got = sized(placed)
+        return None if got is None else (placed, got, why + " (%.1f GB a layer, %.0f GB this process may hold)"
+                                         % (a_layer / 2**30, held / 2**30))
     first = p.model(MIN_CONTEXT if grow else ctx, options)
     moe = bool(getattr(first, "MOE", False)) or "experts_on" not in takes and "card_experts_gb" in takes
     if not moe:

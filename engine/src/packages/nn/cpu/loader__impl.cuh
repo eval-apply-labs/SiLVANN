@@ -4,6 +4,7 @@
 /* What this file needs, named where a reader — and an editor — can follow it. */
 #include "../../../operating_systems/os.cuh"   /* threads, locks, conditions and the clock: the system's */
 #include <stdlib.h>
+#include <string.h>                             /* the slice's copies: memcpy, memset */
 #include "expert__header.cuh"                           /* the index this reads into, and what it publishes */
 #include "../../sys/cpu/silicon/silicon__header.cuh"   /* the family's file_read */
 
@@ -364,6 +365,27 @@ static inline void nn__loader__zzprivate_landed(const nn__loader__read* r) {
     ++nn__loader__zzprivate_count[NN__EXPERT__COUNT_LANDED];
 }
 
+/* ⭐ A PROMOTION HELD UNTIL THE CPUS ARE DONE (NN-99 ④): its gather — a CPU's copy of the expert's pieces into pinned
+ *   staging, 12 MB on GLM — runs beside the sockets' experts for the memory and the cores when it starts at once, and those
+ *   layers ran ~4x slower — that much `MEASURED` (2026-10-21, a rocprof trace of GLM on one MI50 of the ML350: 6 % of
+ *   layers, 23 % of the time). ⚖ *"send the copy over at the end … so it does the write while attention is being
+ *   computed"*: held in WAITING like a half duplex write, let go by `nn__expert_tier__written` — the program's word that
+ *   the CPUs are done — or by anyone who must wait for it to land. `SILVANN_HOLD_PROMOTIONS=1`; OFF, as on the ML350 it
+ *   changed nothing (115.8 against 117.0 ms a token, GLM on one card, 18 GB) — where that card's link is PCIe 3 x8 and a
+ *   promotion's 12 MB take ~2.1 ms at the link's ~6 GB/s. ⛳ To be measured where the DMA is wider (the precision). */
+static bool nn__loader__zzprivate_hold_gathers(void) {
+    static int hold = -1;
+    if (hold < 0) { const char* e = getenv("SILVANN_HOLD_PROMOTIONS"); hold = (e != 0 && e[0] == '1') ? 1 : 0; }
+    return hold == 1;
+}
+/* A held promotion let go now, because someone waits for it. Called with the lock held. */
+static inline void nn__loader__zzprivate_let_go(nn__loader__read* r) {
+    if (r->state != NN__LOADER__WAITING || r->job != NN__LOADER__JOB_GATHER) return;
+    r->state = NN__LOADER__QUEUED;
+    r->seq = ++nn__loader__zzprivate_seq;
+    sys__os__condition_wake_all(&nn__loader__zzprivate_work);
+}
+
 static inline void nn__loader__zzprivate_wait(void) {
     struct timespec a, b;
     sys__os__clock(&a);
@@ -382,6 +404,7 @@ static __device__ inline bool nn__expert__settle(uint64_t layer, uint64_t type) 
         for (unsigned i = 0u; i < NN__EXPERT__FLIGHT_MAX; ++i) {
             nn__loader__read* r = &nn__loader__zzprivate_reads[i];
             if (r->state == NN__LOADER__FREE || !NN__LOADER__ADMITTED(r) || r->owner != owner || r->layer != layer || r->type != type) continue;
+            nn__loader__zzprivate_let_go(r);
             if (r->state == NN__LOADER__QUEUED || r->state == NN__LOADER__READING) { waiting = true; continue; }
             /* done or failed: the index learns of it here, on this thread */
             const bool read = r->state == NN__LOADER__DONE;
@@ -427,7 +450,9 @@ static __device__ inline int nn__expert__promote(sys__silicon_family__id family,
         (void)nn__expert__type_give(type, slot);
         return NN__EXPERT__REFUSED;
     }
-    free_read->state = NN__LOADER__QUEUED;
+    const bool hold = nn__loader__zzprivate_hold_gathers();
+    free_read->state = hold ? NN__LOADER__WAITING : NN__LOADER__QUEUED;
+    free_read->by = owner;
     free_read->predicted = false;
     free_read->owner = owner;
     free_read->family = family;
@@ -438,7 +463,7 @@ static __device__ inline int nn__expert__promote(sys__silicon_family__id family,
     free_read->seq = ++nn__loader__zzprivate_seq;
     free_read->queued_ns = nn__loader__zzprivate_now_ns();
     ++nn__loader__zzprivate_count[NN__EXPERT__COUNT_PROMOTED];
-    sys__os__condition_wake_one(&nn__loader__zzprivate_work);
+    if (!hold) sys__os__condition_wake_one(&nn__loader__zzprivate_work);
     sys__os__lock_give(&nn__loader__zzprivate_lock);
     return NN__EXPERT__ARRIVING;
 }
@@ -479,6 +504,7 @@ static __device__ inline bool nn__expert__settle_one(uint64_t layer, uint64_t ty
     for (;;) {
         nn__loader__read* r = nn__loader__zzprivate_find(owner, layer, type, expert);
         if (r == 0) break;
+        nn__loader__zzprivate_let_go(r);
         if (r->state == NN__LOADER__QUEUED || r->state == NN__LOADER__READING) {
             nn__loader__zzprivate_wait();
             continue;
@@ -574,7 +600,7 @@ static __device__ inline bool nn__expert_tier__of(uint64_t binding, uint64_t lay
         v[NN__EXPERT_TIER__HIDDEN], v[NN__EXPERT_TIER__INTER], v[NN__EXPERT_TIER__UP_LUT], v[NN__EXPERT_TIER__DOWN],
         v[NN__EXPERT_TIER__DOWN_LUT], v[NN__EXPERT_TIER__PARTS], v[NN__EXPERT_TIER__P_UP_LUT], v[NN__EXPERT_TIER__P_DOWN],
         v[NN__EXPERT_TIER__P_DOWN_LUT], v[NN__EXPERT_TIER__GATE_ROW], v[NN__EXPERT_TIER__DOWN_ROW], v[NN__EXPERT_TIER__LANDING],
-        ex[0], ex[1], ex[2], ex[3], v[NN__EXPERT_TIER__SOURCES], v[NN__EXPERT_TIER__TOP_K] };
+        ex[0], ex[1], ex[2], ex[3], v[NN__EXPERT_TIER__SOURCES], v[NN__EXPERT_TIER__TOP_K], 1u, 0u };
     if (t.exclusive > 1u || t.duplex > 1u || (t.exclusive == 1u && t.layers == 0u)) return false;   /* exclusive needs its sources to move */
     if (t.experts == 0u || t.top_k == 0u || t.top_k > t.experts || t.top_k > NN__EXPERT__TIER_K_MAX || t.parts == 0u
      || 5u * t.parts + 1u > NN__EXPERT__GATHER_RUNS || t.inter % t.parts != 0u || t.down_row % t.parts != 0u
@@ -584,6 +610,17 @@ static __device__ inline bool nn__expert_tier__of(uint64_t binding, uint64_t lay
         const sys__heap_node n = sys__node_array__borrow(entry.args[0], NN__EXPERT_TIER__LANDING_LINE);
         if (n.dtype != SYS__KIND__VALUE_INT) return false;
         t.landing_line = n.args[0];
+    }
+    if (sys__node_array__length(entry.args[0]) >= NN__EXPERT_TIER__LENGTH_GROUP) {
+        const sys__heap_node n = sys__node_array__borrow(entry.args[0], NN__EXPERT_TIER__RANKS);
+        if (n.dtype != SYS__KIND__VALUE_INT || n.args[0] == 0u || n.args[0] > NN__EXPERT_TIER__RANKS_MAX
+         || t.exclusive != 0u || (uint64_t)sys__silicon__worker() >= n.args[0]) return false;   /* a group's tier: inclusive, a card's */
+        t.ranks = n.args[0];
+    }
+    if (sys__node_array__length(entry.args[0]) >= NN__EXPERT_TIER__LENGTH_SHARED) {
+        const sys__heap_node n = sys__node_array__borrow(entry.args[0], NN__EXPERT_TIER__SHARED);
+        if (n.dtype != SYS__KIND__VALUE_INT || n.args[0] > t.experts) return false;
+        t.shared = n.args[0];
     }
     *tier = t;
     return true;
@@ -816,7 +853,8 @@ static void nn__loader__zzprivate_release_writes(uint64_t by) {
     bool any = false;
     for (unsigned i = 0u; i < NN__EXPERT__FLIGHT_MAX; ++i) {
         nn__loader__read* r = &nn__loader__zzprivate_reads[i];
-        if (r->state != NN__LOADER__WAITING || r->job != NN__LOADER__JOB_WRITE || r->by != by) continue;
+        if (r->state != NN__LOADER__WAITING || (r->job != NN__LOADER__JOB_WRITE && r->job != NN__LOADER__JOB_GATHER) || r->by != by)
+            continue;
         r->state = NN__LOADER__QUEUED;
         r->seq = ++nn__loader__zzprivate_seq;
         any = true;
@@ -1017,6 +1055,234 @@ static __device__ inline bool nn__expert_tier__visit(sys__silicon_family__id fam
         if (t->exclusive == 1u ? nn__expert_tier__promote(family, t, ids[j], pinned, n_pinned) == NN__EXPERT__ARRIVING
                                : (nn__expert_tier__stitch(t, ids[j], &g)
                                   && nn__expert__promote(family, layer, type, ids[j], &g, pinned, n_pinned) == NN__EXPERT__ARRIVING))
+            ++started;
+    }
+    for (unsigned j = 0u; j < k; ++j) (void)nn__expert__called(layer, type, ids[j], now);
+    return true;
+}
+
+/* ══ ⭐ A POSITION'S PICKS SHARED OUT AMONG A GROUP'S CARDS (NN-99 ②) ══════════════════════════════════════════════════
+ * ⚖ 2026-10-20: *"we see which experts are not on the shared slice and map them each to their gpu, then we see which gpu
+ * has less experts and give it enough experts so it computes the same amount as the others. then we compute the ram
+ * experts and add it all up"*. Every card visits its own tier — each reads only its own index — then posts its picks
+ * and which of them it holds on the board, waits for the others' posts of the same call, and makes the assignment every
+ * card makes from the same posts. ⛳ The board is one, for one group: its cards call it layer by layer in the same order.
+ * Two calls' posts alternate, so a card a call ahead never writes over the one a slower card still reads — it cannot be
+ * two ahead, as it waits for the slower card's post of the call between. */
+typedef struct nn__expert_tier__board {
+    uint64_t gen[NN__EXPERT_TIER__RANKS_MAX];                                     /* a card's last call posted */
+    uint64_t calls[NN__EXPERT_TIER__RANKS_MAX];                                   /* its own count, its thread's */
+    uint64_t ids[2][NN__EXPERT_TIER__RANKS_MAX][NN__EXPERT__TIER_K_MAX];
+    uint8_t  held[2][NN__EXPERT_TIER__RANKS_MAX][NN__EXPERT__TIER_K_MAX];
+    uint64_t promoted[NN__EXPERT_TIER__RANKS_MAX][NN__EXPERT_TIER__RANKS_MAX];    /* each card's count of every card's */
+    uint64_t computed[NN__EXPERT_TIER__RANKS_MAX][NN__EXPERT_TIER__RANKS_MAX];    /* and of every card's picks computed */
+} nn__expert_tier__board;
+static nn__expert_tier__board nn__expert_tier__zzprivate_board;
+
+/* ⭐ A CARD'S VIEW OF EVERY LAYER'S SHARED SLICE (▶ SHARED) — each card keeps its own, made from the same shared picks and
+ * the same counts in the same order, so every card's is the same; its own thread alone writes it. */
+#define NN__EXPERT_TIER__NO_KEEPER 0xFFu
+typedef struct nn__expert_tier__slice {
+    uint64_t layers, experts;
+    uint32_t* count;                     /* [layer · experts + e]: picks, halved at every choice */
+    uint64_t* visits;                    /* [layer] */
+    uint8_t* in;                         /* 1: in the layer's slice */
+    uint8_t* keeper;                     /* the card an expert held outside the slice is computed by, or NO_KEEPER */
+} nn__expert_tier__slice;
+static nn__expert_tier__slice nn__expert_tier__zzprivate_slices[NN__EXPERT_TIER__RANKS_MAX];
+
+static nn__expert_tier__slice* nn__expert_tier__zzprivate_slice(uint32_t me, uint64_t experts) {
+    nn__expert_tier__slice* v = &nn__expert_tier__zzprivate_slices[me];
+    if (v->count != 0) return v->experts == experts ? v : 0;
+    const uint64_t layers = nn__expert__index_layers(), n = layers * experts;
+    if (layers == 0ull) return 0;
+    v->count = (uint32_t*)calloc(n, sizeof(uint32_t));
+    v->visits = (uint64_t*)calloc(layers, sizeof(uint64_t));
+    v->in = (uint8_t*)calloc(n, 1u);
+    v->keeper = (uint8_t*)malloc(n);
+    if (v->count == 0 || v->visits == 0 || v->in == 0 || v->keeper == 0) {
+        free(v->count); free(v->visits); free(v->in); free(v->keeper);
+        v->count = 0; return 0;
+    }
+    memset(v->keeper, NN__EXPERT_TIER__NO_KEEPER, n);
+    v->layers = layers; v->experts = experts;
+    return v;
+}
+
+/* The layer's slice chosen again: its `shared` most picked (the lowest numbered at a tie), the counts halved. An expert
+ * leaving it is kept by the card with the fewest picks computed so far, the lowest numbered at a tie. */
+static void nn__expert_tier__zzprivate_choose(nn__expert_tier__slice* v, uint64_t layer, uint64_t shared, uint32_t ranks,
+                                              const uint64_t* computed) {
+    const uint64_t E = v->experts;
+    uint32_t* c = v->count + layer * E;
+    uint8_t* in = v->in + layer * E;
+    uint8_t* keeper = v->keeper + layer * E;
+    uint32_t least = 0u;
+    for (uint32_t r = 1u; r < ranks; ++r) if (computed[r] < computed[least]) least = r;
+    uint8_t* was = (uint8_t*)malloc(E);
+    if (was == 0) return;
+    memcpy(was, in, E);
+    memset(in, 0, E);
+    for (uint64_t taken = 0u; taken < shared; ++taken) {
+        uint64_t best = E;
+        for (uint64_t e = 0u; e < E; ++e)
+            if (!in[e] && c[e] != 0u && (best == E || c[e] > c[best])) best = e;
+        if (best == E) break;
+        in[best] = 1u;
+    }
+    for (uint64_t e = 0u; e < E; ++e) {
+        if (was[e] && !in[e]) keeper[e] = (uint8_t)least;
+        if (in[e]) keeper[e] = NN__EXPERT_TIER__NO_KEEPER;
+        c[e] >>= 1;
+    }
+    free(was);
+}
+
+/* Card `me` of `ranks` posts its `k` picks and which it holds, and waits for every other card's post of the same call;
+ * false when one never comes, or routed the position otherwise — the cards would sum different experts. `ids` and
+ * `held` come back every card's, card by card. */
+static inline bool nn__expert_tier__zzprivate_share(uint32_t me, uint32_t ranks, unsigned k, const uint64_t* ids,
+                                                   const bool* held, uint8_t all_held[][NN__EXPERT__TIER_K_MAX]) {
+    nn__expert_tier__board* b = &nn__expert_tier__zzprivate_board;
+    const uint64_t call = ++b->calls[me], at = call & 1u;
+    for (unsigned j = 0u; j < k; ++j) { b->ids[at][me][j] = ids[j]; b->held[at][me][j] = held[j] ? 1u : 0u; }
+    __atomic_store_n(&b->gen[me], call, __ATOMIC_RELEASE);
+    for (uint32_t r = 0u; r < ranks; ++r) {
+        if (r == me) continue;
+        if (__atomic_load_n(&b->gen[r], __ATOMIC_ACQUIRE) < call) {
+            struct timespec t0, t;
+            sys__os__clock(&t0);
+            for (uint32_t spin = 1u; __atomic_load_n(&b->gen[r], __ATOMIC_ACQUIRE) < call; ++spin) {
+                if (spin < 256u) continue;
+                sys__os__yield();
+                if ((spin & 1023u) != 0u) continue;
+                sys__os__clock(&t);
+                if ((uint64_t)(t.tv_sec - t0.tv_sec) > (uint64_t)NN__EXPERT_TIER__PATIENCE) return false;
+            }
+        }
+    }
+    for (uint32_t r = 0u; r < ranks; ++r)
+        for (unsigned j = 0u; j < k; ++j) {
+            if (b->ids[at][r][j] != ids[j]) return false;
+            all_held[r][j] = b->held[at][r][j];
+        }
+    return true;
+}
+
+/* A group's tier's visit (▶ the board): which of the position's picks THIS card computes (`mine`) and which some card
+ * does (`any`, marked held for the CPUs), and whether this card adds the model's shared expert (`shared_here`). In order:
+ * a pick outside the slice that cards hold is its keeper's where the keeper holds it, else the one of them with the
+ * fewest so far — which keeps it from then on; then the slice's picks that cards hold and the shared expert, one at a
+ * time to the card with the fewest of those that can (the lowest numbered at a tie); a pick none holds is the CPUs', and
+ * the card with the fewest — then the one the fewest promotions were given so far — is the one that may promote it, by
+ * the tier's own qualifier and landing; and every card not holding a pick of the slice promotes it. Every card counts
+ * every card's picks and promotions the same way, so their assignments never part. A card touches only what it computes
+ * and the slice it holds, so a copy no longer computed there ages out. */
+static __device__ inline bool nn__expert_tier__visit_group(sys__silicon_family__id family, const nn__expert_tier* t,
+                                                           const uint64_t* ids, bool* mine, bool* any, bool* shared_here) {
+    const uint64_t layer = t->layer, type = t->type, E = t->experts;
+    const unsigned k = (unsigned)t->top_k;
+    const uint32_t ranks = (uint32_t)t->ranks, me = (uint32_t)sys__silicon__worker();
+    const bool fed = t->sources != 0ull;
+    if (fed) (void)nn__expert__settle_ready(layer, type);
+    const uint64_t now = nn__expert__tick();
+    bool held[NN__EXPERT__TIER_K_MAX];
+    uint64_t pinned[NN__EXPERT__TIER_K_MAX];
+    unsigned n_pinned = 0u, hits = 0u;
+    for (unsigned j = 0u; j < k; ++j) {
+        sys__heap_node e;
+        if (ids[j] >= E || !nn__expert__slot(layer, type, ids[j], &e)) return false;
+        held[j] = e.args[NN__EXPERT__SLOT_AT] != 0ull;
+        if (held[j]) pinned[n_pinned++] = ids[j];
+    }
+    uint8_t all[NN__EXPERT_TIER__RANKS_MAX][NN__EXPERT__TIER_K_MAX];
+    if (!nn__expert_tier__zzprivate_share(me, ranks, k, ids, held, all)) return false;
+    nn__expert_tier__slice* v = t->shared != 0u ? nn__expert_tier__zzprivate_slice(me, E) : 0;
+    if (t->shared != 0u && (v == 0 || layer >= v->layers)) return false;
+    uint64_t* computed = nn__expert_tier__zzprivate_board.computed[me];          /* this card's count of every card's */
+    uint8_t* in = v != 0 ? v->in + layer * E : 0;
+    uint8_t* keeper = v != 0 ? v->keeper + layer * E : 0;
+    uint32_t load[NN__EXPERT_TIER__RANKS_MAX] = {}, owner_of[NN__EXPERT__TIER_K_MAX], promoter[NN__EXPERT__TIER_K_MAX];
+    for (unsigned j = 0u; j < k; ++j) { owner_of[j] = ranks; promoter[j] = ranks; }
+    /* the picks outside the slice that cards hold: their keeper's, or the least loaded holder, who keeps them */
+    for (unsigned j = 0u; j < k; ++j) {
+        if (in != 0 && in[ids[j]]) continue;
+        uint32_t best = ranks;
+        const uint32_t kept = keeper != 0 ? keeper[ids[j]] : NN__EXPERT_TIER__NO_KEEPER;
+        if (kept < ranks && all[kept][j]) best = kept;
+        else for (uint32_t r = 0u; r < ranks; ++r)
+            if (all[r][j] && (best == ranks || load[r] < load[best])) best = r;
+        if (best == ranks) continue;
+        owner_of[j] = best; ++load[best];
+        if (keeper != 0) keeper[ids[j]] = (uint8_t)best;
+    }
+    /* the slice's picks that cards hold, then the model's shared expert — any card's — one at a time to the fewest */
+    for (unsigned j = 0u; in != 0 && j < k; ++j) {
+        if (!in[ids[j]]) continue;
+        uint32_t best = ranks;
+        for (uint32_t r = 0u; r < ranks; ++r)
+            if (all[r][j] && (best == ranks || load[r] < load[best])) best = r;
+        if (best == ranks) continue;
+        owner_of[j] = best; ++load[best];
+    }
+    if (shared_here != 0) {
+        uint32_t best = 0u;
+        for (uint32_t r = 1u; r < ranks; ++r) if (load[r] < load[best]) best = r;
+        *shared_here = best == me;
+        ++load[best];
+    }
+    for (unsigned j = 0u; j < k; ++j) {
+        any[j] = owner_of[j] < ranks;
+        mine[j] = owner_of[j] == me;
+        if (mine[j]) ++hits;
+        if (held[j] && (mine[j] || (in != 0 && in[ids[j]]))) (void)nn__expert__touch(layer, type, ids[j]);
+    }
+    uint64_t* promoted = nn__expert_tier__zzprivate_board.promoted[me];          /* this card's count of every card's */
+    for (unsigned j = 0u; j < k; ++j) {
+        if (any[j]) continue;
+        uint32_t best = 0u;
+        for (uint32_t r = 1u; r < ranks; ++r)
+            if (load[r] < load[best] || (load[r] == load[best] && promoted[r] < promoted[best])) best = r;
+        promoter[j] = best;
+        ++promoted[best];
+    }
+    for (uint32_t r = 0u; r < ranks; ++r) computed[r] += load[r];
+    /* the slice: this layer's picks counted, and chosen again every SLICE_EVERY visits */
+    if (v != 0) {
+        for (unsigned j = 0u; j < k; ++j) ++v->count[layer * E + ids[j]];
+        if (++v->visits[layer] % NN__EXPERT_TIER__SLICE_EVERY == 0u)
+            nn__expert_tier__zzprivate_choose(v, layer, t->shared, ranks, computed);
+    }
+    {
+        const uint64_t owner = nn__expert__zzpackage_owner();
+        sys__os__lock_take(&nn__loader__zzprivate_lock);
+        nn__loader__zzprivate_count[NN__EXPERT__COUNT_PICKS] += k;
+        nn__loader__zzprivate_count[NN__EXPERT__COUNT_HITS] += hits;
+        for (unsigned j = 0u; j < k; ++j)
+            if (!held[j] && nn__loader__zzprivate_find(owner, layer, type, ids[j]) != 0)
+                ++nn__loader__zzprivate_count[NN__EXPERT__COUNT_PICKED_ARRIVING];
+        sys__os__lock_give(&nn__loader__zzprivate_lock);
+    }
+    /* this card's promotions: the picks no card holds that fell to it, by the qualifier, and the slice's it does not hold
+     *   — the best first (▶ `nn__expert_tier__visit`) */
+    const unsigned land = hits > t->landing_line ? 1u : (unsigned)t->landing;
+    unsigned cand[NN__EXPERT__TIER_K_MAX];
+    uint64_t score[NN__EXPERT__TIER_K_MAX];
+    unsigned n_cand = 0u;
+    for (unsigned j = 0u; j < k && fed && land > 0u; ++j) {
+        const bool sliced = in != 0 && in[ids[j]] && !held[j];
+        if (!sliced && (promoter[j] != me || !nn__expert__qualifies(layer, type, ids[j]))) continue;
+        uint64_t sc = 0ull;
+        (void)nn__expert__zzpackage_older(layer, type, ids[j], &sc);
+        unsigned at = n_cand++;
+        while (at > 0u && score[at - 1u] < sc) { cand[at] = cand[at - 1u]; score[at] = score[at - 1u]; --at; }
+        cand[at] = j; score[at] = sc;
+    }
+    unsigned started = 0u;
+    for (unsigned c = 0u; c < n_cand && started < land; ++c) {
+        nn__expert__gather g;
+        if (nn__expert_tier__stitch(t, ids[cand[c]], &g)
+         && nn__expert__promote(family, layer, type, ids[cand[c]], &g, pinned, n_pinned) == NN__EXPERT__ARRIVING)
             ++started;
     }
     for (unsigned j = 0u; j < k; ++j) (void)nn__expert__called(layer, type, ids[j], now);

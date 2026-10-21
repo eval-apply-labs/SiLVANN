@@ -21,6 +21,11 @@ whole number of rotation blocks in two equal parts, so two sockets need parts of
 
 Every matrix is a TurboQuant record rotated along its input, so each gemv is handed its input rotated; the lossless ones
 (d = 16: the routers, the maps, the norms, the sinks) take it as it is.
+
+⭐ THE STREAMS ARE FLOATS — and the collapse a site norms, and the head's: a sink token's pass fp16's range (the
+begin-of-sentence token's largest |stream| 48,104 after layer 20, 307,505 after layer 39 in the model's own code,
+`MEASURED` node03 2026-10-21, measurements/2026-10-21_deepseek_streams_fp32_node03.md), which DeepSeek's bf16 holds and a
+half does not. A sublayer's input is normed before it is a half, and its output is added to the streams as a float.
 """
 import os
 import pickle
@@ -62,6 +67,25 @@ def angles(n, rot, theta, original=0, factor=1.0, beta_fast=32, beta_slow=1):
 class DeepSeek4(Generates):
     PROGRAM = ("sampling", "generate")       # the model folder's lisp/ files (▶ `ModelFolder.program`)
     SAMPLES_ON_CARD = True
+    # ⛳ AN ANSWER A TOKEN AT A TIME FROM THE HOST: the n-gram memory's rows are hashed and read on the host before each
+    #   position (`engram_rows`), which `generate`'s loop on the card would leave the last position's — so a session steps
+    #   every token (▶ session.py's `GENERATES`)
+    GENERATES = False
+    # a conversation brought back reads its tokens again: the state it leaves on the card (each layer's ring, the
+    #   compressed latents and their index keys) is not read off yet (▶ session.py's `PARKS`)
+    PARKS = False
+
+    @staticmethod
+    def longest_context(config):
+        """The longest conversation this runtime holds: past `candidate_topk_blocks · candidate_block_size` latents, an
+        index source after the candidate source scores inside the candidate blocks, which are not here yet (▶ the refusal
+        in `__init__`) — None where no layer reaches them."""
+        layers, cand = int(config["num_hidden_layers"]), int(config.get("candidate_source_layer_id", -1))
+        reach = int(config.get("candidate_topk_blocks", 0)) * int(config.get("candidate_block_size", 0))
+        index = list(config["index_source_layer_ids"])
+        most = [reach * r + r - 1 for l, r in enumerate(list(config["compress_ratios"])[:layers])
+                if r and 0 <= cand < max((s for s in index if s <= l), default=-1)]
+        return min(most) if most else None
 
     def __init__(self, folder, machine, max_context=512, layers=None, experts_int8=True, engram_from=None,
                  experts_from="ram", experts_in_ram=0, experts_dir=None, socket=None, card=0, cards=None,
@@ -163,6 +187,12 @@ class DeepSeek4(Generates):
             raise Refused("card_experts is 0 .. %d, not %d" % (self.EXPERTS, self.NK))
         self.experts_dir = experts_dir or os.path.join(folder.path, "experts")
         self._plan()
+        # ⭐ A MASK, where the folder's LoRA is one (▶ `nn_rank1_mask_from_projection.py`): `W' = W + Σ r_i·v_iᵀ` beside wo_b
+        #   and the shared expert's down, each a site's cells past its table (▶ the package's AI_DEEPSEEK_4__MASK__* and
+        #   `_mask_layout`). Chosen at boot.
+        self.active_lora = folder.lora if b.mask is not None else None
+        self._lora_cache = {}
+        self._mask_layout()
 
     def indexer(self, l):
         """The layer whose selection of latents layer `l` attends past `index_topk`: the last index source at or before it."""
@@ -307,7 +337,8 @@ class DeepSeek4(Generates):
         big = max(8 << 20, self.max_context * self.RD * 4, self.VOCAB * 2)
         out = {}
         for k in range(self.P):
-            out[k] = self._section(big, self.ARENAS[k], self.COLLECTIONS[k], kinds)
+            ask = self.MASK_ASK.get(k, 0)
+            out[k] = self._section(max(big, ask), self.ARENAS[k], self.COLLECTIONS[k], kinds, bigs=4 if ask else 3)
             out[k] += ("nn__ram_buffer_result__size_bytes:64\nnn__ram_buffer_result__qty:1\n"
                        "nn__ram_buffer_experts__size_bytes:64\nnn__ram_buffer_experts__qty:1\n"
                        "nn__ram_buffer_table__size_bytes:%d\nnn__ram_buffer_table__qty:1\n" % (self.TABLE_BYTES if k == 0 else 256))
@@ -319,7 +350,7 @@ class DeepSeek4(Generates):
     # ── ② the load ───────────────────────────────────────────────────────────────────────────────────────────
     def load(self, progress=None):
         m, b = self.m, self.b
-        self.ring_at, self.CB = {}, {}
+        self.ring_at, self.CB, self.MASK_CELLS = {}, {}, {}
         for k in range(self.P):
             m.act_as(k)
             loader = m.loader()
@@ -349,6 +380,7 @@ class DeepSeek4(Generates):
             if loader.handed() != 0:
                 raise Refused("card %d: %d slots were reserved and never published" % (k, loader.handed()))
             self._card_buffers(k)
+            self._mask_buffers(k)
         self.head_data = self.head_lut = self.emb_data = self.emb_lut = None
         self._load_experts(progress)
         m.act_as(self.CPU)
@@ -367,6 +399,7 @@ class DeepSeek4(Generates):
         m.act_as(CARD)
         m.define_programs(self._procedures)
         self.global_ = None
+        self.b.release()                            # every layer's file let go (▶ `Bundle.release`)
 
     def _card_pieces(self, view, l, x, k):
         """Card `k`'s part of expert `x` of layer `l` as its slot's pieces: rows I_AT[k] .. + I_OF[k] of gate and up and
@@ -450,9 +483,10 @@ class DeepSeek4(Generates):
         m.buffer(H * 2, n("signs_row"), _half(np.tile(signs[:512], H // 512)))
         m.buffer(H * 2, n("fnw"), _half(final_w))
         m.buffer(H * 2, n("zero_h"), _half(np.zeros(H)))
-        cb["streams"] = m.buffer(self.MULT * H * 2, n("streams"))
-        for nm in ("u", "hu", "e", "hm", "hn", "hnr", "routed"):
+        cb["streams"] = m.buffer(self.MULT * H * 4, n("streams"))
+        for nm in ("u", "hu", "e", "hn", "hnr", "routed"):
             cb[nm] = m.buffer(H * 2, n(nm))
+        cb["hm"] = m.buffer(H * 4, n("hm"))             # the head's collapse, floats like the streams
         # the two sites' mixes, handed from one site to the next, and the first layer's one-hot `pre`
         cb["mixa"] = m.buffer(MIX_BYTES, n("mixa"))
         cb["mixb"] = m.buffer(MIX_BYTES, n("mixb"))
@@ -463,10 +497,8 @@ class DeepSeek4(Generates):
         cb["mix_in"] = m.buffer(MIX_BYTES, n("mix_in"), first.tobytes())
         if self.P > 1:
             # the group's sums land here, and nothing else writes it (▶ ai_deepseek_4's `zzprivate_tp`); every card past the
-            # first starts a position's streams from zeros, which card 0's embedding is added to (`_procedures`)
+            # first takes a position's embedding as the group's sum of its zeros and card 0's (`_procedures`)
             cb["tsum"] = m.buffer(H * 2, n("tsum"))
-            if k > 0:
-                m.buffer(self.MULT * H * 2, n("zstreams"), _half(np.zeros(self.MULT * H)))
         if k == 0:
             m.buffer(64, "weights")
             m.buffer(64, "res")
@@ -484,9 +516,9 @@ class DeepSeek4(Generates):
                     m.buffer(4 * (self.TOPK_C + 1), n("isel%d" % l))
         m.buffer(self.QH * (self.W + self.TOPK_C) * 4, n("scores"))
         QW, ON, I = self.QH * self.HD, self.G * self.OR, self.MINTER
-        m.buffer(2 * (4 * H + 3 * self.QR + self.HD + 3 * QW + 2 * ON + 4 * self.HD + self.ID + self.IH * self.ID + self.IH) + 256,
+        m.buffer(2 * (5 * H + 3 * self.QR + self.HD + 3 * QW + 2 * ON + 4 * self.HD + self.ID + self.IH * self.ID + self.IH) + 256,
                  n("ascratch"))
-        m.buffer(2 * (3 * H + self.EXPERTS) + 8 * I + 256, n("mscratch"))
+        m.buffer(2 * (4 * H + self.EXPERTS) + 8 * I + 256, n("mscratch"))
         cb["hand"] = m.buffer(2 * (H + self.TOPK), n("hand"))
         if self.NK:
             m.buffer(8 * self.TOPK * self.MINTER, n("kscratch"))
@@ -540,6 +572,67 @@ class DeepSeek4(Generates):
     def rng(self, buf, at, n):
         return "(nn__vector__range %s %d %d)" % (buf, at, n)
 
+    # ── a mask (▶ `nn_rank1_mask_from_projection.py`) ─────────────────────────────────────────────────────────
+    def _mask_layout(self):
+        """Where each card keeps the mask's tensors: every card the whole of each site's `r` and its own columns of `v` — at
+        the attention its groups' part of wo_b's input, at the shared expert its part of the inner width, whole rotation
+        blocks both — so a card's mask is a partial the group's sum adds as it adds the matrix's. `MASK_PLACE[(card, l,
+        site)]` the two tensors' (start, count) in halves, after the scratch the verbs' dots take; `MASK_ASK` each card's
+        buffer's request."""
+        self.MASK_PLACE, self.MASK_ASK, self._mask_data = {}, {}, {}
+        if self.b.mask is None:
+            return
+        from safetensors.numpy import load_file
+        t = load_file(self.b.mask["path"])
+        for key in t:
+            parts = key.split(".")
+            if len(parts) != 4 or parts[0] != "layers" or parts[2] not in ("attn", "shared") or parts[3] not in ("r", "v"):
+                raise Refused("the mask's %s is not wo_b's or the shared expert's down, which DeepSeek-V4.1 masks" % key)
+        self._mask_scratch = 256                               # the dots: a float a row of `v`
+        cuts = lambda k: {"attn": (k * self.GC * self.OR, (k + 1) * self.GC * self.OR, self.G * self.OR),
+                          "shared": (self.I_AT[k], self.I_AT[k] + self.I_OF[k], self.MINTER)}
+        for k in range(self.P):
+            at = self._mask_scratch
+            for l in self.run_layers:
+                for site, (a, z, whole) in cuts(k).items():
+                    name = "layers.%d.%s" % (l, site)
+                    if name + ".r" not in t:
+                        continue
+                    r, v = t[name + ".r"], t[name + ".v"]
+                    if r.ndim != 2 or v.ndim != 2 or r.shape != (v.shape[0], self.H) or v.shape[1] != whole \
+                            or not 1 <= v.shape[0] <= 8:
+                        raise Refused("the mask's layer %d %s is %s and %s, where this model's is (rank, %d) and (rank, %d)"
+                                      % (l, site, r.shape, v.shape, self.H, whole))
+                    place = []
+                    for x in (r, np.ascontiguousarray(v[:, a:z])):
+                        place.append((at // 2, x.size))
+                        at += (2 * x.size + 255) & ~255
+                    self.MASK_PLACE[(k, l, site)] = place
+                    self._mask_data[(k, l, site)] = (r, v[:, a:z])
+            if any(p[0] == k for p in self.MASK_PLACE):
+                self.MASK_ASK[k] = max(at, (4 << 20) + 256)
+
+    def _mask_buffers(self, k):
+        """Card `k`'s mask buffer, filled, and each of its sites' three cells: views of its `r`, its `v` and the scratch."""
+        if not self.MASK_ASK.get(k):
+            return
+        name = self.sfx("mk", k)
+        base = self.m.buffer(self.MASK_ASK[k], name)
+        for (k_, l, site), place in self.MASK_PLACE.items():
+            if k_ != k:
+                continue
+            for (start, _), x in zip(place, self._mask_data[(k, l, site)]):
+                self.m.write(base + 2 * start, np.ascontiguousarray(x, dtype="<f2").tobytes())
+            self.MASK_CELLS[(k, l, site)] = [self.rng(name, *place[0]), self.rng(name, *place[1]),
+                                             self.rng(name, 0, self._mask_scratch // 2)]
+
+    def _masked(self, k, l, site):
+        """A table's mask cells for card `k`'s site of layer `l`: none where the model has no mask, an integer 0 where it
+        leaves this site alone."""
+        if self.b.mask is None:
+            return []
+        return list(self.MASK_CELLS.get((k, l, site), [0]))
+
     def _tables(self, k):
         """Card `k`'s ai_deepseek_4 plane tables: a layer's attention site (`at`), its MoE site (`mo`) — its own heads, groups
         and inner width under tensor parallelism — and, with card 0's, the CPU's experts' (`ex`). ▶ the package's
@@ -558,13 +651,13 @@ class DeepSeek4(Generates):
                     + [data(l, s + "q_norm.weight"), data(l, s + "kv_norm.weight"), data(l, s + "attn_sink"), self.ring(l),
                        n("angles_c") if self.RATIO[l] else n("angles"), n("scores"), n("signs"), n("ascratch")]
                     + head + [self.QHC, self.HD, self.RD, self.QR, self.OR, self.GC, self.W] + [d(l, x) for x in mats]
-                    + [self.EPS, self.HC_EPS] + self._compressed(l, k))
+                    + [self.EPS, self.HC_EPS] + self._compressed(l, k) + self._masked(k, l, "attn"))
             mats = ["mlp.shared_experts.%s_proj.weight" % x for x in ("gate", "up", "down")]
             m.table(n("mo%d" % l), hc(l, "ffn") + [data(l, "post_attention_layernorm.weight"), n("mixb"), n("mixa"),
                                                    data(l, "mlp.gate.weight"), data(l, "mlp.gate.e_score_correction_bias")]
                     + [c for x in mats for c in pair(l, x)] + [n("signs"), n("mscratch")]
                     + head + [self.EXPERTS, self.TOPK, self.I_OF[k]] + [d(l, x) for x in mats]
-                    + [self.EPS, self.HC_EPS, self.RSCALE, self.LIMIT])
+                    + [self.EPS, self.HC_EPS, self.RSCALE, self.LIMIT] + self._masked(k, l, "shared"))
         for l in self.run_layers:
             if l in self.ENGRAM:
                 m.table(n("en%d" % l), [n("eng%d" % l)] + pair(l, "engram.wkv.weight") + [n("engw%d" % l), n("signs"), n("escratch")]
@@ -649,10 +742,9 @@ class DeepSeek4(Generates):
                 "(nn__vector__range EMBEDDING (+ %d tok) 1) u 1 %d %d) (nn__hadamard__rotate u ones512 hu %d) "
                 "(nn__vector__pointwise_mul hu signs_row e %d)))"
                 % (self.EMB_ROW_BYTES // 2, self.EMB_ROW_BYTES // 2, self.EMB_DATA_BYTES // 2, H, self.EMB_BITS, H, H))
-        m.defun("(defun (embed tok) (begin (embed_e tok) %s (type e)))"
-                % " ".join("(nn__vector__add e zero_h %s %d)" % (self.rng("streams", j * H, H), H) for j in range(self.MULT)))
+        m.defun("(defun (embed tok) (begin (embed_e tok) %s (type e)))" % self._spread(0))
         # the head: the streams collapsed by the last site's mix (the model's `hc_pre` before its norm), the norm, the logits
-        logits = ("(nn__hyper__collapse streams mixb hm %d %d) (nn__rmsnorm__apply hm fnw hn %d %r) "
+        logits = ("(nn__hyper__collapse_fp32 streams mixb hm %d %d) (nn__rmsnorm__apply_fp32 hm fnw hn %d %r) "
                   "(nn__hadamard__rotate hn signs hnr %d) "
                   "(nn__turboquant__gemv (nn__expert__plane 0 %d 0 %d %d) (nn__expert__plane 0 %d 0 %d %d) hnr logits_h %d %d %d)"
                   % (H, self.MULT, H, self.EPS, H, self.T_HEAD, self.HPLAN.at_up_data, self.HPLAN.up_data, self.T_HEAD,
@@ -666,14 +758,13 @@ class DeepSeek4(Generates):
         for l in self.run_layers:
             m.picture("xf%d_0" % l, "(begin (nn__buffer__copy hand %d c_hand %d) (ai_deepseek_4__experts c_hand picks ex%d_0 c_routed))"
                       % (CARD, 2 * (self.H + self.TOPK), l))
-        # ⭐ EVERY OTHER CARD OF THE GROUP: its layers, a picture — from card 0's embedding (`tp_first`: its streams zeros, the
-        #   group's reduce of them with card 0's the embedding on every card) or from the streams already there (`tp_given`)
-        MH = self.MULT * H
+        # ⭐ EVERY OTHER CARD OF THE GROUP: its layers, a picture — from card 0's embedding (`tp_first`: the group's reduce of
+        #   its zeros with card 0's embedding, into every stream) or from the streams already there (`tp_given`)
         for k in range(1, self.P):
             m.act_as(k)
             n = lambda name: self.sfx(name, k)
-            m.picture(n("tp_first"), "(begin (nn__partials__reduce GROUP %s %s %d) %s (type %s))"
-                      % (n("zstreams"), n("streams"), MH, self._tp_layers(k), n("streams")))
+            m.picture(n("tp_first"), "(begin (nn__partials__reduce GROUP %s %s %d) %s %s (type %s))"
+                      % (n("zero_h"), n("e"), H, self._spread(k), self._tp_layers(k), n("streams")))
             m.picture(n("tp_given"), "(begin %s (type %s))" % (self._tp_layers(k), n("streams")))
         m.act_as(CARD)
         m.view("names")
@@ -688,8 +779,14 @@ class DeepSeek4(Generates):
         wait = " ".join("(sys__result %d)" % k for k in range(1, self.P))
         m.defun("(defun (layers pos) (begin (sys__node_array__set TP_POS 0 pos) %s %s %s (type streams)))"
                 % (start("tp_given"), lays, wait))
-        m.defun("(defun (position tok pos) (begin (sys__node_array__set TP_POS 0 pos) %s (embed tok) "
-                "(nn__partials__reduce GROUP streams streams %d) %s %s (type streams)))" % (start("tp_first"), MH, lays, wait))
+        m.defun("(defun (position tok pos) (begin (sys__node_array__set TP_POS 0 pos) %s (embed_e tok) "
+                "(nn__partials__reduce GROUP e e %d) %s %s %s (type streams)))" % (start("tp_first"), H, self._spread(0), lays, wait))
+
+    def _spread(self, k):
+        """Card `k`'s embedding `e` (halves) into every one of its streams (floats)."""
+        H, n = self.H, lambda name: self.sfx(name, k)
+        return " ".join("(nn__vector__widen %s %s %d)" % (n("e"), self.rng(n("streams"), 2 * j * H, 2 * H), H)
+                        for j in range(self.MULT))
 
     # ── ④ running ─────────────────────────────────────────────────────────────────────────────────────────────
     def reset(self):
@@ -744,10 +841,10 @@ class DeepSeek4(Generates):
     def forward(self, pos, token=None, x=None, mix=None, head=False):
         """One position through this stage's layers: the token embedded (the first stage) or what the stage before handed on
         (`x`), then the next token (the last stage) or what to hand on. ⭐ WHAT CROSSES BETWEEN STAGES IS ONE BLOB — the
-        streams (MULT·H halves), the mix the stage before ended on (MIX_BYTES) and the position's token (8 bytes), which the
+        streams (MULT·H floats), the mix the stage before ended on (MIX_BYTES) and the position's token (8 bytes), which the
         n-gram memory hashes — so a ring (▶ `pipeline`) carries it as any model's residual. `x` and `mix` apart are taken
         too."""
-        m, SB = self.m, self.MULT * self.H * 2
+        m, SB = self.m, self.MULT * self.H * 4
         if x is not None and mix is None:
             x, mix, given = x[:SB], x[SB:SB + MIX_BYTES], int(np.frombuffer(x[SB + MIX_BYTES:SB + MIX_BYTES + 8], "<i8")[0])
             token = given if token is None else token
@@ -782,26 +879,42 @@ class DeepSeek4(Generates):
         finally:
             self.m.act_as(CARD)
 
+    def state_regions(self, length, where=None):
+        """Nothing a conversation leaves on the card is read off (`PARKS` False): one brought back reads its tokens again."""
+        return []
+
     def streams(self):
-        return np.frombuffer(self.m.read(self.STREAMS_AT, self.MULT * self.H * 2), dtype="<f2").astype(np.float32)
+        return np.frombuffer(self.m.read(self.STREAMS_AT, self.MULT * self.H * 4), dtype="<f4").copy()
 
     def set_streams(self, a):
-        self.m.write(self.STREAMS_AT, _half(np.asarray(a).reshape(-1)))
+        self.m.write(self.STREAMS_AT, np.asarray(a, dtype="<f4").reshape(-1).tobytes())
 
     def mix(self, which):
         """A site's mix as floats: `pre`, `post`, then `comb` (▶ AI_DEEPSEEK_4__MIX_BYTES) — `a` the attention's, `b` the MoE's."""
         at = self.MIXA_AT if which == "a" else self.MIXB_AT
         return np.frombuffer(self.m.read(at, MIX_BYTES), dtype="<f4").astype(np.float64)
 
-    active_lora = None
-
+    # ── LoRAs: a mask chosen at boot, or none (▶ `_mask_layout`) ──────────────────────────────────────────────
     def load_lora(self, name):
-        if name is not None:
-            raise Refused("DeepSeek-V4.1 has no LoRA overlays in this runtime yet")
-        return 0.0
+        """The LoRA a conversation runs under: the one booted, which is all this model swaps to. Answers the seconds taken."""
+        if name == self.active_lora:
+            return 0.0
+        if self.b.mask is not None:
+            # ⛳ a mask is chosen at boot: its cells are in the tables the procedures were written over
+            raise Refused("a mask is chosen at boot, not swapped: boot the folder with lora %r" % (name,))
+        raise Refused("DeepSeek-V4.1 takes a LoRA only as a mask, chosen at boot")
 
     def unload_lora(self):
-        pass
+        if self.active_lora is not None:
+            raise Refused("a mask is chosen at boot, not taken off: boot the folder without it")
 
     def lora_identity(self):
-        return None
+        if self.active_lora is None:
+            return None
+        return dict(name=self.b.lora["name"], weights=self.b.lora["adapter"]["weights_sha"])
+
+    def _ensure(self, name):
+        """The LoRA `name` known, as a conversation adopted from disk asks (▶ `session.adopt`): the booted mask only."""
+        if name != self.active_lora:
+            raise Refused("this model runs the LoRA %r, chosen at boot, not %r" % (self.active_lora, name))
+        self._lora_cache.setdefault(name, dict(ident=self.lora_identity()))

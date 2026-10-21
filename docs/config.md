@@ -6,7 +6,7 @@ A model's config is a JSON file in its folder's `configs/`. The server reads it 
 - or another file, named as the server's first argument:
   `python3 start_silvann_server.py --model models/<name> long.json` — a file in the model's `configs/`, or a path.
 
-The UI's **Options** view edits these files. Its **New** button starts a file with the server's keys at their
+The UI's **Options** view edits these files. Its **new config** button starts a file with the server's keys at their
 defaults (`image` aside), and the model's options listed in `_options` for you to copy into `options`.
 
 ## How a config is written
@@ -151,7 +151,7 @@ These options apply to Qwen 3.6 35B-A3B, Qwen 3.8 27B, and Qwen 3.5 122B-A10B an
 | `card_experts_gb` | gigabytes | The tier's size, rather than the size chosen at boot. Named alone, it puts the experts on the CPU. |
 | `lend_cache` | `true` by default, or `false` | With a tier, whether it also holds experts in the cache's rows a conversation has not reached, given back as it grows ([above](#the-context-and-the-tier-share-the-card)). |
 | `experts_int8` | `false` by default, or `true` | With the experts on the CPU, a generated token's experts are multiplied in integers: faster, and slightly less exact. Named alone, it puts the experts on the CPU. |
-| `experts_dir` | a folder | With the experts read from the disk, where their file is written: `experts/` in the model's folder by default — another drive, say. |
+| `experts_dir` | a folder | With the experts read from the disk, where they are written when they cannot be read in place ([`users.md` §5](users.md#5-the-experts-on-the-disk)): `experts/` in the model's folder by default — another drive, say. |
 | `picture_pixels` | default `4194304` (2048 × 2048) | The largest picture the boot makes room for on the card, about 23 KB a 16 × 16 patch. A larger picture is made smaller. `0` keeps no room and reads pictures on the CPU. |
 | `picture_weights` | `"auto"` by default, or `"card"`, `"ram"` | Where the vision tower's 0.6 GB of weights sit. In RAM, they are written to the card a block at a time as a picture is read. `auto` puts them on the card when the experts are on the CPU, and in RAM otherwise. |
 | `tensor_parallel` | `1` by default, or `2`, `4` … | **Developer preview: tested on AMD (gfx906) only.** Every layer split over this many cards, each card with its share of the heads and of the MLP; see the conditions below. |
@@ -159,19 +159,29 @@ These options apply to Qwen 3.6 35B-A3B, Qwen 3.8 27B, and Qwen 3.5 122B-A10B an
 
 ### Tensor parallelism
 
-`tensor_parallel` is for dense models only (the 27B), with every layer on the cards. The server refuses it at boot
-when:
+`tensor_parallel` splits every layer's heads over the cards. It runs three kinds of model:
 
-- the model has experts (the 35B, the 122B, the 397B, GLM);
-- the experts are on the CPU, a card tier is named, a LoRA is loaded, or the model is a ring's stage;
+- **a dense model** (the 27B), with every layer on the cards;
+- **a Qwen MoE** (the 35B, the 122B, the 397B), with its experts on the CPU (`experts_on: "cpu"`). A
+  `card_experts_gb` tier is then that many gigabytes on each card, and a position's experts go to the cards that
+  hold them, the rest to the CPU;
+- **GLM**, with its experts in RAM. Each card keeps its own tier of experts, and 10% of a card's slots are experts
+  every card holds. `MEASURED` on four MI50s: 109 ms a token on one card, 100.7 on two, 80.9–86.5 on four.
+
+The server refuses it at boot when:
+
 - the cards **are not all the same size**: each card holds the same share, so the group is sized as one of them;
 - the cards' memory cannot be read: `rocm-smi` or `nvidia-smi` says it;
 - two cards cannot reach each other's memory (peer access);
 - the cards do not split the model's heads evenly;
+- a LoRA is loaded, or the model is a ring's stage;
+- for GLM: `mtp` is on, `card_exclusive` is `true`, or `fused` is off.
 
-Pictures are not read under tensor parallelism yet: the model boots, and a message's picture is refused.
+Pictures are not read under tensor parallelism yet: the model boots, and a message's picture is refused. A GLM group
+reads a prompt one position at a time, and a conversation's state is not saved, so a conversation brought back reads
+its tokens again.
 
-**Its program:** the model's folder needs `lisp/qwen3_5_tp.lisp`. `silvann download <model>` fetches the pack's `lisp/`
+**Its program:** a Qwen model's folder needs `lisp/qwen3_5_tp.lisp`; GLM's runs the pack's own `lisp/glm5.lisp`. `silvann download <model>` fetches the pack's `lisp/`
 afresh, and a pack that does not carry the file yet cannot run tensor parallelism.
 
 **Which cards:** the group is the machine's first cards. Use `HIP_VISIBLE_DEVICES` (AMD) or `CUDA_VISIBLE_DEVICES` to

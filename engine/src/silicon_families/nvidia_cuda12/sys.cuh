@@ -7,6 +7,8 @@
 /* ⛳ THE FAMILY'S OWN RUNTIME, NAMED HERE RATHER THAN INHERITED from whatever included this. */
 #include "../../packages/sys/cpu/silicon/file.cuh"   /* opening and reading a file, written once for every family */
 #include <cuda_runtime.h>
+/* the out-of-line mark the sources write (▶ `environment.cuh`, the host's): here the device compiler's own */
+#define SYS__NOINLINE __noinline__
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>

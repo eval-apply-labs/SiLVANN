@@ -1,6 +1,6 @@
 # SiLVANN
 
-> **Developer preview, v0.14.0.** It runs the models below well on the hardware it was tested on, and it is shared
+> **Developer preview, v0.15.0.** It runs the models below well on the hardware it was tested on, and it is shared
 > for people who can find their way around a build and a stack trace. NVIDIA cards are tested on two, a GeForce
 > RTX 5060 Ti and an RTX 5070 Ti; Windows natively on one PC; macOS is not supported.
 
@@ -67,22 +67,30 @@ v0.11.1, the RTX 5070 Ti's with v0.11.0. v0.11.0's server drew each token with n
 card, through OpenCL and on the CPU alone: the 35B answered in the chat at 32-35 tokens a second on the RTX 5060 Ti,
 and answers at 67 now ([`docs/results.md`](docs/results.md)).
 
-**New in v0.14.0:** SiLVANN reads a model's experts from its pack faster than from the file earlier releases wrote beside it, and an
-integrated GPU reads the model's memory where it lies.
+**New in v0.15.0:** A mixture-of-experts model runs over several cards, GLM 5.3 Flash takes a mask, and a model whose experts are
+copied into RAM needs much less memory to start.
 
-**The experts from the pack, faster.** An expert lies in a pack as several pieces; the loader's threads now read them
-side by side rather than one after another. With `experts_from: "disk"`, on two Xeon E5-2680 v4 with an MI50 and a
-SATA SSD, the 35B-A3B waits 6.8 ms a token on its reads against the old file's 8.2, and answers at 23.6–24.3 tokens a
-second against 22.5–23.7 — the same logits, bit for bit. GLM 5.3 Flash's packs, uploaded again on 19 October with each
-expert's records in the experts' order, are read in place too: a GLM pack downloaded before that day still writes its
-file at the first start ([`docs/users.md`](docs/users.md#5-the-experts-on-the-disk)).
+**An MoE over several cards.** `tensor_parallel` now splits a mixture-of-experts model's attention by heads too: the Qwen
+MoE models with their experts on the CPU, and GLM 5.3 Flash with its experts in RAM. Each card keeps its own tier of
+experts, with a tenth of its slots holding experts every card has; a position's experts go to the cards that hold them,
+and the rest to the CPU. On two Xeon E5-2680 v4 with MI50s, GLM answers in 109 ms a token on one card, 100.7 on two and
+80.9–86.5 on four. It needs cards of one size that can read each other's memory, on AMD, and it is a developer preview
+([`docs/config.md`](docs/config.md#tensor-parallelism)).
 
-**An integrated GPU, one copy.** Through the OpenCL 1.2 family, a GPU whose memory is the machine's RAM — a laptop's, an
-APU's — no longer keeps a second copy of the memory the program shares with it, nor copies it across each token.
-Checked through a CPU's OpenCL (PoCL), which shares its memory the same way; not yet on an integrated GPU itself.
-`SILVANN_OPENCL1_UNIFIED=0` asks for the copies.
+**Less memory at the start.** A model whose experts are copied into RAM no longer keeps its weight files mapped beside
+them. GLM 5.3 Flash's peak fell from 242 GB to 147 GB: on a 256 GB machine it no longer pushes its own experts out to
+swap, which had held a few of its layers up by about 15 ms at a time.
 
-**macOS is not supported.**
+**GLM takes a mask.** A rank-1 mask in GLM 5.3 Flash's `loras/`, as the Qwen models take one
+([`docs/tools.md`](docs/tools.md)): with its experts in RAM, on the card's tier, or read from the disk.
+
+**The chat.** An answer can be up to 16,384 tokens long. A message sent while the model waits on its own question no
+longer locks the conversation: the message stays in the box, and the question's buttons stay under the answer.
+
+**Building.** The engine builds with GCC 13 (Ubuntu 24.04's), and `install.sh` names Python's headers (`python3-dev`)
+when they are missing.
+
+**Why AI on your own machine:** [`docs/local_ai.md`](docs/local_ai.md), for the work that cannot leave the room.
 
 Every release before this one, and this one's notes again: [`release_logs/v0.md`](release_logs/v0.md).
 
@@ -165,6 +173,8 @@ options: [`docs/config.md`](docs/config.md). The model's tool, and adding your o
 Where the design could go next — a
 model whose output is a program the engine runs, sizing the experts after they answer, choosing an adapter at the
 end of a sentence, layers replaced by simpler programs, multi-token prediction as a program: [`docs/directions.md`](docs/directions.md).
+Why a model on your own machine matters — for the work that cannot leave the room, and against the bad actors who could
+run one too: [`docs/local_ai.md`](docs/local_ai.md).
 
 ## What is here
 
@@ -187,7 +197,7 @@ docs/               users.md — running it; ui.md — the chat in the browser; 
                     commands; models.md — every model and what it needs; results.md — every measurement;
                     developers.md — how it is built, adding a model or a silicon;
                     concepts.md — the ideas behind it; compression.md — how the weights are packed;
-                    directions.md — where it could go
+                    directions.md — where it could go; local_ai.md — why AI on your own machine
 ```
 
 ## Contact

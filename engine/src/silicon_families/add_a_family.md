@@ -88,7 +88,7 @@ Copy `amd_rocm6_wave64/includes.cuh` and change the row. The row is the one list
 is: the build script reads its targets from it, so a family cannot take a card its binary has no
 code for. List only cards the vendor's support matrix says the runtime supports — AMD's ROCm
 compatibility matrix, NVIDIA's CUDA release notes. A card not named here is not taken, even a newer
-one of the same line.
+one of the same line. The OpenCL families, whose kernels the driver compiles, also take the cards `opencl_versions.cuh` assigns them.
 
 ### 3. `sys.cuh` — sys's doors
 

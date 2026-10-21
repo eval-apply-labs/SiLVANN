@@ -286,9 +286,9 @@ static __device__ inline void       sys__stack__replace(const sys__heap_node* st
  * field accessors, are reached only from inside the implementation, and `zzprivate` means one FILE. A
  * header that cannot name them is the shape of the rule rather than an omission from it.
  * ────────────────────────────────────────────────────────────────────────────────────────────────── */
-static __device__ __noinline__ void sys__stack__zzpackage_release_internal(sys__heap_node* head,
+static __device__ SYS__NOINLINE void sys__stack__zzpackage_release_internal(sys__heap_node* head,
                                                                     uint64_t* releaser_stack);
-static __device__ __noinline__ void sys__stack_chunk__zzpackage_release_internal(sys__heap_node* head,
+static __device__ SYS__NOINLINE void sys__stack_chunk__zzpackage_release_internal(sys__heap_node* head,
                                                                           uint64_t* releaser_stack);
 
 static __device__ inline uint64_t       sys__stack_chunk__zzpackage_offset(const sys__stack_chunk* chunk);

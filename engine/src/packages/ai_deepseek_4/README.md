@@ -7,10 +7,19 @@ layers — the compressed latents of a source layer; an n-gram memory written in
 routed experts of which 6 run for a token, with one shared expert. The package depends only on `sys` and `nn`; its
 arithmetic is `nn`'s doors.
 
-The layout it is written for: the matrices every token uses on the card, the routed experts on the CPU, in RAM.
+The streams are floats, and so is a site's collapse until it is normed: a sink token's pass fp16's range — the
+begin-of-sentence token's 307,505 after the 40 layers in the model's own code (`measurements/2026-10-21_deepseek_streams_fp32_node03.md`),
+which DeepSeek's bf16 holds. Everything a sublayer reads and writes is halves, as in every other model.
+
+The layout it is written for: the matrices every token uses on a card, or split over a tensor-parallel group of cards;
+the routed experts on the CPU, in RAM or mapped from a file, a fixed share of them on the cards (`card_experts`).
 
 A verb takes its weights and buffers as a **table**, a node array whose cells are named in
 `contracts/objects/layer.cuh`. The runtime that builds the tables and the programs is `silvann_runtime/deepseek4.py`.
+
+A **mask** — `W' = W + Σ r_i·v_iᵀ` beside wo_b and the shared expert's down, a changed model kept as the directions its
+matrices moved (`python/nn_rank1_mask_from_projection.py`) — is three cells past a site's table, which the attention and
+shared verbs add to the matrix's answer.
 
 ## The verbs
 
@@ -23,8 +32,9 @@ A verb takes its weights and buffers as a **table**, a node array whose cells ar
 
 ## What it does not do yet
 
-The indexer, which past 512 compressed latents chooses which of them a query attends; its first level, the candidate
-blocks; a prompt as rows; two sockets; the card's tier of experts. ▶ `src/docs/design/pending/deepseek_v41.md`.
+The indexer's first level, the candidate blocks, so the context stops at 16,384 positions; a prompt as rows — it is
+read a position at a time; the routed experts over two sockets; a card's tier of experts kept as a cache, where
+`card_experts` is a fixed share.
 
 ## Where to start reading
 

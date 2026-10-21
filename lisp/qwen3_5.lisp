@@ -99,9 +99,12 @@
             (defun (layer i pos)                       ; ⑤
               (begin (mixer i pos h1)
                      (ai_qwen_3__pre_expert h1 (nth PRE i) hand picks)
-                     (ai_qwen_3__experts hand picks (nth EXPERTS_TIER i) routed_k nn__expert_tier)
+                     ;; the tier's visit first, so the CPU starts on its picks beside the card's, not after them
+                     (ai_qwen_3__experts hand picks (nth EXPERTS_TIER i) routed_k nn__expert_tier 1)
                      (sys__node_array__set HERE 0 i)
-                     (sys__compute CPU names xq) (sys__result CPU)
+                     (sys__compute CPU names xq_ready)
+                     (ai_qwen_3__experts hand picks (nth EXPERTS_TIER i) routed_k nn__expert_tier)
+                     (sys__result CPU)
                      (nn__buffer__copy c_routed CPU routed HIDDEN_BYTES)
                      (nn__vector__add routed routed_k routed HIDDEN)
                      (ai_qwen_3__post_expert h1 hand routed (nth POST i) x)

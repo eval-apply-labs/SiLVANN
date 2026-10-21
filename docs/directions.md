@@ -74,9 +74,10 @@ are drafts to check, `if` a draft agrees — over verbs that already exist (the 
 how many tokens to draft, when to stop drafting and what to do on a miss are lines of Lisp a user can change
 without rebuilding anything.
 
-*Today:* GLM 5.3 Flash's published bundle carries its prediction layer (the 46th, `eh_proj` / `enorm` /
-`hnorm` around an attention and experts site); the Qwen bundles were packed without theirs. The draft-and-verify
-program is not written.
+*Today:* GLM 5.3 Flash's packs and the Qwen 3.6 packs carry their prediction layer, and `mtp: "yes"` drafts one
+token and checks it beside the next ([`config.md`](config.md)). The check and the draft are Lisp procedures; the loop
+that keeps or refuses a draft is the runtime's Python. The loop as a program, and drafts of more than one token, are
+not built.
 
 ### 5. The model setting its own budget
 

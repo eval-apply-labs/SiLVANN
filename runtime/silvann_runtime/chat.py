@@ -16,6 +16,11 @@ and a later turn continues from it.
               a later turn: [INST] … [/INST]    (the answer ended on </s>)
               no thinking to turn off; with no system prompt given, Mistral's own (`SYSTEM_PROMPT.txt`, its dates filled
               in as Mistral's tooling does — the chat template leaves `{today}` unfilled)
+  DeepSeek    <｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (…)\\n\\n … <｜User｜> … <｜Assistant｜><think>
+  V4.1        a later turn: <｜User｜> … <｜Assistant｜><think>    (the answer ended on <｜end▁of▁sentence｜>)
+              thinking off: no effort, and </think> after the header; the system block only where there is a system
+              prompt or a tool. Its repository's encoding/encoding.py, which no chat template carries; a turn keeps the
+              reasoning of the turns before it, where the encoding drops it without a tool
 ```
 A turn with pictures puts each before the text, as the chat template renders a message whose content is the pictures
 then the text: Qwen's `<|vision_start|>`, a pad a token of the picture, `<|vision_end|>` (▶ `vision.py`); GLM's
@@ -36,8 +41,12 @@ call is answered as the template frames a tool's answer:
               <|observation|><tool_response>…</tool_response><|assistant|><think>
   Mistral 3   [TOOL_CALLS]lisp[ARGS]{"form": "(ls)"}</s>
               [TOOL_RESULTS]…[/TOOL_RESULTS]
+  DeepSeek    \n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name="lisp">\n<｜DSML｜ parameter name="form" string="true">(ls)
+  V4.1        </｜DSML｜ parameter>\n</｜DSML｜ invoke>\n</｜DSML｜ calls><｜end▁of▁sentence｜>
+              <｜User｜><tool_result>…</tool_result><｜Assistant｜><think>
 ```
-A Qwen or GLM answer stops at `</tool_call>` (`call_end`, one token), so a call is answered before the model writes on.
+A Qwen or GLM answer stops at `</tool_call>` (`call_end`, one token), so a call is answered before the model writes on;
+Mistral's and DeepSeek's end their turn after their calls.
 """
 import datetime
 import json
@@ -67,6 +76,17 @@ _QWEN_TOOLS = ("# Tools\n\nYou have access to the following functions:\n\n<tools
                "may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT "
                "after\n- If there is no function call available, answer the question like normal with your current "
                "knowledge and do not tell the user about function calls\n</IMPORTANT>")
+_DS_EFFORT = "Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\n"   # "high", its default
+_DS_TOOLS = ("## Tools\n\nYou have access to a set of tools to help answer the user's question. You can invoke tools by "
+             "writing a \"<｜DSML｜ calls>\" block like the following:\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"$TOOL_NAME\">\n"
+             "<｜DSML｜ parameter name=\"$PARAMETER_NAME\" string=\"true|false\">$PARAMETER_VALUE</｜DSML｜ parameter>\n...\n"
+             "</｜DSML｜ invoke>\n<｜DSML｜ invoke name=\"$TOOL_NAME2\">\n...\n</｜DSML｜ invoke>\n</｜DSML｜ calls>\n\nString "
+             "parameters should be specified as is and set `string=\"true\"`. For all other types (numbers, booleans, arrays, "
+             "objects), pass the value in JSON format and set `string=\"false\"`.\n\nIf thinking_mode is enabled (triggered "
+             "by <think>), you MUST output your complete reasoning inside <think>...</think> BEFORE any tool calls or final "
+             "response.\n\nOtherwise, output directly after </think> with tool calls or final response.\n\n### Available Tool "
+             "Schemas\n\n%s\n\nYou MUST strictly follow the above defined tool name and parameter schemas to invoke tool "
+             "calls.\n")
 _GLM_TOOLS = ("<|system|>\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are "
               "provided with function signatures within <tools></tools> XML tags:\n<tools>\n%s\n</tools>\n\nFor each "
               "function call, output the function name and arguments within the following XML format:\n<tool_call>"
@@ -88,13 +108,17 @@ class Chat:
         elif self.arch.startswith("ministral3"):
             sp = os.path.join(folder.path, "SYSTEM_PROMPT.txt")
             self.default_system = open(sp, encoding="utf-8").read() if os.path.isfile(sp) else None
+        elif self.arch.startswith("deepseek_v41"):
+            self.think_end = self.tok.token_to_id("</think>")
         else:
             raise Refused("no chat framing for a %r model" % self.arch)
         self.stop.discard(None)
-        # a call's first token, and the one it ends on where that is not the turn's end (Mistral's ends on `</s>`)
-        mistral = self.arch.startswith("ministral3")
-        self.call_start = self.tok.token_to_id("[TOOL_CALLS]" if mistral else "<tool_call>")
-        self.call_end = None if mistral else self.tok.token_to_id("</tool_call>")
+        # a call's first token, and the one it ends on where that is not the turn's end (Mistral's and DeepSeek's end on
+        #   theirs); `call_lead` the text before the first token, which a call's markup opens with — DeepSeek's `<`
+        mistral, deepseek = self.arch.startswith("ministral3"), self.arch.startswith("deepseek_v41")
+        self.call_start = self.tok.token_to_id("[TOOL_CALLS]" if mistral else "｜DSML｜" if deepseek else "<tool_call>")
+        self.call_end = None if mistral or deepseek else self.tok.token_to_id("</tool_call>")
+        self.call_lead = "<" if deepseek else ""
 
     def encode(self, text):
         return self.tok.encode(text, add_special_tokens=False).ids
@@ -151,6 +175,18 @@ class Chat:
                 s = "\n<|im_start|>user\n%s<|im_end|>\n<|im_start|>assistant\n" % text
             s += "<think>\n" if thinking else "<think>\n\n</think>\n\n"
             return self.encode(s)
+        if self.arch.startswith("deepseek_v41"):
+            s = ""
+            if first:
+                s = "<｜begin▁of▁sentence｜>"
+                effort = _DS_EFFORT if thinking else ""
+                if system or tools:
+                    s += "<｜System｜>" + effort + (system or "")
+                    if tools:
+                        s += "\n\n" + _DS_TOOLS % json.dumps(TOOL["function"], ensure_ascii=False)
+                elif effort:
+                    s += "<｜System｜>" + effort
+            return self.encode(s + "<｜User｜>" + text + "<｜Assistant｜>" + ("<think>" if thinking else "</think>"))
         if self.arch.startswith("ministral3"):
             s = ""
             if first:
@@ -199,6 +235,8 @@ class Chat:
                     form = ToolMarkup("the call's arguments do not read as {\"form\": \"…\"}: %s" % args[:200])
                 calls.append(form if isinstance(form, ToolMarkup) else str(form))
             return calls
+        if self.arch.startswith("deepseek_v41"):
+            return self._dsml_calls(answer)
         if self.arch.startswith("glm5"):
             got = re.match(r"<tool_call>\s*([^<]*?)\s*<arg_key>[^<]*</arg_key><arg_value>(.*)</arg_value>\s*</tool_call>$",
                            text, re.S)
@@ -213,6 +251,32 @@ class Chat:
             return [ToolMarkup("the one tool is lisp, not %s" % name.strip())]
         return [form]
 
+    def _dsml_calls(self, answer):
+        """DeepSeek's calls: the `<｜DSML｜ calls>` block after the answer's reasoning, an invoke a call, its one
+        parameter the form whatever the model named it — as its text (`string="true"`) or as JSON (`"false"`)."""
+        after = len(answer) - answer[::-1].index(self.think_end) if self.think_end in answer else 0
+        text = self.tok.decode(answer[after:], skip_special_tokens=False)
+        block = re.search(r"<｜DSML｜ calls>\n?(.*?)</｜DSML｜ calls>", text, re.S)
+        if block is None:
+            return [ToolMarkup("the call does not read as a <｜DSML｜ calls> block: %s" % text[-200:])]
+        calls = []
+        for name, body in re.findall(r'<｜DSML｜ invoke name="([^"]*)">\n?(.*?)</｜DSML｜ invoke>', block.group(1), re.S):
+            params = re.findall(r'<｜DSML｜ parameter name="[^"]*" string="(true|false)">(.*?)</｜DSML｜ parameter>', body, re.S)
+            if name.strip() != "lisp":
+                calls.append(ToolMarkup("the one tool is lisp, not %s" % name.strip()))
+            elif len(params) != 1:
+                calls.append(ToolMarkup("the call's arguments do not read as one parameter, form: %s" % body[:200]))
+            else:
+                string, value = params[0]
+                if string == "false":
+                    try:
+                        got = json.loads(value)
+                        value = got if isinstance(got, str) else value
+                    except ValueError:
+                        pass
+                calls.append(value)
+        return calls or [ToolMarkup("the <｜DSML｜ calls> block holds no invoke: %s" % block.group(1)[:200])]
+
     def close_call(self):
         """The tokens that end a turn after a call left unanswered (an answer stopped there), where the template has the
         turn end after the call: Qwen's `<|im_end|>` — the next turn's framing follows it."""
@@ -223,6 +287,9 @@ class Chat:
         again, as the template's generation prompt does."""
         if self.arch.startswith("ministral3"):
             return self.encode("".join("[TOOL_RESULTS]%s[/TOOL_RESULTS]" % a for a in answers))
+        if self.arch.startswith("deepseek_v41"):
+            return self.encode("<｜User｜>" + "\n\n".join("<tool_result>%s</tool_result>" % a for a in answers)
+                               + "<｜Assistant｜>" + ("<think>" if thinking else "</think>"))
         if self.arch.startswith("glm5"):
             return self.encode("<|observation|>" + "".join("<tool_response>%s</tool_response>" % a for a in answers)
                                + "<|assistant|><think>")

@@ -59,7 +59,7 @@ static __device__ inline void sys__fault__publish(sys__fault_channel* channel) {
  * for the whole loop, not one per element — on a path with `MEASURED` 601x of headroom.
  * ⛔ What WOULD falsify it is a raise that both falls through AND runs hot. There is none, and this line
  * is where to check when somebody adds one. */
-static __device__ __noinline__ void sys__fault__raise(uint64_t failed_pc, uint64_t failed_op) {
+static __device__ SYS__NOINLINE void sys__fault__raise(uint64_t failed_pc, uint64_t failed_op) {
     sys__fault_channel* channel = sys__fault__zzprivate_channel;
     if (channel == 0) return;
     channel->pc = failed_pc;

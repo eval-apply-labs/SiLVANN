@@ -296,7 +296,7 @@ static __device__ inline uint16_t nn__primitives__zzpackage_float_to_half(float 
  * ⛔⛔ AND THE ANSWER IS TAGGED `QUOTED_LIST`, NEVER `OBJECT_REFERENCE` — ▶ the impl, where the reason is
  * written out. An ordinary reference to a list is exactly what the evaluator's scan treats as a form
  * still to reduce, so answering under that tag makes the machine try to RUN the answer. */
-static __device__ __noinline__ void nn__vector__zzpackage_apply_get_values_at(sys__heap_node* base,
+static __device__ SYS__NOINLINE void nn__vector__zzpackage_apply_get_values_at(sys__heap_node* base,
                                                                               uint64_t form);
 
 /* ══ ⭐⭐⭐ A VIEW INTO A BUFFER — WHAT LETS A LAYER BE WRITTEN AS A PROGRAM ════════════════════════
@@ -348,7 +348,7 @@ static __device__ __noinline__ void nn__vector__zzpackage_apply_get_values_at(sy
  * `(nn__vector__range v start count)` — `count` ELEMENTS from element `start`, as an `nn__weights`.
  * ⛳ IT COUNTS IN ELEMENTS, NOT BYTES, because every other verb in this package takes an element count
  * and a caller who has to multiply by 2 at one call site out of twenty will eventually not. */
-static __device__ __noinline__ void nn__vector__zzpackage_apply_range(sys__heap_node* base,
+static __device__ SYS__NOINLINE void nn__vector__zzpackage_apply_range(sys__heap_node* base,
                                                                       uint64_t form);
 
 /* `(nn__vector__zero v n)` — `n` elements set to zero, answering `v`.

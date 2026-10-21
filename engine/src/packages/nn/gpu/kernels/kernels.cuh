@@ -175,6 +175,22 @@ static __device__ inline void nn__rmsnorm__zzabi_body(uint16_t* o, const uint16_
     }
 }
 
+/* The same norm of a vector of floats, into halves: a hyper-connection's collapse, as large as its streams until it is
+ * normed (▶ THE STREAMS AS FLOATS, below). */
+static __device__ inline void nn__rmsnorm__zzabi_body_fp32(uint16_t* o, const float* x, const uint16_t* w, uint64_t n, float eps,
+                                                            unsigned int* over) {
+    const uint64_t lane = nn__silicon__lane(), lanes = nn__silicon__lanes();
+    float part = 0.0f;
+    for (uint64_t i = lane; i < n; i += lanes) part += x[i] * x[i];
+    const float mean  = nn__silicon__lanes_sum(part) / (float)n;
+    const float scale = 1.0f / nn__silicon__sqrtf(mean + eps);
+    for (uint64_t i = lane; i < n; i += lanes) {
+        bool hit = false;
+        o[i] = nn__primitives__zzpackage_float_to_half((x[i] * scale) * nn__silicon__half_to_float(w[i]), &hit);
+        if (hit) *over = NN__KERNELS__OVERFLOWED;
+    }
+}
+
 static __device__ inline void nn__vector__zzabi_body_l2norm(uint16_t* o, const uint16_t* x,
                                                              uint64_t n, unsigned int* over) {
     const uint64_t lane = nn__silicon__lane(), lanes = nn__silicon__lanes();
@@ -2872,35 +2888,89 @@ static __device__ inline void nn__hyper__zzabi_body_post(uint16_t* out, const ui
     }
 }
 
-/* The streams collapsed by the `pre` weights a mix already holds (its first `mult` floats) — DeepSeek-V4's sites, each of
- * which collapses by the weights the site before it computed: `out = Σ_i mix_i · stream_i`. */
-static __device__ inline void nn__hyper__zzabi_body_collapse(uint16_t* out, const float* mix, const uint16_t* streams, uint64_t hidden,
-                                                              uint64_t mult, unsigned int* over) {
-    for (uint64_t e = nn__kernels__zzprivate_first(); e < hidden; e += nn__kernels__zzprivate_stride()) {
-        float sum = 0.0f;
-        for (uint64_t i = 0ull; i < mult; ++i) sum += mix[i] * nn__silicon__half_to_float(streams[i * hidden + e]);
-        bool hit = false;
-        out[e] = nn__primitives__zzpackage_float_to_half(sum, &hit);
-        if (hit) *over = NN__KERNELS__OVERFLOWED;
+/* ══ ⭐ THE STREAMS AS FLOATS — DeepSeek-V4.1's, whose sink tokens pass fp16's range ══════════════════════════════════
+ * The begin-of-sentence token's largest |stream| passes 300,000 over DeepSeek-V4.1's 40 layers in the model's own code
+ * (`MEASURED` node03 2026-10-21, measurements/2026-10-21_deepseek_streams_fp32_node03.md): bf16 holds it, a half stops at
+ * 65,504. The arithmetic is the halves' doors' above — the map's logits, `pre`, `post` and `comb` the same functions —
+ * with the streams read and written as floats, and the collapse a float too: it is as large as the streams until it is
+ * normed (`nn__rmsnorm__zzabi_body_fp32`). Nothing here rounds to a half, so nothing here overflows one. */
+static __device__ inline void nn__hyper__zzabi_body_logits_fp32(float* lg, const float* streams, const uint16_t* fn,
+                                                                 uint64_t hidden, uint64_t mult, float norm_eps) {
+    const uint64_t lane = nn__silicon__lane(), lanes = nn__silicon__lanes(), n = mult * hidden, rows = NN__HYPER__MIX(mult);
+    for (uint64_t r = nn__silicon__block(); r < rows; r += nn__silicon__blocks()) {
+        float sq = 0.0f, dot = 0.0f;
+        for (uint64_t c = lane; c < n; c += lanes) {
+            const float v = streams[c];
+            sq += v * v;
+            dot += nn__silicon__half_to_float(fn[r * n + c]) * v;
+        }
+        const float inv = 1.0f / nn__silicon__sqrtf(nn__silicon__lanes_sum(sq) / (float)n + norm_eps);
+        const float got = nn__silicon__lanes_sum(dot) * inv;
+        if (lane == 0ull) lg[r] = got;
     }
 }
 
-/* ⭐ AN N-GRAM MEMORY'S WRITE INTO THE STREAMS — DeepSeek-V4's engram. `kv` is the looked-up rows through their map: a key
- * for each of the `mult` streams (`hidden` halves each), then one value. Stream `j` takes the value, gated by how well it
- * matches its key: the dot of the stream with `w_j ⊙ key_j` (`w` the gate's two maps' product, a row a stream), over
- * both their rms and √hidden; the gate σ of its signed square root (its size at least 1e-6) — the model's `Engram`,
- * normalised a stream at a time, not over the streams together. A block a stream. */
-static __device__ inline void nn__engram__zzabi_body_gate(uint16_t* streams, const uint16_t* kv, const uint16_t* w, uint64_t hidden,
-                                                          uint64_t mult, float eps, unsigned int* over) {
+static __device__ inline void nn__hyper__zzabi_body_pre_fp32(float* out, float* mix, const float* streams, const uint16_t* base,
+                                                              const uint16_t* scale, uint64_t hidden, uint64_t mult, uint64_t iters,
+                                                              float eps) {
+    const float* lg = mix + NN__HYPER__MIX(mult);
+    const float s0 = nn__silicon__half_to_float(scale[0]), s1 = nn__silicon__half_to_float(scale[1]);
+    const float s2 = nn__silicon__half_to_float(scale[2]);
+    float pre[NN__HYPER__MULT_MAX];
+    nn__hyper__zzprivate_pre(pre, lg, base, s0, mult, eps);
+    const uint64_t first = nn__kernels__zzprivate_first();
+    if (first == 0ull) nn__hyper__zzprivate_weights(mix, lg, pre, base, s1, s2, mult, iters, eps);
+    for (uint64_t e = first; e < hidden; e += nn__kernels__zzprivate_stride()) {
+        float sum = 0.0f;
+        for (uint64_t i = 0ull; i < mult; ++i) sum += pre[i] * streams[i * hidden + e];
+        out[e] = sum;
+    }
+}
+
+/* Stream j becomes `post_j · y + Σ_i comb_ij · stream_i` — `y` the sublayer's output, a half — an element of every
+ * stream a lane, so `out` may be `streams` itself. */
+static __device__ inline void nn__hyper__zzabi_body_post_fp32(float* out, const float* streams, const uint16_t* y, const float* mix,
+                                                               uint64_t hidden, uint64_t mult) {
+    for (uint64_t e = nn__kernels__zzprivate_first(); e < hidden; e += nn__kernels__zzprivate_stride()) {
+        float s[NN__HYPER__MULT_MAX];
+        for (uint64_t i = 0ull; i < mult; ++i) s[i] = streams[i * hidden + e];
+        const float ye = nn__silicon__half_to_float(y[e]);
+        for (uint64_t j = 0ull; j < mult; ++j) {
+            float sum = mix[mult + j] * ye;
+            for (uint64_t i = 0ull; i < mult; ++i) sum += mix[2ull * mult + i * mult + j] * s[i];
+            out[j * hidden + e] = sum;
+        }
+    }
+}
+
+/* The streams collapsed by the `pre` weights a mix already holds (its first `mult` floats) — DeepSeek-V4's sites, each of
+ * which collapses by the weights the site before it computed: `out = Σ_i mix_i · stream_i`. */
+static __device__ inline void nn__hyper__zzabi_body_collapse_fp32(float* out, const float* mix, const float* streams, uint64_t hidden,
+                                                                   uint64_t mult) {
+    for (uint64_t e = nn__kernels__zzprivate_first(); e < hidden; e += nn__kernels__zzprivate_stride()) {
+        float sum = 0.0f;
+        for (uint64_t i = 0ull; i < mult; ++i) sum += mix[i] * streams[i * hidden + e];
+        out[e] = sum;
+    }
+}
+
+/* ⭐ AN N-GRAM MEMORY'S WRITE INTO THE STREAMS — DeepSeek-V4's engram, the streams floats (▶ THE STREAMS AS FLOATS). `kv`
+ * is the looked-up rows through their map: a key for each of the `mult` streams (`hidden` halves each), then one value.
+ * Stream `j` takes the value, gated by how well it matches its key: the dot of the stream with `w_j ⊙ key_j` (`w` the
+ * gate's two maps' product, a row a stream), over both their rms and √hidden; the gate σ of its signed square root (its
+ * size at least 1e-6) — the model's `Engram`, normalised a stream at a time, not over the streams together. A block a
+ * stream. */
+static __device__ inline void nn__engram__zzabi_body_gate_fp32(float* streams, const uint16_t* kv, const uint16_t* w, uint64_t hidden,
+                                                               uint64_t mult, float eps) {
     const uint64_t lane = nn__silicon__lane(), lanes = nn__silicon__lanes();
     const uint16_t* value = kv + mult * hidden;
     for (uint64_t j = nn__silicon__block(); j < mult; j += nn__silicon__blocks()) {
-        uint16_t* s = streams + j * hidden;
+        float* s = streams + j * hidden;
         const uint16_t* key = kv + j * hidden;
         const uint16_t* wj = w + j * hidden;
         float hh = 0.0f, kk = 0.0f, dot = 0.0f;
         for (uint64_t c = lane; c < hidden; c += lanes) {
-            const float h = nn__silicon__half_to_float(s[c]), k = nn__silicon__half_to_float(key[c]);
+            const float h = s[c], k = nn__silicon__half_to_float(key[c]);
             hh += h * h;
             kk += k * k;
             dot += h * nn__silicon__half_to_float(wj[c]) * k;
@@ -2913,11 +2983,7 @@ static __device__ inline void nn__engram__zzabi_body_gate(uint16_t* streams, con
         const float a = d < 0.0f ? -d : d;
         const float root = nn__silicon__sqrtf(a > 1e-6f ? a : 1e-6f);
         const float gate = 1.0f / (1.0f + nn__silicon__expf(d < 0.0f ? root : -root));
-        for (uint64_t c = lane; c < hidden; c += lanes) {
-            bool hit = false;
-            s[c] = nn__primitives__zzpackage_float_to_half(nn__silicon__half_to_float(s[c]) + gate * nn__silicon__half_to_float(value[c]), &hit);
-            if (hit) *over = NN__KERNELS__OVERFLOWED;
-        }
+        for (uint64_t c = lane; c < hidden; c += lanes) s[c] += gate * nn__silicon__half_to_float(value[c]);
     }
 }
 
@@ -3336,6 +3402,11 @@ static __device__ inline void nn__index__zzabi_body_gather(uint16_t* out, const 
 }
 
 /* `out[i] = in[i]` for `n` halves — a gather's rows moved into place. */
+/* Halves into floats, each exactly: a vector into a residual kept as floats (▶ THE STREAMS AS FLOATS). */
+static __device__ inline void nn__vector__zzabi_body_widen(float* out, const uint16_t* x, uint64_t n) {
+    for (uint64_t i = nn__kernels__zzprivate_first(); i < n; i += nn__kernels__zzprivate_stride()) out[i] = nn__silicon__half_to_float(x[i]);
+}
+
 static __device__ inline void nn__vector__zzabi_body_copy(uint16_t* out, const uint16_t* in, uint64_t n) {
     for (uint64_t i = nn__kernels__zzprivate_first(); i < n; i += nn__kernels__zzprivate_stride()) out[i] = in[i];
 }

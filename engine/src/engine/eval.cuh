@@ -264,7 +264,7 @@ static __device__ inline uint64_t eng__eval__zzprivate_first_form(uint64_t form,
  * ────────────────────────────────────────────────────────────────────────────────────────────────── */
 
 /* Turn a call into the program that performs it, in place. */
-static __device__ __noinline__ bool eng__eval__zzprivate_expand(uint64_t bindings, uint64_t form, sys__heap_node proc) {
+static __device__ SYS__NOINLINE bool eng__eval__zzprivate_expand(uint64_t bindings, uint64_t form, sys__heap_node proc) {
     /* Both halves are read without a hold: the form holds the procedure and the procedure holds them. A
      * procedure of no parameters has nil where their names would be. */
     sys__heap_node names; sys__heap_node body_cell;

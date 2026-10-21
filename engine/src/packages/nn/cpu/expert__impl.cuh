@@ -1053,7 +1053,7 @@ static __device__ inline bool nn__expert__zzpackage_stand_handed(void) {
 
 /* ══ ⭐⭐ THE LOAD PROTOCOL — ▶ `expert__header.cuh` for the four-line shape the host drives ═══════════ */
 
-static __device__ __noinline__ void nn__expert__zzpackage_apply_reserve(sys__heap_node* base,
+static __device__ SYS__NOINLINE void nn__expert__zzpackage_apply_reserve(sys__heap_node* base,
                                                                         uint64_t form) {
     (void)base;
     if (sys__sublist__length(form) != 2ull) { sys__opcodes__fails(form, SYS__OPCODES__FAULT_ARITY); return; }
@@ -1084,7 +1084,7 @@ static __device__ __noinline__ void nn__expert__zzpackage_apply_reserve(sys__hea
     sys__opcodes__becomes(form, &answer);
 }
 
-static __device__ __noinline__ void nn__expert__zzpackage_apply_assign(sys__heap_node* base,
+static __device__ SYS__NOINLINE void nn__expert__zzpackage_apply_assign(sys__heap_node* base,
                                                                        uint64_t form) {
     (void)base;
     if (sys__sublist__length(form) != 5ull) { sys__opcodes__fails(form, SYS__OPCODES__FAULT_ARITY); return; }
@@ -1123,7 +1123,7 @@ static __device__ __noinline__ void nn__expert__zzpackage_apply_assign(sys__heap
     sys__opcodes__becomes(form, &done);
 }
 
-static __device__ __noinline__ void nn__expert__zzpackage_apply_revoke(sys__heap_node* base,
+static __device__ SYS__NOINLINE void nn__expert__zzpackage_apply_revoke(sys__heap_node* base,
                                                                        uint64_t form) {
     (void)base;
     if (sys__sublist__length(form) != 2ull) { sys__opcodes__fails(form, SYS__OPCODES__FAULT_ARITY); return; }
@@ -1147,7 +1147,7 @@ static __device__ __noinline__ void nn__expert__zzpackage_apply_revoke(sys__heap
 
 /* ⭐ HOW MANY HANDLES ARE OUT. ⛳ A loader that published everything it reserved reads ZERO, so this one
  * number is the whole diagnostic — which is what "the leak is a list anyone can read" buys. */
-static __device__ __noinline__ void nn__expert__zzpackage_apply_handed(sys__heap_node* base,
+static __device__ SYS__NOINLINE void nn__expert__zzpackage_apply_handed(sys__heap_node* base,
                                                                        uint64_t form) {
     (void)base;
     if (sys__sublist__length(form) != 1ull) { sys__opcodes__fails(form, SYS__OPCODES__FAULT_ARITY); return; }
@@ -1159,7 +1159,7 @@ static __device__ __noinline__ void nn__expert__zzpackage_apply_handed(sys__heap
 
 /* ⭐⭐ THE WORD THAT MAKES A LAYER EXIST — ▶ the header for why the protocol above could not work
  * without it. */
-static __device__ __noinline__ void nn__expert__zzpackage_apply_layer(sys__heap_node* base,
+static __device__ SYS__NOINLINE void nn__expert__zzpackage_apply_layer(sys__heap_node* base,
                                                                       uint64_t form) {
     (void)base;
     if (sys__sublist__length(form) != 4ull) { sys__opcodes__fails(form, SYS__OPCODES__FAULT_ARITY); return; }
@@ -1180,7 +1180,7 @@ static __device__ __noinline__ void nn__expert__zzpackage_apply_layer(sys__heap_
 }
 
 /* ⭐⭐ THE JOIN — ▶ `expert__header.cuh` for why this is a kind and why it is minted from the index. */
-static __device__ __noinline__ void nn__expert__zzpackage_apply_plane(sys__heap_node* base,
+static __device__ SYS__NOINLINE void nn__expert__zzpackage_apply_plane(sys__heap_node* base,
                                                                       uint64_t form) {
     (void)base;
     if (sys__sublist__length(form) != 6ull) { sys__opcodes__fails(form, SYS__OPCODES__FAULT_ARITY); return; }
@@ -1251,7 +1251,7 @@ static __device__ __noinline__ void nn__expert__zzpackage_apply_plane(sys__heap_
  * chain from recursing on a device with no stack to spare. ▶ `sys__dictionary__zzpackage_release_internal`,
  * the shape this copies.
  * ⛳ `HELD == 0` IS THE PAGE CASE and is the common one, so the early return is the fast path. */
-static __device__ __noinline__ void nn__weights__zzpackage_release_internal(sys__heap_node* head,
+static __device__ SYS__NOINLINE void nn__weights__zzpackage_release_internal(sys__heap_node* head,
                                                                            uint64_t* releaser_stack) {
     if (head == 0) return;
     const uint64_t held = head[1].args[NN__WEIGHTS__HELD];

@@ -95,6 +95,14 @@
 #define AI_DEEPSEEK_4__IDX__D         69u     /* wq_b, weights, wk */
 #define AI_DEEPSEEK_4__IDX__TABLE     72u
 
+/* ⭐ A MASK, `W' = W + Σ_i r_i·v_iᵀ` beside a matrix that writes into the streams (▶ nn's rank-1 doors) — three cells past
+ *   a site's table: `r` (`rank` rows of `hidden` halves), `v` (`rank` rows of the matrix's input, rotated as that input is,
+ *   this card's columns of it) and a scratch of `rank` floats; an integer 0 in the first, or no cells, where the site has
+ *   none. The rank is `v`'s rows. The attention's mask follows the table's last part: at ATT__TABLE, CMP__TABLE or
+ *   IDX__TABLE, whichever the table carries (▶ `ai_deepseek_4__attention__zzprivate_mask_first`); it is on wo_b's answer.
+ *   The MoE site's is on the shared expert's down. */
+#define AI_DEEPSEEK_4__MASK__RANK_MAX 8u
+
 /* `(ai_deepseek_4__route streams table hand picks)` · `(ai_deepseek_4__shared hand table)` · `(ai_deepseek_4__close streams
  * table routed)` — the MoE site, one table for its three card verbs. The HAND is what crosses to the CPU: the rotated
  * input (hidden halves), then the picks' weights (top_k halves). The router scores √softplus(logit); the bias chooses
@@ -119,11 +127,12 @@
 #define AI_DEEPSEEK_4__MOE__SCALE     27u     /* the routed weights' factor */
 #define AI_DEEPSEEK_4__MOE__LIMIT     28u
 #define AI_DEEPSEEK_4__MOE__TABLE     29u
+#define AI_DEEPSEEK_4__MOE__MASK      AI_DEEPSEEK_4__MOE__TABLE   /* the shared expert's down: its mask (▶ AI_DEEPSEEK_4__MASK__*) */
 
 /* `(ai_deepseek_4__engram streams table)` — the n-gram memory's write into the streams, before the layer's attention site.
  * The program writes the position's looked-up rows (`in` halves: each n-gram size's heads' rows of the layer's table,
  * dequantised) into ROWS; the verb maps them to a key a stream and one value, and each stream takes the value gated by
- * how well it matches its key (▶ nn's `engram_gate`). W is the gate's two maps' product, a row a stream. */
+ * how well it matches its key (▶ nn's `engram_gate_fp32`). W is the gate's two maps' product, a row a stream. */
 #define AI_DEEPSEEK_4__ENG__ROWS      0u
 #define AI_DEEPSEEK_4__ENG__WKV       1u      /* pair */
 #define AI_DEEPSEEK_4__ENG__W         3u

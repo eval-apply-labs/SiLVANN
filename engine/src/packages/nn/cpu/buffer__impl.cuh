@@ -196,7 +196,7 @@ static __device__ inline bool nn__buffer__zzpackage_carve(uint64_t span_at, uint
  * ⛔ IF THE FILING FAILS THE BUFFER IS LOST, and it is lost QUIETLY unless this says so: the count stays
  * at zero, the node's room goes back to the heap, and the span it named has no owner and no record. That
  * is the one outcome here with no later symptom, so it raises. */
-static __device__ __noinline__ void nn__buffer__zzpackage_release_internal(sys__heap_node* head,
+static __device__ SYS__NOINLINE void nn__buffer__zzpackage_release_internal(sys__heap_node* head,
                                                                           uint64_t* releaser_stack) {
     (void)releaser_stack;                     /* a buffer holds no other object, so nothing is handed on */
     if (head == 0) return;
@@ -245,7 +245,7 @@ static __device__ inline uint64_t nn__buffer__zzprivate_take(uint64_t form, uint
     return 0ull;
 }
 
-static __device__ __noinline__ void nn__buffer__zzpackage_apply_getnew(sys__heap_node* base, uint64_t form) {
+static __device__ SYS__NOINLINE void nn__buffer__zzpackage_apply_getnew(sys__heap_node* base, uint64_t form) {
     (void)base;
     sys__heap_node got;
     const uint64_t why = nn__buffer__zzprivate_take(form, 0ull, (uint64_t)NN__BUFFER__CLASSES, &got);
@@ -254,7 +254,7 @@ static __device__ __noinline__ void nn__buffer__zzpackage_apply_getnew(sys__heap
     (void)sys__heap_object__release(got.args[0]);
 }
 
-static __device__ __noinline__ void nn__buffer__zzpackage_apply_getnew_ram(sys__heap_node* base, uint64_t form) {
+static __device__ SYS__NOINLINE void nn__buffer__zzpackage_apply_getnew_ram(sys__heap_node* base, uint64_t form) {
     (void)base;
     sys__heap_node got;
     const uint64_t why = nn__buffer__zzprivate_take(form, (uint64_t)NN__BUFFER__CLASSES,

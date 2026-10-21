@@ -365,16 +365,16 @@ static __device__ inline sys__heap_node sys__sublist__extract(uint64_t sublist, 
  * an entry naming a view that has gone would be adjusted forever by mutations nobody is watching, and
  * would keep a freed position in the count of who is looking. Removing it is safe without a lock for the
  * reason the whole design rests on: one owner, so nothing is walking the roll at that moment. */
-static __device__ __noinline__ void sys__sublist__zzpackage_release_internal(sys__heap_node* head,
+static __device__ SYS__NOINLINE void sys__sublist__zzpackage_release_internal(sys__heap_node* head,
                                                                        uint64_t* releaser_stack);
 
 /* What a store was holding: its chunk chain and its roll. One move each — a chain is one object however
  * many chunks are behind it, and each chunk's own row deals with what is inside it when its turn comes. */
-static __device__ __noinline__ void sys__list__zzpackage_release_internal(sys__heap_node* head,
+static __device__ SYS__NOINLINE void sys__list__zzpackage_release_internal(sys__heap_node* head,
                                                                     uint64_t* releaser_stack);
 
 /* What a chunk was holding: every value standing in it, and the chunk after it. */
-static __device__ __noinline__ void sys__list_chunk__zzpackage_release_internal(sys__heap_node* head,
+static __device__ SYS__NOINLINE void sys__list_chunk__zzpackage_release_internal(sys__heap_node* head,
                                                                           uint64_t* releaser_stack);
 
 /* Building one from a program. It takes no arguments — a list arrives empty and is filled by the verbs

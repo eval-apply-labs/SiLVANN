@@ -29,6 +29,6 @@
  * filling's business everywhere else in this package; this is the one property of it the DECLARATION has
  * to carry, because a caller that inlined the verb and a caller that called it would not agree about
  * what they were compiling. */
-static __device__ __noinline__ void sys__fault__raise(uint64_t failed_pc, uint64_t failed_op);
+static __device__ SYS__NOINLINE void sys__fault__raise(uint64_t failed_pc, uint64_t failed_op);
 
 #endif /* SILVANN__PACKAGES_SYS_CPU_FAULT__HEADER_CUH */

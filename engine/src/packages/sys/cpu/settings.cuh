@@ -88,7 +88,7 @@ static __device__ inline bool sys__settings__zzprivate_plain(uint8_t byte) {
  * released WITHOUT being entered if the entry is refused.
  * ⛳ OUT OF LINE, for the reason `intern` is: it hashes, looks up, allocates and may rotate a tree, and
  * it is reached once per line at boot and from nowhere a program can run. */
-static __device__ __noinline__ bool sys__settings__zzprivate_line(uint64_t dictionary,
+static __device__ SYS__NOINLINE bool sys__settings__zzprivate_line(uint64_t dictionary,
                                                                   const uint8_t* bytes,
                                                                   uint64_t from, uint64_t to) {
     /* ── the colon, and every byte around it ─────────────────────────────────────────────────────── */

@@ -38,6 +38,25 @@ static sys__heap_node nn__rmsnorm__zzabi_apply(const sys__heap_node* argv, unsig
     return nn__doors_answer(&argv[2]);
 }
 
+/* `(nn__rmsnorm__apply_fp32 x w out n eps)` — the same norm of `n` floats, into `n` halves: a hyper-connection's collapse,
+ * as large as its streams until it is normed (▶ nn__hyper__pre_fp32). */
+static sys__heap_node nn__rmsnorm__zzabi_apply_fp32(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx) {
+    if (argc != 5u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
+    uint64_t x_at = 0, w_at = 0, o_at = 0, x_room = 0, w_room = 0, o_room = 0;
+    if (argv[3].dtype != SYS__KIND__VALUE_INT || argv[4].dtype != SYS__KIND__VALUE_FLOAT
+     || !nn__primitives__room(&argv[0], &x_at, &x_room)
+     || !nn__primitives__room(&argv[1], &w_at, &w_room)
+     || !nn__primitives__room(&argv[2], &o_at, &o_room)) return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
+    const uint64_t n = argv[3].args[0];
+    if (n == 0ull || n > (1ull << 32) || 4ull * n > x_room || !nn__primitives__fits(n, w_room) || !nn__primitives__fits(n, o_room))
+        return sys__engine__abi__error(NN__PRIMITIVES__FAULT_BOUNDS);
+    const nn__doors* doors = nn__doors_for(ctx);
+    if (doors == 0) return sys__engine__abi__error(NN__PRIMITIVES__FAULT_NO_DEVICE);
+    doors->rmsnorm_fp32((uint16_t*)(uintptr_t)o_at, (const float*)(uintptr_t)x_at, (const uint16_t*)(uintptr_t)w_at, n,
+                        (float)sys__heap_node__real(argv[4].args[0]), ctx->fault_word);
+    return nn__doors_answer(&argv[2]);
+}
+
 /* ══ ⭐⭐ SOFTMAX — a reduction, then a second reduction, then a broadcast ═══════════════════════════
  * ⛳ THREE PASSES AND NOT TWO, deliberately. The one-pass "online" form that rescales a running sum as
  * a new maximum arrives is a real algorithm and it is a PERFORMANCE choice; here the door runs one
@@ -144,6 +163,7 @@ static sys__heap_node nn__matrix__zzabi_apply_matvec_transposed(const sys__heap_
 }
 
 SYS__ENGINE__ABI__BRIDGE(nn__rmsnorm__zzabi_adapter,                    nn__rmsnorm__zzabi_apply)
+SYS__ENGINE__ABI__BRIDGE(nn__rmsnorm__zzabi_adapter_fp32,               nn__rmsnorm__zzabi_apply_fp32)
 SYS__ENGINE__ABI__BRIDGE(nn__softmax__zzabi_adapter,                    nn__softmax__zzabi_apply)
 SYS__ENGINE__ABI__BRIDGE(nn__sigmoid__zzabi_adapter,                    nn__sigmoid__zzabi_apply)
 SYS__ENGINE__ABI__BRIDGE(nn__matrix__zzabi_adapter_transpose,           nn__matrix__zzabi_apply_transpose)

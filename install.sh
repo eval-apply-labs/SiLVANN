@@ -42,6 +42,11 @@ check_machine() {
         stop "Python 3.10 or newer is needed; this one is $("$py" -V 2>&1)."
     elif ! "$py" -c 'import venv, ensurepip' 2>/dev/null; then missing+=(python3-venv)
     fi
+    # ⛳ Python's headers (Python.h), which the engine's module is compiled against: a separate package on Debian and
+    #   Ubuntu, so the build stopped at `#include <Python.h>` without them (a tester's Python 3.12, 2026-10-21)
+    if [ -n "$py" ] && ! "$py" -c 'import os, sysconfig, sys; sys.exit(0 if os.path.isfile(os.path.join(sysconfig.get_path("include"), "Python.h")) else 1)' 2>/dev/null; then
+        missing+=(python3-dev)
+    fi
     command -v g++ >/dev/null || missing+=(g++)
     command -v git >/dev/null || command -v tar >/dev/null || missing+=(git)
     command -v git >/dev/null || command -v curl >/dev/null || missing+=(curl)

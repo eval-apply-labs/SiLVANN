@@ -172,7 +172,66 @@ SYS__ENGINE__ABI__BRIDGE(nn__vector__zzabi_adapter_at,          nn__vector__zzab
 SYS__ENGINE__ABI__BRIDGE(nn__buffer__zzabi_adapter_read,        nn__buffer__zzabi_apply_read)
 SYS__ENGINE__ABI__BRIDGE(nn__vector__zzabi_adapter_draw,        nn__vector__zzabi_apply_draw)
 
-/* ⭐⭐ `(nn__buffer__copy from worker to bytes)` -> `to`: `bytes` of `from`, a buffer of the worker named, into `to`,
+/* ⭐ A side channel on a device, made the first time and kept: a copy marked ready reads through it (▶ below). */
+static sys__os__lock nn__buffer__zzprivate_side_lock = SYS__OS__LOCK_INIT;
+typedef struct nn__buffer__side { bool used; sys__silicon_family__id family; uint64_t device; void* channel; } nn__buffer__side;
+static nn__buffer__side nn__buffer__zzprivate_sides[SYS__SILICON__WORKERS_MAX];
+
+/* Device `device` of `family`'s side channel, made the first time: 0 where none can be. Lock held. */
+static void* nn__buffer__zzprivate_side_of(sys__silicon_family__id family, uint64_t device) {
+    for (unsigned i = 0u; i < SYS__SILICON__WORKERS_MAX; ++i) {
+        nn__buffer__side* c = &nn__buffer__zzprivate_sides[i];
+        if (c->used && c->family == family && c->device == device) return c->channel;
+        if (c->used) continue;
+        if (!sys__gpu__side_open(family, &c->channel)) return 0;
+        c->used = true; c->family = family; c->device = device;
+        return c->channel;
+    }
+    return 0;
+}
+
+/* ⭐ A WORKER'S BOUNCE, KEPT AND PINNED — the copy's bytes pass through it. ⚖ 2026-10-21 `MEASURED` on an MI50, a 5 KB copy
+ *   while the card computes: 66 us through pageable memory, 16 through pinned; a 4 KB write after a 28 us kernel, 71
+ *   against 50 — and the 35B's tier crosses twice a layer, the hand out and the CPU's sum back, both on the card's path.
+ *   It is registered with both families of the crossing, so whichever is a card pins it (a CPU family's registration is
+ *   nothing); made again when a copy is larger, or crosses between two others. ⛳ Its lock is held from the bounce's
+ *   taking to the copy's end: a thread acting as a worker (▶ `sys__silicon__worker`) shares that worker's index, so the
+ *   worker's own thread is not the only one. A static lock is zeroes, which both systems' initialisers are. */
+typedef struct nn__buffer__bounce {
+    unsigned char* at;
+    uint64_t room;
+    sys__silicon_family__id family[2];
+    bool registered[2];
+    sys__os__lock lock;
+} nn__buffer__bounce;
+static nn__buffer__bounce nn__buffer__zzprivate_bounces[SYS__SILICON__WORKERS_MAX];
+
+static void nn__buffer__zzprivate_bounce_drop(nn__buffer__bounce* b) {
+    for (unsigned i = 0u; i < 2u; ++i) if (b->registered[i]) sys__gpu__memory_unregister_host(b->family[i], b->at);
+    free(b->at);
+    b->at = 0; b->room = 0ull; b->registered[0] = b->registered[1] = false;
+}
+
+/* Worker `w`'s bounce of at least `bytes` between `a` and `b`, registered with each, its lock taken — 0 where none can
+ *   be made, the lock not held. A registration refused (the same family twice, say) leaves it pageable there, and still
+ *   a bounce. */
+static nn__buffer__bounce* nn__buffer__zzprivate_bounce(unsigned w, uint64_t bytes, sys__silicon_family__id a, sys__silicon_family__id b) {
+    if (w >= SYS__SILICON__WORKERS_MAX) return 0;
+    nn__buffer__bounce* c = &nn__buffer__zzprivate_bounces[w];
+    sys__os__lock_take(&c->lock);
+    if (c->at != 0 && c->room >= bytes && c->family[0] == a && c->family[1] == b) return c;
+    const uint64_t room = c->room > bytes ? c->room : (bytes + 4095ull) & ~4095ull;
+    if (c->at != 0) nn__buffer__zzprivate_bounce_drop(c);
+    c->at = (unsigned char*)aligned_alloc(4096u, (size_t)room);
+    if (c->at == 0) { sys__os__lock_give(&c->lock); return 0; }
+    c->room = room; c->family[0] = a; c->family[1] = b;
+    void* card_at = 0;
+    c->registered[0] = sys__gpu__memory_register_host(a, c->at, (size_t)room, &card_at);
+    c->registered[1] = b != a && sys__gpu__memory_register_host(b, c->at, (size_t)room, &card_at);
+    return c;
+}
+
+/* ⭐⭐ `(nn__buffer__copy from worker to bytes [1])` -> `to`: `bytes` of `from`, a buffer of the worker named, into `to`,
  * one of this verb's own worker. ⚖ *"so in case of a single card or a single card type the buffer remains on gpu,
  * if there are different card types the program is written that it also copies the buffer out"* — so the program
  * says when a tensor crosses, and this is the crossing: the source's device bound and waited for (its work may
@@ -181,8 +240,16 @@ SYS__ENGINE__ABI__BRIDGE(nn__vector__zzabi_adapter_draw,        nn__vector__zzab
  * ⛔ THROUGH A BOUNCE OF ITS OWN, allocated for the copy and freed after it. A launch's blocks run on threads the
  *   engine starts for that launch and joins after it (`eng__launch__spread`), so a bounce kept by the thread would be
  *   lost with the thread, one a launch: `MEASURED` 2026-10-14 on node03 (measurements/2026-10-14_v080rc1_on_node03.md),
- *   the 35B with its experts on the CPU grew 37 KB a token and 12 KB a prompt's position, without end. */static sys__heap_node nn__buffer__zzabi_apply_copy(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx) {
-    if (argc != 4u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
+ *   the 35B with its experts on the CPU grew 37 KB a token and 12 KB a prompt's position, without end.
+ * ⭐ WITH 1 AFTER THE BYTES, THE SOURCE IS READY — its writer waited for it (▶ ai_qwen_3's experts visit): it is read
+ *   through a side channel of its device, beside whatever that device runs now, not after it. ⚖ 2026-10-20 *"i thought
+ *   they were overlapping"*: waited for, the CPUs' copy of a card's hand waited for the card's own experts, queued just
+ *   before, and the CPUs' experts ran after the card's instead of beside them. */
+static sys__heap_node nn__buffer__zzabi_apply_copy(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx) {
+    if (argc != 4u && argc != 5u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
+    if (argc == 5u && (argv[4].dtype != SYS__KIND__VALUE_INT || argv[4].args[0] != 1u))
+        return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
+    const bool ready = argc == 5u;
     uint64_t from = 0, from_room = 0, to = 0, to_room = 0;
     if (!nn__primitives__room_of_any(&argv[0], &from, &from_room) || argv[1].dtype != SYS__KIND__VALUE_INT
      || !nn__primitives__room(&argv[2], &to, &to_room) || argv[3].dtype != SYS__KIND__VALUE_INT)
@@ -195,15 +262,30 @@ SYS__ENGINE__ABI__BRIDGE(nn__vector__zzabi_adapter_draw,        nn__vector__zzab
     if (owner != 0ull && owner != argv[1].args[0] + 1ull) return sys__engine__abi__error(NN__BUFFER__FAULT_OWNER);
     const sys__engine__ctx* src = sys__engine__ctx_of((unsigned int)argv[1].args[0]);
     if (src == 0 || src->fault_word == 0 || nn__doors_for(ctx) == 0) return sys__engine__abi__error(NN__PRIMITIVES__FAULT_NO_DEVICE);
-    unsigned char* bounce = (unsigned char*)malloc((size_t)bytes);
-    if (bounce == 0) return sys__engine__abi__error(NN__PRIMITIVES__FAULT_NO_DEVICE);
     const bool elsewhere = src->family != ctx->family || src->device != ctx->device;
     bool ok = !elsewhere || sys__silicon__bind_device(src->family, src->device);
-    ok = ok && sys__gpu__compute_completed(src->family)
-            && sys__gpu__memory_read(src->family, bounce, (const void*)(uintptr_t)from, (size_t)bytes);
+    /* ⛳ made while the source is bound: a card family pins it on whichever card is bound, which any card reads */
+    nn__buffer__bounce* kept = ok ? nn__buffer__zzprivate_bounce(sys__silicon__worker(), bytes, src->family, ctx->family) : 0;
+    unsigned char* bounce = kept != 0 ? kept->at : (unsigned char*)malloc((size_t)bytes);
+    if (bounce == 0) {
+        if (elsewhere) (void)sys__silicon__bind_device(ctx->family, ctx->device);
+        return sys__engine__abi__error(NN__PRIMITIVES__FAULT_NO_DEVICE);
+    }
+    /* ⛳ a family with no side channel reads it as any other copy, waited for */
+    void* side = 0;
+    if (ready && ok) {
+        sys__os__lock_take(&nn__buffer__zzprivate_side_lock);
+        side = nn__buffer__zzprivate_side_of(src->family, (uint64_t)src->device);
+        if (side != 0) ok = sys__gpu__side_memory_read(src->family, bounce, (const void*)(uintptr_t)from, (size_t)bytes, side);
+        sys__os__lock_give(&nn__buffer__zzprivate_side_lock);
+    }
+    if (side == 0)
+        ok = ok && sys__gpu__compute_completed(src->family)
+                && sys__gpu__memory_read(src->family, bounce, (const void*)(uintptr_t)from, (size_t)bytes);
     if (elsewhere) ok = sys__silicon__bind_device(ctx->family, ctx->device) && ok;
     ok = ok && sys__gpu__memory_write(ctx->family, (void*)(uintptr_t)to, bounce, (size_t)bytes);
-    free(bounce);
+    if (kept != 0) sys__os__lock_give(&kept->lock);
+    else free(bounce);
     if (!ok) return sys__engine__abi__error(NN__PRIMITIVES__FAULT_NO_DEVICE);
     return nn__doors_answer(&argv[2]);
 }

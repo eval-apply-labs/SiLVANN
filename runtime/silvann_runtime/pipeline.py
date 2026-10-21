@@ -17,8 +17,8 @@ the sampler the request carries — and hands it to its next, the first, which c
   a position   token -> first's layers -> its residual -> the next's layers -> … -> the last's -> the token -> the first
   a prompt     the same, a chunk of rows at a time (the smallest chunk any machine reads)
 ```
-What crosses a link is the residual: a row of halves a position (4 KB for the 35B, 10 KB for the 27B, GLM's streams 32
-KB), or a chunk's rows. Each machine keeps its own layers' caches — so a conversation's state is spread over the machines,
+What crosses a link is the residual: a row a position (halves: 4 KB for the 35B, 10 KB for the 27B, GLM's streams 32 KB;
+DeepSeek's streams floats, 80 KB), or a chunk's rows. Each machine keeps its own layers' caches — so a conversation's state is spread over the machines,
 and one brought back after another ran reads its tokens again (`Pipeline.PARKS`).
 """
 import argparse

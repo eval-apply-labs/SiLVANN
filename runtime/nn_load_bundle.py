@@ -263,6 +263,37 @@ class Bundle:
             f.close()
         self._blob = {}
 
+    def release(self, layer=None):
+        """⭐ A LAYER'S FILE LET GO once what it holds is where it goes — `layer`'s, or every one. Its map closed and its
+        pages dropped from the page cache: they are the file's, clean, so the drop costs nothing, and a later `blob` maps
+        it again. ⛳ WHY: a mapped file's pages stay resident and look recently used, so a model whose experts are copied
+        out of its layers into RAM held both — GLM 5.3 Flash's 150 GB of layers beside its 143 GB of experts, 254 GB on a
+        251 GB box — and the kernel swapped experts out to keep the files. `MEASURED` 2026-10-21 on the ML350: 8 GB
+        swapped during the load, then up to 110k pages a second swapped back in by the sockets as they decoded, one
+        socket's layer stalled ~15 ms at a time (NN-99 ④). A map something still holds a view of stays open — its pages
+        are still dropped, and come back as they are read. Returns the layers kept mapped so, empty when all were let go
+        — a slice left bound (a loop's last `piece`) is enough to keep one."""
+        layers = list(self._blob) if layer is None else [self._store(layer)]
+        kept = []
+        if layer is None and self.overlay is not None:
+            kept += self.overlay.release()
+        for l in layers:
+            if l not in self._blob:
+                continue
+            f, m = self._blob[l]
+            try:
+                os.posix_fadvise(f.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)
+            except (AttributeError, OSError):
+                pass                                    # not on this system: the pages age out as they would have
+            try:
+                m.close()
+            except BufferError:
+                kept.append(l)                          # a view still reads it: kept mapped
+                continue
+            f.close()
+            del self._blob[l]
+        return kept
+
 
 # ══ ⭐⭐ ONE RECORD, AND THE SLICES INSIDE IT ═══════════════════════════════════════════════════
 

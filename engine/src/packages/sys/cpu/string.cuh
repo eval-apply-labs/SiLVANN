@@ -101,7 +101,7 @@ static __device__ inline void sys__string__zzprivate_mix(uint64_t* v, uint32_t a
  * by name. The message words and the working words are what it keeps, and nothing else.
  * ⛳ OUT OF LINE, FOR SIZE AND NOT FOR SPEED: inlined, its two call sites were two copies of twelve rounds.
  * `REASONED` on the host — the timing was measured only on the device kernel (▶ the note at the top). */
-static __device__ __noinline__ void sys__string__zzprivate_compress(uint64_t* h, const uint64_t* iv,
+static __device__ SYS__NOINLINE void sys__string__zzprivate_compress(uint64_t* h, const uint64_t* iv,
                                                               const uint8_t* bytes, uint64_t from,
                                                               uint64_t length, uint64_t counted, bool last) {
     static const uint8_t schedule[10][16] = {
@@ -148,7 +148,7 @@ static __device__ __noinline__ void sys__string__zzprivate_compress(uint64_t* h,
  * none; `into` is written whole, and nothing else is.
  * ⛳ THE LAST BLOCK IS NEVER EMPTY UNLESS THE TEXT IS: a text whose length is a multiple of 128 finishes
  * on its own last full block, which is what the standard says and what the harness pins at 128 and 256. */
-static __device__ __noinline__ void sys__string__hash(const uint8_t* bytes, uint64_t length,
+static __device__ SYS__NOINLINE void sys__string__hash(const uint8_t* bytes, uint64_t length,
                                                       sys__heap_node* into) {
     if (into == 0) return;
     static const uint64_t iv[8] = {

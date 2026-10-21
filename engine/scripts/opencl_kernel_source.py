@@ -42,7 +42,7 @@ FAKE = {
 }
 SPELLINGS = ('#define constexpr const\n#define static_assert _Static_assert\n'
              '#define alignas(n) __attribute__((aligned(n)))\n#define alignof(t) __alignof__(t)\n'
-             '#define __device__\n#define __noinline__ __attribute__((noinline))\n')
+             '#define __device__\n#define SYS__NOINLINE __attribute__((noinline))\n')
 # ⛳ nn's arithmetic dial is read here the way a family reads it: its defaults file first, then one
 #   definition per function with the choice inside it. `SILVANN_NN_ARITHMETIC_FAST` overrides it, as it
 #   does for the other families' compilers.

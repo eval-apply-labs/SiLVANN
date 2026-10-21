@@ -317,6 +317,8 @@ class Client:
                     yield "waiting", {}
                     await asyncio.sleep(float(resp.headers.get("Retry-After", 5)))
                     continue
+                if resp.status_code >= 400:
+                    await resp.aread()                # the server's reason, which a caller reads off the error
                 resp.raise_for_status()
                 event = None
                 async for raw in resp.aiter_lines():
@@ -375,8 +377,8 @@ async def _export_download(token: str):
 REPO_ROOT = Path(__file__).resolve().parent          # main/ — the runtime root
 SERVER_SCRIPT = REPO_ROOT / "start_silvann_server.py"
 CORE_SCRIPT = REPO_ROOT / "silvann_core.py"          # lists and downloads the models this release knows
-# what the machine keeps — the models and the conversations: beside the UI, or where SILVANN_DATA says (the Docker
-# image's volume), as the server and silvann_core.py read it
+# what the machine keeps — the models and the conversations: beside the UI, or where SILVANN_DATA says (a container's
+# volume), as the server and silvann_core.py read it
 DATA_DIR = Path(os.environ.get("SILVANN_DATA") or REPO_ROOT)
 MODELS_DIR = DATA_DIR / "models"                     # models/<name>/ — self-contained model folders
 LAST_START = DATA_DIR / "ui_last_start.json"         # the model a --local UI starts again when it starts
@@ -436,7 +438,7 @@ QWEN_OPTIONS = {
     "experts_int8": "false (default) or true: a token's experts on the CPU in integers",
     "picture_pixels": "default 4194304: the largest picture the card makes room for; 0 reads pictures on the CPU",
     "picture_weights": "\"auto\" (default), \"card\" or \"ram\": the vision tower's weights",
-    "tensor_parallel": "1 (default), 2, 4: a dense model over that many cards of one size (AMD, a developer preview)",
+    "tensor_parallel": "1 (default), 2, 4: the model over that many cards of one size; an MoE's experts on the CPU or in RAM (AMD, a developer preview)",
     "mtp": "\"no\" (default) or \"yes\": the MTP layer drafts the token after next and the model checks both at once — a "
            "greedy answer the same tokens; not faster yet on the 35B",
 }
@@ -496,8 +498,9 @@ HELP_DOCS = [
     ("Using SiLVANN", "A model's config", DOCS_DIR / "config.md"),
     ("Using SiLVANN", "The model's tool and your own commands", DOCS_DIR / "tools.md"),
     ("Using SiLVANN", "Skills", RELEASE_DIR / "skills" / "README.md"),
-    ("Using SiLVANN", "Windows and the Docker app", RELEASE_DIR / "docker" / "README.md"),
+    ("Using SiLVANN", "A container of your own", RELEASE_DIR / "docker" / "README.md"),
     ("Using SiLVANN", "Every release's notes", RELEASE_DIR / "release_logs" / "v0.md"),
+    ("Using SiLVANN", "Why AI on your own machine", DOCS_DIR / "local_ai.md"),
     ("The models", "The models", DOCS_DIR / "models.md"),
     ("The models", "Their results", DOCS_DIR / "results.md"),
     ("The models", "A model's folder", RELEASE_DIR / "models" / "README.md"),
@@ -511,6 +514,7 @@ HELP_DOCS = [
     ("Developing", "Package ai_qwen_3", ENGINE_SRC / "packages" / "ai_qwen_3" / "README.md"),
     ("Developing", "Package ai_z__glm_5_3", ENGINE_SRC / "packages" / "ai_z__glm_5_3" / "README.md"),
     ("Developing", "Package ai_qwen_image", ENGINE_SRC / "packages" / "ai_qwen_image" / "README.md"),
+    ("Developing", "Package ai_deepseek_4", ENGINE_SRC / "packages" / "ai_deepseek_4" / "README.md"),
     ("Developing", "Adding a silicon family", ENGINE_SRC / "silicon_families" / "add_a_family.md"),
     ("Developing", "OpenCL 1.2 for integrated GPUs", ENGINE_SRC / "silicon_families" / "khronos_opencl1_igpu" / "README.md"),
     ("Developing", "Contributing", LICENCE_DIR / "CONTRIBUTING.md"),
@@ -1247,7 +1251,7 @@ async def page():
             attach_btn.set_visibility(False)       # shown when the server's model reads pictures or files (its /health)
             input_box = ui.textarea(placeholder="Type a message — Enter to send, Shift+Enter for newline"
                                     ).classes("flex-grow").props("autogrow outlined")
-            max_in = ui.number(label="max tokens", value=2048, min=1, max=4096).classes("w-32")
+            max_in = ui.number(label="max tokens", value=2048, min=1, max=16384).classes("w-32")
             send_btn = ui.button(icon="send")
 
         def _cart_pending() -> list:
@@ -2454,8 +2458,17 @@ async def page():
                 elif not on_tool_event(kind, payload):
                     break
         except httpx.HTTPStatusError as ex:
-            if ex.response.status_code == 409 and state.get("ask"):
-                state["history"][-1]["content"] += "\n\n_[the model waits on your answer to its ask]_"
+            if ex.response.status_code == 409 and (state.get("ask") or "waits on an answer" in ex.response.text):
+                # the model's ask is still open — a page that was put away and back may not have known it: its buttons
+                # again, and the typed message kept for after the answer
+                state["history"].pop()  # the empty assistant message
+                state["history"].pop()  # the user message they typed
+                input_box.set_value(txt)
+                try:
+                    state["ask"] = (await client.activate(state["active_id"])).get("ask") or state.get("ask")
+                except Exception:
+                    pass
+                safe_notify("The model waits on your answer to its ask — the buttons under its answer", type="warning")
             elif ex.response.status_code == 409:
                 # Server says cart isn't bound anymore — almost certainly evicted (we went idle
                 # past the heartbeat window). Drop the assistant placeholder, flip back to
@@ -2512,6 +2525,12 @@ async def page():
         """The user's answer to the model's ask, then the rest of its answer, into the conversation's last message."""
         if state["streaming"] or not state.get("ask") or not state["active_id"]:
             return
+        # a conversation put away while the ask waited is brought back first, as sending brings it back
+        if not state.get("active_bound"):
+            await bind_active()
+            if not state.get("active_bound"):
+                return
+        asked = state["ask"]
         state["ask"] = None
         state["streaming"] = True
         set_send_btn(True)
@@ -2529,6 +2548,8 @@ async def page():
                     break
         except httpx.HTTPStatusError as ex:
             state["history"][-1]["content"] += f"\n\n_[stream error: HTTP {ex.response.status_code}]_"
+            if ex.response.status_code in (409, 423):
+                state["ask"] = asked                  # not answered: its buttons stay
         except Exception as e:
             state["history"][-1]["content"] += f"\n\n_[stream error: {e}]_"
         finally:
@@ -2793,7 +2814,7 @@ def main():
                    help="default SiLVANN server endpoint (override on first launch)")
     p.add_argument("--no-browser", action="store_true", help="don't auto-open the browser")
     p.add_argument("--local", action="store_true",
-                   help="the UI as the app over this machine's models (the Docker image's): the local panel first, "
+                   help="the UI as the app over this machine's models: the local panel first, "
                         "the model started last started again, and the server stopped with the UI")
     args = p.parse_args()
 

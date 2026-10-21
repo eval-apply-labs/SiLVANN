@@ -30,7 +30,7 @@
  *   (`nn__silicon__lanes_sum` / `lanes_max`, each family's fold). No block of the evaluator can reach it —
  *   it runs on a card, inside one launch, where every lane of the block calls it.
  *
- * ⛳ IT IS `__noinline__`, which the host environment keeps as a real `noinline`: the parking loop is
+ * ⛳ IT IS `SYS__NOINLINE`, which the host environment keeps as a real `noinline`: the parking loop is
  *   entered once per launch and stays out of line from the evaluator it calls once per computation.
  *   Nothing on the host prices the choice either way (`REASONED`, not measured).
  * ────────────────────────────────────────────────────────────────────────────────────────────────── */
@@ -70,7 +70,7 @@ static __device__ inline bool eng__opcodes__zzprivate_told_to_stop(const unsigne
  * provisional until the write-back reconciles it, so a launch-scoped pairing alone would leave the chunk
  * claimed and its count unsettled for the whole residency.
  * The pairing that every kernel in this tree owes per launch, this owes per computation. */
-static __device__ __noinline__ void eng__opcodes__await_instructions(sys__heap_node* here, uint32_t me,
+static __device__ SYS__NOINLINE void eng__opcodes__await_instructions(sys__heap_node* here, uint32_t me,
                                                                      unsigned int* stop) {
     if (here == 0) return;
     /* ⭐ STOP MEANS "WHEN NOTHING IS WAITING", NEVER "NOW". Work put on this base before the stop was given

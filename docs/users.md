@@ -1,6 +1,6 @@
 # Running SiLVANN
 
-This is a **developer preview (v0.12.0)**. It is tested on Linux with AMD Instinct MI50 cards (gfx906, ROCm 6), with an
+This is a **developer preview (v0.15.0)**. It is tested on Linux with AMD Instinct MI50 cards (gfx906, ROCm 6), with an
 NVIDIA GeForce RTX 5060 Ti (sm_120, CUDA 12.9), and on the CPU alone with AVX2 and with AVX-512 — on Ubuntu 22.04 — and
 natively on Windows on one PC, with an RTX 5070 Ti ([below](#on-windows)). Other NVIDIA generations are untested; macOS is
 not supported. If something does not build or does not run on your
@@ -26,10 +26,10 @@ them your skills (`skills/`), the tool's workspace, the folders it was allowed a
 (`ui_last_start.json`). What the old folder holds stays there; the command names what to move across. The `silvann`
 command's `serve`, `ui` and `download` read the folder; the server and the UI started by hand read `SILVANN_DATA`, which
 also comes before it. It installs nothing system-wide and asks for no
-password: a tool it needs and does not find — Python's `venv`, `g++`, `git` — it names, with the `apt` line that installs
+password: a tool it needs and does not find — Python's `venv` and its headers (`python3-dev`), `g++`, `git` — it names, with the `apt` line that installs
 it. A card whose compiler is missing (CUDA's `nvcc`, ROCm's `hipcc`) is named too; install it, then `silvann build`.
 
-**By hand:** you need Python 3.10 or newer, `g++`, for AMD cards ROCm's `hipcc` (`/opt/rocm/bin/hipcc`), and for NVIDIA cards CUDA
+**By hand:** you need Python 3.10 or newer with its headers (`python3-dev` on Debian and Ubuntu), `g++`, for AMD cards ROCm's `hipcc` (`/opt/rocm/bin/hipcc`), and for NVIDIA cards CUDA
 12's `nvcc` — found on the `PATH`, or named by `SILVANN_NVCC=/usr/local/cuda-12.9/bin/nvcc`.
 
 ```bash
@@ -99,12 +99,12 @@ of them on the card that leaves Task Manager's shared GPU memory near 0 —
 "card_experts_gb": 6}` answered at 16 tokens a second there. The driver's "CUDA - Sysmem Fallback Policy" set to
 "Prefer No Sysmem Fallback" left CUDA in WSL 2 without the card on that PC: keep it at its default.
 
-### On Windows: the Docker image
+### On Windows: a container
 
-From v0.12.0 there is none, and no scripts to run one: SiLVANN runs natively ([above](#on-windows)). Under Docker Desktop
+SiLVANN publishes no image: it runs natively ([above](#on-windows)). Under Docker Desktop
 on WSL 2 it ran well below what the PC gives — on one PC (an RTX 5070 Ti, a Ryzen 7 5800X, 32 GB of RAM) 37 tokens a
 second with Ministral 3 14B `D4` and 22 with the Qwen 3.6 35B-A3B `D8E4`, where the same version installed on Linux gave
-46 and 40. [`docker/README.md`](../docker/README.md) keeps the Dockerfile, for a container of your own.
+46 and 40. [`docker/README.md`](../docker/README.md) has the Dockerfile, for a container of your own.
 
 ### On Windows: Linux on a USB SSD
 
@@ -265,7 +265,7 @@ was. A free card can draw instead, with `image_card` in the config. How, and wha
 ### Skills
 
 A skill gives the model's REPL commands of yours, written in Python or as a program: a folder with a `SKILL.md` that
-declares them, in `skills/` beside the conversations (the Docker image's `/data/skills`). The release ships `files`:
+declares them, in `skills/` beside the conversations (`/data/skills` in a container built from `docker/`). The release ships `files`:
 `(find "folder" "pattern")`. `(skills)` lists them. **How to write one, step by step, and how values cross between Lisp
 and Python: [`tools.md`](tools.md).**
 
@@ -300,7 +300,7 @@ non-commercial use only.
 ## 4. The model's settings
 
 `models/<name>/configs/default.json` is read when the server starts; another file can be named as the server's
-first argument. The UI's Options edit it, and their **New** starts a file with every key the server reads.
+first argument. The UI's Options edit it, and their **new config** starts a file with every key the server reads.
 
 **Every key, every model's options, what the config leaves out and how it is chosen for the machine, and tensor
 parallelism: [`config.md`](config.md).**

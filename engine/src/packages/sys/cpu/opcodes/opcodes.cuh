@@ -112,7 +112,7 @@ static __device__ inline sys__heap_node sys__opcodes__truth(bool yes) {
  * name owns its own stack, so for distinct names the order is unobservable — but two scopes entered for
  * the SAME name have to be left innermost-first or the wrong one survives. Mirroring the entry order is
  * correct without having to know whether the caller repeated itself. */
-static __device__ __noinline__ void sys__opcodes__zzpackage_apply_remove_bindings(sys__heap_node* base, uint64_t form) {
+static __device__ SYS__NOINLINE void sys__opcodes__zzpackage_apply_remove_bindings(sys__heap_node* base, uint64_t form) {
     (void)base;
     const uint64_t n = sys__sublist__length(form);
     if (n < 3ull) { sys__opcodes__fails(form, SYS__OPCODES__FAULT_ARITY); return; }
@@ -221,7 +221,7 @@ static __device__ inline bool sys__opcodes__zzprivate_operands3(uint64_t form,
  * ⛳ IT NEEDS NO SEQUENCING CODE OF ITS OWN, which is the point of the flat scan — by the time this runs,
  * every one of its arguments has already been reduced, in order, because that is how the scan found them.
  * All that is left is to say which of the answers is the form's. */
-static __device__ __noinline__ void sys__opcodes__zzpackage_apply_begin(sys__heap_node* base, uint64_t form) {
+static __device__ SYS__NOINLINE void sys__opcodes__zzpackage_apply_begin(sys__heap_node* base, uint64_t form) {
     (void)base;
     const uint64_t n = sys__sublist__length(form);
     if (n < 2ull) { sys__opcodes__fails(form, SYS__OPCODES__FAULT_ARITY); return; }
@@ -252,7 +252,7 @@ static __device__ __noinline__ void sys__opcodes__zzpackage_apply_begin(sys__hea
 static __device__ inline bool sys__opcodes__zzprivate_while_error(const sys__heap_node* v) {
     return v->dtype == SYS__KIND__OBJECT_REFERENCE && sys__error__is(v->args[0]);
 }
-static __device__ __noinline__ void sys__opcodes__zzpackage_apply_while(sys__heap_node* base, uint64_t form) {
+static __device__ SYS__NOINLINE void sys__opcodes__zzpackage_apply_while(sys__heap_node* base, uint64_t form) {
     (void)base;
     const uint64_t n = sys__sublist__length(form);
     if (n == 3ull) {
@@ -317,7 +317,7 @@ static __device__ __noinline__ void sys__opcodes__zzpackage_apply_while(sys__hea
  * call was for. `prog1` keeps the body's answer while everything after it still runs.
  * ⛳ IT IS A PRIMITIVE AND NOT A COMPOSITE, which is the point: nothing here knows what a call is. It says
  * "this one is the answer" and the rest is a program the composer wrote. */
-static __device__ __noinline__ void sys__opcodes__zzpackage_apply_prog1(sys__heap_node* base, uint64_t form) {
+static __device__ SYS__NOINLINE void sys__opcodes__zzpackage_apply_prog1(sys__heap_node* base, uint64_t form) {
     (void)base;
     if (sys__sublist__length(form) < 2ull) { sys__opcodes__fails(form, SYS__OPCODES__FAULT_ARITY); return; }
     const sys__heap_node first = sys__sublist__nth(form, 1ull);

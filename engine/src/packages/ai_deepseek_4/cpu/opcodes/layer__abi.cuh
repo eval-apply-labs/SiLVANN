@@ -1,11 +1,12 @@
 #ifndef SILVANN__PACKAGES_AI_DEEPSEEK_4_CPU_OPCODES_LAYER__ABI_CUH
 #define SILVANN__PACKAGES_AI_DEEPSEEK_4_CPU_OPCODES_LAYER__ABI_CUH
 /* ══ DEEPSEEK-V4.1'S LAYER, A VERB A DEVICE SEAM ═════════════════════════════════════════════════════════════
- * The four residual streams go in and come out in place. A site's verb writes its own mix of them (`nn__hyper__pre`),
- * collapses them by the mix the site before it wrote (`nn__hyper__collapse`), norms the input, runs the sublayer and
- * mixes the streams again with its output by its own mix (`nn__hyper__post`) — the attention site whole in one verb, the
- * MoE site cut in three where the routed experts run on another worker. Every matrix is a TurboQuant record rotated
- * along its input, so each is handed its input rotated; the router is lossless and reads it as it is.
+ * The four residual streams go in and come out in place, as floats: a sink token's pass fp16's range (▶ nn's THE STREAMS
+ * AS FLOATS). A site's verb writes its own mix of them (`hyper_pre_fp32`), collapses them by the mix the site before it
+ * wrote (`hyper_collapse_fp32`), norms the input into halves, runs the sublayer and mixes the streams again with its
+ * output by its own mix (`hyper_post_fp32`) — the attention site whole in one verb, the MoE site cut in three where the
+ * routed experts run on another worker. Every matrix is a TurboQuant record rotated along its input, so each is handed
+ * its input rotated; the router is lossless and reads it as it is.
  * ▶ `contracts/objects/layer.cuh` for the tables. */
 
 #include <math.h>
@@ -20,23 +21,26 @@ static inline bool ai_deepseek_4__layer__zzprivate_open(const sys__heap_node* ar
 }
 
 /* The site's input: its own mix of the streams written into OWN, the streams collapsed by the EARLIER site's `pre` into
- * `xin`, then normed into `h`. The mix's own collapse lands in `xin` first and is written over. */
+ * `xin` (floats, as large as the streams), then normed into `h` (halves). The mix's own collapse lands in `xin` first and
+ * is written over. */
 static inline void ai_deepseek_4__layer__zzprivate_collapse(const nn__doors* doors, unsigned int* over, const uint64_t* at,
                                                             uint64_t streams, uint64_t xin, uint64_t h, uint64_t H, uint64_t M,
                                                             uint64_t iters, float eps, float hc_eps) {
     const uint64_t own = at[AI_DEEPSEEK_4__OWN];
-    doors->hyper_logits((float*)(uintptr_t)own + NN__HYPER__MIX(M), (const uint16_t*)(uintptr_t)streams,
-                        (const uint16_t*)(uintptr_t)at[AI_DEEPSEEK_4__HC_FN], H, M, eps);
-    doors->hyper_pre((uint16_t*)(uintptr_t)xin, (float*)(uintptr_t)own, (const uint16_t*)(uintptr_t)streams, (const uint16_t*)(uintptr_t)at[AI_DEEPSEEK_4__HC_BASE],
-                     (const uint16_t*)(uintptr_t)at[AI_DEEPSEEK_4__HC_SCALE], H, M, iters, hc_eps, over);
-    doors->hyper_collapse((uint16_t*)(uintptr_t)xin, (const float*)(uintptr_t)at[AI_DEEPSEEK_4__EARLIER], (const uint16_t*)(uintptr_t)streams,
-                          H, M, over);
-    doors->rmsnorm((uint16_t*)(uintptr_t)h, (const uint16_t*)(uintptr_t)xin, (const uint16_t*)(uintptr_t)at[AI_DEEPSEEK_4__NORM], H, eps, over);
+    doors->hyper_logits_fp32((float*)(uintptr_t)own + NN__HYPER__MIX(M), (const float*)(uintptr_t)streams,
+                             (const uint16_t*)(uintptr_t)at[AI_DEEPSEEK_4__HC_FN], H, M, eps);
+    doors->hyper_pre_fp32((float*)(uintptr_t)xin, (float*)(uintptr_t)own, (const float*)(uintptr_t)streams,
+                          (const uint16_t*)(uintptr_t)at[AI_DEEPSEEK_4__HC_BASE], (const uint16_t*)(uintptr_t)at[AI_DEEPSEEK_4__HC_SCALE], H, M,
+                          iters, hc_eps);
+    doors->hyper_collapse_fp32((float*)(uintptr_t)xin, (const float*)(uintptr_t)at[AI_DEEPSEEK_4__EARLIER], (const float*)(uintptr_t)streams,
+                               H, M);
+    doors->rmsnorm_fp32((uint16_t*)(uintptr_t)h, (const float*)(uintptr_t)xin, (const uint16_t*)(uintptr_t)at[AI_DEEPSEEK_4__NORM], H, eps,
+                        over);
 }
 
-/* The mixes a site reads and writes, and its streams, each big enough for `mult` streams of `hidden`. */
+/* The mixes a site reads and writes, and its streams, each big enough for `mult` streams of `hidden` (floats). */
 static inline bool ai_deepseek_4__layer__zzprivate_mixes(const uint64_t* room, uint64_t s_room, uint64_t H, uint64_t M) {
-    return H != 0u && M != 0u && M <= NN__HYPER__MULT_MAX && H <= (1ull << 24) && nn__primitives__fits(M * H, s_room)
+    return H != 0u && M != 0u && M <= NN__HYPER__MULT_MAX && H <= (1ull << 24) && 4ull * M * H <= s_room
         && room[AI_DEEPSEEK_4__OWN] >= AI_DEEPSEEK_4__MIX_BYTES && room[AI_DEEPSEEK_4__EARLIER] >= 4ull * M;
 }
 
@@ -108,6 +112,13 @@ static uint64_t ai_deepseek_4__attention__zzprivate_compressed(uint64_t table, c
     c->ratio = ratio; c->source = source; c->cache = c->at[AI_DEEPSEEK_4__CMP__CACHE]; c->ring = c->at[AI_DEEPSEEK_4__CMP__RING];
     c->zero = c->at[AI_DEEPSEEK_4__CMP__ZERO]; c->gather = c->at[AI_DEEPSEEK_4__CMP__GATHER];
     return 0u;
+}
+
+/* Where an attention table's mask begins: past its last part — the window's, the compressed latents' or the indexer's. */
+static inline unsigned ai_deepseek_4__attention__zzprivate_mask_first(uint64_t table) {
+    const uint64_t length = sys__node_array__length(table);
+    return length >= AI_DEEPSEEK_4__IDX__TABLE ? AI_DEEPSEEK_4__IDX__TABLE
+         : length >= AI_DEEPSEEK_4__CMP__TABLE ? AI_DEEPSEEK_4__CMP__TABLE : AI_DEEPSEEK_4__ATT__TABLE;
 }
 
 /* The source's compressor at `pos` on the site's rotated input `hr`: its latent (and, past ratio 1, its gate) into the
@@ -188,11 +199,11 @@ static uint64_t ai_deepseek_4__attention__zzprivate_row(const sys__heap_node* ar
     const uint64_t latents_all = cmp.ratio != 0u ? (pos + 1u) / cmp.ratio : 0u;
     if (room[AI_DEEPSEEK_4__ATT__SCORES] / 4u < heads * (len + (latents_all < cmp.topk || cmp.ratio == 0u ? latents_all : cmp.topk)))
         return AI_DEEPSEEK_4__LAYER__FAULT_ROOM;
-    /* scratch, halves: xin · h · hr · [qa kv] · qn · qnr · q · o · or · og · ogr · y · [the compressor's kv, gate, rotated
-       latent, index key] · [the indexer's query and weights] */
-    const uint64_t need = 2u * (4u * H + 3u * QR + HD + 3u * QW + 2u * ON + 4u * HD + cmp.dim + cmp.heads * cmp.dim + cmp.heads);
+    /* scratch: xin, floats; then halves: h · hr · [qa kv] · qn · qnr · q · o · or · og · ogr · y · [the compressor's kv,
+       gate, rotated latent, index key] · [the indexer's query and weights] */
+    const uint64_t need = 2u * (5u * H + 3u * QR + HD + 3u * QW + 2u * ON + 4u * HD + cmp.dim + cmp.heads * cmp.dim + cmp.heads);
     if (room[AI_DEEPSEEK_4__ATT__SCRATCH] < need) return AI_DEEPSEEK_4__LAYER__FAULT_ROOM;
-    const uint64_t xin = at[AI_DEEPSEEK_4__ATT__SCRATCH], h = xin + 2u * H, hr = h + 2u * H, qa = hr + 2u * H, kv = qa + 2u * QR;
+    const uint64_t xin = at[AI_DEEPSEEK_4__ATT__SCRATCH], h = xin + 4u * H, hr = h + 2u * H, qa = hr + 2u * H, kv = qa + 2u * QR;
     const uint64_t qn = kv + 2u * HD, qnr = qn + 2u * QR, q = qnr + 2u * QR, o = q + 2u * QW, orot = o + 2u * QW;
     const uint64_t og = orot + 2u * QW, ogr = og + 2u * ON, y = ogr + 2u * ON;
     const uint64_t signs = at[AI_DEEPSEEK_4__ATT__SIGNS], ring = at[AI_DEEPSEEK_4__ATT__RING], scores = at[AI_DEEPSEEK_4__ATT__SCORES];
@@ -276,6 +287,11 @@ static uint64_t ai_deepseek_4__attention__zzprivate_row(const sys__heap_node* ar
     doors->hadamard_rotate((uint16_t*)(uintptr_t)ogr, (const uint16_t*)(uintptr_t)og, (const uint16_t*)(uintptr_t)signs, ON, over);
     ai_deepseek_4__layer__zzprivate_gemv(doors, over, at[AI_DEEPSEEK_4__ATT__WOB], room[AI_DEEPSEEK_4__ATT__WOB], at[AI_DEEPSEEK_4__ATT__WOB + 1u],
                                          room[AI_DEEPSEEK_4__ATT__WOB + 1u], y, ogr, d[4], H, ON);
+    /* the mask on wo_b's answer, this card's columns of it: the group's sum below adds the cards' parts as it adds wo_b's */
+    const uint64_t mf = ai_deepseek_4__table__zzpackage_masked(doors, over, argv[1].args[0],
+                                                               ai_deepseek_4__attention__zzprivate_mask_first(argv[1].args[0]), y, ogr, H, ON,
+                                                               AI_DEEPSEEK_4__LAYER__FAULT_TABLE);
+    if (mf != 0u) return mf;
     /* ⭐ UNDER TENSOR PARALLELISM this card's heads and groups gave a partial of the output: the group's sum of them is the
      *   output, in the group's own buffer (▶ `ai_deepseek_4__layer__zzprivate_tp`) */
     uint64_t out = y;
@@ -284,8 +300,8 @@ static uint64_t ai_deepseek_4__attention__zzprivate_row(const sys__heap_node* ar
         if (f != 0u) return f;
         out = tp[1];
     }
-    doors->hyper_post((uint16_t*)(uintptr_t)streams, (const uint16_t*)(uintptr_t)streams, (const uint16_t*)(uintptr_t)out,
-                      (const float*)(uintptr_t)at[AI_DEEPSEEK_4__OWN], H, M, over);
+    doors->hyper_post_fp32((float*)(uintptr_t)streams, (const float*)(uintptr_t)streams, (const uint16_t*)(uintptr_t)out,
+                           (const float*)(uintptr_t)at[AI_DEEPSEEK_4__OWN], H, M);
     return 0u;
 }
 
@@ -311,7 +327,7 @@ static inline bool ai_deepseek_4__layer__zzprivate_moe(uint64_t table, uint64_t*
     const uint64_t H = v[AI_DEEPSEEK_4__MOE__HIDDEN], E = v[AI_DEEPSEEK_4__MOE__EXPERTS];
     const uint64_t K = v[AI_DEEPSEEK_4__MOE__TOP_K], I = v[AI_DEEPSEEK_4__MOE__INTER];
     return H != 0u && H <= (1ull << 24) && E != 0u && E <= (1ull << 20) && K != 0u && K <= E && K <= AI_DEEPSEEK_4__TOP_K_MAX
-        && I != 0u && I <= (1ull << 24) && room[AI_DEEPSEEK_4__MOE__SCRATCH] >= 2u * (3u * H + E) + 8u * I;
+        && I != 0u && I <= (1ull << 24) && room[AI_DEEPSEEK_4__MOE__SCRATCH] >= 2u * (4u * H + E) + 8u * I;
 }
 
 /* `(ai_deepseek_4__route streams table hand picks)` -> `hand`. The MoE site to the router: the site's mix written, the
@@ -331,7 +347,8 @@ static sys__heap_node ai_deepseek_4__route__zzabi_apply(const sys__heap_node* ar
     if (!ai_deepseek_4__layer__zzprivate_mixes(room, s_room, H, M) || !nn__primitives__fits(H + K, h_room)
      || !nn__primitives__fits(E, room[AI_DEEPSEEK_4__MOE__BIAS]) || !nn__primitives__fits(E * H, room[AI_DEEPSEEK_4__MOE__ROUTER]))
         return sys__engine__abi__error(AI_DEEPSEEK_4__LAYER__FAULT_TABLE);
-    const uint64_t scratch = at[AI_DEEPSEEK_4__MOE__SCRATCH], xin = scratch + 2u * H, h = xin + 2u * H, logits = h + 2u * H;
+    /* scratch: the shared expert's answer, kept for `close` · xin (floats) · h · the router's logits */
+    const uint64_t scratch = at[AI_DEEPSEEK_4__MOE__SCRATCH], xin = scratch + 2u * H, h = xin + 4u * H, logits = h + 2u * H;
     const nn__doors* doors = nn__doors_for(ctx);
     if (doors == 0) return sys__engine__abi__error(NN__PRIMITIVES__FAULT_NO_DEVICE);
     unsigned int* over = ctx->fault_word;
@@ -361,7 +378,7 @@ static sys__heap_node ai_deepseek_4__shared__zzabi_apply(const sys__heap_node* a
     const uint64_t H = v[AI_DEEPSEEK_4__MOE__HIDDEN], I = v[AI_DEEPSEEK_4__MOE__INTER], E = v[AI_DEEPSEEK_4__MOE__EXPERTS];
     const uint64_t* d = &v[AI_DEEPSEEK_4__MOE__D];
     if (!nn__primitives__fits(H, h_room)) return sys__engine__abi__error(AI_DEEPSEEK_4__LAYER__FAULT_TABLE);
-    const uint64_t sh = at[AI_DEEPSEEK_4__MOE__SCRATCH], gu = sh + 2u * (3u * H + E), act = gu + 4u * I, actr = act + 2u * I;
+    const uint64_t sh = at[AI_DEEPSEEK_4__MOE__SCRATCH], gu = sh + 2u * (4u * H + E), act = gu + 4u * I, actr = act + 2u * I;
     const uint64_t signs = at[AI_DEEPSEEK_4__MOE__SIGNS];
     const nn__doors* doors = nn__doors_for(ctx);
     if (doors == 0) return sys__engine__abi__error(NN__PRIMITIVES__FAULT_NO_DEVICE);
@@ -375,6 +392,9 @@ static sys__heap_node ai_deepseek_4__shared__zzabi_apply(const sys__heap_node* a
     doors->hadamard_rotate((uint16_t*)(uintptr_t)actr, (const uint16_t*)(uintptr_t)act, (const uint16_t*)(uintptr_t)signs, I, over);
     ai_deepseek_4__layer__zzprivate_gemv(doors, over, at[AI_DEEPSEEK_4__MOE__DOWN], room[AI_DEEPSEEK_4__MOE__DOWN], at[AI_DEEPSEEK_4__MOE__DOWN + 1u],
                                          room[AI_DEEPSEEK_4__MOE__DOWN + 1u], sh, actr, d[2], H, I);
+    const uint64_t mf = ai_deepseek_4__table__zzpackage_masked(doors, over, argv[1].args[0], AI_DEEPSEEK_4__MOE__MASK, sh, actr, H, I,
+                                                               AI_DEEPSEEK_4__LAYER__FAULT_TABLE);
+    if (mf != 0u) return sys__engine__abi__error(mf);
     return nn__doors_answer(&argv[0]);
 }
 
@@ -405,8 +425,8 @@ static sys__heap_node ai_deepseek_4__close__zzabi_apply(const sys__heap_node* ar
         if (f != 0u) return sys__engine__abi__error(f);
         y = tp[1];
     }
-    doors->hyper_post((uint16_t*)(uintptr_t)streams, (const uint16_t*)(uintptr_t)streams, (const uint16_t*)(uintptr_t)y,
-                      (const float*)(uintptr_t)at[AI_DEEPSEEK_4__OWN], H, M, ctx->fault_word);
+    doors->hyper_post_fp32((float*)(uintptr_t)streams, (const float*)(uintptr_t)streams, (const uint16_t*)(uintptr_t)y,
+                           (const float*)(uintptr_t)at[AI_DEEPSEEK_4__OWN], H, M);
     return nn__doors_answer(&argv[0]);
 }
 
@@ -467,7 +487,7 @@ static sys__heap_node ai_deepseek_4__engram__zzabi_apply(const sys__heap_node* a
         return sys__engine__abi__error(AI_DEEPSEEK_4__LAYER__FAULT_TABLE);
     const uint64_t H = v[AI_DEEPSEEK_4__ENG__HIDDEN], M = v[AI_DEEPSEEK_4__ENG__MULT], IN = v[AI_DEEPSEEK_4__ENG__IN];
     if (H == 0u || H > (1ull << 24) || M == 0u || M > NN__HYPER__MULT_MAX || IN == 0u || IN > (1ull << 24)
-     || !nn__primitives__fits(M * H, s_room) || !nn__primitives__fits(IN, room[AI_DEEPSEEK_4__ENG__ROWS])
+     || 4ull * M * H > s_room || !nn__primitives__fits(IN, room[AI_DEEPSEEK_4__ENG__ROWS])
      || !nn__primitives__fits(M * H, room[AI_DEEPSEEK_4__ENG__W]) || room[AI_DEEPSEEK_4__ENG__SCRATCH] < 2u * (IN + (M + 1u) * H))
         return sys__engine__abi__error(AI_DEEPSEEK_4__LAYER__FAULT_TABLE);
     const uint64_t rr = at[AI_DEEPSEEK_4__ENG__SCRATCH], kv = rr + 2u * IN;
@@ -478,8 +498,8 @@ static sys__heap_node ai_deepseek_4__engram__zzabi_apply(const sys__heap_node* a
                            (const uint16_t*)(uintptr_t)at[AI_DEEPSEEK_4__ENG__SIGNS], IN, over);
     ai_deepseek_4__layer__zzprivate_gemv(doors, over, at[AI_DEEPSEEK_4__ENG__WKV], room[AI_DEEPSEEK_4__ENG__WKV], at[AI_DEEPSEEK_4__ENG__WKV + 1u],
                                          room[AI_DEEPSEEK_4__ENG__WKV + 1u], kv, rr, v[AI_DEEPSEEK_4__ENG__D], (M + 1u) * H, IN);
-    doors->engram_gate((uint16_t*)(uintptr_t)streams, (const uint16_t*)(uintptr_t)kv, (const uint16_t*)(uintptr_t)at[AI_DEEPSEEK_4__ENG__W], H, M,
-                       r[AI_DEEPSEEK_4__ENG__EPS], over);
+    doors->engram_gate_fp32((float*)(uintptr_t)streams, (const uint16_t*)(uintptr_t)kv, (const uint16_t*)(uintptr_t)at[AI_DEEPSEEK_4__ENG__W], H,
+                            M, r[AI_DEEPSEEK_4__ENG__EPS]);
     return nn__doors_answer(&argv[0]);
 }
 

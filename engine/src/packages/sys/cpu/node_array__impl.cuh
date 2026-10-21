@@ -399,7 +399,7 @@ static __device__ inline uint64_t sys__node_array__zzpackage_place(sys__heap_nod
     return sys__heap__offset(room + 1);
 }
 
-static __device__ __noinline__ void sys__node_array__zzpackage_release_internal(sys__heap_node* head,
+static __device__ SYS__NOINLINE void sys__node_array__zzpackage_release_internal(sys__heap_node* head,
                                                                           uint64_t* releaser_stack) {
     if (head == 0) return;
     /* Every element that named an object moves onto the stack the teardown is working through, and the

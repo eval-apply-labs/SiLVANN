@@ -27,7 +27,7 @@ would cost a synchronisation on every verb call (`MEASURED` on gfx906: 1.654 µs
 
 **Kinds and verbs are rows.** `nn`'s kinds, objects and verbs are the same X-macro rows as `sys`'s, tagged
 with this package's id so no two packages collide. From Python, `e.kinds()` and `e.verbs()` list them
-alongside the language's. Count them rather than trusting a number here (today 3 kinds and 73 verbs):
+alongside the language's. Count them rather than trusting a number here (today 3 kinds and 84 verbs):
 
 ```bash
 cd src/packages/nn
@@ -63,10 +63,12 @@ The package's own device-wide state sits in its rows of the system register, `nn
 standing up         nn__package__init
 buffers             nn__buffer__getnew  nn__buffer__getnew_ram  nn__vector__range  nn__vector__zero
                     nn__buffer__copy — a buffer from another worker, through RAM
+                    nn__vector__widen — halves into floats, each exactly (a residual kept as floats)
 vector arithmetic   nn__vector__add  nn__vector__pointwise_mul  nn__vector__scale  nn__vector__scale_at
                     nn__vector__exp  nn__vector__softplus  nn__vector__dot_product
 matrix arithmetic   nn__expert__multiply_fp16  nn__matrix__matvec_transposed  nn__matrix__transpose
 norms               nn__rmsnorm__apply  nn__vector__l2norm
+                    nn__rmsnorm__apply_fp32 — the norm of a vector of floats, into halves
 activations         nn__softmax__apply  nn__sigmoid__apply  nn__swiglu__combine
                     nn__swiglu__clamped — the swiglu clamped at a limit (GLM 5.3's MoE)
 a layer's MLP       nn__mlp__apply  nn__mlp__rows — a dense SwiGLU MLP, its norm and its residual, over a plane table
@@ -79,9 +81,13 @@ attention           nn__rope__angles  nn__rope__apply  nn__attention__decode
                     nn__rope__interleaved — a head's part turned on adjacent pairs, and back (DeepSeek-V4's, GLM 5.3's)
                     nn__attention__softmax_sink — the scores' softmax, its sum taking a sink a head (DeepSeek-V4's)
 hyper-connection    nn__hyper__pre  nn__hyper__post — several residual streams collapsed into a sublayer's input,
-                    and mixed again after it
-                    nn__hyper__collapse — the streams collapsed by the weights an earlier site computed (DeepSeek-V4's)
-n-gram memory       nn__engram__gate — looked-up rows' value into each stream, gated by its key's match (DeepSeek-V4's)
+                    and mixed again after it, the streams halves (GLM 5.3's)
+                    nn__hyper__pre_fp32  nn__hyper__post_fp32 — the same with the streams floats, past fp16's range
+                    (DeepSeek-V4's: a sink token's pass 300,000)
+                    nn__hyper__collapse_fp32 — the streams collapsed by the weights an earlier site computed, into
+                    floats (DeepSeek-V4's)
+n-gram memory       nn__engram__gate_fp32 — looked-up rows' value into each stream, gated by its key's match, the
+                    streams floats (DeepSeek-V4's)
 deltanet            nn__deltanet__rank_1_update  nn__deltanet__readout  nn__deltanet__conv_step
                     nn__deltanet__step — one step, every head in one launch
                     nn__kda__step — Kimi Delta Attention's step, GLM 5.3 Flash's linear attention
@@ -364,7 +370,7 @@ does not have, or tells the story of how the code got this way.
 
 ## Checks
 
-From `backstage/` in the development repository:
+From the development repository's root:
 
 ```
 bash scripts/src_selftest.sh               the language and nn's structures, compiled for the host

@@ -80,7 +80,7 @@ static __device__ inline uint64_t sys__bindings__zzprivate_hatch(uint64_t scopes
 /* A spelled name: what a dictionary holds for its string, BORROWED, and whether it holds anything.
  * Borrowing is sound for both tables — the scopes' dictionary is this object's alone and is never written
  * while a read is using what it found, and a base's is sealed. */
-static __device__ __noinline__ sys__heap_node sys__bindings__zzprivate_spelled_in(uint64_t dictionary,
+static __device__ SYS__NOINLINE sys__heap_node sys__bindings__zzprivate_spelled_in(uint64_t dictionary,
                                                                                  uint64_t string, bool* found) {
     *found = false;
     if (dictionary == 0ull) return sys__heap_node__nothing();
@@ -90,7 +90,7 @@ static __device__ __noinline__ sys__heap_node sys__bindings__zzprivate_spelled_i
 
 /* A spelled name: its scope stack, BORROWED, or a null when it has none yet. Out of line so the lookup of
  * a numbered name carries nothing of it. */
-static __device__ __noinline__ sys__heap_node sys__bindings__zzprivate_spelled_scope(uint64_t scopes,
+static __device__ SYS__NOINLINE sys__heap_node sys__bindings__zzprivate_spelled_scope(uint64_t scopes,
                                                                                     uint64_t string) {
     bool found = false;
     return sys__bindings__zzprivate_spelled_in(sys__bindings__zzprivate_hatch(scopes), string, &found);
@@ -98,7 +98,7 @@ static __device__ __noinline__ sys__heap_node sys__bindings__zzprivate_spelled_s
 
 /* Give a spelled name its stack: made, put in the scopes' dictionary — which is made first when this is
  * the first such name — and answered HELD. A refusal answers nothing, having raised. */
-static __device__ __noinline__ sys__heap_node sys__bindings__zzprivate_make_spelled(uint64_t scopes,
+static __device__ SYS__NOINLINE sys__heap_node sys__bindings__zzprivate_make_spelled(uint64_t scopes,
                                                                                    uint64_t string) {
     uint64_t hatch = sys__bindings__zzprivate_hatch(scopes);
     if (hatch == 0ull) {
@@ -176,7 +176,7 @@ static __device__ inline bool sys__bindings__zzprivate_scoped(const sys__heap_no
 }
 
 /* A spelled name, in the base: whether its sealed dictionary has it, and what — held when `hold`. */
-static __device__ __noinline__ bool sys__bindings__zzprivate_spelled_underneath(const sys__heap_node* fields,
+static __device__ SYS__NOINLINE bool sys__bindings__zzprivate_spelled_underneath(const sys__heap_node* fields,
                                                                                 uint64_t string, bool hold,
                                                                                 sys__heap_node* answer) {
     const sys__heap_node hatch = sys__node_array__borrow(fields->args[SYS__BINDINGS__BASE], SYS__BINDINGS__HATCH);
@@ -192,7 +192,7 @@ static __device__ __noinline__ bool sys__bindings__zzprivate_spelled_underneath(
  * ⛳ IT TAKES THE STRING AND NOT THE CELL, as every out-of-line function here does: these are called from
  * the two functions the evaluator inlines, and a word is the cheapest thing to hand across a call.
  * `REASONED` on the host — the price was measured only on the device kernel (▶ the note at the top). */
-static __device__ __noinline__ bool sys__bindings__zzprivate_add_spelled(uint64_t bindings, uint64_t string,
+static __device__ SYS__NOINLINE bool sys__bindings__zzprivate_add_spelled(uint64_t bindings, uint64_t string,
                                                                          const sys__heap_node* value) {
     (void)bindings;
     const uint64_t scopes = sys__bindings__zzprivate_reach()->scopes;
@@ -210,7 +210,7 @@ static __device__ __noinline__ bool sys__bindings__zzprivate_add_spelled(uint64_
 
 /* What a spelled name means when this environment has no scope for it: the base's value, or this
  * environment's unbound error — HELD when `hold`, and the unbound error is held either way. */
-static __device__ __noinline__ sys__heap_node sys__bindings__zzprivate_spelled_below(const sys__heap_node* fields,
+static __device__ SYS__NOINLINE sys__heap_node sys__bindings__zzprivate_spelled_below(const sys__heap_node* fields,
                                                                                     uint64_t string, bool hold) {
     sys__heap_node answer;
     if (fields->args[SYS__BINDINGS__BASE] != 0ull &&
@@ -221,7 +221,7 @@ static __device__ __noinline__ sys__heap_node sys__bindings__zzprivate_spelled_b
 
 /* The engine's borrowed read of a spelled name, whole — its own scope, then the base, then unbound. The
  * caller has established that this environment's reach is armed; it takes the string, for the reason above. */
-static __device__ __noinline__ sys__heap_node sys__bindings__zzprivate_borrow_spelled(uint64_t bindings,
+static __device__ SYS__NOINLINE sys__heap_node sys__bindings__zzprivate_borrow_spelled(uint64_t bindings,
                                                                                      uint64_t string) {
     const sys__heap_node stack =
         sys__bindings__zzprivate_spelled_scope(sys__bindings__zzprivate_reach()->scopes, string);
@@ -258,7 +258,7 @@ static __device__ inline uint64_t sys__bindings__symbols(uint64_t bindings) {
  * it is the wrong size; and that what it keeps past the width could still be written.
  * ⛳ OUT OF LINE because `create` is inlined into every caller that begins a computation, and this is the
  * part only a snapshot needs. Its cost was reasoned only on the device kernel (▶ the note at the top). */
-static __device__ __noinline__ bool sys__bindings__zzprivate_base_fits(uint64_t base, uint64_t width) {
+static __device__ SYS__NOINLINE bool sys__bindings__zzprivate_base_fits(uint64_t base, uint64_t width) {
     if (!sys__node_array__is(base)) {
         sys__fault__raise(0ull, SYS__NODE_ARRAY__FAULT_KIND);
         return false;
@@ -498,7 +498,7 @@ static __device__ inline bool sys__bindings__set(uint64_t bindings, const sys__h
  * there, when no spelled name means anything. The base's own spelled names are copied first and this
  * environment's scopes are written over them, which is the read order of a name. The keys go across as
  * they are: a string's offset is the same name in both. */
-static __device__ __noinline__ bool sys__bindings__zzprivate_picture_spelled(uint64_t bindings, uint64_t picture) {
+static __device__ SYS__NOINLINE bool sys__bindings__zzprivate_picture_spelled(uint64_t bindings, uint64_t picture) {
     const sys__heap_node* fields = sys__heap__object_full_address(bindings);
     const uint64_t mine = sys__bindings__zzprivate_hatch(fields->args[SYS__BINDINGS__SCOPES]);
     const sys__heap_node hatch = fields->args[SYS__BINDINGS__BASE] != 0ull
@@ -558,7 +558,7 @@ static __device__ inline uint64_t sys__bindings__create_viewonly_array(uint64_t 
     return picture;
 }
 
-static __device__ __noinline__ void sys__bindings__zzpackage_release_internal(sys__heap_node* head,
+static __device__ SYS__NOINLINE void sys__bindings__zzpackage_release_internal(sys__heap_node* head,
                                                                        uint64_t* releaser_stack) {
     if (head == 0) return;
     /* Three references move and none is let go of, for the reason every row here moves rather than
@@ -606,7 +606,7 @@ static __device__ inline uint64_t sys__bindings__zzpackage_named(const sys__heap
     return base == 0 ? 0ull : base->args[SYS__COMPUTING_BASE__BINDINGS];
 }
 
-static __device__ __noinline__ void sys__bindings__zzpackage_apply_let(sys__heap_node* base, uint64_t form) {
+static __device__ SYS__NOINLINE void sys__bindings__zzpackage_apply_let(sys__heap_node* base, uint64_t form) {
     /* The verb, the environment, a name and a value for each binding, and the body: an odd length, and at
      * least one pair. */
     const uint64_t n = sys__sublist__length(form);

@@ -70,7 +70,7 @@ RUN apt-get update \
 COPY --from=build /opt/silvann /opt/silvann
 COPY docker/image_notices.py /opt/silvann/docker/image_notices.py
 COPY docker/entrypoint.sh /opt/silvann/docker/entrypoint.sh
-# requirements-nonfree.txt is not in the image: the scripts' `install_nonfree` installs it from PyPI into the volume, under
+# requirements-nonfree.txt is not in the image: docker/README.md's command installs it from PyPI into the volume, under
 # /data/python/<the image's Python version>, which silvann-data.pth puts on the environment's path when it exists
 RUN ln -s /opt/silvann/silvann /usr/local/bin/silvann \
  && ln -s /opt/silvann/silvann_cli /usr/local/bin/silvann_cli \

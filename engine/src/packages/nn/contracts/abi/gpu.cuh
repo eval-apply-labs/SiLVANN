@@ -198,11 +198,16 @@ typedef struct nn__gemm__tile {
     X(PKG, void, vector_sum,               nn__vector__zzabi_launch_sum,               (uint16_t* out, nn__vector__parts parts, uint64_t n, unsigned int* over)) \
     X(PKG, void, rope_interleaved,         nn__rope__zzabi_launch_interleaved,         (uint16_t* o, const uint16_t* x, const float* cs, uint64_t heads, uint64_t head_stride, uint64_t rot, uint64_t inverse, unsigned int* over)) \
     X(PKG, void, attention_softmax_sink,   nn__attention__zzabi_launch_softmax_sink,   (float* p, const uint16_t* sink, uint64_t rows, uint64_t length)) \
-    X(PKG, void, hyper_collapse,           nn__hyper__zzabi_launch_collapse,           (uint16_t* out, const float* mix, const uint16_t* streams, uint64_t hidden, uint64_t mult, unsigned int* over)) \
+    X(PKG, void, hyper_collapse_fp32,      nn__hyper__zzabi_launch_collapse_fp32,      (float* out, const float* mix, const float* streams, uint64_t hidden, uint64_t mult)) \
     X(PKG, void, vector_top_k_scored,      nn__vector__zzabi_launch_top_k_scored,      (uint64_t* values, uint64_t stride, uint16_t* weights, const uint16_t* x, const uint16_t* bias, uint64_t n, uint64_t k, float scale, uint64_t score)) \
-    X(PKG, void, engram_gate,              nn__engram__zzabi_launch_gate,              (uint16_t* streams, const uint16_t* kv, const uint16_t* w, uint64_t hidden, uint64_t mult, float eps, unsigned int* over)) \
+    X(PKG, void, engram_gate_fp32,         nn__engram__zzabi_launch_gate_fp32,         (float* streams, const uint16_t* kv, const uint16_t* w, uint64_t hidden, uint64_t mult, float eps)) \
     X(PKG, void, turboquant_gemv_groups_n, nn__turboquant__zzabi_launch_gemv_groups_n, (uint16_t* out, nn__turboquant__groups g, const uint16_t* x, uint64_t cols, uint64_t n, uint64_t out_stride, unsigned int* over)) \
-    X(PKG, void, rmsnorm_rotate,           nn__rmsnorm__zzabi_launch_rotate,           (uint16_t* rot, uint16_t* o, const uint16_t* x, const uint16_t* w, const uint16_t* sign, uint64_t n, float eps, unsigned int* over))
+    X(PKG, void, rmsnorm_rotate,           nn__rmsnorm__zzabi_launch_rotate,           (uint16_t* rot, uint16_t* o, const uint16_t* x, const uint16_t* w, const uint16_t* sign, uint64_t n, float eps, unsigned int* over)) \
+    X(PKG, void, hyper_logits_fp32,        nn__hyper__zzabi_launch_logits_fp32,        (float* lg, const float* streams, const uint16_t* fn, uint64_t hidden, uint64_t mult, float norm_eps)) \
+    X(PKG, void, hyper_pre_fp32,           nn__hyper__zzabi_launch_pre_fp32,           (float* out, float* mix, const float* streams, const uint16_t* base, const uint16_t* scale, uint64_t hidden, uint64_t mult, uint64_t iters, float eps)) \
+    X(PKG, void, hyper_post_fp32,          nn__hyper__zzabi_launch_post_fp32,          (float* out, const float* streams, const uint16_t* y, const float* mix, uint64_t hidden, uint64_t mult)) \
+    X(PKG, void, rmsnorm_fp32,             nn__rmsnorm__zzabi_launch_fp32,             (uint16_t* o, const float* x, const uint16_t* w, uint64_t n, float eps, unsigned int* over)) \
+    X(PKG, void, vector_widen,             nn__vector__zzabi_launch_widen,             (float* out, const uint16_t* x, uint64_t n))
 
 /* ⛳ THE TABLE AND THE LAUNCH ARE THE HOST'S SIDE OF A FAMILY, so a family whose kernels are compiled as
  * OpenCL C does not see them there: that language has no function pointers, and `kernel` is a keyword. */

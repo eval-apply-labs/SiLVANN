@@ -47,7 +47,7 @@
  * only the refusal and the object it allocates.
  *
  * ⚠ **TWO CONSEQUENCES, NEITHER HIDDEN:**
- * ① `fault__impl.cuh`'s `__noinline__` rests on *"every raise is a refusal and every refusal returns"*,
+ * ① `fault__impl.cuh`'s `SYS__NOINLINE` rests on *"every raise is a refusal and every refusal returns"*,
  *   and these 18 raises fall through. Its COLD-PATH argument holds — this is one raise per VERB CALL,
  *   not per element, on a path `MEASURED` at 601x of headroom — but the stated falsifier is partly met
  *   and says so at its own site.

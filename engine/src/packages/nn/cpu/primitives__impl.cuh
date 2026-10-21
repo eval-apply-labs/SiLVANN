@@ -154,7 +154,7 @@ static inline uint16_t nn__vector__zzprivate_element(uint64_t x_at, uint64_t i, 
     return h;
 }
 
-static __device__ __noinline__ void nn__vector__zzpackage_apply_get_values_at(sys__heap_node* base,
+static __device__ SYS__NOINLINE void nn__vector__zzpackage_apply_get_values_at(sys__heap_node* base,
                                                                               uint64_t form) {
     (void)base;
     if (sys__sublist__length(form) != 3ull) { sys__opcodes__fails(form, SYS__OPCODES__FAULT_ARITY); return; }
@@ -249,7 +249,7 @@ static __device__ __noinline__ void nn__vector__zzpackage_apply_get_values_at(sy
 }
 
 /* ── ⭐⭐⭐ `(nn__vector__range v start count)` -> an `nn__weights` over the buffer's own bytes ─────── */
-static __device__ __noinline__ void nn__vector__zzpackage_apply_range(sys__heap_node* base,
+static __device__ SYS__NOINLINE void nn__vector__zzpackage_apply_range(sys__heap_node* base,
                                                                       uint64_t form) {
     (void)base;
     if (sys__sublist__length(form) != 4ull) { sys__opcodes__fails(form, SYS__OPCODES__FAULT_ARITY); return; }

@@ -9,6 +9,7 @@ engine/src/packages/nn/           the Neural Network library: buffers, the exper
 engine/src/packages/ai_qwen_3/    the Qwen 3.5 family's layers as verbs
 engine/src/packages/ai_z__glm_5_3/   GLM 5.3 Flash's layers as verbs
 engine/src/packages/ai_qwen_image/  Qwen-Image 2.1's transformer and picture decoder as verbs
+engine/src/packages/ai_deepseek_4/  DeepSeek-V4.1-Flash's layers as verbs
 engine/src/silicon_families/      one folder a kind of silicon: what it answers for the packages
 runtime/silvann_runtime/          Python: a model folder booted onto the machine, its tables and programs
 ```

@@ -39,6 +39,6 @@ SYS__PACKAGE__DECLARE_HATCH_ROWS(nn)
 
 /* Stand this package up. Takes the init list, so it can ask what has not run yet, and answers nothing —
  * whether it did its work or put itself back at the tail to wait for the language. */
-static __device__ __noinline__ void nn__package__zzpackage_apply_init(sys__heap_node* base, uint64_t form);
+static __device__ SYS__NOINLINE void nn__package__zzpackage_apply_init(sys__heap_node* base, uint64_t form);
 
 #endif /* SILVANN__PACKAGES_NN_CPU_PACKAGE__HEADER_CUH */

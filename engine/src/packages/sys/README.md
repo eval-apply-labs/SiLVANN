@@ -190,7 +190,7 @@ absent has nothing that will notice when it stops being true.
 
 ## Checks
 
-From `backstage/` in the development repository:
+From the development repository's root:
 
 ```
 bash scripts/src_selftest.sh             the language, compiled for the host and run: ~1,650 checks

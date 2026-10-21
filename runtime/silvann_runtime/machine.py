@@ -72,6 +72,7 @@ class Machine:
         # every procedure, picture and view defined, in order: (what, worker, name, text) — ▶ `write_programs`
         self.programs = []
         self.worker = -1               # the worker `act_as` last chose
+        self.worker_moved = {}         # a `(worker N ...)` form's N -> the worker it is here (▶ `_source_forms`)
         self.recording = False         # True: the definitions are recorded and not made — ▶ `composed_programs`
         self.read_from = None          # the file the programs were read from, when they were
         self.programs_file = None      # (path, key): where a boot looks for its programs before composing them
@@ -200,7 +201,8 @@ class Machine:
         """A model's Lisp file — `lisp/<name>.lisp` in its folder (▶ `ModelFolder.program`) — every top-level form in
         order, handed to the evaluator as a REPL hands it a line. A `defun` — or an `if` choosing between defuns by a
         setting the boot bound — is defined as it is; three forms are the machine's rather than the language's:
-            (worker N form ...)     the forms inside defined as worker N (▶ `act_as`)
+            (worker N form ...)     the forms inside defined as worker N (▶ `act_as`) — or as the worker the model
+                                    moved N to in `worker_moved` (Qwen's CPU, worker 1, after a group's cards)
             (picture name form)     the form frozen and bound by name, for `sys__compute` to hand another block
             (view name)             the bindings as they stand, bound by name — what a computed block sees"""
         with open(path) as f:
@@ -211,7 +213,7 @@ class Machine:
             head = form[0] if isinstance(form, list) and form else None
             if head == "worker":
                 before = self.worker
-                self.act_as(form[1])
+                self.act_as(self.worker_moved.get(form[1], form[1]))
                 self._source_forms(form[2:], name)
                 self.act_as(before)
             elif head == "picture":

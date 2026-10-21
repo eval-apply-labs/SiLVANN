@@ -129,6 +129,73 @@ static uint64_t nn__routed__zzprivate_slot(const nn__routed* r, uint64_t expert)
     return nn__expert__slot(r->layer, r->type, expert, &me) ? me.args[NN__EXPERT__SLOT_AT] : 0ull;
 }
 
+/* ⭐ A TIER'S VISIT KEPT FOR THE COMPUTE AFTER IT — ▶ `nn__routed__visit`: a worker's last visit, taken by its next
+ * position of the same layer. */
+#define NN__ROUTED__VISITS 16u
+typedef struct nn__routed__visited {
+    bool valid;
+    uint64_t layer, ids[NN__TURBOQUANT__GROUPS_MAX];
+    bool on_card[NN__TURBOQUANT__GROUPS_MAX], some_card[NN__TURBOQUANT__GROUPS_MAX];
+} nn__routed__visited;
+static nn__routed__visited nn__routed__zzprivate_visits[NN__ROUTED__VISITS];
+
+/* The picks read and checked, and — with a tier — its visit: which this worker computes, which some card does, both
+ * marked held in the picks for the CPUs, and in a group whether this card adds the shared expert. 0, or the fault. */
+static uint64_t nn__routed__zzprivate_picks(sys__engine__ctx* ctx, const nn__routed* r, uint64_t picks, const nn__expert_tier* tier,
+                                            uint64_t* ids, uint64_t* held, uint64_t* n_held, bool* on_card, bool* some_card) {
+    const uint64_t E = r->experts, K = r->top_k, first = r->first, count = r->count;
+    sys__node_array_walk pw;
+    if (!sys__node_array__walk(picks, 0ull, &pw)) return NN__ROUTED__FAULT_EXPERT;
+    *n_held = 0u;
+    for (uint64_t j = 0u; j < K; ++j, sys__node_array__next(&pw)) {
+        const sys__heap_node* p = sys__node_array__walk_cell(&pw);
+        /* a pick numbered `experts` or past it is one a card's tier holds */
+        if (p == 0 || p->dtype != SYS__KIND__VALUE_INT || p->args[0] >= 2u * E) return NN__ROUTED__FAULT_EXPERT;
+        ids[j] = p->args[0];
+        if (ids[j] >= first && ids[j] < first + count) held[(*n_held)++] = ids[j] - first;
+    }
+    if (tier == 0) return 0u;
+    bool shared_here = false;
+    /* ⛳ a group's picks with a cell past them: whether this card adds the model's shared expert (▶ SHARED) */
+    const bool sharing = tier->ranks > 1u && sys__node_array__length(picks) > K;
+    if (!(tier->ranks > 1u ? nn__expert_tier__visit_group(ctx->family, tier, ids, on_card, some_card, sharing ? &shared_here : 0)
+                           : nn__expert_tier__visit(ctx->family, tier, ids, on_card)))
+        return NN__ROUTED__FAULT_EXPERT;
+    /* the picks a card computes, marked held for the CPUs — and in a group a pick another card computes as well */
+    for (uint64_t j = 0u; j < K; ++j) {
+        if (!on_card[j] && !some_card[j]) continue;
+        sys__heap_node mark = sys__heap_node__nothing();
+        mark.dtype = SYS__KIND__VALUE_INT; mark.num_args = 0u; mark.op_code = 0ull; mark.args[0] = ids[j] + E;
+        if (!sys__node_array__set(picks, j, &mark)) return NN__ROUTED__FAULT_EXPERT;
+    }
+    if (sharing) {
+        sys__heap_node flag = sys__heap_node__nothing();
+        flag.dtype = SYS__KIND__VALUE_INT; flag.num_args = 0u; flag.op_code = 0ull; flag.args[0] = shared_here ? 1u : 0u;
+        if (!sys__node_array__set(picks, K, &flag)) return NN__ROUTED__FAULT_EXPERT;
+    }
+    return 0u;
+}
+
+/* ⭐ A TIER'S VISIT ALONE (⚖ 2026-10-20 *"i thought they were overlapping... have a look at it"*): the picks marked, so
+ * the CPUs can start on theirs before this card's experts are queued — the CPUs' copy of the hand would otherwise wait
+ * behind them — and the visit kept for this worker's next `nn__routed__position` of the layer, which computes without
+ * visiting again. 0, or the fault. */
+static uint64_t nn__routed__visit(sys__engine__ctx* ctx, const nn__routed* r, uint64_t picks, const nn__expert_tier* tier) {
+    const uint64_t K = r->top_k, E = r->experts;
+    const unsigned w = sys__silicon__worker();
+    if (tier == 0 || w >= NN__ROUTED__VISITS || K == 0u || K > E || K > NN__TURBOQUANT__GROUPS_MAX
+     || sys__node_array__length(picks) < K || tier->top_k != K || r->backing.file != 0ull)
+        return NN__ROUTED__FAULT_SHAPE;
+    nn__routed__visited* v = &nn__routed__zzprivate_visits[w];
+    uint64_t held[NN__TURBOQUANT__GROUPS_MAX], n_held = 0u;
+    for (uint64_t j = 0u; j < K; ++j) { v->on_card[j] = false; v->some_card[j] = false; }
+    v->valid = false;
+    const uint64_t f = nn__routed__zzprivate_picks(ctx, r, picks, tier, v->ids, held, &n_held, v->on_card, v->some_card);
+    if (f != 0u) return f;
+    v->layer = r->layer; v->valid = true;
+    return 0u;
+}
+
 static uint64_t nn__routed__position(sys__engine__ctx* ctx, const nn__doors* doors, const nn__routed* r, uint64_t hand,
                                      uint64_t picks, const nn__expert_tier* tier, uint64_t routed, nn__routed__done* done) {
     const uint64_t H = r->hidden, I = r->inter, E = r->experts, K = r->top_k, first = r->first, count = r->count;
@@ -139,20 +206,23 @@ static uint64_t nn__routed__position(sys__engine__ctx* ctx, const nn__doors* doo
         return NN__ROUTED__FAULT_SHAPE;
     if (r->scratch_room < 8u * K * I) return NN__ROUTED__FAULT_ROOM;
     unsigned int* over = ctx->fault_word;
-    /* every pick read once; the ones this worker holds, as its collection numbers them */
+    /* every pick read once — or, where this worker's tier was visited just before (▶ `nn__routed__visit`), as that visit
+     *   read them — and the ones this worker holds, as its collection numbers them */
     uint64_t ids[NN__TURBOQUANT__GROUPS_MAX], held[NN__TURBOQUANT__GROUPS_MAX], n_held = 0u;
-    sys__node_array_walk pw;
-    if (!sys__node_array__walk(picks, 0ull, &pw)) return NN__ROUTED__FAULT_EXPERT;
-    for (uint64_t j = 0u; j < K; ++j, sys__node_array__next(&pw)) {
-        const sys__heap_node* p = sys__node_array__walk_cell(&pw);
-        /* a pick numbered `experts` or past it is one a card's tier holds */
-        if (p == 0 || p->dtype != SYS__KIND__VALUE_INT || p->args[0] >= 2u * E) return NN__ROUTED__FAULT_EXPERT;
-        ids[j] = p->args[0];
-        if (ids[j] >= first && ids[j] < first + count) held[n_held++] = ids[j] - first;
+    bool on_card[NN__TURBOQUANT__GROUPS_MAX] = {}, some_card[NN__TURBOQUANT__GROUPS_MAX] = {};
+    const unsigned w = sys__silicon__worker();
+    nn__routed__visited* v = tier != 0 && w < NN__ROUTED__VISITS ? &nn__routed__zzprivate_visits[w] : 0;
+    if (v != 0 && v->valid && v->layer == layer) {
+        v->valid = false;
+        for (uint64_t j = 0u; j < K; ++j) {
+            ids[j] = v->ids[j]; on_card[j] = v->on_card[j]; some_card[j] = v->some_card[j];
+            if (ids[j] >= first && ids[j] < first + count) held[n_held++] = ids[j] - first;
+        }
+    } else {
+        if (v != 0) v->valid = false;
+        const uint64_t f = nn__routed__zzprivate_picks(ctx, r, picks, tier, ids, held, &n_held, on_card, some_card);
+        if (f != 0u) return f;
     }
-    /* a tier's visit: which picks it holds, and the promotions of those it does not */
-    bool on_card[NN__TURBOQUANT__GROUPS_MAX] = {};
-    if (tier != 0 && !nn__expert_tier__visit(ctx->family, tier, ids, on_card)) return NN__ROUTED__FAULT_EXPERT;
     /* ① the picks this worker holds: the ones in memory now, and the others on their way — read into a slot where the
      *   slots are a cache, their pages started where the slots are a mapped file */
     uint64_t slot[NN__TURBOQUANT__GROUPS_MAX], which[NN__TURBOQUANT__GROUPS_MAX];
@@ -170,13 +240,11 @@ static uint64_t nn__routed__position(sys__engine__ctx* ctx, const nn__doors* doo
             continue;
         }
         if (tier != 0) {
-            /* a tier: the picks it holds are this worker's, marked held for the others; the rest are left to them */
-            if (!on_card[j]) continue;
+            /* a tier: the picks it holds are this worker's, marked held for the others; the rest are left to them — and in
+             *   a group, a pick another card computes is marked held as well, so the CPUs leave it */
+            if (!on_card[j]) continue;                               /* marked held by the visit (▶ above) */
             const uint64_t at = nn__routed__zzprivate_slot(r, id - first);
             if (at == 0ull) return NN__ROUTED__FAULT_EXPERT;
-            sys__heap_node mark = sys__heap_node__nothing();
-            mark.dtype = SYS__KIND__VALUE_INT; mark.num_args = 0u; mark.op_code = 0ull; mark.args[0] = id + E;
-            if (!sys__node_array__set(picks, j, &mark)) return NN__ROUTED__FAULT_EXPERT;
             slot[ready] = at; which[ready] = j; ++ready;
             continue;
         }

@@ -356,12 +356,37 @@ typedef struct nn__expert__gather { nn__expert__run run[NN__EXPERT__GATHER_RUNS]
  *                 `nn__expert_tier_landing_line`. Absent: every visit `LANDING`. */
 #define NN__EXPERT_TIER__LANDING_LINE 20u
 #define NN__EXPERT_TIER__LENGTH_LINE  21u
+/* ⭐ optional, A TIER A CARD OF A GROUP (NN-99 ②) — the cards of a tensor-parallel group each hold a tier, workers 0 ..
+ * RANKS-1, and a position's picks are shared out among them rather than each card's own:
+ *   RANKS       the cards; absent or 1: the tier is its card's alone, as before
+ * Every card visits its own tier, then the cards trade what each holds (a wait for the group, ▶ `nn__expert_tier__share`)
+ * and every card makes the same assignment from it: a pick one card holds is that card's, a pick several hold the one of
+ * them with the fewest so far, a pick none holds the CPUs' — and the card with the fewest is the one that may promote it.
+ * Each card computes its own; every pick a card computes is marked held for the CPUs. */
+#define NN__EXPERT_TIER__RANKS        21u
+#define NN__EXPERT_TIER__LENGTH_GROUP 22u
+/*   SHARED      the experts of a layer every card keeps (NN-99 ③, ⚖ *"we can keep 10% of the l1 cache into the top shared
+ *               experts across both gpus, and then the remaining part is exclusive"*): the slice, the layer's most picked
+ *               by picks halved every `SLICE_EVERY` visits, chosen again at each halving the same way on every card. A
+ *               card not holding a pick of the slice promotes it; a pick several cards hold goes, after the ones a single
+ *               card holds, one at a time to the card with the fewest — and so does the model's own shared expert, where
+ *               the picks' node array has a cell past them: 1 there on the card that adds it, 0 on the others. An expert
+ *               that leaves the slice stays the card's with the fewest picks so far: the others no longer touch theirs,
+ *               so it ages out of them (⚖ *"when we demote an expert from the shared l1 it becomes property of the card
+ *               with the least amount of picks"*). Absent or 0: no slice. */
+#define NN__EXPERT_TIER__SHARED       22u
+#define NN__EXPERT_TIER__LENGTH_SHARED 23u
+#define NN__EXPERT_TIER__SLICE_EVERY  64u    /* a layer's visits between two choices of its slice */
+#define NN__EXPERT_TIER__RANKS_MAX     8u    /* a tensor-parallel group's cards at most (▶ nn's partials) */
+#define NN__EXPERT_TIER__PATIENCE     60u    /* seconds a card waits for the others' share: a card that never comes is an error */
 /* A tier as one layer reads it: `sources` that layer's addresses, or 0. */
 typedef struct nn__expert_tier {
     uint64_t sources, layer, type, experts, top_k, hidden, inter, up_lut, down, down_lut;
     uint64_t parts, p_up_lut, p_down, p_down_lut, gate_row, down_row, landing;
     uint64_t exclusive, part_worker, part_type, duplex, layers;   /* `layers`: the sources' node array on the layers */
     uint64_t landing_line;
+    uint64_t ranks;                                               /* the cards of its group, 1 alone (▶ RANKS) */
+    uint64_t shared;                                              /* a layer's experts on every card (▶ SHARED) */
 } nn__expert_tier;
 #define NN__EXPERT_TIER__CHANNELS  16u   /* evacuation channels, each an expert's bytes in pinned memory */
 #define NN__EXPERT_TIER__OUTGOING  64u   /* swaps in flight, over every layer */

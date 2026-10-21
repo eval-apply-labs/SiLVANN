@@ -544,7 +544,7 @@ static __device__ inline void sys__heap_chunk__zzprivate_recycle(sys__heap_node*
  * every occupant has already gone; there is nothing left in it by definition, and a chunk that still held
  * something could not have got here.
  * ────────────────────────────────────────────────────────────────────────────────────────────────── */
-static __device__ __noinline__ void sys__heap_chunk__zzpackage_release_internal(sys__heap_node* head,
+static __device__ SYS__NOINLINE void sys__heap_chunk__zzpackage_release_internal(sys__heap_node* head,
                                                                          uint64_t* releaser_stack) {
     (void)releaser_stack;                 /* a chunk is room, and room holds nothing that can be moved */
     if (head == 0) return;
@@ -1039,7 +1039,7 @@ static __device__ inline void sys__heap__stop_carving(void) {
         (void)sys__heap__zzprivate_stop_carving(from);
 }
 
-static __device__ __noinline__ sys__heap_node* sys__heap__zzpackage_make_sized(sys__kind kind, uint64_t nodes) {
+static __device__ SYS__NOINLINE sys__heap_node* sys__heap__zzpackage_make_sized(sys__kind kind, uint64_t nodes) {
     /* Before anything, because the very next line reads through a pointer the publishing sets. */
     if (!sys__heap__zzpackage_published()) {
         sys__fault__raise(0ull, SYS__HEAP__FAULT_NOT_PUBLISHED);

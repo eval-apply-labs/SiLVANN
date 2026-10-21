@@ -68,10 +68,41 @@ static inline void ai_z__glm_5_3__layer__zzprivate_gemv(const nn__doors* doors, 
                            (const uint16_t*)(uintptr_t)(x), d, rows, cols, over);
 }
 
+/* ⭐ A TENSOR-PARALLEL GROUP's TWO TRAILING ARGUMENTS (NN-99 ④, ▶ ai_deepseek_4's) — its number and the buffer its sums
+ * land in, `H` halves at least — into `tp`: the group, the buffer, its room. ⛳ The streams' mix is not linear in the
+ * sublayer's output across cards — `res · streams` would count once a card — so the group's sum is taken of the output,
+ * between the last projection and the place, and every card places the same sum. Nothing but a reduce writes the buffer:
+ * between two reduces the group's other cards read it (nn's `contracts/objects/partials.cuh`). False when they are not
+ * there or are wrong. */
+static inline bool ai_z__glm_5_3__layer__zzprivate_tp(const sys__heap_node* argv, unsigned first, uint64_t H, uint64_t* tp) {
+    uint64_t sum = 0, s_room = 0;
+    if (argv[first].dtype != SYS__KIND__VALUE_INT || !nn__primitives__room(&argv[first + 1u], &sum, &s_room)
+     || !nn__primitives__fits(H, s_room))
+        return false;
+    tp[0] = argv[first].args[0];
+    tp[1] = sum;
+    tp[2] = s_room;
+    return true;
+}
+
+/* The sublayer's output `y` placed — under a group (`tp`), the group's sum of every card's `y`. 0, or the fault. */
+static inline uint64_t ai_z__glm_5_3__layer__zzprivate_place_group(sys__engine__ctx* ctx, const nn__doors* doors, unsigned int* over,
+                                                                  uint64_t scratch, uint64_t streams, uint64_t y, uint64_t H,
+                                                                  uint64_t M, const uint64_t* tp) {
+    if (tp != 0) {
+        if (!nn__primitives__fits(H, tp[2])) return AI_Z__GLM_5_3__LAYER__FAULT_TABLE;
+        const uint64_t f = nn__partials__reduce_onto(ctx, doors, tp[0], y, tp[1], H, 0u);
+        if (f != 0u) return f;
+        y = tp[1];
+    }
+    ai_z__glm_5_3__layer__zzprivate_place(doors, over, scratch, streams, y, H, M);
+    return 0u;
+}
+
 /* `(ai_z__glm_5_3__kda streams table)` -> `streams`. The attention site of a KDA layer: q, k, v, the forget gate's and the
  * output gate's first projections and β's logits in one grouped launch, the three short convolutions, the gates' second
  * projections on their rotated ranks, the step, the output projection. */
-static uint64_t ai_z__glm_5_3__kda__zzprivate_row(const sys__heap_node* argv, sys__engine__ctx* ctx, uint64_t row) {
+static uint64_t ai_z__glm_5_3__kda__zzprivate_row(const sys__heap_node* argv, sys__engine__ctx* ctx, uint64_t row, const uint64_t* tp) {
     uint64_t streams = 0, s_room = 0;
     if (!ai_z__glm_5_3__layer__zzprivate_open(argv, &streams, &s_room)) return SYS__OPCODES__FAULT_TYPE;
     uint64_t at[AI_Z__GLM_5_3__KDA__TABLE], room[AI_Z__GLM_5_3__KDA__TABLE], v[AI_Z__GLM_5_3__KDA__TABLE];
@@ -126,14 +157,17 @@ static uint64_t ai_z__glm_5_3__kda__zzprivate_row(const sys__heap_node* argv, sy
                     r[AI_Z__GLM_5_3__KDA__EPS], over);
     doors->hadamard_rotate((uint16_t*)(uintptr_t)(kor), (const uint16_t*)(uintptr_t)(ko), (const uint16_t*)(uintptr_t)(signs), KW, over);
     ai_z__glm_5_3__layer__zzprivate_gemv(doors, over, at, room, AI_Z__GLM_5_3__KDA__O, y, kor, d[8], H, KW);
-    ai_z__glm_5_3__layer__zzprivate_place(doors, over, scratch, streams, y, H, M);
-    return 0u;
+    const uint64_t f = ai_z__glm_5_3__table__zzpackage_masked(doors, over, argv[1].args[0], AI_Z__GLM_5_3__KDA__MASK, y, kor, 1u, H, KW,
+                                                           AI_Z__GLM_5_3__LAYER__FAULT_TABLE);
+    if (f != 0u) return f;
+    return ai_z__glm_5_3__layer__zzprivate_place_group(ctx, doors, over, scratch, streams, y, H, M, tp);
 }
 
 /* `(ai_z__glm_5_3__mla streams table pos)` -> `streams`. The attention site of an MLA layer at position `pos`: q through its
  * rank, the latent normed and written rotated into the cache's row `pos`, the query absorbed into the latent, every head
  * attending rows `0..pos` of the cache as one kv head, the answer expanded by each head's value rows and projected. */
-static uint64_t ai_z__glm_5_3__mla__zzprivate_row(const sys__heap_node* argv, sys__engine__ctx* ctx, uint64_t pos, uint64_t row) {
+static uint64_t ai_z__glm_5_3__mla__zzprivate_row(const sys__heap_node* argv, sys__engine__ctx* ctx, uint64_t pos, uint64_t row,
+                                               const uint64_t* tp) {
     uint64_t streams = 0, s_room = 0;
     if (!ai_z__glm_5_3__layer__zzprivate_open(argv, &streams, &s_room)) return SYS__OPCODES__FAULT_TYPE;
     uint64_t at[AI_Z__GLM_5_3__IDX__TABLE], room[AI_Z__GLM_5_3__IDX__TABLE], v[AI_Z__GLM_5_3__IDX__TABLE];
@@ -257,8 +291,10 @@ static uint64_t ai_z__glm_5_3__mla__zzprivate_row(const sys__heap_node* argv, sy
     doors->attention_expand((uint16_t*)(uintptr_t)(vh), (const uint16_t*)(uintptr_t)(olat), (const uint16_t*)(uintptr_t)(kvb), heads, VD, LAT, stride, NOPE, over);
     doors->hadamard_rotate((uint16_t*)(uintptr_t)(vhr), (const uint16_t*)(uintptr_t)(vh), (const uint16_t*)(uintptr_t)(signs), heads * VD, over);
     ai_z__glm_5_3__layer__zzprivate_gemv(doors, over, at, room, AI_Z__GLM_5_3__MLA__O, y, vhr, d[3], H, heads * VD);
-    ai_z__glm_5_3__layer__zzprivate_place(doors, over, scratch, streams, y, H, M);
-    return 0u;
+    const uint64_t f = ai_z__glm_5_3__table__zzpackage_masked(doors, over, table, AI_Z__GLM_5_3__MLA__MASK, y, vhr, 1u, H, heads * VD,
+                                                           AI_Z__GLM_5_3__LAYER__FAULT_TABLE);
+    if (f != 0u) return f;
+    return ai_z__glm_5_3__layer__zzprivate_place_group(ctx, doors, over, scratch, streams, y, H, M, tp);
 }
 
 /* A swiglu on the card: gate and up in one grouped launch on `x` (rotated), clamped, rotated, down into `out`. */
@@ -278,7 +314,7 @@ static inline void ai_z__glm_5_3__layer__zzprivate_swiglu(const nn__doors* doors
 }
 
 /* `(ai_z__glm_5_3__mlp streams table)` -> `streams`. The MLP site of a dense layer. */
-static uint64_t ai_z__glm_5_3__mlp__zzprivate_row(const sys__heap_node* argv, sys__engine__ctx* ctx, uint64_t row) {
+static uint64_t ai_z__glm_5_3__mlp__zzprivate_row(const sys__heap_node* argv, sys__engine__ctx* ctx, uint64_t row, const uint64_t* tp) {
     uint64_t streams = 0, s_room = 0;
     if (!ai_z__glm_5_3__layer__zzprivate_open(argv, &streams, &s_room)) return SYS__OPCODES__FAULT_TYPE;
     uint64_t at[AI_Z__GLM_5_3__MLP__TABLE], room[AI_Z__GLM_5_3__MLP__TABLE], v[AI_Z__GLM_5_3__MLP__TABLE];
@@ -303,8 +339,7 @@ static uint64_t ai_z__glm_5_3__mlp__zzprivate_row(const sys__heap_node* argv, sy
     doors->hadamard_rotate((uint16_t*)(uintptr_t)(hr), (const uint16_t*)(uintptr_t)(h), (const uint16_t*)(uintptr_t)(signs), H, over);
     ai_z__glm_5_3__layer__zzprivate_swiglu(doors, over, at, room, AI_Z__GLM_5_3__MLP__GATE, AI_Z__GLM_5_3__MLP__UP, AI_Z__GLM_5_3__MLP__DOWN,
                                         &v[AI_Z__GLM_5_3__MLP__D], hr, gu, signs, y, H, I, r[AI_Z__GLM_5_3__MLP__LIMIT]);
-    ai_z__glm_5_3__layer__zzprivate_place(doors, over, scratch, streams, y, H, M);
-    return 0u;
+    return ai_z__glm_5_3__layer__zzprivate_place_group(ctx, doors, over, scratch, streams, y, H, M, tp);
 }
 
 /* The MoE site's table, for its three card verbs. */
@@ -369,13 +404,18 @@ static sys__heap_node ai_z__glm_5_3__shared__zzabi_apply(const sys__heap_node* a
     ai_z__glm_5_3__layer__zzprivate_swiglu(doors, ctx->fault_word, at, room, AI_Z__GLM_5_3__MOE__GATE, AI_Z__GLM_5_3__MOE__UP,
                                         AI_Z__GLM_5_3__MOE__DOWN, &v[AI_Z__GLM_5_3__MOE__D], hand, gu, at[AI_Z__GLM_5_3__MOE__SIGNS], sh, H, I,
                                         r[AI_Z__GLM_5_3__MOE__LIMIT]);
+    /* the mask on the shared expert's down, on the rotated activation the swiglu left after its gate-up and activation */
+    const uint64_t f = ai_z__glm_5_3__table__zzpackage_masked(doors, ctx->fault_word, argv[1].args[0], AI_Z__GLM_5_3__MOE__MASK, sh,
+                                                           gu + 6u * I, 1u, H, I, AI_Z__GLM_5_3__LAYER__FAULT_TABLE);
+    if (f != 0u) return sys__engine__abi__error(f);
     return nn__doors_answer(&argv[0]);
 }
 
-/* `(ai_z__glm_5_3__close streams table routed)` -> `streams`. The routed experts' sum added to the shared expert's, and the
- * streams mixed again with it. */
+/* `(ai_z__glm_5_3__close streams table routed [group sum])` -> `streams`. The routed experts' sum added to the shared
+ * expert's, and the streams mixed again with it — under a group, this card's part of the shared expert and its share of
+ * the routed (the CPU's sum on one card) summed over the group first. */
 static sys__heap_node ai_z__glm_5_3__close__zzabi_apply(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx) {
-    if (argc != 3u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
+    if (argc != 3u && argc != 5u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
     uint64_t streams = 0, s_room = 0, routed = 0, r_room = 0;
     if (!ai_z__glm_5_3__layer__zzprivate_open(argv, &streams, &s_room) || !nn__primitives__room(&argv[2], &routed, &r_room))
         return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
@@ -388,8 +428,12 @@ static sys__heap_node ai_z__glm_5_3__close__zzabi_apply(const sys__heap_node* ar
     const uint64_t scratch = at[AI_Z__GLM_5_3__MOE__SCRATCH], sh = scratch + AI_Z__GLM_5_3__CARRY_MIX, y = scratch + AI_Z__GLM_5_3__CARRY(H);
     const nn__doors* doors = nn__doors_for(ctx);
     if (doors == 0) return sys__engine__abi__error(NN__PRIMITIVES__FAULT_NO_DEVICE);
+    uint64_t tp[3] = {0u, 0u, 0u};
+    if (argc == 5u && !ai_z__glm_5_3__layer__zzprivate_tp(argv, 3u, H, tp)) return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
     doors->vector_add((uint16_t*)(uintptr_t)(y), (const uint16_t*)(uintptr_t)(sh), (const uint16_t*)(uintptr_t)(routed), H, ctx->fault_word);
-    ai_z__glm_5_3__layer__zzprivate_place(doors, ctx->fault_word, scratch, streams, y, H, M);
+    const uint64_t f = ai_z__glm_5_3__layer__zzprivate_place_group(ctx, doors, ctx->fault_word, scratch, streams, y, H, M,
+                                                                 argc == 5u ? tp : 0);
+    if (f != 0u) return sys__engine__abi__error(f);
     return nn__doors_answer(&argv[0]);
 }
 
@@ -434,12 +478,64 @@ static bool ai_z__glm_5_3__experts__zzprivate_routed(uint64_t table, const uint6
     return ai_z__glm_5_3__experts__zzprivate_backing(table, &out->backing);
 }
 
+/* ⭐ THE MASK ON THE ROUTED EXPERTS' DOWNS, for the `n` picks nn just summed into `routed` (▶ `nn__routed__done`: pick
+ * `which[i]`, expert `ids[which[i]]`, a number of the layer's): `routed += r · Σ_i w_i (V[expert] · actr_i)`, `w` the hand's
+ * weights. The experts and the weights' places go to the mask's scratch — `2n` words — and the dots after them. 0, or the
+ * fault to answer with. */
+static uint64_t ai_z__glm_5_3__experts__zzprivate_mask_picks(sys__engine__ctx* ctx, const nn__doors* doors, const uint64_t* mk,
+                                                          const uint64_t* mroom, const nn__routed* rt, uint64_t hand,
+                                                          uint64_t routed, const nn__routed__done* done) {
+    const uint64_t H = rt->hidden, I = rt->inter, E = rt->experts, n = done->n;
+    const uint64_t w = hand + 2u * H, s = mk[2] + 8u * n;
+    if (n > AI_Z__GLM_5_3__TOP_K_MAX || !nn__primitives__fits(H, mroom[0]) || !nn__primitives__fits(E * I, mroom[1]) || mroom[2] < 12u * n)
+        return AI_Z__GLM_5_3__LAYER__FAULT_TABLE;
+    uint32_t idx[2u * AI_Z__GLM_5_3__TOP_K_MAX];
+    for (uint64_t i = 0u; i < n; ++i) {
+        if (done->ids[done->which[i]] >= E) return AI_Z__GLM_5_3__LAYER__FAULT_EXPERT;
+        idx[i] = (uint32_t)done->ids[done->which[i]];
+        idx[n + i] = (uint32_t)done->which[i];
+    }
+    if (!sys__gpu__memory_write(ctx->family, (void*)(uintptr_t)mk[2], idx, 8u * n)) return NN__PRIMITIVES__FAULT_NO_DEVICE;
+    doors->rank1_dots((float*)(uintptr_t)s, (const uint16_t*)(uintptr_t)mk[1], (const uint32_t*)(uintptr_t)mk[2],
+                      (const uint16_t*)(uintptr_t)done->actr, (const uint16_t*)(uintptr_t)w, (const uint32_t*)(uintptr_t)(mk[2] + 4u * n),
+                      n, I, I, 0u);
+    doors->rank1_add((uint16_t*)(uintptr_t)routed, (const uint16_t*)(uintptr_t)mk[0], (const float*)(uintptr_t)s, 1u, n, H, 0u,
+                     ctx->fault_word);
+    return 0u;
+}
+
+/* The routed experts' mask over a chunk's picks (▶ nn's `nn__routed__rows_mask`): a dot each, in the picks' order, spread
+ * onto its pick's sum through the down pairs. nn names a pick's expert less the worker's `first`, so `V` is read from
+ * that expert's row on. */
+typedef struct ai_z__glm_5_3__experts__rows_mask { uint64_t mk[3], mroom[3], H, I, E, first; } ai_z__glm_5_3__experts__rows_mask;
+static uint64_t ai_z__glm_5_3__experts__zzprivate_rows_mask(void* model, sys__engine__ctx* ctx, uint64_t P, const uint32_t* expert_of,
+                                                         uint64_t actr, uint64_t weights, uint64_t down_pairs, uint64_t sums) {
+    const ai_z__glm_5_3__experts__rows_mask* m = (const ai_z__glm_5_3__experts__rows_mask*)model;
+    const nn__doors* doors = nn__doors_for(ctx);
+    if (doors == 0) return NN__PRIMITIVES__FAULT_NO_DEVICE;
+    if (m->first >= m->E || !nn__primitives__fits(m->H, m->mroom[0]) || !nn__primitives__fits(m->E * m->I, m->mroom[1])
+     || m->mroom[2] < 8u * P)
+        return AI_Z__GLM_5_3__LAYER__FAULT_TABLE;
+    if (!sys__gpu__memory_write(ctx->family, (void*)(uintptr_t)m->mk[2], expert_of, 4u * P)) return NN__PRIMITIVES__FAULT_NO_DEVICE;
+    const uint64_t s = m->mk[2] + 4u * P, V = m->mk[1] + 2u * m->first * m->I;
+    doors->rank1_dots((float*)(uintptr_t)s, (const uint16_t*)(uintptr_t)V, (const uint32_t*)(uintptr_t)m->mk[2],
+                      (const uint16_t*)(uintptr_t)actr, (const uint16_t*)(uintptr_t)weights, 0, P, m->I, m->I, 1u);
+    doors->rank1_spread((float*)(uintptr_t)sums, (const uint16_t*)(uintptr_t)m->mk[0], (const float*)(uintptr_t)s,
+                        (const uint32_t*)(uintptr_t)(down_pairs + 4u), P, m->H, 2u);
+    return 0u;
+}
+
 /* `(ai_z__glm_5_3__experts hand picks table routed [nn__expert_tier])` -> `routed`: Σ w_j · down_j(swiglu(gate_up_j(x))) over the
  * picks this worker holds, the SwiGLU clamped — as nn runs a position's routed experts (▶ nn's `nn__routed__position`):
  * the ones in memory computed while the rest arrive, a card's tier's picks computed and marked held, and zero where this
- * worker holds none. */
+ * worker holds none — and the mask added after, where the table carries one. */
 static sys__heap_node ai_z__glm_5_3__experts__zzabi_apply(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx) {
-    if (argc != 4u && argc != 5u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
+    if (argc != 4u && argc != 5u && argc != 6u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
+    /* WITH 1 AFTER THE TIER, ITS VISIT ALONE (NN-99 ④, ▶ ai_qwen_3's experts): the picks marked and the card waited for,
+     *   nothing computed — the sockets start on theirs before this card's experts are queued (glm5.py's `card_visit_first`) */
+    const bool visit_only = argc == 6u;
+    if (visit_only && (argv[5].dtype != SYS__KIND__VALUE_INT || argv[5].args[0] != 1u))
+        return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
     uint64_t hand = 0, h_room = 0, routed = 0, r_room = 0;
     if (!nn__primitives__room(&argv[0], &hand, &h_room) || !nn__primitives__room(&argv[3], &routed, &r_room)
      || !sys__heap_node__carries_reference(argv[1].dtype) || !sys__node_array__is(argv[1].args[0])
@@ -456,13 +552,27 @@ static sys__heap_node ai_z__glm_5_3__experts__zzabi_apply(const sys__heap_node* 
         return sys__engine__abi__error(AI_Z__GLM_5_3__LAYER__FAULT_TABLE);
     nn__routed rt;
     if (!ai_z__glm_5_3__experts__zzprivate_routed(argv[2].args[0], at, room, v, r, &rt)) return sys__engine__abi__error(AI_Z__GLM_5_3__LAYER__FAULT_TABLE);
+    uint64_t mk[3], mroom[3];
+    bool masked = false;
+    if (!ai_z__glm_5_3__table__zzpackage_mask(argv[2].args[0], AI_Z__GLM_5_3__EXP__MASK, mk, mroom, &masked))
+        return sys__engine__abi__error(AI_Z__GLM_5_3__LAYER__FAULT_TABLE);
     nn__expert_tier tier;
     bool tier_ok = true;
     const bool holds = ai_z__glm_5_3__experts__zzprivate_tier(argv, argc, 4u, rt.layer, &tier, &tier_ok);
     if (!tier_ok) return sys__engine__abi__error(AI_Z__GLM_5_3__LAYER__FAULT_TABLE);
+    if (visit_only) {
+        if (!holds) return sys__engine__abi__error(AI_Z__GLM_5_3__LAYER__FAULT_TABLE);
+        const uint64_t f = nn__routed__visit(ctx, &rt, argv[1].args[0], &tier);
+        if (f != 0u) return sys__engine__abi__error(f);
+        if (!sys__gpu__compute_completed(ctx->family)) return sys__engine__abi__error(NN__PRIMITIVES__FAULT_NO_DEVICE);
+        return nn__doors_answer(&argv[3]);
+    }
     const nn__doors* doors = nn__doors_for(ctx);
     if (doors == 0) return sys__engine__abi__error(NN__PRIMITIVES__FAULT_NO_DEVICE);
-    const uint64_t f = nn__routed__position(ctx, doors, &rt, hand, argv[1].args[0], holds ? &tier : 0, routed, 0);
+    nn__routed__done done;
+    uint64_t f = nn__routed__position(ctx, doors, &rt, hand, argv[1].args[0], holds ? &tier : 0, routed, &done);
+    if (f == 0u && masked && done.n != 0u)
+        f = ai_z__glm_5_3__experts__zzprivate_mask_picks(ctx, doors, mk, mroom, &rt, hand, routed, &done);
     return f != 0u ? sys__engine__abi__error(f) : nn__doors_answer(&argv[3]);
 }
 
@@ -478,21 +588,36 @@ static bool ai_z__glm_5_3__layer__zzprivate_rows(const sys__heap_node* n, uint64
     return true;
 }
 
-/* `(ai_z__glm_5_3__kda streams table)` -> `streams`. */
+/* A site verb's group, where it was handed one after its `n` operands: 0 without, `tp` with, and false where it is wrong.
+ *   The sum's room is checked against `H` where the site knows it (▶ `..._place_group`). */
+static bool ai_z__glm_5_3__layer__zzprivate_group(const sys__heap_node* argv, unsigned argc, unsigned n, uint64_t* tp, const uint64_t** use) {
+    *use = 0;
+    if (argc == n) return true;
+    if (argc != n + 2u || !ai_z__glm_5_3__layer__zzprivate_tp(argv, n, 1u, tp)) return false;
+    *use = tp;
+    return true;
+}
+/* `(ai_z__glm_5_3__kda streams table [group sum])` -> `streams`. */
 static sys__heap_node ai_z__glm_5_3__kda__zzabi_apply(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx) {
-    if (argc != 2u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
-    return ai_z__glm_5_3__layer__zzprivate_answer(argv, ai_z__glm_5_3__kda__zzprivate_row(argv, ctx, 0u));
+    if (argc != 2u && argc != 4u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
+    uint64_t tp[3]; const uint64_t* use = 0;
+    if (!ai_z__glm_5_3__layer__zzprivate_group(argv, argc, 2u, tp, &use)) return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
+    return ai_z__glm_5_3__layer__zzprivate_answer(argv, ai_z__glm_5_3__kda__zzprivate_row(argv, ctx, 0u, use));
 }
-/* `(ai_z__glm_5_3__mla streams table pos)` -> `streams`. */
+/* `(ai_z__glm_5_3__mla streams table pos [group sum])` -> `streams`. */
 static sys__heap_node ai_z__glm_5_3__mla__zzabi_apply(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx) {
-    if (argc != 3u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
+    if (argc != 3u && argc != 5u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
     if (argv[2].dtype != SYS__KIND__VALUE_INT) return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
-    return ai_z__glm_5_3__layer__zzprivate_answer(argv, ai_z__glm_5_3__mla__zzprivate_row(argv, ctx, argv[2].args[0], 0u));
+    uint64_t tp[3]; const uint64_t* use = 0;
+    if (!ai_z__glm_5_3__layer__zzprivate_group(argv, argc, 3u, tp, &use)) return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
+    return ai_z__glm_5_3__layer__zzprivate_answer(argv, ai_z__glm_5_3__mla__zzprivate_row(argv, ctx, argv[2].args[0], 0u, use));
 }
-/* `(ai_z__glm_5_3__mlp streams table)` -> `streams`. */
+/* `(ai_z__glm_5_3__mlp streams table [group sum])` -> `streams`. */
 static sys__heap_node ai_z__glm_5_3__mlp__zzabi_apply(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx) {
-    if (argc != 2u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
-    return ai_z__glm_5_3__layer__zzprivate_answer(argv, ai_z__glm_5_3__mlp__zzprivate_row(argv, ctx, 0u));
+    if (argc != 2u && argc != 4u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
+    uint64_t tp[3]; const uint64_t* use = 0;
+    if (!ai_z__glm_5_3__layer__zzprivate_group(argv, argc, 2u, tp, &use)) return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
+    return ai_z__glm_5_3__layer__zzprivate_answer(argv, ai_z__glm_5_3__mlp__zzprivate_row(argv, ctx, 0u, use));
 }
 /* ══ ⭐⭐ A PROMPT AS ROWS — each site over `n` positions at once ═══════════════════════════════════════════════
  * Row `t` of `streams` is position `first + t`. Every matrix runs ONCE over the chunk, through nn's expert-major GEMM
@@ -662,6 +787,9 @@ static sys__heap_node ai_z__glm_5_3__kda_rows__zzabi_apply(const sys__heap_node*
                      r[AI_Z__GLM_5_3__KDA__LOWER], r[AI_Z__GLM_5_3__KDA__EPS], n, over);
     doors->hadamard_rotate((uint16_t*)(uintptr_t)kor, (const uint16_t*)(uintptr_t)ko, (const uint16_t*)(uintptr_t)signs, n * KW, over);
     ai_z__glm_5_3__rows__zzprivate_gemm(doors, over, at, room, AI_Z__GLM_5_3__KDA__O, y, kor, pairs, n, d[8], H, KW);
+    const uint64_t f = ai_z__glm_5_3__table__zzpackage_masked(doors, over, argv[1].args[0], AI_Z__GLM_5_3__KDA__MASK, y, kor, n, H, KW,
+                                                           AI_Z__GLM_5_3__LAYER__FAULT_TABLE);
+    if (f != 0u) return sys__engine__abi__error(f);
     ai_z__glm_5_3__rows__zzprivate_place(doors, over, mixes, streams, y, H, M, n);
     return nn__doors_answer(&argv[0]);
 }
@@ -853,6 +981,9 @@ static sys__heap_node ai_z__glm_5_3__mla_rows__zzabi_apply(const sys__heap_node*
     }
     doors->hadamard_rotate((uint16_t*)(uintptr_t)vhr, (const uint16_t*)(uintptr_t)vh, (const uint16_t*)(uintptr_t)signs, n * heads * VD, over);
     ai_z__glm_5_3__rows__zzprivate_gemm(doors, over, at, room, AI_Z__GLM_5_3__MLA__O, y, vhr, pairs, n, d[3], H, heads * VD);
+    const uint64_t f = ai_z__glm_5_3__table__zzpackage_masked(doors, over, argv[1].args[0], AI_Z__GLM_5_3__MLA__MASK, y, vhr, n, H,
+                                                           heads * VD, AI_Z__GLM_5_3__LAYER__FAULT_TABLE);
+    if (f != 0u) return sys__engine__abi__error(f);
     ai_z__glm_5_3__rows__zzprivate_place(doors, over, mixes, streams, y, H, M, n);
     return nn__doors_answer(&argv[0]);
 }
@@ -950,6 +1081,9 @@ static sys__heap_node ai_z__glm_5_3__route_rows__zzabi_apply(const sys__heap_nod
     }
     ai_z__glm_5_3__rows__zzprivate_swiglu(doors, over, at, room, AI_Z__GLM_5_3__MOE__GATE, AI_Z__GLM_5_3__MOE__UP, AI_Z__GLM_5_3__MOE__DOWN,
                                        &v[AI_Z__GLM_5_3__MOE__D], hr, pairs, gu, act, actr, signs, shared, H, I, n, r[AI_Z__GLM_5_3__MOE__LIMIT]);
+    const uint64_t f = ai_z__glm_5_3__table__zzpackage_masked(doors, over, argv[1].args[0], AI_Z__GLM_5_3__MOE__MASK, shared, actr, n, H, I,
+                                                           AI_Z__GLM_5_3__LAYER__FAULT_TABLE);
+    if (f != 0u) return sys__engine__abi__error(f);
     return nn__doors_answer(&argv[2]);
 }
 
@@ -999,13 +1133,19 @@ static sys__heap_node ai_z__glm_5_3__experts_rows__zzabi_apply(const sys__heap_n
         return sys__engine__abi__error(AI_Z__GLM_5_3__LAYER__FAULT_TABLE);
     nn__routed rt;
     if (!ai_z__glm_5_3__experts__zzprivate_routed(argv[1].args[0], at, room, v, r, &rt)) return sys__engine__abi__error(AI_Z__GLM_5_3__LAYER__FAULT_TABLE);
+    ai_z__glm_5_3__experts__rows_mask mask = {};
+    bool masked = false;
+    if (!ai_z__glm_5_3__table__zzpackage_mask(argv[1].args[0], AI_Z__GLM_5_3__EXP__MASK, mask.mk, mask.mroom, &masked))
+        return sys__engine__abi__error(AI_Z__GLM_5_3__LAYER__FAULT_TABLE);
+    mask.H = H; mask.I = rt.inter; mask.E = rt.experts; mask.first = rt.first;
     nn__expert_tier tier;
     bool tier_ok = true;
     const bool holds = ai_z__glm_5_3__experts__zzprivate_tier(argv, argc, 4u, rt.layer, &tier, &tier_ok);
     if (!tier_ok) return sys__engine__abi__error(AI_Z__GLM_5_3__LAYER__FAULT_TABLE);
     const nn__doors* doors = nn__doors_for(ctx);
     if (doors == 0) return sys__engine__abi__error(NN__PRIMITIVES__FAULT_NO_DEVICE);
-    const uint64_t f = nn__routed__rows(ctx, doors, &rt, hands, n, holds ? &tier : 0, routed, 0, 0);
+    const uint64_t f = nn__routed__rows(ctx, doors, &rt, hands, n, holds ? &tier : 0, routed,
+                                        masked ? ai_z__glm_5_3__experts__zzprivate_rows_mask : 0, &mask);
     return f != 0u ? sys__engine__abi__error(f) : nn__doors_answer(&argv[2]);
 }
 

@@ -10,10 +10,10 @@ the Neural Network library       what a model is built with: buffers, experts, a
 ```
 
 A model is a **program** in this language: a list of forms that name `nn`'s verbs and its own package's, run
-by the evaluator, with the heavy arithmetic launched on a graphics card or on the CPU's cores. Three model
+by the evaluator, with the heavy arithmetic launched on a graphics card or on the CPU's cores. Four model
 packages ship: `packages/ai_qwen_3` (Qwen 3.5, 3.6 and 3.8, dense and mixture of experts),
-`packages/ai_z__glm_5_3` (GLM 5.3 Flash) and `packages/ai_qwen_image` (Qwen-Image 2.1's diffusion transformer and its
-picture decoder). The Python side that boots a model folder onto the machine is `silvann_runtime`.
+`packages/ai_z__glm_5_3` (GLM 5.3 Flash), `packages/ai_qwen_image` (Qwen-Image 2.1's diffusion transformer and its
+picture decoder) and `packages/ai_deepseek_4` (DeepSeek-V4.1-Flash's layers, a model not yet offered for download). The Python side that boots a model folder onto the machine is `silvann_runtime`.
 
 ## How it runs
 
@@ -62,7 +62,7 @@ folder: the next build enrols it and gives it the next id.
 
 ## Building
 
-From `backstage/` in the development repository:
+From the development repository's root:
 
 ```
 bash scripts/rebuild_engine.sh            the wheel (silvann_engine_cpu), then every silicon family
@@ -100,7 +100,7 @@ the card). `e.kinds()`, `e.verbs()` and `e.packages()` list the vocabulary; `e.c
 The program is written in a C subset — no classes, no templates, no overloading — so that it can be
 translated to C mechanically. A name carries its package, its type and its visibility
 (`sys__stack__push`, `sys__stack__zzprivate_set_current_chunk`); ▶ `packages/sys/README.md` for the rules.
-From `backstage/` in the development repository:
+From the development repository's root:
 
 ```
 python3 scripts/src_c_subset_gate.py      the code stays C-shaped, and names stay within their tiers
@@ -109,7 +109,7 @@ python3 scripts/src_claim_gate.py         every claim a comment makes about the 
 
 ## Testing
 
-From `backstage/` in the development repository:
+From the development repository's root:
 
 ```
 bash scripts/src_selftest.sh                   the language, compiled for the host

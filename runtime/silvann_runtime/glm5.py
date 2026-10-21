@@ -38,6 +38,7 @@ import numpy as np
 from . import experts_file, expert_tier, sampling
 from .vision import video_ram
 from .generate import GENERATE_MOST, Generates
+from .autotune import card_memory
 from .model_folder import NL, Refused
 
 ARCHITECTURES = ("glm5_next_text",)
@@ -56,7 +57,7 @@ class Glm5(Generates):
     def __init__(self, folder, machine, max_context=2048, layers=None, grid=True, fused=True, sockets=None, experts_int8=True,
                  experts_from="auto", experts_dir=None, chunk=256, experts_ram_gb=None, card_experts_gb=0, card_hot=None,
                  card_landing=1, card_line=None, card_exclusive=False, card_free=16, card_duplex_line=1200, card_duplex=None, card_landing_line=3,
-                 lend_cache=True, picture_pixels=1 << 22, mtp=False, mtp_hidden="hn",
+                 lend_cache=True, picture_pixels=1 << 22, mtp=False, mtp_hidden="hn", tensor_parallel=1, card_shared=0.1, card_visit_first=False,
                  ):
         if folder.architecture not in ARCHITECTURES:
             raise Refused("%s is a %r model, not one of %s" % (folder.path, folder.architecture, ARCHITECTURES))
@@ -142,6 +143,52 @@ class Glm5(Generates):
         if sockets > 1 and not fused:
             raise Refused("the experts split over %d sockets are reached by ai_z__glm_5_3's verbs only" % sockets)
         self.PARTS = sockets
+        # ⭐ A TENSOR-PARALLEL GROUP OF `tensor_parallel` CARDS (NN-99 ④): every card the same cut of each matrix — the
+        #   attention by heads (a KDA layer's channels, an MLA layer's heads), the dense MLP and the shared expert by their
+        #   inner width — each site's output the group's sum (ai_z__glm_5_3's verbs' `GROUP sum` pair, ▶ ai_deepseek_4's),
+        #   every card a tier of routed experts sharing a position's picks (▶ nn's `nn__expert_tier__visit_group`), the
+        #   streams, the latents, the indexer and the router replicated, so every card's are the same. Card 0 holds the
+        #   head and the embedding and hands the sockets their share. A position at a time: a prompt goes in a row each.
+        #   `card_shared`: of a card's slots a layer, the share every card keeps (NN-99 ③)
+        self.P = int(tensor_parallel or 1)
+        self.CARD_SHARED = float(card_shared)
+        # `card_visit_first`: the tier's picks marked and the sockets started before the card's experts are queued (▶
+        #   glm5.lisp `tier_and_sockets`) — off, as it was slower on the MI50 box (NN-99 ④); a switch to measure it elsewhere
+        self.VISIT_FIRST = bool(card_visit_first)
+        self.GROUP = 0
+        if self.P > 1:
+            if not fused:
+                raise Refused("a tensor-parallel group runs ai_z__glm_5_3's verbs — fused=True")
+            if mtp:
+                raise Refused("the MTP layer does not run in a tensor-parallel group yet — mtp 'no'")
+            if b.mask is not None:
+                raise Refused("a rank-1 mask does not run in a tensor-parallel group yet")
+            if card_exclusive:
+                raise Refused("an exclusive tier does not run in a tensor-parallel group yet")
+            if card_hot:
+                raise Refused("a tensor-parallel group's tiers start empty — no card_hot")
+            if layers is not None:
+                raise Refused("a tensor-parallel group runs every layer — not a ring's stage yet")
+            if self.KH % self.P or self.QH % self.P or (self.KW // self.P) % 512 or (self.QH // self.P * self.VD) % 512:
+                raise Refused("%d KDA heads and %d MLA heads do not split into %d parts of whole rotation blocks"
+                              % (self.KH, self.QH, self.P))
+            if self.INTER % (512 * self.P) or self.MINTER % (512 * self.P):
+                raise Refused("the MLPs' widths %d and %d do not split into %d parts of whole rotation blocks"
+                              % (self.INTER, self.MINTER, self.P))
+            # ⭐ CARDS OF ONE SIZE, as qwen3_5's group (⚖ 2026-10-16): every card holds the same share and the same tier,
+            #   so the group is sized as one card of them. Peer access is the group's join (▶ nn's `nn__partials__join`)
+            sizes = card_memory()
+            if sizes is None or len(sizes) < self.P:
+                raise Refused("tensor parallelism over %d cards: the cards' memory cannot be read (rocm-smi or "
+                              "nvidia-smi says it)%s" % (self.P, "" if sizes is None else ": %d cards here" % len(sizes)))
+            if len(set(sizes[:self.P])) > 1:
+                raise Refused("tensor parallelism takes cards of one size, and these %d are not: %s GB"
+                              % (self.P, ", ".join("%.1f" % (z / 2 ** 30) for z in sizes[:self.P])))
+            lend_cache = False
+            self.BINDINGS = 512 * self.P + 256
+        # a card's share of each width: all of it on one card
+        self.KHC, self.QHC = self.KH // self.P, self.QH // self.P
+        self.KWC, self.IC, self.MC = self.KHC * self.KD, self.INTER // self.P, self.MINTER // self.P
         self.EXPERTS_INT8 = experts_int8   # the routed experts' products in integers on the CPU (nn's int8 gemvs)
         # ⭐ THE CARD'S TIER OF ROUTED EXPERTS (NN-48): `card_experts_gb` of whole experts on the card, which computes the
         #   picks it holds while the CPU computes the rest. An expert the CPU computed earns a slot by nn's qualifier — three
@@ -169,10 +216,22 @@ class Glm5(Generates):
             raise Refused("an exclusive tier needs a card tier — card_experts_gb")
         if self.CARD_GB and not fused:
             raise Refused("the card's tier of experts runs in the fused layer — fused=True")
+        # ⭐ A RANK-1 MASK, where the folder's LoRA is one (▶ `nn_rank1_mask.py`, `nn_rank1_mask_from_lora.py`): `W' = W + r·vᵀ`
+        #   beside the attention's output projections, the shared experts' downs and the routed experts' downs, each a site's
+        #   cells past its table (▶ the package's `*__MASK` and `_mask_layout`). Chosen at boot, as Qwen's is.
+        if b.overlay is not None:
+            raise Refused("GLM 5.3 Flash takes a LoRA as a rank-1 mask, not as an adapter's matrices")
+        if b.mask is not None:
+            if not fused:
+                raise Refused("a rank-1 mask is applied by ai_z__glm_5_3's verbs — fused=True")
+            if self.MTP is not None:
+                raise Refused("the MTP layer's draft check does not take a mask yet — mtp 'no'")
+        self.active_lora = folder.lora if b.mask is not None else None
+        self._lora_cache = {}
         # ⭐ THE PROGRAM IS lisp/glm5.lisp — the fused layer's: a loop over the layers, each its sites over its tables. The
         #   unfused layer, nn's words a layer, is composed here (`_composed_procedures`), for the router's log
         self.SOURCE = fused
-        self.CPUS = [dict(w=CPU + i, dev=(1 + i) if sockets > 1 else 0, part=i) for i in range(sockets)]
+        self.CPUS = [dict(w=self.P + i, dev=(1 + i) if sockets > 1 else 0, part=i) for i in range(sockets)]
         self._plan()
         self.EXPERTS_FROM = experts_file.choose(experts_from, self.cpu_arena, video_ram(folder.config))
         if self.CARD_EXCLUSIVE and self.EXPERTS_FROM != "ram":
@@ -206,8 +265,9 @@ class Glm5(Generates):
         # ⭐ A PROMPT AS ROWS, `chunk` positions at a time through each layer (ai_z__glm_5_3's `…_rows` verbs): a routed expert
         #   is read once for every row of the chunk that picked it. ⛳ `REASONED`: with the experts on the disk the chunk
         #   wants to be large — a chunk's picks reach most of a layer's experts, so each is streamed about once a chunk
-        self.CH = max(1, min(chunk, max_context)) if fused else 0
+        self.CH = max(1, min(chunk, max_context)) if fused and self.P == 1 else 0
         self.experts_dir = experts_dir or os.path.join(folder.path, "experts")
+        self._mask_layout()
         # ⭐ PICTURES ON THE CARD (NN-81): the vision tower's weights in a collection of their own and its scratch in another,
         #   sized for pictures of up to `picture_pixels` (0: none, and none of the card's memory for them — the tower then
         #   runs on the host, ▶ vision_glm.py) — where the pack carries the tower, a prompt goes as rows (the only way a
@@ -223,6 +283,39 @@ class Glm5(Generates):
         """A CPU worker's buffer by name: `c_…` on the first, `c1_…` on the second."""
         return ("c_" if i == 0 else "c%d_" % i) + name
 
+    @staticmethod
+    def sfx(name, k):
+        """Card `k`'s own name for a buffer or a table: card 0's is the name itself."""
+        return name if k == 0 else "%s_%d" % (name, k)
+
+    def _cut(self, l, n, s):
+        """Card `s`'s part of layer `l`'s matrix `n` in a group: None for whole, ("rows", runs) or ("cols", (first, end)).
+        A KDA layer's heads are channels [s·KWC, +KWC) of q, k, v, their convolutions, the gates' second projections and
+        dt_bias, heads of β and A_log, and those columns of its output; an MLA layer's heads are rows of q_b and of the
+        latent's expansion (a head's NOPE + VD rows together), and its output's columns. The rest is every card's whole."""
+        if self.P == 1:
+            return None
+        a, rows, cols = "self_attn.", lambda at, w: ("rows", [(s * w + at, w)]), lambda w: ("cols", (s * w, (s + 1) * w))
+        if self.kinds[l] == "d" and not n.startswith("mlp."):
+            KWC = self.KWC
+            cut = {a + x: rows(0, KWC) for x in ("q_proj.weight", "k_proj.weight", "v_proj.weight", "q_conv1d.weight",
+                                                  "k_conv1d.weight", "v_conv1d.weight", "f_b_proj.weight", "g_b_proj.weight")}
+            cut.update({a + "b_proj.weight": rows(0, self.KHC), a + "A_log": cols(self.KHC), a + "dt_bias": cols(KWC),
+                        a + "o_proj.weight": cols(KWC)})
+            return cut.get(n)
+        if self.kinds[l] == "f" and n.startswith(a) and ".indexer." not in n:
+            return {a + "q_b_proj.weight": rows(0, self.QHC * self.NOPE),
+                    a + "kv_b_proj.weight": rows(0, self.QHC * (self.NOPE + self.VD)),
+                    a + "o_proj.weight": cols(self.QHC * self.VD)}.get(n)
+        dense, shared = "mlp.%s_proj.weight", "mlp.shared_experts.%s_proj.weight"
+        return {dense % "gate": rows(0, self.IC), dense % "up": rows(0, self.IC), dense % "down": cols(self.IC),
+                shared % "gate": rows(0, self.MC), shared % "up": rows(0, self.MC), shared % "down": cols(self.MC)}.get(n)
+
+    def _part(self, l, n, s):
+        """Card `s`'s bytes of layer `l`'s matrix `n` (data, scales), or None where it holds it whole."""
+        c = self._cut(l, n, s)
+        return None if c is None else NL.dense_part(self.b, n, l, **{c[0]: c[1]})
+
     # ── ① the collections ─────────────────────────────────────────────────────────────────────────────────────
     def dense_names(self, l):
         """A layer's matrices that live on the card: all but the routed experts, and the indexer's place bias, which is
@@ -234,7 +327,11 @@ class Glm5(Generates):
         # a tensor is known by its layer's kind and its name: `o_proj` is 8192 wide in a KDA layer and 16384 in an MLA one
         keys = sorted({self.key(l, n) for l in run for n in self.dense_names(l)})
         first = {k: next(l for l in run if self.key(l, k[1]) == k and k[1] in self.dense_names(l)) for k in keys}
-        plans = {k: NL.dense_plan(b, k[1], first[k]) for k in keys}
+        # ⛳ in a group every card's part of a matrix is the same shape (▶ `_cut`), so card 0's plan is every card's
+        plans = {}
+        for k in keys:
+            got = self._part(first[k], k[1], 0)
+            plans[k] = NL.dense_plan(b, k[1], first[k]) if got is None else NL.SlotPlan(len(got[0]), 0, 0, len(got[1]))
         # ⭐ ONE COLLECTION A SHAPE, a slot a tensor of it in each layer — q, k and v share one, the two maps another —
         #   which is the collections' own design, and what keeps GLM's forty-odd tensors under the ruled thirty-two
         groups = {}
@@ -261,10 +358,10 @@ class Glm5(Generates):
         self.EMB_DATA_BYTES, self.HEAD_BITS = len(self.emb_data), int(self.head_rec["d"])
         self.TABLE_BYTES = (len(self.emb_data) + len(self.emb_lut) + 255) // 256 * 256      # the rows, then the scales
         # KDA: the state (heads · head_dim² floats) in the up half, the conv window (q · k · v, three taps) in the down
-        self.S_BYTES, self.W_BYTES = self.KH * self.KD * self.KD * 4, 3 * self.KW * 3 * 2
+        self.S_BYTES, self.W_BYTES = self.KHC * self.KD * self.KD * 4, 3 * self.KWC * 3 * 2
         self.SPLAN = NL.SlotPlan(self.S_BYTES, 0, 0, self.W_BYTES)
         # MLA: the rotated latents in the up half, the latent's expansion decoded to halves in the down
-        self.C_BYTES, self.KVB_BYTES = self.max_context * self.LAT * 2, self.QH * (self.NOPE + self.VD) * self.LAT * 2
+        self.C_BYTES, self.KVB_BYTES = self.max_context * self.LAT * 2, self.QHC * (self.NOPE + self.VD) * self.LAT * 2
         # and the indexer's caches after the latents: a key and a gate in a ring of `kpool` (read only to finish their
         # pool), a pooled key a pool
         ik = self.KP * self.ID * 2
@@ -341,7 +438,7 @@ class Glm5(Generates):
                    kinds, len(types), typed))
 
     def workers(self):
-        return [(self.m.silicon, 0)] + [("x86_avx2", c["dev"]) for c in self.CPUS]
+        return [(self.m.silicon, k) for k in range(self.P)] + [("x86_avx2", c["dev"]) for c in self.CPUS]
 
     def device_params(self):
         """The card's section and each CPU worker's: {worker: text}."""
@@ -353,6 +450,9 @@ class Glm5(Generates):
             # a chunk's rows: streams, hands, carries, the routed rows (a socket each) and the tokens' rows
             big = max(big, self.CH * self.MULT * self.H * 2, self.CH * self.HAND, self.CH * (256 + 2 * self.H))
             bigs += 5 + len(self.CPUS)
+        # a mask's buffer, one of the big ones: asked for past the 4 MiB class so it lands in theirs (▶ `_mask_layout`)
+        if self.MASK_ASK[CARD]:
+            big, bigs = max(big, self.MASK_ASK[CARD]), bigs + 1
         # ⛳ the rows verbs' `work` buffer is the one buffer of its class, sized past every other big one so no other lands there
         self.WORK = max(self._work_bytes(), big + 4096) if self.CH else 0
         works = 1
@@ -375,6 +475,9 @@ class Glm5(Generates):
                  "nn__ram_buffer_table__size_bytes:%d\nnn__ram_buffer_table__qty:1\n" % self.TABLE_BYTES)
         # ⛳ a section with no collection is refused, so a run with no MoE layer gives the CPU one of a single slot
         out = {CARD: card}
+        # a group's other cards: the same collections and classes, and no embedding to hold
+        for k in range(1, self.P):
+            out[k] = card.replace("nn__ram_buffer_table__size_bytes:%d\n" % self.TABLE_BYTES, "nn__ram_buffer_table__size_bytes:256\n")
         moe = sum(self.moe[l] for l in self.run_layers)
         for c in self.CPUS:
             slots = self.SLOTS if self.SLOTS is not None else (self.EXPERTS - getattr(self, "CARD_PER", 0)) * moe
@@ -385,6 +488,8 @@ class Glm5(Generates):
                 cbig = max(cbig, 2 * self.CH * self.H + 16 * P + 2 * P + 8 * P * self.PI + 4 * P * self.H + 64,
                            self.CH * self.HAND)
                 cbigs += 3
+            if self.MASK_ASK.get(c["w"]):
+                cbig, cbigs = max(cbig, self.MASK_ASK[c["w"]]), cbigs + 1
             out[c["w"]] = self._section(cbig, self.EPLAN.slot_bytes * slots if self.EPLAN else 0, experts,
                                         kinds, many=16, bigs=cbigs, mains=2 + (3 if self.CH else 0))
         return out
@@ -408,42 +513,66 @@ class Glm5(Generates):
     # ── ② the load ───────────────────────────────────────────────────────────────────────────────────────────
     def load(self, progress=None):
         m, b = self.m, self.b
-        m.act_as(CARD)
-        loader = m.loader()
-        self._head_and_embedding(loader)
-        if self.VIS:
-            self._vision_load(loader)
-        self.state_at = {}
-        for l in self.run_layers:
-            for t in sorted({self.TYPE[self.key(l, n)] for n in self.dense_names(l)}):
-                loader.layer_width(l, t, self.WIDTH[t])
-            for n in self.dense_names(l):
-                k = self.key(l, n)
-                loader.load_dense(b, self.PLAN[k], self.TYPE[k], n, l, which=self.WHICH[k])
-            t = self.T_STATE if self.kinds[l] == "d" else self.T_KV
-            loader.layer_width(l, t, 1)
-            self.state_at[l] = loader.reserve(t)
-            loader.assign(l, t, 0, self.state_at[l])
-        if self.CPLAN is not None:
-            self._card_experts(loader)
-        if loader.handed() != 0:
-            raise Refused("%d card slots were reserved and never published" % loader.handed())
-        self._card_buffers()
-        # every MLA layer's latent expansion, decoded once into halves beside its cache
-        for l in self.run_layers:
-            if self.kinds[l] == "f":
-                n = "self_attn.kv_b_proj.weight"
-                r = b.record(l, n)
-                m.must("(begin (nn__turboquant__decode %s %s %s %d %d %d) (type x))"
-                       % (self.plane(l, n, "data"), self.plane(l, n, "lut"), self.kv(l, "kvb"), r.rows, r.cols, r.d),
-                       "layer %d's latent expansion" % l)
+        self.state_of = {}
+        for card in range(self.P):                    # card 0 first: the others' buffers take its signs
+            m.act_as(card)
+            loader = m.loader()
+            if card == 0:
+                self._head_and_embedding(loader)
+                if self.VIS:
+                    self._vision_load(loader)
+            at = self.state_of[card] = {}
+            for l in self.run_layers:
+                for t in sorted({self.TYPE[self.key(l, n)] for n in self.dense_names(l)}):
+                    loader.layer_width(l, t, self.WIDTH[t])
+                for n in self.dense_names(l):
+                    k = self.key(l, n)
+                    got = self._part(l, n, card)
+                    if got is None:
+                        loader.load_dense(b, self.PLAN[k], self.TYPE[k], n, l, which=self.WHICH[k])
+                    else:
+                        loader.load_bytes(self.PLAN[k], self.TYPE[k], l, got[0], got[1], which=self.WHICH[k])
+                t = self.T_STATE if self.kinds[l] == "d" else self.T_KV
+                loader.layer_width(l, t, 1)
+                at[l] = loader.reserve(t)
+                loader.assign(l, t, 0, at[l])
+            if self.CPLAN is not None:
+                self._card_experts(loader)
+            if loader.handed() != 0:
+                raise Refused("card %d: %d slots were reserved and never published" % (card, loader.handed()))
+            if card == 0:
+                self._card_buffers()
+                self.MASK_CELLS = {}
+                self._mask_buffers(CARD, "mk")
+            else:
+                self._group_buffers(card)
+            # every MLA layer's latent expansion — a card's heads of it — decoded once into halves beside its cache
+            for l in self.run_layers:
+                if self.kinds[l] == "f":
+                    n = "self_attn.kv_b_proj.weight"
+                    r = b.record(l, n)
+                    m.must("(begin (nn__turboquant__decode %s %s %s %d %d %d) (type x))"
+                           % (self.plane(l, n, "data"), self.plane(l, n, "lut"), self.kv(l, "kvb"),
+                              self.QHC * (self.NOPE + self.VD), r.cols, r.d), "card %d: layer %d's latent expansion" % (card, l))
+        self.state_at = self.state_of[0]
         if self.EPLAN is not None:
             {"disk": self._cache_experts, "mapped": self._map_experts}.get(self.EXPERTS_FROM, self._load_experts)(progress)
             for i, c in enumerate(self.CPUS):
                 m.act_as(c["w"])
                 self._cpu_buffers(i)
+                self._mask_buffers(c["w"], self.cn(i, "mk"))
+        for card in range(1, self.P):
+            m.act_as(card)
+            self._fused_tables(card)
         m.act_as(CARD)
         self._tables()
+        if self.P > 1:
+            # ⭐ THE GROUP: each card joins it on its own worker, card 0 first (▶ nn's `nn__partials__join`)
+            for card in range(self.P):
+                m.act_as(card)
+                m.must("(nn__partials__join %d %d %d %d)" % (self.GROUP, card, self.P, min(4, self.P)),
+                       "card %d joining the group" % card, "sys__value_true")
+            m.act_as(CARD)
         if self.CPLAN is not None:
             self._lend()
         if self.VIS:
@@ -456,6 +585,7 @@ class Glm5(Generates):
         if self.CPLAN is not None and self.CH and self.EPLAN is not None:
             self._calibrate_line()
         self.global_ = None                         # what was left of global.pkl, read by the buffers
+        self.b.release()                            # every layer's file let go, now on the card or in RAM (▶ `Bundle.release`)
 
     def _head_and_embedding(self, loader):
         """The head into its slot and the embedding into its RAM buffer, before any layer — then the program lets go of
@@ -607,6 +737,9 @@ class Glm5(Generates):
                         m.write_from(at + into, piece.ctypes.data, piece.nbytes)
                     loader.assign(l, 0, x, at)
                     self.SRC.setdefault((l, s), []).append(at)
+            view = piece = None                   # a slice left bound keeps the map open: `close` refuses it
+            if b.release(l):                      # its experts copied out: the file let go (▶ `Bundle.release`)
+                raise Refused("layer %d's file is still mapped after its experts were copied out" % l)
             if progress:
                 progress(i + 1, len(moe))
         for c in self.CPUS:
@@ -632,6 +765,12 @@ class Glm5(Generates):
         """The experts table's last cell where the experts are a cache: worker `w`'s backing of layer `l`."""
         return [self.BACKING[(w, l)]] if self.SLOTS is not None else []
 
+    def _experts_tail(self, w, l):
+        """An experts table's cells past its fixed length: its backing — an integer 0 in its place where there is none and a
+        mask follows — and the mask's cells for worker `w`'s share of layer `l` (▶ AI_Z__GLM_5_3__EXP__MASK)."""
+        back = self._backing(w, l)
+        return back if self.b.mask is None else (back or [0]) + self._masked(w, l, "moe")
+
     def _map_experts(self, progress):
         """Every MoE layer's routed experts from each socket's file, mapped over its slots (▶ `experts_file`)."""
         moe = [l for l in self.run_layers if self.moe[l]]
@@ -653,6 +792,10 @@ class Glm5(Generates):
         m.buffer(H * 2, "fnw", _half(final_w))                   # GLM's norm is a plain gain
         m.buffer(H * 2, "zero_h", _half(np.zeros(H)))
         self.STREAMS_AT = m.buffer(self.MULT * H * 2, "streams")
+        if self.P > 1:
+            # ⛳ the group's sums land in a buffer of their own: between two reduces the other cards read it, so nothing but a
+            #   reduce writes it (▶ nn's `contracts/objects/partials.cuh`)
+            m.buffer(self.MULT * H * 2, "tsum")
         for nm, n in (("u", H), ("hu", H), ("e", H), ("xin", H), ("h", H), ("hr", H), ("y", H), ("sh", H),
                       ("routed", H), ("hm", H), ("hn", H), ("hnr", H),
                       ("qkv", 3 * KW), ("conved", 3 * KW), ("fb", KW + self.KH), ("fa", self.KD), ("far", self.KD),
@@ -702,7 +845,7 @@ class Glm5(Generates):
         self.at["hand"] = m.buffer(2 * (H + self.TOPK), "hand")
         # ⛳ a query attends at most `topk` positions and the filling pool's, so the scores need no more than that
         self.ATTEND = min(self.max_context, self.ITOPK + self.KP)
-        m.buffer(2 * self.QH * self.ATTEND * 4, "scores")
+        m.buffer(2 * self.QHC * self.ATTEND * 4, "scores")
         # the indexer's: the pools' scores, the chosen positions (and their count), their latents gathered, and each MLA
         # layer's place bias, decoded here — it is added to the gates, not multiplied, so the card needs it as it is
         m.buffer((self.max_context // self.KP + 1) * 4, "iscores")
@@ -729,6 +872,34 @@ class Glm5(Generates):
             m.node_array("nrows", 1)
             m.buffer(self.WORK, "rwork")                         # the rows verbs' — ▶ `_work_bytes`
 
+    def _group_buffers(self, k):
+        """Card `k`'s buffers in a group, by its own names (▶ `sfx`): the streams (and zeros, its part of the embedding's
+        sum), the group's sum, the sites' scratch, the attention's scores and the indexer's, the hand, the picks and its
+        tier's share — what its tables and its layers' program name. ⛳ The indexer's place biases are every card's: each
+        card chooses the positions an MLA query attends, the same ones."""
+        m, H, n = self.m, self.H, lambda name: self.sfx(name, k)
+        m.buffer(1024, n("signs"), _half(self.signs[:512]))
+        m.buffer(H * 2, n("zero_h"), _half(np.zeros(H)))
+        self.at[n("streams")] = m.buffer(self.MULT * H * 2, n("streams"))
+        m.buffer(self.MULT * H * 2, n("zstreams"), _half(np.zeros(self.MULT * H)))
+        m.buffer(self.MULT * H * 2, n("tsum"))
+        m.buffer(1 << 19, n("gscratch"))
+        m.buffer(2 * (H + self.TOPK), n("hand"))
+        m.node_array(n("picks"), self.TOPK)
+        m.buffer(2 * self.QHC * self.ATTEND * 4, n("scores"))
+        m.buffer((self.max_context // self.KP + 1) * 4, n("iscores"))
+        m.buffer((self.ITOPK + self.KP + 1) * 4, n("iindex"))
+        m.buffer((self.ITOPK + self.KP) * self.LAT * 2, n("igather"))
+        import nn_unpack_model as NU
+        for l in self.run_layers:
+            if self.kinds[l] == "f":
+                r = self.b.record(l, "self_attn.indexer.index_kpool_compress_ape")
+                ape = np.asarray(NU.decode_record(r.rec, r.bundle.blob(l)), dtype=np.float64).reshape(self.KP, self.ID)
+                m.buffer(self.KP * self.ID * 2, n("ape%d" % l), _half(ape))
+        if self.CPLAN is not None:
+            m.buffer(2 * H, n("routed_k"))
+            m.buffer(2 * 4 * self.TOPK * self.MINTER, n("kscratch"))
+
     def _cpu_buffers(self, i):
         m, H, c = self.m, self.H, lambda name: self.cn(i, name)
         m.buffer(1024, c("signs"), _half(self.signs[:512]))
@@ -748,6 +919,75 @@ class Glm5(Generates):
             self.at[c("hands")] = m.buffer(CH * self.HAND, c("hands"))
             m.buffer(CH * H * 2, c("rrows"))
             m.buffer(2 * CH * H + 16 * P + 2 * P + 8 * P * I + 4 * P * H + 64, c("rscratch"))
+
+    # ── the rank-1 mask, when the folder's LoRA is one (▶ the package's `*__MASK` cells) ───────────────────────────────
+    def _mask_layout(self):
+        """Where each worker keeps the mask's tensors: the card the attention's and the shared expert's `r` and `v`, each
+        socket the routed experts' `r` and its part of every expert's `V` — the columns of its share of the inner width,
+        whole rotation blocks, so they meet the activation it rotated on its own — and, with a card's tier, the card the
+        routed experts' `r` and the whole of `V`, since the tier holds whole experts. `MASK_PLACE[(worker, l, site)]` the
+        two tensors' (start, count) in halves, after the scratch the verbs' dots take; `MASK_ASK` each buffer's request."""
+        self.MASK_PLACE, self.MASK_ASK, self._mask_data = {}, {CARD: 0}, {}
+        if self.b.mask is None:
+            return
+        from safetensors.numpy import load_file
+        t = load_file(self.b.mask["path"])
+        # the verbs' dots: a chunk's picks 8 bytes each, a chunk's rows 4, a position's picks 12
+        self._mask_scratch = 8 * max(self.CH, 1) * self.TOPK + 256
+        at = {CARD: self._mask_scratch}
+        for l in self.run_layers:
+            if l == self.MTP:
+                continue
+            attn_in = self.KW if self.kinds[l] == "d" else self.QH * self.VD
+            for site, cols in (("attn", attn_in), ("shared", self.MINTER)):
+                if "layers.%d.%s.r" % (l, site) in t:
+                    self._mask_put(at, CARD, l, site, t["layers.%d.%s.r" % (l, site)], t["layers.%d.%s.v" % (l, site)], cols)
+            if "layers.%d.moe.r" % l in t:
+                V = t["layers.%d.moe.V" % l]
+                if not self.moe[l] or self.EPLAN is None or V.shape != (self.EXPERTS, self.MINTER):
+                    raise Refused("the mask's layer %d routed experts are %s, where this model runs %s"
+                                  % (l, V.shape, (self.EXPERTS, self.MINTER) if self.moe[l] else "none"))
+                for c in self.CPUS:
+                    at.setdefault(c["w"], self._mask_scratch)
+                    part = V[:, c["part"] * self.PI:(c["part"] + 1) * self.PI]
+                    self._mask_put(at, c["w"], l, "moe", t["layers.%d.moe.r" % l], part, self.EXPERTS * self.PI)
+                if self.CPLAN is not None:
+                    self._mask_put(at, CARD, l, "moe", t["layers.%d.moe.r" % l], V, self.EXPERTS * self.MINTER)
+        for w, n in at.items():
+            if any(k[0] == w for k in self.MASK_PLACE):
+                self.MASK_ASK[w] = max(n, (4 << 20) + 256)
+
+    def _mask_put(self, at, w, l, site, r, v, cols):
+        """A site's `r` and `v` placed in worker `w`'s mask buffer, refused where they are not this model's widths."""
+        if r.size != self.H or v.size != cols:
+            raise Refused("the mask's layer %d %s is %d and %d wide, where this model's is %d and %d"
+                          % (l, site, r.size, v.size, self.H, cols))
+        place = []
+        for a in (r, v):
+            place.append((at[w] // 2, a.size))
+            at[w] += (2 * a.size + 255) & ~255
+        self.MASK_PLACE[(w, l, site)] = place
+        self._mask_data[(w, l, site)] = (r, v)
+
+    def _mask_buffers(self, w, name):
+        """Worker `w`'s mask buffer, filled, and each of its sites' three cells: views of its `r`, its `v` and the scratch."""
+        if not self.MASK_ASK.get(w):
+            return
+        base = self.m.buffer(self.MASK_ASK[w], name)
+        for (w_, l, site), place in self.MASK_PLACE.items():
+            if w_ != w:
+                continue
+            for (start, _), a in zip(place, self._mask_data[(w, l, site)]):
+                self.m.write(base + 2 * start, np.ascontiguousarray(a, dtype="<f2").tobytes())
+            self.MASK_CELLS[(w, l, site)] = [self.rng(name, *place[0]), self.rng(name, *place[1]),
+                                             self.rng(name, 0, self._mask_scratch // 2)]
+
+    def _masked(self, w, l, site):
+        """A table's mask cells for worker `w`'s site of layer `l`: none where the model has no mask, an integer 0 where it
+        leaves this site alone."""
+        if self.b.mask is None:
+            return []
+        return list(self.MASK_CELLS.get((w, l, site), [0]))
 
     # ── the planes ────────────────────────────────────────────────────────────────────────────────────────────
     def key(self, l, n):
@@ -850,8 +1090,10 @@ class Glm5(Generates):
         if self.CH and self.EPLAN is not None:
             self._rows_tables()
 
-    def _fused_tables(self):
-        m, b, H, s = self.m, self.b, self.H, "self_attn."
+    def _fused_tables(self, k=0):
+        """The fused layer's tables — card `k`'s in a group, by its own names (▶ `sfx`), over its parts' planes: its heads,
+        its share of the MLPs' widths, its tier. The CPU's experts tables are card 0's to make."""
+        m, b, H, s, n = self.m, self.b, self.H, "self_attn.", lambda name: self.sfx(name, k)
         pair = lambda l, n: [self.plane(l, n, "data"), self.plane(l, n, "lut")]
         data = lambda l, n: self.plane(l, n, "data")
         d = lambda l, n: b.record(l, n).d
@@ -864,51 +1106,54 @@ class Glm5(Generates):
             if self.kinds[l] == "d":
                 mats = [s + n + ".weight" for n in ("q_proj", "k_proj", "v_proj", "f_a_proj", "g_a_proj", "b_proj",
                                                     "f_b_proj", "g_b_proj", "o_proj")]
-                m.table("at%d" % l, hc(l, "attn") + [data(l, "input_layernorm.weight")] + [c for n in mats for c in pair(l, n)]
+                m.table(n("at%d" % l), hc(l, "attn") + [data(l, "input_layernorm.weight")] + [c for x in mats for c in pair(l, x)]
                         + [data(l, s + "%s_conv1d.weight" % c) for c in "qkv"]
                         + [data(l, s + "A_log"), data(l, s + "dt_bias"), data(l, s + "o_norm.weight"),
-                           self.state(l, "S"), self.state(l, "W"), "signs", "gscratch"]
-                        + head + [self.KH, self.KD] + [d(l, n) for n in mats] + [self.EPS, self.HC_EPS, self.LOWER])
+                           self.state(l, "S"), self.state(l, "W"), n("signs"), n("gscratch")]
+                        + head + [self.KHC, self.KD] + [d(l, x) for x in mats] + [self.EPS, self.HC_EPS, self.LOWER]
+                        + self._masked(CARD, l, "attn"))
             else:
                 mats = [s + n + ".weight" for n in ("q_a_proj", "kv_a_proj_with_mqa", "q_b_proj", "o_proj")]
                 ix = [s + "indexer." + n for n in ("wq_b.weight", "wk.weight", "weights_proj.weight", "index_kpool_compress_gate")]
-                m.table("at%d" % l, hc(l, "attn") + [data(l, "input_layernorm.weight")] + [c for n in mats for c in pair(l, n)]
+                m.table(n("at%d" % l), hc(l, "attn") + [data(l, "input_layernorm.weight")] + [c for x in mats for c in pair(l, x)]
                         + [data(l, s + "q_a_layernorm.weight"), data(l, s + "kv_a_layernorm.weight"), self.kv(l, "kvb"),
-                           self.kv(l, "c"), "scores", "signs", "gscratch"]
-                        + head + [self.QH, self.QR, self.LAT, self.NOPE, self.VD] + [d(l, n) for n in mats]
+                           self.kv(l, "c"), n("scores"), n("signs"), n("gscratch")]
+                        + head + [self.QHC, self.QR, self.LAT, self.NOPE, self.VD] + [d(l, x) for x in mats]
                         + [self.EPS, self.HC_EPS]
                         # the indexer — ▶ the package's AI_Z__GLM_5_3__IDX__ cells
-                        + [c for n in ix for c in pair(l, n)]
-                        + [data(l, s + "indexer.k_norm.weight"), data(l, s + "indexer.k_norm.bias"), "ape%d" % l,
-                           self.kv(l, "ikeys"), self.kv(l, "igates"), self.kv(l, "ipool"), "iscores", "iindex", "igather"]
-                        + [self.IH, self.ID, self.KP, self.ITOPK] + [d(l, n) for n in ix])
+                        + [c for x in ix for c in pair(l, x)]
+                        + [data(l, s + "indexer.k_norm.weight"), data(l, s + "indexer.k_norm.bias"), n("ape%d" % l),
+                           self.kv(l, "ikeys"), self.kv(l, "igates"), self.kv(l, "ipool"), n("iscores"), n("iindex"), n("igather")]
+                        + [self.IH, self.ID, self.KP, self.ITOPK] + [d(l, x) for x in ix]
+                        + self._masked(CARD, l, "attn"))
             if not self.moe[l]:
                 mats = ["mlp.%s_proj.weight" % n for n in ("gate", "up", "down")]
-                m.table("ml%d" % l, hc(l, "ffn") + [data(l, "post_attention_layernorm.weight")] + [c for n in mats for c in pair(l, n)]
-                        + ["signs", "gscratch"] + head + [self.INTER] + [d(l, n) for n in mats]
+                m.table(n("ml%d" % l), hc(l, "ffn") + [data(l, "post_attention_layernorm.weight")] + [c for x in mats for c in pair(l, x)]
+                        + [n("signs"), n("gscratch")] + head + [self.IC] + [d(l, x) for x in mats]
                         + [self.EPS, self.HC_EPS, self.LIMIT])
                 continue
             if self.CPLAN is not None:
                 cp = self.CPLAN
                 # the tier's layer, fed from the sockets' memory where every expert is there (▶ `nn__expert_tier`)
                 if all((l, c["part"]) in self.SRC for c in self.CPUS):
-                    self._int_array("src%d" % l, [self.SRC[(l, c["part"])][x] for x in range(self.EXPERTS) for c in self.CPUS])
+                    if k == (1 if self.P > 1 else 0):   # every card's tier reads the same sources: the first card to table them makes them
+                        self._int_array("src%d" % l, [self.SRC[(l, c["part"])][x] for x in range(self.EXPERTS) for c in self.CPUS])
                     fed[l] = "src%d" % l
-                cells = ["signs", "zero_h", "kscratch", l, self.T_CEXP, cp.at_up_lut - cp.at_up_data,
+                cells = [n("signs"), n("zero_h"), n("kscratch"), l, self.T_CEXP, cp.at_up_lut - cp.at_up_data,
                          cp.at_down_data - cp.at_up_data, cp.at_down_lut - cp.at_up_data, H, self.MINTER,
-                         self.EXPERTS, self.TOPK, self.E_D, 0, self.EXPERTS, 0, self.LIMIT, 0]
-                m.table("exk%d" % l, cells)
+                         self.EXPERTS, self.TOPK, self.E_D, 0, self.EXPERTS, 0, self.LIMIT, 0] + self._masked(CARD, l, "moe")
+                m.table(n("exk%d" % l), cells)
                 if self.CH:
                     m.table("exkr%d" % l, ["signs", "zero_h", "krscratch"] + cells[3:])   # a prompt chunk's, its own scratch
             mats = ["mlp.shared_experts.%s_proj.weight" % n for n in ("gate", "up", "down")]
             # ⛳ a draft's check runs a layer's MoE site for two positions at once: the second its own table over the same
             #   planes, its scratch its own (`gscratch2`), so the first's carry is not written over (▶ `_check_procedures`)
-            for name, scratch in (("mo%d" % l, "gscratch"),) + ((("mo%db" % l, "gscratch2"),) if self.MTP is not None and l != self.MTP else ()):
+            for name, scratch in ((n("mo%d" % l), n("gscratch")),) + ((("mo%db" % l, "gscratch2"),) if self.MTP is not None and l != self.MTP else ()):
                 m.table(name, hc(l, "ffn") + [data(l, "post_attention_layernorm.weight"), data(l, "mlp.gate.weight"),
                                               data(l, "mlp.gate.e_score_correction_bias")]
-                        + [c for n in mats for c in pair(l, n)] + ["signs", scratch]
-                        + head + [self.EXPERTS, self.TOPK, self.MINTER] + [d(l, n) for n in mats]
-                        + [self.EPS, self.HC_EPS, self.RSCALE, self.LIMIT])
+                        + [c for x in mats for c in pair(l, x)] + [n("signs"), scratch]
+                        + head + [self.EXPERTS, self.TOPK, self.MC] + [d(l, x) for x in mats]
+                        + [self.EPS, self.HC_EPS, self.RSCALE, self.LIMIT] + self._masked(CARD, l, "shared"))
         if self.CPLAN is not None:
             # ⭐ THE CARD'S TIER, ONE FOR THE CARD: how one of its experts is cut, where the sockets keep every expert's parts
             #   a layer at a time, and the binding `nn__expert_tier` the programs hand the verbs (▶ `expert_tier.bind`)
@@ -918,11 +1163,16 @@ class Glm5(Generates):
                     raise Refused("an exclusive tier needs every MoE layer's sources")
                 self.DUPLEX = expert_tier.duplex(m, CARD, self.CPLAN.slot_bytes, self.CARD_DUPLEX_LINE, self.CARD_DUPLEX)
                 exclusive = dict(part_worker=self.CPUS[0]["w"], part_type=0)
-            expert_tier.tier(m, "tier_card", self.T_CEXP, self.EXPERTS, self.TOPK, H, self.MINTER, self.CPLAN, self.LAYERS,
+            # in a group every card a tier of its own, the picks shared out among them, and a slice of each layer's most picked
+            #   every card keeps (NN-99 ③)
+            moe = sum(1 for l in self.run_layers if self.moe[l])
+            shared = int(round(self.CARD_SHARED * self.CARD_SLOTS / moe)) if self.P > 1 and moe else 0
+            expert_tier.tier(m, n("tier_card"), self.T_CEXP, self.EXPERTS, self.TOPK, H, self.MINTER, self.CPLAN, self.LAYERS,
                              fed, self.PARTS, self.EPLAN, self.GATE_ROW, self.DOWN_ROW, self.CARD_LANDING, exclusive,
-                             self.CARD_LANDING_LINE)
-            expert_tier.bind(m, {CARD: "tier_card"}, len(self.workers()))
-        if self.EPLAN is not None:
+                             self.CARD_LANDING_LINE, ranks=self.P, shared=shared)
+            if k == 0:
+                expert_tier.bind(m, {c: self.sfx("tier_card", c) for c in range(self.P)}, len(self.workers()))
+        if self.EPLAN is not None and k == 0:
             p = self.EPLAN
             for i, cpu in enumerate(self.CPUS):
                 m.act_as(cpu["w"])
@@ -932,7 +1182,7 @@ class Glm5(Generates):
                         m.table("ex%d_%d" % (l, i), [c("signs"), c("zero"), c("scratch"), l, 0, p.at_up_lut - p.at_up_data,
                                                      p.at_down_data - p.at_up_data, p.at_down_lut - p.at_up_data, H, self.PI,
                                                      self.EXPERTS, self.TOPK, self.E_D, 0, self.EXPERTS,
-                                                     1 if self.EXPERTS_INT8 else 0, self.LIMIT] + self._backing(cpu["w"], l))
+                                                     1 if self.EXPERTS_INT8 else 0, self.LIMIT] + self._experts_tail(cpu["w"], l))
             m.act_as(CARD)
 
     def _fused_body(self):
@@ -983,7 +1233,10 @@ class Glm5(Generates):
                            HEAD_SCALES=head(self.HPLAN.at_down_lut, self.HPLAN.down_lut), HEAD_BITS=self.HEAD_BITS,
                            HAND=self.HAND, HAND_PICKS_AT=self.HAND - 8 * K, HAND_BYTES=2 * (H + K),
                            ROWS_HANDS_BYTES=self.CH * self.HAND, ROWS_BYTES=2 * H * self.CH, ROWS_HALVES=H * self.CH,
-                           CARD_TIER=tier, CARD=CARD, SOCKETS=len(self.CPUS)))
+                           CARD_TIER=tier, CARD=CARD, SOCKETS=len(self.CPUS), FIRST_SOCKET=self.P, CARDS=self.P, GROUP=self.GROUP,
+                           VISIT_FIRST=self.VISIT_FIRST))
+        if self.P > 1:
+            m.node_array("TP_POS", 1)           # the position the group's other cards run (▶ `_group_procedures`)
         moe = lambda name: [name % l if self.moe[l] else 0 for l in run]
         m.array("KDA", [self.kinds[l] == "d" for l in run])
         m.array("MOE", [bool(self.moe[l]) for l in run])
@@ -1024,9 +1277,64 @@ class Glm5(Generates):
         self.m.load_source(self.folder.program("sampling"))
         self.m.load_source(self.folder.program("generate"))
         if self.EPLAN is not None:
+            self.m.worker_moved = {1: self.P}          # the file's worker 1 the first socket, after a group's cards
             self.m.load_source(self.folder.program("glm5_cpu"))
+        if self.P > 1:
+            self._group_procedures()
         if self.MTP is not None:
             self._mtp_procedures()
+
+    def _group_layers(self, k):
+        """Every layer at the position in TP_POS on card `k` past the first, by its own names: the same sites as card 0's,
+        each output the group's sum; a MoE site its tier's share of the picks, or none of the routed sum (card 0 adds the
+        sockets')."""
+        n, pos, tier = (lambda name: self.sfx(name, k)), "(nth TP_POS 0)", self.CPLAN is not None
+        out = []
+        for l in self.run_layers:
+            if self.kinds[l] == "d":
+                out.append("(ai_z__glm_5_3__kda %s %s GROUP %s)" % (n("streams"), n("at%d" % l), n("tsum")))
+            else:
+                out.append("(ai_z__glm_5_3__mla %s %s %s GROUP %s)" % (n("streams"), n("at%d" % l), pos, n("tsum")))
+            if not self.moe[l]:
+                out.append("(ai_z__glm_5_3__mlp %s %s GROUP %s)" % (n("streams"), n("ml%d" % l), n("tsum")))
+                continue
+            mine = ("(ai_z__glm_5_3__experts %s %s %s %s %s) " % (n("hand"), n("picks"), n("exk%d" % l), n("routed_k"),
+                                                                 expert_tier.BINDING) if tier else "")
+            # its close waits for the group's sum, card 0's after the sockets: the CPUs are done — a held promotion goes
+            out.append("(ai_z__glm_5_3__route %s %s %s %s) %s(ai_z__glm_5_3__shared %s %s) "
+                       "(ai_z__glm_5_3__close %s %s %s GROUP %s)%s"
+                       % (n("streams"), n("mo%d" % l), n("hand"), n("picks"), mine, n("hand"), n("mo%d" % l),
+                          n("streams"), n("mo%d" % l), n("routed_k") if tier else n("zero_h"), n("tsum"),
+                          " (nn__expert_tier__written %s)" % expert_tier.BINDING if tier else ""))
+        return " ".join(out)
+
+    def _group_procedures(self):
+        """A tensor-parallel group's program (NN-99 ④): card 0's sites redefined to take the group's sums — the rest of
+        lisp/glm5.lisp as it is — and every other card's layers, a picture each it starts on them for a position: from card
+        0's embedding (`tp_first`, its streams zeros, the group's sum of them the embedding on every card)."""
+        m, MH = self.m, self.MULT * self.H
+        for k in range(1, self.P):
+            m.act_as(k)
+            n = lambda name: self.sfx(name, k)
+            m.picture(n("tp_first"), "(begin (nn__partials__reduce GROUP %s %s %d) %s (type %s))"
+                      % (n("zstreams"), n("streams"), MH, self._group_layers(k), n("streams")))
+        m.act_as(CARD)
+        m.view("names")
+        m.defun("(defun (mixer i pos) (if (nth KDA i) (ai_z__glm_5_3__kda streams (nth AT i) GROUP tsum) "
+                "(ai_z__glm_5_3__mla streams (nth AT i) pos GROUP tsum)))")
+        m.defun("(defun (moe i) (let ((s 0)) (ai_z__glm_5_3__route streams (nth MO i) hand picks) "
+                "(tier_and_sockets i) "
+                "(ai_z__glm_5_3__shared hand (nth MO i)) "
+                "(while '(< s SOCKETS) '(begin (sys__result (nth SOCKET s)) (set! s (+ s 1)))) "
+                "(if CARD_TIER (nn__expert_tier__written nn__expert_tier) 0) "
+                "(sockets_sum) (if CARD_TIER (nn__vector__add routed routed_k routed HIDDEN) 0) "
+                "(ai_z__glm_5_3__close streams (nth MO i) routed GROUP tsum)))")
+        m.defun("(defun (layer i pos) (begin (mixer i pos) (if (nth MOE i) (moe i) (ai_z__glm_5_3__mlp streams (nth ML i) GROUP tsum)) "
+                "(type streams)))")
+        start = " ".join("(sys__compute %d names %s)" % (k, self.sfx("tp_first", k)) for k in range(1, self.P))
+        wait = " ".join("(sys__result %d)" % k for k in range(1, self.P))
+        m.defun("(defun (position tok pos) (begin (sys__node_array__set TP_POS 0 pos) %s (embed tok) "
+                "(nn__partials__reduce GROUP streams streams %d) (layers_f pos) %s (type streams)))" % (start, MH, wait))
 
     def _mtp_procedures(self):
         """`(mtp tok pos)` -> the MTP layer's greedy draft of the token after `tok`: at position `pos` of its own cache,
@@ -1279,7 +1587,7 @@ class Glm5(Generates):
                     m.table("exr%d_%d" % (l, i), [c("signs"), c("zero"), c("rscratch"), l, 0, p.at_up_lut - p.at_up_data,
                                                   p.at_down_data - p.at_up_data, p.at_down_lut - p.at_up_data, H, self.PI,
                                                   self.EXPERTS, self.TOPK, self.E_D, 0, self.EXPERTS,
-                                                  1 if self.EXPERTS_INT8 else 0, self.LIMIT] + self._backing(cpu["w"], l))
+                                                  1 if self.EXPERTS_INT8 else 0, self.LIMIT] + self._experts_tail(cpu["w"], l))
         m.act_as(CARD)
 
     def _rows_procedures(self):
@@ -1336,7 +1644,9 @@ class Glm5(Generates):
             if self.kinds[l] == "d":
                 zeros += ["(nn__vector__zero %s %d)" % (self.state(l, "S"), self.S_BYTES // 2),
                           "(nn__vector__zero %s %d)" % (self.state(l, "W"), self.W_BYTES // 2)]
-        self.m.must("(begin %s (type streams))" % " ".join(zeros), "the reset")
+        for k in reversed(range(self.P)):
+            self.m.act_as(k)
+            self.m.must("(begin %s (type %s))" % (" ".join(zeros), self.sfx("streams", k)), "card %d's reset" % k)
         self._room(0, exact=True)                       # a conversation from nothing: every lent slot the tier's again
         self._mtp_have, self._mtp_hid, self._mtp_next = -1, -1, None
 
@@ -1702,22 +2012,35 @@ class Glm5(Generates):
     def set_streams(self, a):
         self.m.write(self.STREAMS_AT, _half(np.asarray(a).reshape(-1)))
 
-    # ── LoRAs: none yet for this family, so a conversation runs on the base alone ────────────────────────────
-    active_lora = None
-
+    # ── LoRAs: a rank-1 mask chosen at boot, or none (▶ `_mask_layout`) ────────────────────────────────────────
     def load_lora(self, name):
-        if name is not None:
-            raise Refused("GLM 5.3 Flash has no LoRA overlays in this runtime yet")
-        return 0.0
+        """The LoRA a conversation runs under: the one booted, which is all this model swaps to. Answers the seconds taken."""
+        if name == self.active_lora:
+            return 0.0
+        if self.b.mask is not None:
+            # ⛳ a rank-1 mask is chosen at boot: its cells are in the tables the procedures were written over
+            raise Refused("a rank-1 mask is chosen at boot, not swapped: boot the folder with lora %r" % (name,))
+        raise Refused("GLM 5.3 Flash takes a LoRA only as a rank-1 mask, chosen at boot")
 
     def unload_lora(self):
-        pass
+        if self.active_lora is not None:
+            raise Refused("a rank-1 mask is chosen at boot, not taken off: boot the folder without it")
 
     def lora_identity(self):
-        return None
+        if self.active_lora is None:
+            return None
+        return dict(name=self.b.lora["name"], weights=self.b.lora["adapter"]["weights_sha"])
+
+    def _ensure(self, name):
+        """The LoRA `name` known, as a conversation adopted from disk asks (▶ `session.adopt`): the booted mask only."""
+        if name != self.active_lora:
+            raise Refused("this model runs the LoRA %r, chosen at boot, not %r" % (self.active_lora, name))
+        self._lora_cache.setdefault(name, dict(ident=self.lora_identity()))
 
     def state_write(self, length, blobs):
         """A conversation's state, as `state_regions` lays it out, written back — its rows withheld from the tier first."""
+        if self.P > 1:
+            raise Refused("a conversation's state is saved and restored on one card — a group's is every card's, not yet")
         self._room(length, exact=True)
         for (at, _), blob in zip([r for r in self.state_regions(length) if r[1]], blobs):
             self.m.write(at, blob)
@@ -1729,6 +2052,8 @@ class Glm5(Generates):
         and gates and the pooled keys to its last pool, which choose what a position past `index_topk` attends. They come
         last, so a conversation saved without them still finds its latents and states where they were. `where`: each
         layer's state's address — the load's by default; a table of zeros answers the sizes before the boot."""
+        if self.P > 1 and where is None:
+            raise Refused("a conversation's state is saved and restored on one card — a group's is every card's, not yet")
         out, index = [], []
         for l in self.run_layers:
             at = (self.state_at if where is None else where)[l]

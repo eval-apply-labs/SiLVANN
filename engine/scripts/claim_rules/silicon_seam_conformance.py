@@ -26,7 +26,7 @@ _LEX = re.compile(r'"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|/\*.*?\*/|//[^\n]*', 
 # a declaration ends in ';', a definition in '{'; the parameter list may run over several lines.
 # `__device__` is OPTIONAL and CAPTURED: the seam has two sides, and which side a verb is on is part of
 # what a backend owes. Matching only the device form is how twelve host verbs sat in the seam unwatched.
-_SIG = re.compile(r'\bstatic\s+(__device__\s+)?(?:inline|__noinline__|__forceinline__)\s+'
+_SIG = re.compile(r'\bstatic\s+(__device__\s+)?(?:inline|SYS__NOINLINE|__forceinline__)\s+'
                   r'([A-Za-z_][A-Za-z0-9_ \t*&]*?)\b((?:sys__silicon|sys__gpu|nn__silicon)__\w+)\s*\(([^)]*)\)\s*([;{])', re.S)
 
 _KEYWORD = {'void', 'int', 'char', 'unsigned', 'signed', 'long', 'short',

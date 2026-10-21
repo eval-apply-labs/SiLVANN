@@ -1384,8 +1384,11 @@ class _Answer:
             self.held = True                   # a call: shown as every model's is, once it is read
         if self.held:
             return
-        # a character whose bytes the next token ends decodes as U+FFFD until then: shown once it is whole
+        # a character whose bytes the next token ends decodes as U+FFFD until then: shown once it is whole — and the text a
+        #   call's markup opens with before its first token (DeepSeek's `<`), once the next token says it is not a call
         text = (self.opened + S.chat.decode(self.answer)).rstrip("�")
+        if self.declared and S.chat.call_lead and text.endswith(S.chat.call_lead):
+            text = text[:-len(S.chat.call_lead)]
         delta, self.shown = text[len(self.shown):], text
         self._show("token", delta, token_id=tok, used=len(self.c.tokens))
 

@@ -386,7 +386,7 @@ static __device__ inline uint64_t sys__heap_object__clone__default(sys__heap_nod
  * over and writes the count back; it is in `computing_base__impl.cuh`, with the rest of what a computing
  * base does.
  * ────────────────────────────────────────────────────────────────────────────────────────────────── */
-static __device__ __noinline__ void sys__heap_object__release__default(sys__heap_node* head,
+static __device__ SYS__NOINLINE void sys__heap_object__release__default(sys__heap_node* head,
                                                                 uint64_t* releaser_stack) {
     (void)head; (void)releaser_stack;             /* it held nothing, so there is nothing to move */
 }
@@ -628,7 +628,7 @@ static __device__ inline uint64_t sys__heap_object__clone(uint64_t offset, sys__
  * ⛳ WHETHER OUT OF LINE IS THE RIGHT TRADE AT ALL IS AN OPEN QUESTION AND NOT A SETTLED ONE: a spill
  * is a cost and so is a call, and which is cheaper here cannot be read off a spill count. It needs a
  * program worth timing on the host. */
-static __device__ __noinline__ uint32_t sys__heap_object__release(uint64_t offset) {
+static __device__ SYS__NOINLINE uint32_t sys__heap_object__release(uint64_t offset) {
     if (!sys__heap__zzpackage_published()) {
         sys__fault__raise(0ull, SYS__HEAP__FAULT_NOT_PUBLISHED);
         return 0u;

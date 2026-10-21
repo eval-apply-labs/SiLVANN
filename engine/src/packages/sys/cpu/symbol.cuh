@@ -74,7 +74,7 @@ static __device__ inline bool sys__symbol__zzprivate_tables(uint64_t* hashes, ui
 /* Stand the three tables up: an empty dictionary in each row, held by the register alone. `sys`'s init
  * calls it once per machine. Answers whether all three stand; a refusal has raised its own reason, and a
  * machine whose init refuses is taken back down, so rows written before the refusal go with it. */
-static __device__ __noinline__ bool sys__symbol__zzpackage_stand_up(void) {
+static __device__ SYS__NOINLINE bool sys__symbol__zzpackage_stand_up(void) {
     uint64_t made[3] = { 0ull, 0ull, 0ull };
     bool placed = true;
     for (uint32_t i = 0u; i < 3u && placed; ++i) {
@@ -98,7 +98,7 @@ static __device__ __noinline__ bool sys__symbol__zzpackage_stand_up(void) {
  * its bytes, no tables, a hash collision, or no room.
  * ⛳ OUT OF LINE, because it hashes, looks up three times and may allocate — and it is called from a door
  * a composer crosses once per new name, never from inside a program. */
-static __device__ __noinline__ uint64_t sys__symbol__intern(const uint8_t* bytes, uint64_t length,
+static __device__ SYS__NOINLINE uint64_t sys__symbol__intern(const uint8_t* bytes, uint64_t length,
                                                             uint64_t* interned) {
     if (interned != 0) *interned = 0ull;
     if (length > SYS__STRING__BYTES_MAX) {
@@ -162,7 +162,7 @@ static __device__ __noinline__ uint64_t sys__symbol__intern(const uint8_t* bytes
  * goes, and a name spelled with it would then name whatever the room holds next. Raises when it refuses.
  * ⛳ One hash of the text and one lookup, so it belongs where a program enters the machine, not on any
  * path a program runs. */
-static __device__ __noinline__ bool sys__symbol__interned(uint64_t string) {
+static __device__ SYS__NOINLINE bool sys__symbol__interned(uint64_t string) {
     uint64_t hashes = 0ull, numbers = 0ull, names = 0ull;
     if (!sys__symbol__zzprivate_tables(&hashes, &numbers, &names)) return false;
     bool same = false;

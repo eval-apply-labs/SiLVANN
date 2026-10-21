@@ -259,10 +259,16 @@
     /* choice. ▶ `cpu/opcodes/attention__abi.cuh`, `hyper__abi.cuh`, `vector__abi.cuh`.                                   */ \
     X(PKG, 73, "nn__rope__interleaved", nn__rope__zzabi_adapter_interleaved,       NN__ROPE__INTERLEAVED) \
     X(PKG, 74, "nn__attention__softmax_sink", nn__attention__zzabi_adapter_softmax_sink, NN__ATTENTION__SOFTMAX_SINK) \
-    X(PKG, 75, "nn__hyper__collapse", nn__hyper__zzabi_adapter_collapse,           NN__HYPER__COLLAPSE) \
+    X(PKG, 75, "nn__hyper__collapse_fp32", nn__hyper__zzabi_adapter_collapse_fp32, NN__HYPER__COLLAPSE_FP32) \
     X(PKG, 76, "nn__vector__top_k_scored", nn__vector__zzabi_adapter_top_k_scored, NN__VECTOR__TOP_K_SCORED) \
-    X(PKG, 77, "nn__engram__gate",    nn__engram__zzabi_adapter_gate,              NN__ENGRAM__GATE) \
+    X(PKG, 77, "nn__engram__gate_fp32", nn__engram__zzabi_adapter_gate_fp32,       NN__ENGRAM__GATE_FP32) \
     X(PKG, 78, "nn__vector__copy",    nn__vector__zzabi_adapter_copy,              NN__VECTOR__COPY) \
-    X(PKG, 79, "nn__turboquant__gemv_n", nn__turboquant__zzabi_adapter_gemv_n,    NN__TURBOQUANT__GEMV_N)
+    X(PKG, 79, "nn__turboquant__gemv_n", nn__turboquant__zzabi_adapter_gemv_n,    NN__TURBOQUANT__GEMV_N) \
+    /* ⭐ A RESIDUAL KEPT AS FLOATS — DeepSeek-V4's streams, whose sink tokens pass fp16's range: the hyper-connection's two */ \
+    /* words over float streams, a vector of floats normed into halves, halves widened into floats. ▶ `hyper__abi.cuh`.  */ \
+    X(PKG, 80, "nn__hyper__pre_fp32", nn__hyper__zzabi_adapter_pre_fp32,           NN__HYPER__PRE_FP32) \
+    X(PKG, 81, "nn__hyper__post_fp32", nn__hyper__zzabi_adapter_post_fp32,         NN__HYPER__POST_FP32) \
+    X(PKG, 82, "nn__rmsnorm__apply_fp32", nn__rmsnorm__zzabi_adapter_fp32,         NN__RMSNORM__APPLY_FP32) \
+    X(PKG, 83, "nn__vector__widen",   nn__vector__zzabi_adapter_widen,             NN__VECTOR__WIDEN)
 
 #endif /* SILVANN__PACKAGES_NN_CONTRACTS_MACROS_LANGUAGE_CONTRACT__VERBS_CUH */

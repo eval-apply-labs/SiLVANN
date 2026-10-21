@@ -44,11 +44,11 @@ G, C, P = '__global', '__constant', '__private'
 # the names a parser needs that OpenCL C has built in; parsed, never written
 PARSE_ONLY = ('typedef unsigned long ulong; typedef unsigned int uint; typedef unsigned short ushort;\n'
               'typedef unsigned char uchar; typedef _Bool bool; typedef unsigned short half;\n')
-# ⛳ `__noinline__` RIDES THROUGH THE PARSER AS `_Noreturn`, the one function specifier it keeps that nn's card side never
+# ⛳ `SYS__NOINLINE` RIDES THROUGH THE PARSER AS `_Noreturn`, the one function specifier it keeps that nn's card side never
 #   uses, and is written back as the attribute
 SPELLINGS = ('#define constexpr const\n#define static_assert _Static_assert\n'
              '#define alignas(n) __attribute__((aligned(n)))\n#define alignof(t) _Alignof(t)\n'
-             '#define __device__\n#define __noinline__ _Noreturn\n')
+             '#define __device__\n#define SYS__NOINLINE _Noreturn\n')
 # what the bodies call of the family, as the parser sees it; the definitions are written in their place
 SILICON = {
     'nn__silicon__expf':  'float nn__silicon__expf(float x);',

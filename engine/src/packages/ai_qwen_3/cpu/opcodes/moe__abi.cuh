@@ -380,11 +380,17 @@ static uint64_t ai_qwen_3__moe__zzprivate_mask_picks(sys__engine__ctx* ctx, cons
     return 0u;
 }
 
-/* `(ai_qwen_3__experts hand picks planes routed [nn__expert_tier])` -> `routed`: Σ_j w[j] · down_j(swiglu(gate_up_j(hm))),
+/* `(ai_qwen_3__experts hand picks planes routed [nn__expert_tier [1]])` -> `routed`: Σ_j w[j] · down_j(swiglu(gate_up_j(hm))),
  * as nn runs a position's routed experts (▶ nn's `nn__routed__position`): an expert not in memory read while the others
- * compute, a card's tier's picks computed and marked held — and the mask added after, where the table carries one. */
+ * compute, a card's tier's picks computed and marked held — and the mask added after, where the table carries one.
+ * ⭐ WITH 1 AFTER THE TIER, ITS VISIT ALONE (▶ nn's `nn__routed__visit`): the picks marked and the card waited for — the
+ *   hand `pre_expert` queued is whole — and nothing computed; the next call without it computes the card's picks. In
+ *   between the CPUs start on theirs, so they run beside the card's (▶ lisp/qwen3_5.lisp ⑤). */
 static sys__heap_node ai_qwen_3__experts__zzabi_apply(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx) {
-    if (argc != 4u && argc != 5u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
+    if (argc != 4u && argc != 5u && argc != 6u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
+    const bool visit_only = argc == 6u;
+    if (visit_only && (argv[5].dtype != SYS__KIND__VALUE_INT || argv[5].args[0] != 1u))
+        return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
     uint64_t hand = 0, hand_room = 0, routed = 0, routed_room = 0;
     if (!sys__heap_node__carries_reference(argv[1].dtype) || !sys__node_array__is(argv[1].args[0])
      || !sys__heap_node__carries_reference(argv[2].dtype) || !sys__node_array__is(argv[2].args[0])
@@ -419,6 +425,13 @@ static sys__heap_node ai_qwen_3__experts__zzabi_apply(const sys__heap_node* argv
     bool tier_ok = true;
     const bool holds = ai_qwen_3__moe__zzprivate_tier(argv, argc, 4u, r.layer, &tier, &tier_ok);
     if (!tier_ok || (holds && masked)) return sys__engine__abi__error(AI_QWEN_3__MOE__FAULT_TABLE);
+    if (visit_only) {
+        if (!holds) return sys__engine__abi__error(AI_QWEN_3__MOE__FAULT_TABLE);
+        const uint64_t f = nn__routed__visit(ctx, &r, argv[1].args[0], &tier);
+        if (f != 0u) return sys__engine__abi__error(f);
+        if (!sys__gpu__compute_completed(ctx->family)) return sys__engine__abi__error(NN__PRIMITIVES__FAULT_NO_DEVICE);
+        return nn__doors_answer(&argv[3]);
+    }
     const nn__doors* doors = nn__doors_for(ctx);
     if (doors == 0) return sys__engine__abi__error(NN__PRIMITIVES__FAULT_NO_DEVICE);
     nn__routed__done done;

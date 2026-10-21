@@ -1087,7 +1087,7 @@ static __device__ inline bool sys__list__thaw_running_into(uint64_t array_base, 
 
 /* ── THE ROW METHODS ─────────────────────────────────────────────────────────────────────────────── */
 
-static __device__ __noinline__ void sys__sublist__zzpackage_release_internal(sys__heap_node* head,
+static __device__ SYS__NOINLINE void sys__sublist__zzpackage_release_internal(sys__heap_node* head,
                                                                        uint64_t* releaser_stack) {
     if (head == 0) return;
     const uint64_t store = head[1].args[SYS__SUBLIST__STORE];
@@ -1104,7 +1104,7 @@ static __device__ __noinline__ void sys__sublist__zzpackage_release_internal(sys
     sys__stack__transfer(releaser_stack, &reference);
 }
 
-static __device__ __noinline__ void sys__list__zzpackage_release_internal(sys__heap_node* head,
+static __device__ SYS__NOINLINE void sys__list__zzpackage_release_internal(sys__heap_node* head,
                                                                     uint64_t* releaser_stack) {
     if (head == 0) return;
     /* Two moves, and each is one object however long the chain behind it — every chunk's own row deals
@@ -1121,7 +1121,7 @@ static __device__ __noinline__ void sys__list__zzpackage_release_internal(sys__h
     }
 }
 
-static __device__ __noinline__ void sys__list_chunk__zzpackage_release_internal(sys__heap_node* head,
+static __device__ SYS__NOINLINE void sys__list_chunk__zzpackage_release_internal(sys__heap_node* head,
                                                                           uint64_t* releaser_stack) {
     if (head == 0) return;
     sys__heap_node*    cells = (sys__heap_node*)(head + 1);

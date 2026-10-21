@@ -69,6 +69,23 @@ static sys__heap_node nn__vector__zzabi_apply_copy(const sys__heap_node* argv, u
     return nn__doors_answer(&argv[1]);
 }
 
+/* `(nn__vector__widen x out n)` -> `out`: `n` halves into `n` floats, each exactly — a vector into a residual kept as
+ * floats (DeepSeek-V4's streams, ▶ nn__hyper__pre_fp32). The two may not overlap. */
+static sys__heap_node nn__vector__zzabi_apply_widen(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx) {
+    if (argc != 3u) return nn__vector__zzabi_error(SYS__OPCODES__FAULT_ARITY);
+    uint64_t x_at = 0, x_room = 0, o_at = 0, o_room = 0;
+    if (argv[2].dtype != SYS__KIND__VALUE_INT || !nn__primitives__room(&argv[0], &x_at, &x_room)
+     || !nn__primitives__room(&argv[1], &o_at, &o_room))
+        return nn__vector__zzabi_error(SYS__OPCODES__FAULT_TYPE);
+    const uint64_t n = argv[2].args[0];
+    if (n > (1ull << 32) || !nn__primitives__fits(n, x_room) || 4ull * n > o_room) return nn__vector__zzabi_error(NN__PRIMITIVES__FAULT_BOUNDS);
+    if ((x_at < o_at + 4u * n) && (o_at < x_at + 2u * n)) return nn__vector__zzabi_error(NN__PRIMITIVES__FAULT_BOUNDS);
+    const nn__doors* doors = nn__doors_for(ctx);
+    if (doors == 0) return nn__vector__zzabi_error(NN__PRIMITIVES__FAULT_NO_DEVICE);
+    doors->vector_widen((float*)(uintptr_t)o_at, (const uint16_t*)(uintptr_t)x_at, n);
+    return nn__doors_answer(&argv[1]);
+}
+
 /* `(nn__vector__exp x out n)` and `(nn__vector__softplus x out n)` — one input, one output, the same
  * checks; only the door differs, so one body serves both. */
 static inline sys__heap_node nn__vector__zzabi_zzprivate_unary(const sys__heap_node* argv, unsigned argc,
@@ -202,6 +219,7 @@ static sys__heap_node nn__vector__zzabi_apply_scale_at(const sys__heap_node* arg
 SYS__ENGINE__ABI__BRIDGE(nn__vector__zzabi_adapter_add,           nn__vector__zzabi_apply_add)
 SYS__ENGINE__ABI__BRIDGE(nn__vector__zzabi_adapter_zero,          nn__vector__zzabi_apply_zero)
 SYS__ENGINE__ABI__BRIDGE(nn__vector__zzabi_adapter_copy,          nn__vector__zzabi_apply_copy)
+SYS__ENGINE__ABI__BRIDGE(nn__vector__zzabi_adapter_widen,         nn__vector__zzabi_apply_widen)
 SYS__ENGINE__ABI__BRIDGE(nn__vector__zzabi_adapter_exp,           nn__vector__zzabi_apply_exp)
 SYS__ENGINE__ABI__BRIDGE(nn__vector__zzabi_adapter_softplus,      nn__vector__zzabi_apply_softplus)
 SYS__ENGINE__ABI__BRIDGE(nn__vector__zzabi_adapter_l2norm,        nn__vector__zzabi_apply_l2norm)

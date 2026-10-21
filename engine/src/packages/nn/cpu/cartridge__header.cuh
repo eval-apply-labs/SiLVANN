@@ -127,7 +127,7 @@ static __device__ inline bool nn__cartridge__resolve(uint64_t layer, uint64_t to
                                                      sys__heap_node* answer);
 
 /* The word a model program says. Answers a `nn__kv_ref`, or an error naming which of the two it was. */
-static __device__ __noinline__ void nn__cartridge__zzpackage_apply_reference(sys__heap_node* base,
+static __device__ SYS__NOINLINE void nn__cartridge__zzpackage_apply_reference(sys__heap_node* base,
                                                                             uint64_t form);
 
 #endif /* SILVANN__PACKAGES_NN_CPU_CARTRIDGE__HEADER_CUH */

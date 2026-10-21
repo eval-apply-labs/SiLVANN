@@ -96,7 +96,7 @@ def duplex(m, card, slot_bytes, line=1200, fixed=None):
 
 
 def tier(m, name, type_, experts, top_k, hidden, inter, plan, layers, sources=None, parts=1, part_plan=None, gate_row=0,
-         down_row=0, landing=0, exclusive=None, landing_line=3):
+         down_row=0, landing=0, exclusive=None, landing_line=3, ranks=1, shared=0):
     """A card's tier of routed experts as nn reads it (▶ NN__EXPERT_TIER__), bound by `name`: the card's collection, the
     card slot's `plan`, and — where the CPUs keep every expert — `sources`, {layer: the name of a node array of that layer's
     addresses, part p of expert x at x · parts + p}, with a part slot's `part_plan` and the row bytes the stitch splices
@@ -104,7 +104,9 @@ def tier(m, name, type_, experts, top_k, hidden, inter, plan, layers, sources=No
     in RAM, a promotion swapping one back — sources on every layer it runs, and `nn__expert_tier_duplex` bound
     (▶ `duplex`), which the tier reads as its DUPLEX cell. `landing_line` binds `nn__expert_tier_landing_line`: the hits
     of a visit above which it starts one promotion, `landing` at or below it — ⚖ *"1 if the hits are more than 3/8 …
-    two if it is below that (the compute on cpu masks the loading)"*. A program may rebind it and make the table again."""
+    two if it is below that (the compute on cpu masks the loading)"*. A program may rebind it and make the table again.
+    `ranks` > 1: a tier on each of a tensor-parallel group's cards, a position's picks shared out among them (NN-99,
+    ▶ nn's RANKS), `shared` of a layer's experts kept on every one of them (▶ nn's SHARED)."""
     m.must("(sys__add_bindings %d '%s %d)" % (m.env, LANDING_LINE, int(landing_line)), "the binding " + LANDING_LINE,
            "sys__value_true")
     off = lambda p: [p.at_up_lut - p.at_up_data, p.at_down_data - p.at_up_data, p.at_down_lut - p.at_up_data]
@@ -114,7 +116,7 @@ def tier(m, name, type_, experts, top_k, hidden, inter, plan, layers, sources=No
     m.table(name, [name + "_sources" if sources else 0, type_, experts, top_k, hidden, inter] + off(plan) + [parts] + off(pp)
             + [gate_row, down_row, landing]
             + ([1, exclusive["part_worker"], exclusive["part_type"], "(if %s 1 0)" % DUPLEX] if exclusive else [0, 0, 0, 0])
-            + [LANDING_LINE])
+            + [LANDING_LINE] + ([int(ranks), int(shared)] if ranks > 1 else []))
 
 
 def bind(m, tiers, workers):

@@ -125,7 +125,7 @@ static __device__ inline sys__heap_node sys__engine__abi__error(uint64_t code) {
  * guards the BRIDGE's array; the verb's guards the VERB's contract. Without this one a malformed form
  * is a stack overrun here rather than an error value from there. */
 #define SYS__ENGINE__ABI__BRIDGE(ADAPTER_NAME, VERB_FN)                                                      \
-    static __device__ __noinline__ void ADAPTER_NAME(sys__heap_node* base, uint64_t form) {          \
+    static __device__ SYS__NOINLINE void ADAPTER_NAME(sys__heap_node* base, uint64_t form) {          \
         const uint64_t len = sys__sublist__length(form);                                             \
         if (len == 0ull || len - 1ull > (uint64_t)SYS__ENGINE__ABI__MAX_ARGV) {                              \
             sys__opcodes__fails(form, SYS__OPCODES__FAULT_ARITY);                                    \

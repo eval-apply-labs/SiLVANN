@@ -46,7 +46,7 @@ class Qwen35(Generates):
 
     def __init__(self, folder, machine, max_context=4096, fused_moe=True, kv="tiered", tiers=None, experts_on="card",
                  experts_from="auto", experts_dir=None, layers=None, chunk=256, experts_ram_gb=None, card_experts_gb=0,
-                 card_landing=1, card_line=None, experts_int8=False, picture_pixels=1 << 22,
+                 card_landing=1, card_line=None, card_shared=0.1, experts_int8=False, picture_pixels=1 << 22,
                  picture_weights="auto", tensor_parallel=1, lend_cache=True, mtp="no", mtp_rows=False, mtp_pairs=True):
         if folder.architecture not in ARCHITECTURES:
             raise Refused("%s is a %r model, not one of %s" % (folder.path, folder.architecture, ARCHITECTURES))
@@ -110,13 +110,25 @@ class Qwen35(Generates):
         #   its verbs add over the cards' own memory (▶ lisp/qwen3_5_tp.lisp, nn's partials). From here on the head counts
         #   are a card's; FULL keeps the model's. A dense model, the embedding and the head card 0's.
         self.CARDS, self.GROUP = int(tensor_parallel or 1), 0
+        self.KV_REP = 1                                     # the cards a key-value head is copied onto (▶ below)
+        self.CPU = self.CARDS if self.CARDS > 1 else CPU    # the CPU worker: after a group's cards
         self.BINDINGS = 512 * self.CARDS            # every card's tables are names in the one environment
         self.FULL = dict(KH=self.KH, VH=self.VH, QH=self.QH, KVH=self.KVH)
         if self.CARDS > 1:
             P = self.CARDS
-            if self.MOE or experts_on != "card" or layers is not None or card_experts_gb or b.mask is not None:
-                raise Refused("tensor parallelism is a dense model's, its every layer on the cards, without a mask")
-            if any(n % P for n in (self.KH, self.VH, self.QH, self.KVH)) or self.INTER % 512 or self.INTER // 512 < P:
+            # ⭐ AN MoE OVER THE CARDS (NN-99 ①): its mixers split by heads as a dense model's, its experts the CPU's — the
+            #   MoE block whole on card 0, which hands every card the layer's answer through the group
+            #   ⭐ AND A TIER ON EVERY CARD (NN-99 ②): `card_experts_gb` a card, the router run on every card, a position's
+            #   picks shared out among the cards that hold them and the rest the CPU's (▶ nn's `nn__expert_tier__visit_group`)
+            if (self.MOE and experts_on != "cpu") or (not self.MOE and experts_on != "card") \
+                    or layers is not None or b.mask is not None:
+                raise Refused("tensor parallelism is a dense model's, its every layer on the cards, or an MoE's with its "
+                              "experts on the CPU (experts_on='cpu') — without a mask")
+            dense_cut = not self.MOE and (self.INTER % 512 or self.INTER // 512 < P)
+            # ⭐ MORE CARDS THAN KEY-VALUE HEADS (the 35B's two over four cards): each card a copy of the one its query
+            #   heads read — KV_REP cards a head — so its cache holds that head, and a conversation's state takes it once
+            kv_cut = self.KVH % P and P % self.KVH
+            if any(n % P for n in (self.KH, self.VH, self.QH)) or kv_cut or dense_cut:
                 raise Refused("%d cards do not split %s's heads (%d, %d, %d, %d) and 512-blocks evenly"
                               % (P, folder.path, self.KH, self.VH, self.QH, self.KVH))
             # ⭐ CARDS OF ONE SIZE (⚖ 2026-10-16: "it should only work when the cards have the same size otherwise it is
@@ -128,8 +140,9 @@ class Qwen35(Generates):
             if len(set(sizes[:P])) > 1:
                 raise Refused("tensor parallelism takes cards of one size, and these %d are not: %s GB"
                               % (P, ", ".join("%.1f" % (s / 2 ** 30) for s in sizes[:P])))
-            self.KH, self.VH, self.QH, self.KVH = self.KH // P, self.VH // P, self.QH // P, self.KVH // P
-            blocks = self.INTER // 512
+            self.KV_REP = max(1, P // self.KVH)
+            self.KH, self.VH, self.QH, self.KVH = self.KH // P, self.VH // P, self.QH // P, max(1, self.KVH // P)
+            blocks = max(self.INTER // 512, P)          # an MoE's MLP is not cut: card 0's whole
             each = [blocks // P + (1 if k < blocks % P else 0) for k in range(P)]
             self.INTER_AT = [512 * sum(each[:k]) for k in range(P)]
             self.INTER_OF = [512 * n for n in each]
@@ -222,6 +235,9 @@ class Qwen35(Generates):
         #   (`card_line` fixes it). ▶ glm5.py's, and nn's `nn__expert_tier__*`
         self.CARD_GB, self.CARD_LANDING = float(card_experts_gb or 0), int(card_landing)
         self.CARD_LINE = int(card_line) if card_line else None
+        # ⭐ A GROUP'S SHARED SLICE (NN-99 ③): `card_shared` of a card's slots a layer kept on every card of a tensor-parallel
+        #   group — the hottest, chosen again from decayed picks (▶ nn's `NN__EXPERT_TIER__SHARED`); 0, none
+        self.CARD_SHARED = float(card_shared)
         # ⭐ THE CACHE'S ROWS NO CONVERSATION HAS REACHED, LENT TO THE TIER (NN-93) — ▶ `_lend`. `lend_cache` false keeps
         #   the tier to its own run
         self.LEND_ON = bool(lend_cache)
@@ -259,8 +275,8 @@ class Qwen35(Generates):
     def _cut(self, n, s):
         """Card `s`'s part of the matrix `n`: None for whole (a norm, one card), ("rows", runs) or ("cols", (first, end)).
         Every cut is whole rows, or whole 512-blocks of a row — the blocks its input is rotated in — so no part pads."""
-        if self.CARDS == 1 or n.endswith("norm.weight"):
-            return None
+        if self.CARDS == 1 or n.endswith("norm.weight") or (self.MOE and n.startswith("mlp.")):
+            return None                 # an MoE's block is card 0's, whole
         F, LH, AH = self.FULL, self.LH, self.AH
         kp, vp, qp, kvp = self.KH, self.VH, self.QH, self.KVH
         i0, ip = self.INTER_AT[s], self.INTER_OF[s]
@@ -274,12 +290,16 @@ class Qwen35(Generates):
                 "linear_attn.dt_bias":            ("cols", (s * vp, (s + 1) * vp)),
                 "linear_attn.out_proj.weight":    ("cols", (s * vp * LH, (s + 1) * vp * LH)),
                 "self_attn.q_proj.weight":        ("rows", [(s * qp * 2 * AH, qp * 2 * AH)]),
-                "self_attn.k_proj.weight":        ("rows", [(s * kvp * AH, kvp * AH)]),
-                "self_attn.v_proj.weight":        ("rows", [(s * kvp * AH, kvp * AH)]),
+                "self_attn.k_proj.weight":        ("rows", [(s // self.KV_REP * kvp * AH, kvp * AH)]),
+                "self_attn.v_proj.weight":        ("rows", [(s // self.KV_REP * kvp * AH, kvp * AH)]),
                 "self_attn.o_proj.weight":        ("cols", (s * qp * AH, (s + 1) * qp * AH)),
                 "mlp.gate_proj.weight":           ("rows", [(i0, ip)]),
                 "mlp.up_proj.weight":             ("rows", [(i0, ip)]),
                 "mlp.down_proj.weight":           ("cols", (i0, i0 + ip))}[n]
+
+    def _moe_block(self, n):
+        """Whether `n` is an MoE layer's block after its mixer — its norm, router and shared expert, card 0's alone."""
+        return n.startswith("mlp.") or n == "post_attention_layernorm.weight"
 
     def _part(self, l, n, s):
         """Card `s`'s bytes of layer `l`'s matrix `n` (data, scales), or None when it holds it whole. An MLP part of fewer
@@ -441,16 +461,15 @@ class Qwen35(Generates):
                 % (big, 6 + (self.MASK_BYTES[CARD] > 0) + tier, (self.arena + (256 << 20)) >> 20, len(self.kinds) - n_d, n_d,
                    self._layer_types(), len(self.collections), types, self.TABLE_BYTES))
         card = self._pools(card, self._mtp_asks())
-        if self.CARDS > 1:
-            return {k: card for k in range(self.CARDS)}       # every card the same collections, each its own part
+        cards = {k: card for k in range(self.CARDS)}          # every card the same collections, each its own part
         if not self.CPU_EXPERTS:
-            return card
+            return cards if self.CARDS > 1 else card
         # the CPU worker's section: its one collection, the experts, and small pools for the hand-off's buffers — and a
         # prompt's: its hand rows, its routed rows and `experts_rows`' scratch (▶ ai_qwen_3's `experts_rows`)
         p = self.EPLAN
         P, I = self.CHUNK * self.TOPK, self.INTER
         self.RSCRATCH = 2 * self.CHUNK * self.H + 16 * P + 2 * P + 8 * P * I + 4 * self.CHUNK * self.TOPK * self.H + 64
-        cbig = max(1 << 20, self.RSCRATCH, self.CHUNK * self.HAND_ROW, self.MASK_BYTES[CPU])
+        cbig = max(1 << 20, self.RSCRATCH, self.CHUNK * self.HAND_ROW, self.MASK_BYTES[self.CPU])
         cpu = ("nn__buffer_resid__size_bytes:2097152\nnn__buffer_resid__qty:8\n"
                "nn__buffer_main__size_bytes:4194304\nnn__buffer_main__qty:1\n"
                "nn__buffer_attn_out__size_bytes:1048576\nnn__buffer_attn_out__qty:16\n"
@@ -465,11 +484,11 @@ class Qwen35(Generates):
                "nn__conversation__text_size_kb:4\nnn__deltanet_state__bytes_per_layer:64\n"
                "nn__model__layer_types:%s\nnn__expert__types:1\n"
                "nn__expert__type0__up_bytes:%d\nnn__expert__type0__down_bytes:%d\nnn__expert__type0__slots:%d\n"
-               % (cbig, 5 + (self.MASK_BYTES[CPU] > 0), (self.cpu_arena + (256 << 20)) >> 20, len(self.kinds) - n_d, n_d,
+               % (cbig, 5 + (self.MASK_BYTES[self.CPU] > 0), (self.cpu_arena + (256 << 20)) >> 20, len(self.kinds) - n_d, n_d,
                   self._layer_types(), p.up_bytes, p.down_bytes,
                   self.SLOTS if self.SLOTS is not None else self.EXPERTS * len(self.run_layers)))
         cpu = self._pools(cpu, [2 * (self.H + 16), self.H * 2] if self.MTP is not None else [])   # c_hand2, c_routed2
-        return {CARD: card, CPU: cpu}
+        return {**cards, self.CPU: cpu}
 
     def _index_layers(self):
         """The model's layers, as the experts' file names them — the MTP layer's place after them where it is held."""
@@ -510,7 +529,7 @@ class Qwen35(Generates):
         """The machine's workers: the card, and the CPU when the experts are there — or the cards of a tensor-parallel
         group, worker `k` device `k`."""
         if self.CARDS > 1:
-            return [(self.m.silicon, k) for k in range(self.CARDS)]
+            return [(self.m.silicon, k) for k in range(self.CARDS)] + ([("x86_avx2", 0)] if self.CPU_EXPERTS else [])
         return [(self.m.silicon, 0)] + ([("x86_avx2", 0)] if self.CPU_EXPERTS else [])
 
     # ── ② the load ───────────────────────────────────────────────────────────────────────────────────────────
@@ -566,12 +585,13 @@ class Qwen35(Generates):
         m.define_programs(self._procedures)
         if self.CPLAN is not None:
             self.CALIBRATION = expert_tier.calibrate(
-                m, CARD, CPU, self.KRS_AT, self.EPLAN.slot_bytes, self.C_HANDS_AT, self.HAND_ROW, 2 * self.H,
+                m, CARD, self.CPU, self.KRS_AT, self.EPLAN.slot_bytes, self.C_HANDS_AT, self.HAND_ROW, 2 * self.H,
                 (2 * (self.H + 16 + self.INTER) + 7) & ~7, self.TOPK, self.EXPERTS,
                 lambda n: "(ai_qwen_3__experts_rows c_hands exrc%d c_rrows %d)" % (self.run_layers[0], n),
                 self.CHUNK, fixed=self.CARD_LINE)
         self.active_lora, self._lora_cache = self.folder.lora, {}     # a LoRA chosen at boot is in the slots already
         self.global_ = None                         # what was left of global.pkl, read by the buffers
+        self.b.release()                            # every layer's file let go (▶ `Bundle.release`)
 
     def _load_cards(self, progress=None):
         """Tensor parallel: each card its part of every layer, its buffers and its tables, as that card's worker; card 0
@@ -586,6 +606,9 @@ class Qwen35(Generates):
                 self._head_and_embedding(loader)
             for i, l in enumerate(self.run_layers):
                 for n in b.names(l):
+                    if self.MOE and (n in (GU, DN) or (k > 0 and self.CPLAN is None and self._moe_block(n))):
+                        continue                    # the experts the CPU's; the rest of the block card 0's, or every
+                                                    # card's where each holds a tier (its router its own)
                     key = self.KEY[(l, n)]
                     loader.layer_width(l, self.TYPE[key], 1)
                     got = self._part(l, n, k)
@@ -599,6 +622,9 @@ class Qwen35(Generates):
                 loader.assign(l, t, 0, self.state_of[k][l])
                 if progress:
                     progress(k * len(self.run_layers) + i + 1, P * len(self.run_layers))
+            if self.CPLAN is not None:                 # this card's tier, every layer's band of it, empty at boot
+                for l in self.run_layers:
+                    loader.layer_width(l, self.T_CEXP, self.EXPERTS)
             if loader.handed() != 0:
                 raise Refused("card %d: %d slots were reserved and never published" % (k, loader.handed()))
             self._buffers(k)
@@ -609,12 +635,26 @@ class Qwen35(Generates):
             m.act_as(k)
             m.must("(nn__partials__join %d %d %d %d)" % (self.GROUP, k, P, fan), "card %d joining the group" % k,
                    "sys__value_true")
+        if self.CPU_EXPERTS:
+            self._cpu_experts(progress)
+        if self.CPLAN is not None:
+            for k in range(P):
+                m.act_as(k)
+                self._tier_tables(k)
+            expert_tier.bind(m, {k: self._named("tier_card", k) for k in range(P)}, len(self.workers()))
         m.act_as(-1)
         self.state_at = self.state_of[0]
         self._bindings()
         m.define_programs(self._procedures)
+        if self.CPLAN is not None:          # a prompt's rows through card 0's tier: its line, as one card's (▶ `load`)
+            self.CALIBRATION = expert_tier.calibrate(
+                m, CARD, self.CPU, self.KRS_AT, self.EPLAN.slot_bytes, self.C_HANDS_AT, self.HAND_ROW, 2 * self.H,
+                (2 * (self.H + 16 + self.INTER) + 7) & ~7, self.TOPK, self.EXPERTS,
+                lambda n: "(ai_qwen_3__experts_rows c_hands exrc%d c_rrows %d)" % (self.run_layers[0], n),
+                self.CHUNK, fixed=self.CARD_LINE)
         self.active_lora, self._lora_cache = self.folder.lora, {}
         self.global_ = None
+        self.b.release()                            # every layer's file let go (▶ `Bundle.release`)
 
     # ── pictures: the vision tower on the card ───────────────────────────────────────────────────────────────
     def _vision_plan(self):
@@ -818,13 +858,13 @@ class Qwen35(Generates):
         layers = self.run_layers
         backing = {}
         if self.EXPERTS_FROM == "disk":
-            backing = experts_file.cache_experts(m, self.b, [(CPU, 0, 1)], e, layers, self.EXPERTS, self.experts_dir,
+            backing = experts_file.cache_experts(m, self.b, [(self.CPU, 0, 1)], e, layers, self.EXPERTS, self.experts_dir,
                                                  self._expert_pieces, self._index_layers(), progress=progress)
         elif self.EXPERTS_FROM == "mapped":
-            experts_file.map_experts(m, self.b, [(CPU, 0, 1)], e, layers, self.EXPERTS, self.experts_dir,
+            experts_file.map_experts(m, self.b, [(self.CPU, 0, 1)], e, layers, self.EXPERTS, self.experts_dir,
                                      self._expert_pieces, self._index_layers(), progress=progress)
         else:
-            m.act_as(CPU)
+            m.act_as(self.CPU)
             loader = m.loader()
             for l in layers:
                 loader.layer_width(l, 0, self.EXPERTS)
@@ -833,7 +873,7 @@ class Qwen35(Generates):
                     self.SRC.setdefault(l, []).append(loader.placed[-1][3])
             if loader.handed() != 0:
                 raise Refused("%d expert slots were reserved and never published" % loader.handed())
-        m.act_as(CPU)
+        m.act_as(self.CPU)
         signs = 1.0 - 2.0 * np.unpackbits(np.frombuffer(self.global_["__signs__"]["plane"], dtype=np.uint8),
                                           bitorder="little").astype(np.float64)
         m.buffer(1024, "c_signs", _half(signs[:512]))
@@ -851,14 +891,14 @@ class Qwen35(Generates):
         for l in layers:
             cells = ["c_signs", "c_scratch", "c_zero", l, 0, e.at_up_lut, e.at_down_data, e.at_down_lut,
                      H, self.INTER, self.EXPERTS, self.TOPK, int(self.b.record(l, GU).d),
-                     backing.get((CPU, l), 0)] + self._masked(l, "moe", 16, 14)
+                     backing.get((self.CPU, l), 0)] + self._masked(l, "moe", 16, 14)
             if self.EXPERTS_INT8:                          # ▶ AI_QWEN_3__EXP__INT8, past the mask's cells
                 cells += [0] * (19 - len(cells)) + [1]
             m.table("exc%d" % l, cells)
             # a prompt's: the chunk's scratch in place of a position's, and a picture over the chunk
             m.table("exrc%d" % l, ["c_signs", "c_rscratch", "c_zero", l, 0, e.at_up_lut, e.at_down_data, e.at_down_lut,
                                    H, self.INTER, self.EXPERTS, self.TOPK, int(self.b.record(l, GU).d),
-                                   backing.get((CPU, l), 0)] + self._masked(l, "moe", 16, 14))
+                                   backing.get((self.CPU, l), 0)] + self._masked(l, "moe", 16, 14))
         m.array("EXPERTS_CPU", ["exc%d" % l for l in layers])
         m.array("EXPERTS_CPU_ROWS", ["exrc%d" % l for l in layers])
         m.act_as(CARD)
@@ -899,6 +939,13 @@ class Qwen35(Generates):
                 m.buffer(self.WINDOW_SCORES, nm("window_scores"))
             else:
                 m.buffer(self.CHUNK * self.QH * self.max_context * 4, nm("scores_rows"))
+            if self.CPLAN is not None:
+                # a tier on this card too: its router's hand and picks, and its share of a position's experts
+                m.buffer(2 * (H + 16 + self.INTER), nm("hand"))
+                m.buffer(65536, nm("pre_scratch"))
+                m.node_array(nm("picks"), self.TOPK + 1)      # past the picks: 1 where this card adds the shared expert
+                m.buffer(H * 2, nm("routed_k"))
+                m.buffer(2 * (self.TOPK * 2 * self.INTER + 2 * self.TOPK * self.INTER), nm("kscratch"))
             return
         final_w = np.frombuffer(np.asarray(self.global_["model.language_model.norm.weight"]["vbr_data"]).tobytes(),
                                 dtype="<f2").astype(np.float64)[:H]
@@ -942,7 +989,7 @@ class Qwen35(Generates):
             # card as the CPU's experts read the hand and the picks
             m.buffer(2 * (H + 16 + self.INTER), "hand")
             m.buffer(65536, "pre_scratch")
-            m.node_array("picks", self.TOPK)
+            m.node_array("picks", self.TOPK + (1 if self.CARDS > 1 and self.CPLAN is not None else 0))
             m.buffer(131072, "exp_scratch")
         if self.MTP is not None:
             self._mtp_buffers()
@@ -1041,25 +1088,25 @@ class Qwen35(Generates):
         """Where each of the mask's tensors goes: `MASK_PLACE[(worker, l, site)]` its `r` and `v` as (start, count) in
         halves inside that worker's one mask buffer, and `MASK_BYTES` each buffer's size — the scratch for the verbs'
         dots first. The mixers and the shared expert are the card's; the routed experts go wherever they run."""
-        self.MASK_BYTES, self.MASK_PLACE = {CARD: 0, CPU: 0}, {}
+        self.MASK_BYTES, self.MASK_PLACE = {CARD: 0, self.CPU: 0}, {}
         mask = self.b.mask
         if mask is None:
             return
         from safetensors.numpy import load_file
         self._mask_tensors = t = load_file(mask["path"])
         scratch = 8 * self.CHUNK * max(self.TOPK, 1) + 256
-        at = {CARD: scratch, CPU: scratch}
+        at = {CARD: scratch, self.CPU: scratch}
         for l in self.run_layers:
             for site in ("attn", "shared", "moe"):
                 if "layers.%d.%s.r" % (l, site) not in t:
                     continue
-                w = CPU if site == "moe" and self.CPU_EXPERTS else CARD
+                w = self.CPU if site == "moe" and self.CPU_EXPERTS else CARD
                 place = []
                 for a in (t["layers.%d.%s.r" % (l, site)], t["layers.%d.%s.%s" % (l, site, "V" if site == "moe" else "v")]):
                     place.append((at[w] // 2, a.size))
                     at[w] += (a.nbytes + 255) & ~255
                 self.MASK_PLACE[(w, l, site)] = place
-        for w in (CARD, CPU):
+        for w in (CARD, self.CPU):
             if any(k[0] == w for k in self.MASK_PLACE):
                 self.MASK_BYTES[w] = at[w]
         self._mask_scratch = scratch
@@ -1067,7 +1114,7 @@ class Qwen35(Generates):
     def _mask_buffers(self, cpu):
         """This worker's mask buffer, filled, and each site's three table cells: views of its `r`, its `v` and the
         scratch."""
-        w = CPU if cpu else CARD
+        w = self.CPU if cpu else CARD
         if not self.MASK_BYTES[w]:
             return
         m, t, name = self.m, self._mask_tensors, ("c_mk" if cpu else "mk")
@@ -1176,6 +1223,20 @@ class Qwen35(Generates):
             else:
                 rows = self._mixer_cells(l, nm("pf_scratch"), nm("cs_rows"), nm("scores_rows"), card) + [self.THETA] + flag
             m.table(nm(("dr%d" if self.kinds[l] == "d" else "atr%d" if self.TIERED else "ar%d") % l), ungated(rows))
+            if self.MOE:
+                if self.CPLAN is not None:  # its own router, as card 0's (▶ `_tables`)
+                    sh = ["mlp.shared_expert.gate_proj.weight", "mlp.shared_expert.up_proj.weight",
+                          "mlp.shared_expert_gate.weight"]
+                    m.table(nm("pre%d" % l), [pl(l, "post_attention_layernorm.weight", "data"),
+                                              pl(l, "mlp.gate.weight", "data"), pl(l, "mlp.gate.weight", "lut")]
+                            + [c for n in sh for c in (pl(l, n, "data"), pl(l, n, "lut"))]
+                            + [nm("signs"), nm("pre_scratch"), self.H, self.INTER, self.EXPERTS, self.TOPK,
+                               d(l, "mlp.gate.weight"), d(l, "mlp.shared_expert.down_proj.weight")] + flag)
+                    # and the shared expert's down, for a position it falls to this card (NN-99 ③)
+                    m.table(nm("post%d" % l), [pl(l, "mlp.shared_expert.down_proj.weight", "data"),
+                                               pl(l, "mlp.shared_expert.down_proj.weight", "lut"),
+                                               self.H, self.INTER, self.TOPK, d(l, "mlp.shared_expert.down_proj.weight")])
+                continue                    # the rest of its MoE block is card 0's
             ms = ["mlp.gate_proj.weight", "mlp.up_proj.weight", "mlp.down_proj.weight"]
             for name, scratch in (("ml%d", "mix_scratch"), ("mlr%d", "pf_scratch")):     # a position's, and the rows'
                 m.table(nm(name % l), [pl(l, "post_attention_layernorm.weight", "data")]
@@ -1183,22 +1244,28 @@ class Qwen35(Generates):
                         + [nm("signs"), nm("one"), nm(scratch), self.H, self.INTER_OF[card]] + [d(l, n) for n in ms]
                         + [self.EPS] + flag)
 
-    def _tier_tables(self):
+    def _tier_tables(self, card=0):
         """The card's tier (▶ nn's `nn__expert_tier`): its experts tables, a position's and a chunk's, each with its own
-        scratch; the tier, fed from the CPU's memory where every expert is there (the experts in RAM); and the binding."""
-        m, e = self.m, self.EPLAN
+        scratch; the tier, fed from the CPU's memory where every expert is there (the experts in RAM); and the binding —
+        one card's, or (`card`, as that card's worker) a tensor-parallel group's card's, whose tier says the group's size
+        and whose binding `_load_cards` makes for every card. A chunk's table is card 0's alone: a prompt's rows go
+        through card 0's tier and the CPU (▶ lisp/qwen3_5_tp.lisp)."""
+        m, e, nm = self.m, self.EPLAN, (lambda n: self._named(n, card))
         for l in self.run_layers:
             d = int(self.b.record(l, GU).d)
-            if l in self.SRC:
+            if l in self.SRC and card == 0:
                 self._int_array("src%d" % l, self.SRC[l])
             cells = [l, self.T_CEXP, e.at_up_lut, e.at_down_data, e.at_down_lut, self.H, self.INTER, self.EXPERTS, self.TOPK,
                      d, 0, 0, 0, 0, 0, 0]
-            m.table("exk%d" % l, ["signs", "kscratch", "zero_h"] + cells)
-            m.table("exkr%d" % l, ["signs", "krscratch", "zero_h"] + cells)
+            m.table(nm("exk%d" % l), [nm("signs"), nm("kscratch"), nm("zero_h")] + cells)
+            if card == 0:
+                m.table("exkr%d" % l, ["signs", "krscratch", "zero_h"] + cells)
         # a card slot laid out as the CPU's, so a promotion copies one whole
-        expert_tier.tier(m, "tier_card", self.T_CEXP, self.EXPERTS, self.TOPK, self.H, self.INTER, e, self.LAYERS,
-                         {l: "src%d" % l for l in self.run_layers if l in self.SRC}, landing=self.CARD_LANDING)
-        expert_tier.bind(m, {CARD: "tier_card"}, len(self.workers()))
+        expert_tier.tier(m, nm("tier_card"), self.T_CEXP, self.EXPERTS, self.TOPK, self.H, self.INTER, e, self.LAYERS,
+                         {l: "src%d" % l for l in self.run_layers if l in self.SRC}, landing=self.CARD_LANDING,
+                         ranks=self.CARDS, shared=int(round(self.CARD_SHARED * self.CARD_SLOTS / len(self.run_layers))))
+        if self.CARDS == 1:
+            expert_tier.bind(m, {CARD: "tier_card"}, len(self.workers()))
 
     # ── the cache's unreached rows lent to the tier (NN-93) ──────────────────────────────────────────────────────
     # ⚖ 2026-10-17: *"progressively shrink the l1 cache as the context grows, maybe in chunks of 8k tokens... this way we
@@ -1288,7 +1355,7 @@ class Qwen35(Generates):
                       LAG=0, ROWPOS=False, MROPE=self.MROPE,
                       ROTATED=bool(self.ROTATED), TIERED=bool(self.TIERED), ROUTED=bool(self.MOE),
                       FUSED=bool(self.MOE and self.FUSED), EXPERTS_ON_CPU=bool(self.CPU_EXPERTS),
-                      CARD_TIER=self.CPLAN is not None, CARD=CARD, CPU=CPU)
+                      CARD_TIER=self.CPLAN is not None, CARD=CARD, CPU=self.CPU)
         if self.CPU_EXPERTS:
             values.update(HAND_BYTES=2 * (H + 16), HANDS_BYTES=self.CHUNK * self.HAND_ROW, ROWS_BYTES=self.CHUNK * H * 2,
                           ROWS_HALVES=self.CHUNK * H, HAND_ROW=self.HAND_ROW, HAND_PICKS_AT=self.HAND_ROW - 8 * self.TOPK)
@@ -1317,23 +1384,41 @@ class Qwen35(Generates):
         if self.CPLAN is not None:
             m.array("EXPERTS_TIER", ["exk%d" % l for l in run])
             m.array("EXPERTS_TIER_ROWS", ["exkr%d" % l for l in run])
+        if self.CARDS > 1:
+            self._card_bindings()
 
     def _card_bindings(self):
         """What lisp/qwen3_5_tp.lisp reads besides: the group, and each card's names in arrays indexed by its worker."""
         m, run, P = self.m, self.run_layers, self.CARDS
-        m.bind_values(dict(CARDS=P, GROUP=self.GROUP))
+        m.bind_values(dict(CARDS=P, GROUP=self.GROUP, TOP_K=self.TOPK if self.MOE else 0))
         m.node_array("TP_POS", 1)
         m.node_array("TP_N", 1)
         m.node_array("TP_I", P)
         rows = lambda l: ("dr%d" if self.kinds[l] == "d" else "atr%d" if self.TIERED else "ar%d") % l   # noqa: E731
         for k in range(1, P):
             m.array(self._named("MIXER", k), [self._named("mx%d" % l, k) for l in run])
-            m.array(self._named("MLP", k), [self._named("ml%d" % l, k) for l in run])
             m.array(self._named("MIXER_ROWS", k), [self._named(rows(l), k) for l in run])
-            m.array(self._named("MLP_ROWS", k), [self._named("mlr%d" % l, k) for l in run])
-        for name, of in (("X_OF", "x"), ("H_OF", "h"), ("ZERO_OF", "zero_h"), ("CS_OF", "cs"), ("MIXER_OF", "MIXER"),
-                         ("MLP_OF", "MLP"), ("XS_OF", "xs"), ("H1S_OF", "h1s"), ("MIXER_ROWS_OF", "MIXER_ROWS"),
-                         ("MLP_ROWS_OF", "MLP_ROWS")):
+            if not self.MOE:
+                m.array(self._named("MLP", k), [self._named("ml%d" % l, k) for l in run])
+                m.array(self._named("MLP_ROWS", k), [self._named("mlr%d" % l, k) for l in run])
+        names = [("X_OF", "x"), ("H_OF", "h"), ("ZERO_OF", "zero_h"), ("CS_OF", "cs"), ("MIXER_OF", "MIXER"),
+                 ("XS_OF", "xs"), ("H1S_OF", "h1s"), ("MIXER_ROWS_OF", "MIXER_ROWS")]
+        if not self.MOE:
+            names += [("MLP_OF", "MLP"), ("MLP_ROWS_OF", "MLP_ROWS")]
+        else:                               # an MoE's block is card 0's: the other cards have no MLP, the names zeros
+            m.array("MLP_OF", [0] * P)
+            m.array("MLP_ROWS_OF", [0] * P)
+            if self.CPLAN is not None:      # a tier on every card: its router's and its experts' names
+                for k in range(1, P):
+                    m.array(self._named("PRE", k), [self._named("pre%d" % l, k) for l in run])
+                    m.array(self._named("EXPERTS_TIER", k), [self._named("exk%d" % l, k) for l in run])
+                    m.array(self._named("POST", k), [self._named("post%d" % l, k) for l in run])
+                names += [("PRE_OF", "PRE"), ("HAND_OF", "hand"), ("PICKS_OF", "picks"), ("ROUTED_K_OF", "routed_k"),
+                          ("EXPERTS_TIER_OF", "EXPERTS_TIER"), ("POST_OF", "POST")]
+            else:
+                for name in ("PRE_OF", "HAND_OF", "PICKS_OF", "ROUTED_K_OF", "EXPERTS_TIER_OF", "POST_OF"):
+                    m.array(name, [0] * P)
+        for name, of in names:
             m.array(name, [self._named(of, k) for k in range(P)])
 
     def _procedures(self):
@@ -1347,6 +1432,7 @@ class Qwen35(Generates):
         self.m.load_source(self.folder.program("sampling"))
         self.m.load_source(self.folder.program("generate"))
         if self.CPU_EXPERTS:
+            self.m.worker_moved = {CPU: self.CPU}           # the file's worker 1 the CPU, after a group's cards
             self.m.load_source(self.folder.program("qwen3_5_cpu"))
         if self.MTP is not None:
             self._mtp_procedures()
@@ -1397,7 +1483,7 @@ class Qwen35(Generates):
         x, x2 = (rng(xb, 0, H), rng(xb, H, H)) if xb else ("x", "x2")
         h1, h12 = (rng(hb, 0, H), rng(hb, H, H)) if hb else ("h1", "h12")
         if self.CPU_EXPERTS:
-            m.act_as(CPU)
+            m.act_as(self.CPU)
             m.picture("xqb", "(begin (nn__buffer__copy hand CARD c_hand HAND_BYTES) (nn__buffer__copy hand2 CARD c_hand2 HAND_BYTES) "
                       "(ai_qwen_3__experts c_hand picks (nth EXPERTS_CPU (nth HERE 0)) c_routed) "
                       "(ai_qwen_3__experts c_hand2 picks2 (nth EXPERTS_CPU (nth HERE 0)) c_routed2))")
@@ -1844,11 +1930,12 @@ class Qwen35(Generates):
             parts.append([self.m.read(at, n) if n else b"" for at, n in self.state_regions(length, card=k)])
         self.m.act_as(-1)
         out = []
-        for i, (_, _, rows, secs) in enumerate(self._state_layout(length)):
+        for i, (l, _, rows, secs) in enumerate(self._state_layout(length)):
             if not rows * sum(secs):
                 continue
             cut = np.cumsum([0] + secs)
-            mine = [np.frombuffer(p[i], dtype=np.uint8).reshape(rows, -1) for p in parts]
+            held = parts if self.kinds[l] == "d" else parts[::self.KV_REP]     # a copied head once
+            mine = [np.frombuffer(p[i], dtype=np.uint8).reshape(rows, -1) for p in held]
             out.append(np.concatenate([c[:, cut[j]:cut[j + 1]] for j in range(len(secs)) for c in mine],
                                       axis=1).tobytes())
         return out
@@ -1858,7 +1945,8 @@ class Qwen35(Generates):
         layout = [r for r in self._state_layout(length) if r[2] * sum(r[3])]
         self._room(length, exact=True)                  # its rows withheld from the tier before they are written
         P = self.CARDS
-        want = [rows * sum(secs) * P for _, _, rows, secs in layout]
+        shares = lambda l: P if self.kinds[l] == "d" else P // self.KV_REP          # noqa: E731 — a copied head once
+        want = [rows * sum(secs) * shares(l) for l, _, rows, secs in layout]
         if [len(b) for b in blobs] != want:
             raise Refused("a state of %d regions (%d bytes) is not this model's at %d positions (%d regions, %d bytes)"
                           % (len(blobs), sum(map(len, blobs)), length, len(want), sum(want)))
@@ -1871,7 +1959,8 @@ class Qwen35(Generates):
                     self.m.write(at[l] + off, blob)
                     continue
                 full, cut = np.frombuffer(blob, dtype=np.uint8).reshape(rows, -1), np.cumsum([0] + secs)
-                mine = [full[:, P * cut[j] + k * secs[j]:P * cut[j] + (k + 1) * secs[j]] for j in range(len(secs))]
+                Q, q = shares(l), (k if self.kinds[l] == "d" else k // self.KV_REP)
+                mine = [full[:, Q * cut[j] + q * secs[j]:Q * cut[j] + (q + 1) * secs[j]] for j in range(len(secs))]
                 self.m.write(at[l] + off, np.concatenate(mine, axis=1).tobytes())
         if P > 1:
             self.m.act_as(-1)

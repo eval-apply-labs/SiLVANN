@@ -274,7 +274,7 @@ static __device__ inline bool sys__bindings__set(uint64_t bindings, const sys__h
 /* The environment a binding form names: `env`, or for 0 the one the computation running it keeps in its base. */
 static __device__ inline uint64_t sys__bindings__zzpackage_named(const sys__heap_node* base, uint64_t env);
 
-static __device__ __noinline__ void sys__bindings__zzpackage_release_internal(sys__heap_node* head,
+static __device__ SYS__NOINLINE void sys__bindings__zzpackage_release_internal(sys__heap_node* head,
                                                                         uint64_t* releaser_stack);
 
 /* Building one from a program: how many names, and the table to sit over. Two arguments, so it is
@@ -303,7 +303,7 @@ static __device__ inline sys__heap_node sys__bindings__zzpackage_construct(sys__
  * environment exactly as it found it rather than half-entered with no unbinding written down — which is
  * the rule a call's expansion keeps for the same reason.
  * ────────────────────────────────────────────────────────────────────────────────────────────────── */
-static __device__ __noinline__ void sys__bindings__zzpackage_apply_let(sys__heap_node* base,
+static __device__ SYS__NOINLINE void sys__bindings__zzpackage_apply_let(sys__heap_node* base,
                                                                        uint64_t form);
 
 #endif /* SILVANN__PACKAGES_SYS_CPU_BINDINGS__HEADER_CUH */

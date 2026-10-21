@@ -372,7 +372,7 @@ static __device__ inline sys__heap_node sys__dictionary__get(uint64_t dictionary
  * it happened; a refusal raises and leaves the dictionary exactly as it was.
  * ⛳ OUT OF LINE: it is the one verb here that can allocate, rotate and walk a path, and it is reached from
  * wherever a name is registered. */
-static __device__ __noinline__ bool sys__dictionary__put(uint64_t dictionary, const sys__heap_node* key,
+static __device__ SYS__NOINLINE bool sys__dictionary__put(uint64_t dictionary, const sys__heap_node* key,
                                                          const sys__heap_node* value) {
     sys__heap_node* fields = sys__dictionary__zzprivate_fields(dictionary);
     if (fields == 0 || !sys__dictionary__zzprivate_writable(dictionary)) return false;
@@ -580,7 +580,7 @@ static __device__ inline bool sys__dictionary__zzpackage_after(uint64_t dictiona
 
 /* A new dictionary holding the same keys and values — each value held once more — and writable, whatever
  * the source is. The caller holds it. A refusal answers nothing, having raised, and leaves nothing behind. */
-static __device__ __noinline__ uint64_t sys__dictionary__copy(uint64_t dictionary) {
+static __device__ SYS__NOINLINE uint64_t sys__dictionary__copy(uint64_t dictionary) {
     if (sys__dictionary__zzprivate_fields(dictionary) == 0) return 0ull;
     const uint64_t copy = sys__dictionary__create();
     if (copy == 0ull) return 0ull;
@@ -602,7 +602,7 @@ static __device__ __noinline__ uint64_t sys__dictionary__copy(uint64_t dictionar
  * itself; each moves what it held onto the chain the release loop drains.
  * ────────────────────────────────────────────────────────────────────────────────────────────────── */
 
-static __device__ __noinline__ void sys__dictionary__zzpackage_release_internal(sys__heap_node* head,
+static __device__ SYS__NOINLINE void sys__dictionary__zzpackage_release_internal(sys__heap_node* head,
                                                                                uint64_t* releaser_stack) {
     if (head == 0) return;
     const uint64_t root = head[1].args[SYS__DICTIONARY__ROOT];
@@ -612,7 +612,7 @@ static __device__ __noinline__ void sys__dictionary__zzpackage_release_internal(
     sys__stack__transfer(releaser_stack, &reference);
 }
 
-static __device__ __noinline__ void sys__tree_routing_node__zzpackage_release_internal(sys__heap_node* head,
+static __device__ SYS__NOINLINE void sys__tree_routing_node__zzpackage_release_internal(sys__heap_node* head,
                                                                                       uint64_t* releaser_stack) {
     if (head == 0) return;
     const uint32_t sides[2] = { SYS__TREE_ROUTING_NODE__LEFT, SYS__TREE_ROUTING_NODE__RIGHT };
@@ -626,7 +626,7 @@ static __device__ __noinline__ void sys__tree_routing_node__zzpackage_release_in
 }
 
 /* ⛔ THE VALUES ONLY, BY PARITY — never a key. See the top of this file. */
-static __device__ __noinline__ void sys__dictionary_leaf__zzpackage_release_internal(sys__heap_node* head,
+static __device__ SYS__NOINLINE void sys__dictionary_leaf__zzpackage_release_internal(sys__heap_node* head,
                                                                                     uint64_t* releaser_stack) {
     if (head == 0) return;
     sys__heap_node* pairs = head + 1;

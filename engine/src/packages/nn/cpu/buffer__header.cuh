@@ -77,14 +77,14 @@ static __device__ inline bool nn__buffer__zzpackage_carve(uint64_t span_at, uint
                                                           uint64_t ram_bytes, uint64_t* ended);
 
 /* Where a buffer goes when nobody wants it: back in its own class's list. */
-static __device__ __noinline__ void nn__buffer__zzpackage_release_internal(sys__heap_node* head,
+static __device__ SYS__NOINLINE void nn__buffer__zzpackage_release_internal(sys__heap_node* head,
                                                                           uint64_t* releaser_stack);
 
 /* `(nn__buffer__getnew  size)` — the smallest class that fits, or an error. */
-static __device__ __noinline__ void nn__buffer__zzpackage_apply_getnew(sys__heap_node* base, uint64_t form);
+static __device__ SYS__NOINLINE void nn__buffer__zzpackage_apply_getnew(sys__heap_node* base, uint64_t form);
 /* `(nn__buffer__getnew_ram size)` — the smallest RAM class that fits: bytes the card writes and the program
  * reads where they are. ▶ `NN__BUFFER_RAM_CLASS_LIST`. */
-static __device__ __noinline__ void nn__buffer__zzpackage_apply_getnew_ram(sys__heap_node* base, uint64_t form);
+static __device__ SYS__NOINLINE void nn__buffer__zzpackage_apply_getnew_ram(sys__heap_node* base, uint64_t form);
 /* `(nn__buffer__read b)` on the DEVICE evaluator — where no verb writes a stamped value, so there is never
  * one to read. ▶ `cpu/opcodes/result__abi.cuh` for the verb itself. */
 

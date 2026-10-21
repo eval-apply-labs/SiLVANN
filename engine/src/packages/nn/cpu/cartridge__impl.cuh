@@ -516,7 +516,7 @@ static __device__ inline bool nn__cartridge__resolve(uint64_t layer, uint64_t to
  *     RANGE      there is one, and it does not hold that token or that layer
  * ⇒ ★ A CALLER CAN DO SOMETHING ABOUT THE SECOND AND NOTHING ABOUT THE FIRST, so one word for both would
  * be a diagnosis thrown away at the only place it was available. */
-static __device__ __noinline__ void nn__cartridge__zzpackage_apply_reference(sys__heap_node* base,
+static __device__ SYS__NOINLINE void nn__cartridge__zzpackage_apply_reference(sys__heap_node* base,
                                                                             uint64_t form) {
     (void)base;
     if (sys__sublist__length(form) != 4ull) {

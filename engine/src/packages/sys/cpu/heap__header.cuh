@@ -222,7 +222,7 @@ static __device__ inline void         sys__heap__zzpackage_record_deallocation(v
 /* Carve room for one object of a kind whose extent the CALLER knows, in nodes, head included. A kind
  * whose size is decided when one is asked for has nothing to put in its row's size column, and this is the
  * only way such a kind is made at all. */
-static __device__ __noinline__ sys__heap_node*  sys__heap__zzpackage_make_sized(sys__kind kind, uint64_t nodes);
+static __device__ SYS__NOINLINE sys__heap_node*  sys__heap__zzpackage_make_sized(sys__kind kind, uint64_t nodes);
 static __device__ inline sys__heap_node*  sys__heap__make(sys__kind kind);
 static __device__ inline sys__heap_node*  sys__heap_chunk__zzpackage_from_object_head(const sys__heap_node* head);
 static __device__ inline uint32_t     sys__heap__zzpackage_take_up(unsigned int* slot);
@@ -251,7 +251,7 @@ static __device__ inline bool         sys__heap_chunk__zzpackage_release(sys__he
 static __device__ inline sys__heap_node*  sys__heap__zzpackage_computing_base(uint32_t block_id);
 static __device__ inline sys__heap_node*  sys__heap_node__zzpackage_head(uint64_t offset);
 /* The chunk's release method, named by its row in the kind list and called only by the dispatch. */
-static __device__ __noinline__ void sys__heap_chunk__zzpackage_release_internal(sys__heap_node* head,
+static __device__ SYS__NOINLINE void sys__heap_chunk__zzpackage_release_internal(sys__heap_node* head,
                                                                          uint64_t* releaser_stack);
 
 #endif /* SILVANN__PACKAGES_SYS_CPU_HEAP__HEADER_CUH */

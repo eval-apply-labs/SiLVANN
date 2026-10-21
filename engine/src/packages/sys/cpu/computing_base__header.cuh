@@ -238,7 +238,7 @@ static __device__ inline void     sys__computing_base__zzpackage_set_heap_provid
 static __device__ inline bool     sys__computing_base__zzpackage_start(sys__heap_node* computing_base,
                                                                        uint32_t block_id);
 /* What the kind list names as this kind's teardown, which refuses rather than freeing. */
-static __device__ __noinline__ void sys__computing_base__zzpackage_never_release_internal(sys__heap_node* head,
+static __device__ SYS__NOINLINE void sys__computing_base__zzpackage_never_release_internal(sys__heap_node* head,
                                                                                    uint64_t* releaser_stack);
 
 #endif /* SILVANN__PACKAGES_SYS_CPU_COMPUTING_BASE__HEADER_CUH */

@@ -106,7 +106,7 @@ A **skill** is a folder that gives the REPL new commands. It holds:
 **Where skills are read from:**
 
 - `skills/` beside the conversations: in the install's folder, beside `start_silvann_server.py`, or in the folder
-  `SILVANN_DATA` names (`/data/skills` in the Docker image). Yours go here.
+  `SILVANN_DATA` names (`/data/skills` in a container built from `docker/`). Yours go here.
 - `skills/` in the install, the ones the release ships. `files` is one, and a working example.
 
 **When they are read:** at the start of a conversation's REPL, and again at its `(reset)`. A skill added while the
@@ -266,4 +266,4 @@ skill took. It is left out, and `(skills)` says so.
 skill of yours named like a shipped one takes its place.
 
 ⚠ **A skill is code you install.** Its Python runs inside the server and its programs as the server's user, with the
-user's files and network. In the Docker image those are the container's.
+user's files and network. In a container, those are the container's.

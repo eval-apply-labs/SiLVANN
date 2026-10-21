@@ -325,7 +325,7 @@ static __device__ inline uint32_t sys__heap_object__retain(uint64_t offset);
 
 /* Let one hold go, and if it was the last, take the object apart and everything that dies with it.
  * ⛳ NOT INLINED, AND THE ARGUMENT FOR IT IS WHERE IT IS DEFINED. */
-static __device__ __noinline__ uint32_t sys__heap_object__release(uint64_t offset);
+static __device__ SYS__NOINLINE uint32_t sys__heap_object__release(uint64_t offset);
 
 /* The same, through a value CELL rather than a bare reference — and it clears the cell.
  *
@@ -344,7 +344,7 @@ static __device__ inline void sys__heap_object__set(sys__heap_node* cell, const 
  * overrides it, and may call the default as super — none of `release`'s needs to, the room going back in
  * the teardown once for every kind rather than inside any method.
  * They are public because a row in another package names them exactly as a row here does. */
-static __device__ __noinline__ void sys__heap_object__release__default(sys__heap_node* head,
+static __device__ SYS__NOINLINE void sys__heap_object__release__default(sys__heap_node* head,
                                                                uint64_t* releaser_stack);
 static __device__ inline uint64_t sys__heap_object__clone__default(sys__heap_node* head,
                                                                   sys__heap_node* computing_base);

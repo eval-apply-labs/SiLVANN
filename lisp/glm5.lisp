@@ -113,12 +113,24 @@
       (ai_z__glm_5_3__mla streams (nth AT i) pos)))
 
 ;; the routed MLP: the router's picks into the hand, a card tier's share computed and marked, every socket handed the
-;; rest while the card runs the shared expert, the shares summed — and the card tier's — and the streams closed
+;; rest while the card runs the shared expert, the shares summed — and the card tier's — and the streams closed.
+;; ⛳ THE TIER'S EXPERTS BEFORE THE SOCKETS START, NOT BESIDE THEM (NN-99 ④, measured): the visit-first order Qwen takes
+;;   (▶ qwen3_5.lisp) drains the card's queue a layer to start the sockets early — GLM's card experts are short, and the
+;;   drain costs more than they hide: a token 118-123 against 109-116 ms on one card (18 GB), 106.5 against 100.7 on two
+;;   (18 GB a card), 85.6 against 80.9 on four (24 GB a card); four cards' runs vary ±5 ms (▶ glm5.py's group `moe`, the same)
+;; the tier's experts and the sockets started, in the order VISIT_FIRST names (glm5.py's `card_visit_first`, off by default)
+(defun (tier_and_sockets i)
+  (if CARD_TIER
+      (if VISIT_FIRST
+          (begin (ai_z__glm_5_3__experts hand picks (nth EXK i) routed_k nn__expert_tier 1)
+                 (sockets_start i xf_ready)
+                 (ai_z__glm_5_3__experts hand picks (nth EXK i) routed_k nn__expert_tier))
+          (begin (ai_z__glm_5_3__experts hand picks (nth EXK i) routed_k nn__expert_tier) (sockets_start i xf)))
+      (sockets_start i xf)))
 (defun (moe i)
   (let ((s 0))
     (ai_z__glm_5_3__route streams (nth MO i) hand picks)
-    (if CARD_TIER (ai_z__glm_5_3__experts hand picks (nth EXK i) routed_k nn__expert_tier) 0)
-    (sockets_start i xf)
+    (tier_and_sockets i)
     (ai_z__glm_5_3__shared hand (nth MO i))
     (while '(< s SOCKETS) '(begin (sys__result (nth SOCKET s)) (set! s (+ s 1))))
     (if CARD_TIER (nn__expert_tier__written nn__expert_tier) 0)     ; the CPUs done: an exclusive tier's writes go now

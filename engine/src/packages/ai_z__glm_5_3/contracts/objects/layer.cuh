@@ -175,6 +175,16 @@
 /* A prompt's experts, where the slots are a cache: this many a batch, the next batch read while one computes — so a
  * worker's cache needs room for two batches beside what it keeps. */
 #define AI_Z__GLM_5_3__EXP__BATCH      16u
+
+/* ⭐ A RANK-1 MASK, where the model folder's LoRA is one (▶ python's `nn_rank1_mask.py`): `W' = W + r·vᵀ` for a matrix that
+ * writes into the residual — three cells past a table: its `r` (hidden halves), its `v` (the matrix's input, rotated; the
+ * routed experts' `V`, a row an expert of the layer) and a scratch for the dots — or an integer 0, or no cells, for none.
+ * The attention's output projection, the shared expert's down and the routed experts' downs carry one; the MTP layer's
+ * sites none. A card's tier masks the picks it holds with `V` at the experts' whole width; each socket its own part. */
+#define AI_Z__GLM_5_3__KDA__MASK       AI_Z__GLM_5_3__KDA__TABLE
+#define AI_Z__GLM_5_3__MLA__MASK       AI_Z__GLM_5_3__IDX__TABLE              /* past the indexer, which every MLA table has */
+#define AI_Z__GLM_5_3__MOE__MASK       AI_Z__GLM_5_3__MOE__TABLE              /* the shared expert's                          */
+#define AI_Z__GLM_5_3__EXP__MASK       (AI_Z__GLM_5_3__EXP__BACKING + 1u)     /* past the backing, an integer 0 where none    */
 /* A prompt's MLA rows attend this many at a time where they attend every position before them: the scores of a block are
  * `rows · heads · (first + rows)` floats of the rows verbs' work buffer. */
 #define AI_Z__GLM_5_3__MLA__ROWS_BLOCK 32u

@@ -1,7 +1,7 @@
 # The UI
 
 The chat in a browser: `silvann ui`, or `venv/bin/python silvann_ui.py --port 8090` from the release's folder, then
-http://localhost:8090. The Docker image's app is the same UI. It only talks HTTP to a SiLVANN server, on this machine or
+http://localhost:8090. It only talks HTTP to a SiLVANN server, on this machine or
 another one; it can also start and stop a server on this machine (**Options**).
 
 ## The left drawer
@@ -70,7 +70,7 @@ Below the messages:
   model. A picture or a video needs a model that reads them: the Qwen models and GLM 5.3 Flash. The server reads it when
   it is attached, a chip shows it, and the message carries it. It stays in the conversation and is saved with it.
 - **The message box**: **Enter** sends, **Shift+Enter** is a new line.
-- **max tokens** caps an answer, up to 4,096. The model stops sooner when it is done.
+- **max tokens** caps an answer, up to 16,384. The model stops sooner when it is done.
 - **The send button** becomes a stop button while an answer streams, and stops it.
 
 One conversation is answered at a time. A message sent while another is being answered waits ("⏳ waiting my turn…")
@@ -109,12 +109,12 @@ removes it (not the model). [`config.md`](config.md) says what each key does. Fo
 
 - **The data folder** holds the models and the conversations: `models/<name>/` and `user_sessions/<model>/<id>/`, on
   the server's machine. It is the release's folder, or the one `silvann models <folder>` named (for `silvann ui` and
-  `silvann serve`), or `SILVANN_DATA`. In the Docker image it is the volume, `/data`.
+  `silvann serve`), or `SILVANN_DATA`. In a container built from `docker/` it is the volume, `/data`.
 - **A model's folder**: its configs, and the programs it runs as written at its last start
   (`models/<name>/programs.lisp`). The setup the server chose is kept there too (`autotune.json`).
 - **The UI's own settings** (the endpoint, the last conversation, the conversations' passwords you typed): kept by the
-  UI, on its machine, for this browser — in `.nicegui/` beside `silvann_ui.py`, or the volume's `/data/.nicegui` in the
-  Docker image. The passwords are there as you typed them.
+  UI, on its machine, for this browser — in `.nicegui/` beside `silvann_ui.py`, or `/data/.nicegui` in a container
+  built from `docker/`. The passwords are there as you typed them.
 - **The Hugging Face token** that Options saves: `.huggingface_token` in the data folder, readable by its owner alone.
   A copy of the data folder (or of a container's volume) carries it, and the UI's settings with the passwords:
   **forget** the token, and remove `.nicegui/`, before giving such a copy to someone else.

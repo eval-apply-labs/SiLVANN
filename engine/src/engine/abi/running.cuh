@@ -31,13 +31,13 @@
  *   `args[0]`, which is a different answer from the one a program that ran and came to nothing gives.
  * ⇒ ★ AN ERROR IS A VALUE, AND THIS IS THE DOOR WHERE THAT PAYS — a caller reads the kind it was handed
  *   instead of asking a second channel why nothing came back. The refusal arm below carries the ruling. */
-/* ⛔⛔ THE TWO HALVES ARE `__noinline__` ON PURPOSE, AND IT IS A RATE DECISION RATHER THAN A STYLE ONE.
+/* ⛔⛔ THE TWO HALVES ARE `SYS__NOINLINE` ON PURPOSE, AND IT IS A RATE DECISION RATHER THAN A STYLE ONE.
  *   Inlined beside the evaluator, the state machine's own values stay live ACROSS the evaluation, for
  *   six transitions that run once per program. Given their own frames, what they need is theirs and the
  *   evaluator's frame is untouched. `REASONED` — the A/B of the two arms on this build is unmeasured, and
  *   a reader checking it measures both against each other on the tree in front of them.
  * ⇒ ★ A COST PAID ONCE CAN STILL BE PAID PER-INSTRUCTION IF IT IS PAID IN REGISTERS. */
-static __device__ __noinline__ uint64_t eng__abi__zzprivate_start(sys__heap_node* here, uint32_t me,
+static __device__ SYS__NOINLINE uint64_t eng__abi__zzprivate_start(sys__heap_node* here, uint32_t me,
                                                                   uint64_t bindings, uint64_t picture,
                                                                   uint64_t* why) {
     *why = 0ull;
@@ -64,7 +64,7 @@ static __device__ __noinline__ uint64_t eng__abi__zzprivate_start(sys__heap_node
  * hold the base was keeping becomes this caller's and nothing is retained or released out here. That is
  * the same two steps a scheduler on another block performs, which is the point: the block that ran the
  * work does not know whether it was asked by the host or by another block. */
-static __device__ __noinline__ sys__heap_node eng__abi__zzprivate_collect(sys__heap_node* here, uint32_t me,
+static __device__ SYS__NOINLINE sys__heap_node eng__abi__zzprivate_collect(sys__heap_node* here, uint32_t me,
                                                                          sys__heap_node value) {
     (void)sys__computing_base__finish(here, me, SYS__COMPUTING_BASE__OK, value);
     return sys__computing_base__read_result(here, me);

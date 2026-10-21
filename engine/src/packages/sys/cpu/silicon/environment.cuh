@@ -32,13 +32,14 @@
  * on every kernel; it tells a device compiler how many registers it may spend, which is not a sentence
  * about anything here. */
 #define __launch_bounds__(...)
-/* ⛔ AND THIS ONE IS DEFINED RATHER THAN DEFINED AWAY, because deleting it would silently drop the one
- * property it exists to assert. `sys__fault__raise` is `__noinline__` on purpose — it is a cold path,
- * `REASONED` at `fault__impl.cuh` — and the host attribute means the same thing, so the function it
- * marks stays out of line here too. */
-#ifndef __noinline__
-#define __noinline__ __attribute__((noinline))
-#endif
+/* ⛔ AND OUT OF LINE IS DEFINED RATHER THAN DEFINED AWAY, because deleting it would silently drop the one
+ * property it exists to assert. `sys__fault__raise` is `SYS__NOINLINE` on purpose — it is a cold path,
+ * `REASONED` at `fault__impl.cuh` — so the function it marks stays out of line.
+ * ⛔ OUR OWN NAME, NOT `__noinline__`: a name with two underscores is the compiler's, and GCC 13's headers
+ * spell `__attribute__((__noinline__))`, which a `__noinline__` macro turned into an attribute inside an
+ * attribute — "‘noinline’ was not declared in this scope" (a tester's Ubuntu 24.04 build, 2026-10-21; CUDA's
+ * own `__noinline__` met the same). */
+#define SYS__NOINLINE __attribute__((noinline))
 
 /* ── ⭐⭐⭐ ONE COPY PER RUNNER, AND THIS IS THE LINE THAT DECIDES WHETHER FOUR CARDS RUN AS FOUR ──────
  * `silicon__header.cuh` defaults `BLOCK_LOCAL` to `static __shared__` — on a card, one copy per BLOCK.

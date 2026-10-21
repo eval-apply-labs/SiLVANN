@@ -30,7 +30,7 @@
  * ══════════════════════════════════════════════════════════════════════════════════════════════════ */
 
 
-static __device__ __noinline__ void nn__package__zzpackage_apply_init(sys__heap_node* base, uint64_t form) {
+static __device__ SYS__NOINLINE void nn__package__zzpackage_apply_init(sys__heap_node* base, uint64_t form) {
     (void)base;
     uint64_t why = 0ull;
     const uint64_t list = sys__package__list_of(form, &why);

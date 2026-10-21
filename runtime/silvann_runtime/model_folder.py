@@ -35,6 +35,9 @@ class ModelFolder:
                           "`nn_pack_model.py --raw RAW --out %s --carry-only`" % (self.path, self.path))
         whole = json.load(open(cfg))
         self.config = whole.get("text_config", whole)
+        # the end of a turn where no generation config names it (DeepSeek-V4.1's repository carries none), as Hugging Face's
+        # generate falls back to the model's config
+        self.eos = whole.get("eos_token_id", self.config.get("eos_token_id", []))
         self.generation = {}
         gen = os.path.join(self.path, "generation_config.json")
         if os.path.isfile(gen):
@@ -85,5 +88,5 @@ class ModelFolder:
         return ident
 
     def end_tokens(self):
-        eos = self.generation.get("eos_token_id", [])
+        eos = self.generation.get("eos_token_id", self.eos)
         return set(eos if isinstance(eos, list) else [eos])

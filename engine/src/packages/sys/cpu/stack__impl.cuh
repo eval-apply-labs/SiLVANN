@@ -442,7 +442,7 @@ static __device__ inline void sys__stack_chunk__zzprivate_replace(sys__stack_chu
  * We can do this because each stack chunk is private and no public method allows for a retain count
  * bigger than one nor a direct reference to the internal values
  * ────────────────────────────────────────────────────────────────────────────────────────────────── */
-static __device__ __noinline__ void sys__stack_chunk__zzpackage_release_internal(sys__heap_node* head,
+static __device__ SYS__NOINLINE void sys__stack_chunk__zzpackage_release_internal(sys__heap_node* head,
                                                                           uint64_t* releaser_stack) {
     if (head == 0) return;
     sys__stack_chunk* chunk = (sys__stack_chunk*)(head + 1);
@@ -766,7 +766,7 @@ static __device__ inline void sys__stack__replace(const sys__heap_node* stack_re
  * We can do this because each stack chunk is private and no public method allows for a retain count
  * bigger than one nor a direct reference to the internal values
  * ────────────────────────────────────────────────────────────────────────────────────────────────── */
-static __device__ __noinline__ void sys__stack__zzpackage_release_internal(sys__heap_node* head,
+static __device__ SYS__NOINLINE void sys__stack__zzpackage_release_internal(sys__heap_node* head,
                                                                     uint64_t* releaser_stack) {
     if (head == 0) return;
     const uint64_t current = head[1].args[SYS__STACK__CURRENT_STACK_CHUNK];

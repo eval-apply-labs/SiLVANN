@@ -32,6 +32,7 @@ static uint64_t nn__routed__top_k(sys__engine__ctx* ctx, const nn__doors* doors,
 static uint64_t nn__routed__top_k_scored(sys__engine__ctx* ctx, const nn__doors* doors, uint64_t picks, uint64_t weights,
                                          uint64_t logits, uint64_t bias, float scale, uint64_t n, uint64_t k, uint64_t score,
                                          uint64_t* chosen);
+static uint64_t nn__routed__visit(sys__engine__ctx* ctx, const nn__routed* r, uint64_t picks, const nn__expert_tier* tier);
 static uint64_t nn__routed__position(sys__engine__ctx* ctx, const nn__doors* doors, const nn__routed* r, uint64_t hand,
                                      uint64_t picks, const nn__expert_tier* tier, uint64_t routed, nn__routed__done* done);
 static uint64_t nn__routed__rows(sys__engine__ctx* ctx, const nn__doors* doors, const nn__routed* r, uint64_t hands, uint64_t n,
