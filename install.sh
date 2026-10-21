@@ -50,6 +50,9 @@ check_machine() {
     command -v g++ >/dev/null || missing+=(g++)
     command -v git >/dev/null || command -v tar >/dev/null || missing+=(git)
     command -v git >/dev/null || command -v curl >/dev/null || missing+=(curl)
+    # ⛳ without git the release comes as GitHub's archive (`fetch`), a URL only GitHub has: any other source — a Gitea
+    #   repository, one that asks for a login — is cloned, so it needs git (a tester's tarball was a login page, 2026-10-21)
+    case "$SOURCE" in https://github.com/*) ;; *) command -v git >/dev/null || missing+=(git) ;; esac
     if [ ${#missing[@]} -gt 0 ]; then
         stop "missing: ${missing[*]}. On Ubuntu or Debian:  sudo apt update && sudo apt install -y ${missing[*]}
    then run this installer again."
@@ -59,7 +62,12 @@ check_machine() {
 # the cards, and the compiler each one's family is built with; what is chosen goes to build.sh as its variables
 find_cards() {
     BUILD_ENV=()
-    FAMILIES=x86_avx2
+    # ⭐ THE OPENCL FAMILIES ALWAYS (⚖ 2026-10-21 "why dont we build opencl2 and opencl 1 automatically so there is nothing
+    #   no one needs to do?"): they need nothing installed to be built (the headers carried, the loader a stub), and at run
+    #   time they take only the cards no other family does — an NVIDIA card older than CUDA's (OpenCL 1.2), an AMD card
+    #   without ROCm's HIP (OpenCL 2) — so a machine whose cards CUDA or ROCm run is unchanged
+    FAMILIES="x86_avx2 khronos_opencl2 khronos_opencl1_igpu"
+    local opencl_card=""
     if grep -qw avx2 /proc/cpuinfo; then
         note "the CPU: $(grep -m1 'model name' /proc/cpuinfo | sed 's/.*: //') — AVX2$(grep -qw avx512bw /proc/cpuinfo && echo ', AVX-512')"
     else
@@ -72,14 +80,28 @@ find_cards() {
         cards=$(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null | paste -sd ';' || true)
         caps=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | tr -d '.' | sort -u | paste -sd ',' || true)
         note "NVIDIA: $cards"
-        nvcc=${SILVANN_NVCC:-$(command -v nvcc || ls -d /usr/local/cuda/bin/nvcc /usr/local/cuda-1[2-9]*/bin/nvcc 2>/dev/null | sort -V | tail -1 || true)}
-        if [ -n "$nvcc" ] && [ -x "$nvcc" ]; then
-            note "   built with $nvcc ($("$nvcc" --version | grep -o 'release [0-9.]*'))${caps:+, for compute capability $caps}"
-            BUILD_ENV+=("SILVANN_NVCC=$nvcc"); FAMILIES="$FAMILIES nvidia_cuda12"
-            [ -n "$caps" ] && BUILD_ENV+=("SILVANN_CUDA_ARCHES=$caps")
-        else
-            note "   ⚠ no nvcc: the card's family needs CUDA 12's compiler — the CUDA toolkit from developer.nvidia.com/cuda-downloads"
-            note "     (the toolkit; the driver is installed already), then \`silvann build\`. Until then the CPU runs the models."
+        # ⛳ CUDA'S FAMILY TAKES COMPUTE 7.5 AND NEWER (its targets, sm_75 …): an older card — Pascal's GTX 10x0, compute 6.1
+        #   — is not built for (CUDA 13 builds no sm_61, and 12.9 stops at its tensor cores), and runs through OpenCL 1.2
+        local c old="" new="" said=""
+        for c in ${caps//,/ }; do
+            if [ "$c" -ge 75 ] 2>/dev/null; then new="$new${new:+,}$c"
+            else old="$old${old:+,}$c"; said="$said${said:+, }${c%?}.${c: -1}"; fi
+        done
+        if [ -n "$old" ]; then
+            note "   compute capability $said is older than CUDA's family takes (7.5 and newer): that card runs through OpenCL 1.2"
+            opencl_card=1
+        fi
+        caps=$new
+        if [ -n "$new" ] || [ -z "$old" ]; then          # a card CUDA's family takes, or none whose compute was read
+            nvcc=${SILVANN_NVCC:-$(command -v nvcc || ls -d /usr/local/cuda/bin/nvcc /usr/local/cuda-1[2-9]*/bin/nvcc 2>/dev/null | sort -V | tail -1 || true)}
+            if [ -n "$nvcc" ] && [ -x "$nvcc" ]; then
+                note "   built with $nvcc ($("$nvcc" --version | grep -o 'release [0-9.]*'))${caps:+, for compute capability $caps}"
+                BUILD_ENV+=("SILVANN_NVCC=$nvcc"); FAMILIES="$FAMILIES nvidia_cuda12"
+                [ -n "$caps" ] && BUILD_ENV+=("SILVANN_CUDA_ARCHES=$caps")
+            else
+                note "   ⚠ no nvcc: the card's family needs CUDA 12's compiler — the CUDA toolkit from developer.nvidia.com/cuda-downloads"
+                note "     (the toolkit; the driver is installed already), then \`silvann build\`. Until then the CPU runs the models."
+            fi
         fi
     fi
     if [ -e /dev/kfd ]; then
@@ -91,10 +113,14 @@ find_cards() {
             note "AMD: ${gfx:-a card} — built with /opt/rocm/bin/hipcc"
             [ -n "$gfx" ] && BUILD_ENV+=("SILVANN_HIP_ARCHES=$gfx")
             FAMILIES="$FAMILIES amd_rocm6_wave64"
-            [ -f /opt/rocm/include/CL/cl.h ] && FAMILIES="$FAMILIES khronos_opencl2"
         else
             note "AMD: a card, and no ROCm — its family needs ROCm 6's hipcc (/opt/rocm), then \`silvann build\`"
+            opencl_card=1
         fi
+    fi
+    # an OpenCL family runs on the machine's own OpenCL loader, which a card's driver usually brings
+    if [ -n "$opencl_card" ] && ! { ldconfig -p 2>/dev/null | grep -q 'libOpenCL\.so\.1'; }; then
+        note "   ⚠ no OpenCL loader (libOpenCL.so.1): sudo apt install -y ocl-icd-libopencl1 — until then the CPU runs the models"
     fi
     note "memory: $(awk '/MemTotal/ {printf "%.0f GB", $2 / 1048576}' /proc/meminfo) of RAM"
     if [ -n "${SILVANN_SILICON_FAMILIES:-}" ]; then

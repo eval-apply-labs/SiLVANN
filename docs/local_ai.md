@@ -68,7 +68,8 @@ None of this needs AI kept away from anyone. It closes the door the fake would h
 
 ## A change of habits, not for the worse
 
-AI will change some of our habits, as the telephone and the internet did. That does not mean it has to change them for
-the worse. Models that run on your own machine, from published weights and software anyone can build, keep the benefit
-with the people who most need their work to stay private, and keep the defence in the hands of the defenders. That is
-worth safeguarding, if we are smart about it.
+AI will change some of our habits and expectations, as the telephone and the internet did. That does not mean it has to
+change them for the worse. Models that run on your own machine, from published weights and software anyone can build,
+keep the benefit with the people who most need their work to stay private, and keep the defence in the hands of the
+defenders. That is worth safeguarding, and if we are smart about it we can forge new habits where the expectation is
+that users' security and privacy are at the top of the design list.

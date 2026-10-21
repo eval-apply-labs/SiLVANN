@@ -21,6 +21,33 @@ OUT=build/silicon_families
 mkdir -p "$OUT"
 FAILED=0
 
+# a build's failure, said: its compiler's errors — nvcc's "fatal" lines too (an architecture it does not build) — or,
+#   where none matched, the log's last lines, so "⛔ family:" never stands alone (a tester's nvcc 13.4 and sm_61, 2026-10-21)
+reason() {   # log
+    grep -m10 -iE 'error|fatal' "$1" || tail -n 5 "$1"
+}
+
+# ⭐ OPENCL NEEDS NOTHING INSTALLED TO BE BUILT (⚖ 2026-10-21 "why dont we build opencl2 and opencl 1 automatically so
+#   there is nothing no one needs to do?"): the headers are Khronos' own, carried (scripts/third_party/OpenCL-Headers, as
+#   build.py does on Windows), and the families link against a stub `libOpenCL.so.1` made here from `cl.h`'s own calls —
+#   the SONAME every OpenCL loader carries, so the library names the loader as linking the real one would. The machine's
+#   own loader (ocl-icd, ROCm's, NVIDIA's) is what runs; where there is none the family does not load, and the others run.
+#   SILVANN_OPENCL_INCLUDE / SILVANN_OPENCL_LIB name others.
+opencl_link() {   # sets CLINC and CLLIB
+    CLINC=${SILVANN_OPENCL_INCLUDE:-scripts/third_party/OpenCL-Headers}
+    CLLIB=${SILVANN_OPENCL_LIB:-}
+    [ -f "$CLINC/CL/cl.h" ] || return 1
+    [ -n "$CLLIB" ] && return 0
+    CLLIB=$OUT/opencl_loader_stub
+    [ -f "$CLLIB/libOpenCL.so" ] && return 0
+    mkdir -p "$CLLIB"
+    # ⛳ the names as build.py reads them: `CL_API_CALL` and the name are on two lines in Khronos' cl.h
+    python3 -c 'import re, sys; print("".join("void %s(void) {}\n" % n for n in sorted(set(re.findall(r"CL_API_CALL\s+(cl\w+)\s*\(", open(sys.argv[1]).read())))), end="")' \
+        "$CLINC/CL/cl.h" > "$CLLIB/stub.c" || return 1
+    [ -s "$CLLIB/stub.c" ] || return 1     # an empty stub links nothing, and the families would not name the loader
+    gcc -shared -fPIC -Wl,-soname,libOpenCL.so.1 -o "$CLLIB/libOpenCL.so" "$CLLIB/stub.c" > "$CLLIB/stub.log" 2>&1
+}
+
 # ⛳ A FAMILY'S TRANSLATION UNIT IS ITS OWN `unit.cuh`; the `.cu` written here is the one line that
 #   includes it, because `one_tu` holds src/ to exactly one `.cu`.
 tu() {   # family
@@ -82,7 +109,7 @@ for P in $(echo "${SILVANN_SILICON_FAMILIES:-$ALL}" | tr ',' ' '); do
         # shellcheck disable=SC2086
         /opt/rocm/bin/hipcc ${GCC:+--gcc-install-dir=$GCC} $ARCHES $NNDIAL -O2 -std=c++17 -fPIC -shared -fvisibility=hidden -I src \
             "$OUT/amd_rocm6_wave64.cu" -o "$OUT/libsilvann_amd_rocm6_wave64.so" > "$OUT/amd_rocm6_wave64.log" 2>&1 \
-            || { echo "⛔ amd_rocm6_wave64:"; grep -m10 error "$OUT/amd_rocm6_wave64.log"; }
+            || { echo "⛔ amd_rocm6_wave64:"; reason "$OUT/amd_rocm6_wave64.log"; }
         built amd_rocm6_wave64 "$OUT/libsilvann_amd_rocm6_wave64.so" ;;
     nvidia_cuda12)
         NVCC=${SILVANN_NVCC:-$(command -v nvcc || echo "$(cd .. && pwd)/toolchains/cuda-12.9/bin/nvcc")}
@@ -99,13 +126,12 @@ for P in $(echo "${SILVANN_SILICON_FAMILIES:-$ALL}" | tr ',' ' '); do
         # shellcheck disable=SC2086
         "$NVCC" $GENCODE $NNDIAL -O2 -std=c++17 -cudart static -Xcompiler -fPIC,-fvisibility=hidden -shared -I src \
             "$OUT/nvidia_cuda12.cu" -o "$OUT/libsilvann_nvidia_cuda12.so" > "$OUT/nvidia_cuda12.log" 2>&1 \
-            || { echo "⛔ nvidia_cuda12:"; grep -m10 error "$OUT/nvidia_cuda12.log"; }
+            || { echo "⛔ nvidia_cuda12:"; reason "$OUT/nvidia_cuda12.log"; }
         built nvidia_cuda12 "$OUT/libsilvann_nvidia_cuda12.so" ;;
     khronos_opencl2)
         # ⛳ NO CARD COMPILER: the kernels are OpenCL C, generated from nn's rows and compiled by the runtime
         #   on the card it finds. What is built here is the host side, against the OpenCL loader.
-        CLINC=${SILVANN_OPENCL_INCLUDE:-/opt/rocm/include}; CLLIB=${SILVANN_OPENCL_LIB:-/opt/rocm/lib}
-        [ -f "$CLINC/CL/cl.h" ] || { echo "⛔ khronos_opencl2: no CL/cl.h under $CLINC (set SILVANN_OPENCL_INCLUDE)"; FAILED=1; continue; }
+        opencl_link || { echo "⛔ khronos_opencl2: no CL/cl.h under $CLINC, or the loader's stub would not build"; FAILED=1; continue; }
         python3 scripts/opencl_kernel_source.py "$OUT/khronos_opencl2_kernels.cpp" \
             || { echo "⛔ khronos_opencl2: nn's kernels would not become OpenCL C"; FAILED=1; continue; }
         tu khronos_opencl2 > "$OUT/khronos_opencl2.cpp"
@@ -114,14 +140,12 @@ for P in $(echo "${SILVANN_SILICON_FAMILIES:-$ALL}" | tr ',' ' '); do
             "$OUT/khronos_opencl2.cpp" "$OUT/khronos_opencl2_kernels.cpp" \
             -L "$CLLIB" -lOpenCL -lpthread -o "$OUT/libsilvann_khronos_opencl2.so" \
             > "$OUT/khronos_opencl2.log" 2>&1 \
-            || { echo "⛔ khronos_opencl2:"; grep -m10 error "$OUT/khronos_opencl2.log"; }
+            || { echo "⛔ khronos_opencl2:"; reason "$OUT/khronos_opencl2.log"; }
         built khronos_opencl2 "$OUT/libsilvann_khronos_opencl2.so" ;;
     khronos_opencl1_igpu)
         # ⛳ AS khronos_opencl2, NO CARD COMPILER — the kernels are OpenCL C 1.2, every pointer's space worked out by the
-        #   generator — and against whichever OpenCL headers and loader the box has: ROCm's, else the system's.
-        CLINC=${SILVANN_OPENCL_INCLUDE:-$([ -f /opt/rocm/include/CL/cl.h ] && echo /opt/rocm/include || echo /usr/include)}
-        CLLIB=${SILVANN_OPENCL_LIB:-$([ -d /opt/rocm/lib ] && echo /opt/rocm/lib || echo /usr/lib/x86_64-linux-gnu)}
-        [ -f "$CLINC/CL/cl.h" ] || { echo "⛔ khronos_opencl1_igpu: no CL/cl.h under $CLINC (set SILVANN_OPENCL_INCLUDE)"; FAILED=1; continue; }
+        #   generator — against the carried headers and the loader's stub (▶ `opencl_link`).
+        opencl_link || { echo "⛔ khronos_opencl1_igpu: no CL/cl.h under $CLINC, or the loader's stub would not build"; FAILED=1; continue; }
         python3 scripts/opencl1_kernel_source.py "$OUT/khronos_opencl1_igpu_kernels.cpp" \
             || { echo "⛔ khronos_opencl1_igpu: nn's kernels would not become OpenCL C 1.2"; FAILED=1; continue; }
         tu khronos_opencl1_igpu > "$OUT/khronos_opencl1_igpu.cpp"
@@ -130,7 +154,7 @@ for P in $(echo "${SILVANN_SILICON_FAMILIES:-$ALL}" | tr ',' ' '); do
             "$OUT/khronos_opencl1_igpu.cpp" "$OUT/khronos_opencl1_igpu_kernels.cpp" \
             -L "$CLLIB" -lOpenCL -lpthread -o "$OUT/libsilvann_khronos_opencl1_igpu.so" \
             > "$OUT/khronos_opencl1_igpu.log" 2>&1 \
-            || { echo "⛔ khronos_opencl1_igpu:"; grep -m10 error "$OUT/khronos_opencl1_igpu.log"; }
+            || { echo "⛔ khronos_opencl1_igpu:"; reason "$OUT/khronos_opencl1_igpu.log"; }
         built khronos_opencl1_igpu "$OUT/libsilvann_khronos_opencl1_igpu.so" ;;
     x86_avx2)
         # ⛳ THE CPU: g++ for the instruction set the family's name promises — the bodies and the overrides are
@@ -140,7 +164,7 @@ for P in $(echo "${SILVANN_SILICON_FAMILIES:-$ALL}" | tr ',' ' '); do
         g++ $NNDIAL -O3 -mavx2 -mfma -mf16c -std=c++17 -fPIC -shared -fvisibility=hidden -I src \
             "$OUT/x86_avx2.cpp" -lpthread -o "$OUT/libsilvann_x86_avx2.so" \
             > "$OUT/x86_avx2.log" 2>&1 \
-            || { echo "⛔ x86_avx2:"; grep -m10 error "$OUT/x86_avx2.log"; }
+            || { echo "⛔ x86_avx2:"; reason "$OUT/x86_avx2.log"; }
         built x86_avx2 "$OUT/libsilvann_x86_avx2.so" ;;
     *) echo "⛔ $P: this script has no recipe for it — which compiler, and how its targets are passed"; FAILED=1 ;;
     esac

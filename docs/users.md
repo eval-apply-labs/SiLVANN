@@ -1,6 +1,6 @@
 # Running SiLVANN
 
-This is a **developer preview (v0.15.0)**. It is tested on Linux with AMD Instinct MI50 cards (gfx906, ROCm 6), with an
+This is a **developer preview (v0.15.1)**. It is tested on Linux with AMD Instinct MI50 cards (gfx906, ROCm 6), with an
 NVIDIA GeForce RTX 5060 Ti (sm_120, CUDA 12.9), and on the CPU alone with AVX2 and with AVX-512 — on Ubuntu 22.04 — and
 natively on Windows on one PC, with an RTX 5070 Ti ([below](#on-windows)). Other NVIDIA generations are untested; macOS is
 not supported. If something does not build or does not run on your
@@ -28,6 +28,8 @@ command's `serve`, `ui` and `download` read the folder; the server and the UI st
 also comes before it. It installs nothing system-wide and asks for no
 password: a tool it needs and does not find — Python's `venv` and its headers (`python3-dev`), `g++`, `git` — it names, with the `apt` line that installs
 it. A card whose compiler is missing (CUDA's `nvcc`, ROCm's `hipcc`) is named too; install it, then `silvann build`.
+An NVIDIA card older than CUDA's family takes (compute capability below 7.5: a GTX 10x0) is built for through OpenCL 1.2
+instead, with nothing to install but the card's driver — a developer preview, not yet checked on such a card.
 
 **By hand:** you need Python 3.10 or newer with its headers (`python3-dev` on Debian and Ubuntu), `g++`, for AMD cards ROCm's `hipcc` (`/opt/rocm/bin/hipcc`), and for NVIDIA cards CUDA
 12's `nvcc` — found on the `PATH`, or named by `SILVANN_NVCC=/usr/local/cuda-12.9/bin/nvcc`.

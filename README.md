@@ -1,6 +1,6 @@
 # SiLVANN
 
-> **Developer preview, v0.15.0.** It runs the models below well on the hardware it was tested on, and it is shared
+> **Developer preview, v0.15.1.** It runs the models below well on the hardware it was tested on, and it is shared
 > for people who can find their way around a build and a stack trace. NVIDIA cards are tested on two, a GeForce
 > RTX 5060 Ti and an RTX 5070 Ti; Windows natively on one PC; macOS is not supported.
 
@@ -67,7 +67,22 @@ v0.11.1, the RTX 5070 Ti's with v0.11.0. v0.11.0's server drew each token with n
 card, through OpenCL and on the CPU alone: the 35B answered in the chat at 32-35 tokens a second on the RTX 5060 Ti,
 and answers at 67 now ([`docs/results.md`](docs/results.md)).
 
-**New in v0.15.0:** A mixture-of-experts model runs over several cards, GLM 5.3 Flash takes a mask, and a model whose experts are
+**New in v0.15.1:** Windows has its prebuilt libraries again, and an older NVIDIA card runs through OpenCL 1.2.
+
+**Windows.** v0.15.0's Windows evaluator did not build, so its release carried no `silvann_windows_x64.zip` and
+`install.ps1` built the libraries itself. This release carries them again.
+
+**An older NVIDIA card, through OpenCL 1.2.** CUDA's family takes compute capability 7.5 and newer. A card older than
+that — a GTX 10x0 — now runs through the OpenCL 1.2 family instead of the CPU, with nothing to install but the card's
+driver. A developer preview: not yet checked on such a card.
+
+**OpenCL built by every install.** On Linux both OpenCL families are built every time, against Khronos' headers carried
+in the release, and need no package to build. At run time they take only a card no other family takes.
+
+**The installer.** A source other than GitHub (`SILVANN_SOURCE`) is cloned with `git`, which it now asks for; a family
+that does not build says why.
+
+**v0.15.0:** A mixture-of-experts model runs over several cards, GLM 5.3 Flash takes a mask, and a model whose experts are
 copied into RAM needs much less memory to start.
 
 **An MoE over several cards.** `tensor_parallel` now splits a mixture-of-experts model's attention by heads too: the Qwen

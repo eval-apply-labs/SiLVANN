@@ -147,7 +147,12 @@ runs on the MI50 through ROCm's OpenCL (nn's verbs, the 27B and the 35B against 
 (nn's verbs, every pack but GLM's against HF); `khronos_opencl1_igpu`, for integrated GPUs whose OpenCL is 1.2, on the
 same card through NVIDIA's OpenCL (nn's verbs, the 27B against HF): its build writes nn's kernels as OpenCL C 1.2 with
 every pointer's address space worked out (`engine/scripts/opencl1_kernel_source.py`), and its folder's README says what
-it is for and how a device is added.
+it is for and how a device is added. Both OpenCL families are built by every Linux install, with nothing installed for them: the headers are
+Khronos' own, carried in `engine/scripts/third_party/OpenCL-Headers`, and they link against a stub of the OpenCL loader
+made from `cl.h` (`libOpenCL.so.1`, the name every loader carries), so the machine's own loader is the one that runs. They
+take a card only when no other family does — an NVIDIA card below compute capability 7.5 (a GTX 10x0) goes to
+`khronos_opencl1_igpu`, an AMD card without ROCm's HIP to `khronos_opencl2` — and where there is no loader they do not
+load and the others run.
 
 ## When a card faults
 

@@ -208,7 +208,7 @@ static nn__buffer__bounce nn__buffer__zzprivate_bounces[SYS__SILICON__WORKERS_MA
 
 static void nn__buffer__zzprivate_bounce_drop(nn__buffer__bounce* b) {
     for (unsigned i = 0u; i < 2u; ++i) if (b->registered[i]) sys__gpu__memory_unregister_host(b->family[i], b->at);
-    free(b->at);
+    sys__os__memory_aligned_free(b->at);        /* as it was allocated: Windows' _aligned_free */
     b->at = 0; b->room = 0ull; b->registered[0] = b->registered[1] = false;
 }
 
@@ -222,7 +222,7 @@ static nn__buffer__bounce* nn__buffer__zzprivate_bounce(unsigned w, uint64_t byt
     if (c->at != 0 && c->room >= bytes && c->family[0] == a && c->family[1] == b) return c;
     const uint64_t room = c->room > bytes ? c->room : (bytes + 4095ull) & ~4095ull;
     if (c->at != 0) nn__buffer__zzprivate_bounce_drop(c);
-    c->at = (unsigned char*)aligned_alloc(4096u, (size_t)room);
+    c->at = (unsigned char*)sys__os__memory_aligned(4096u, (size_t)room);   /* the system's (Windows has no aligned_alloc) */
     if (c->at == 0) { sys__os__lock_give(&c->lock); return 0; }
     c->room = room; c->family[0] = a; c->family[1] = b;
     void* card_at = 0;

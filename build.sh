@@ -27,9 +27,12 @@ for f in engine/build/silicon_families/*.skipped; do
 done
 
 "$PY" - <<'PY'
+import os
 import sys
 sys.path.insert(0, "lib")
 import silvann_engine_cpu as e
-names = ["%s (%s)" % (f.get("silicon"), f.get("outcome")) if isinstance(f, dict) else str(f) for f in e.silicon_families()]
+# a family by its file's name: `silicon` is None for one that did not load, which the line once printed as "None"
+names = ["%s (%s)" % (f.get("silicon") or os.path.basename(f.get("path") or "?").replace("libsilvann_", "").split(".")[0],
+                      f.get("outcome")) if isinstance(f, dict) else str(f) for f in e.silicon_families()]
 print("== built: the evaluator, and the families", ", ".join(names) or "(none)")
 PY
