@@ -155,11 +155,39 @@ static inline void x86_avx2__file_close(uint64_t handle) { sys__file__zzabi_clos
 /* A file mapped as memory, over memory the program already holds — the pages there are replaced by the file's, read
  * from the disk when first touched and kept as the system keeps a file's pages. `sys__file__zzabi_open`'s handle is
  * the descriptor plus one. The mapping outlives the handle, and `memory_free` unmaps it with the rest. */
+/* ⭐ WHERE A FILE IS MAPPED — the ranges `memory_map_file` made, so `memory_prefetch` asks the system of those alone: the
+ *   rest is memory this family allocated, in memory already. A runtime maps a file a layer or a part (▶ deepseek4.py,
+ *   experts_file.py); past the table's room every range is asked of, as before it. A range freed and allocated again
+ *   is still asked of, which is slower and no less right. */
+#define X86_AVX2__ZZPRIVATE_FILE_RANGES 256u
+static uintptr_t     x86_avx2__zzprivate_file_from[X86_AVX2__ZZPRIVATE_FILE_RANGES];
+static uintptr_t     x86_avx2__zzprivate_file_to[X86_AVX2__ZZPRIVATE_FILE_RANGES];
+static uint32_t      x86_avx2__zzprivate_file_ranges = 0u;            /* past the room: X86_AVX2__ZZPRIVATE_FILE_RANGES + 1 */
+static sys__os__lock x86_avx2__zzprivate_file_lock = SYS__OS__LOCK_INIT;
+
 static inline bool x86_avx2__memory_map_file(void* at, size_t bytes, uint64_t handle, uint64_t offset) {
     if (at == 0 || bytes == 0u || handle == 0ull || (uintptr_t)at % X86_AVX2__ZZPRIVATE_PAGE != 0u
         || offset % X86_AVX2__ZZPRIVATE_PAGE != 0ull)
         return false;
+    sys__os__lock_take(&x86_avx2__zzprivate_file_lock);
+    const uint32_t n = x86_avx2__zzprivate_file_ranges;
+    if (n < X86_AVX2__ZZPRIVATE_FILE_RANGES) {
+        x86_avx2__zzprivate_file_from[n] = (uintptr_t)at;
+        x86_avx2__zzprivate_file_to[n] = (uintptr_t)at + bytes;
+    }
+    /* recorded before the mapping is made, so no reader ever takes the range for the family's own */
+    __atomic_store_n(&x86_avx2__zzprivate_file_ranges, n < X86_AVX2__ZZPRIVATE_FILE_RANGES ? n + 1u : X86_AVX2__ZZPRIVATE_FILE_RANGES + 1u,
+                     __ATOMIC_RELEASE);
+    sys__os__lock_give(&x86_avx2__zzprivate_file_lock);
     return sys__os__memory_map_file(at, bytes, sys__file__zzabi_descriptor(handle), offset);
+}
+/* Whether `[from, to)` may hold a file's pages: it meets a range a file was mapped over, or the table ran out of room. */
+static inline bool x86_avx2__zzprivate_file_backed(uintptr_t from, uintptr_t to) {
+    const uint32_t n = __atomic_load_n(&x86_avx2__zzprivate_file_ranges, __ATOMIC_ACQUIRE);
+    if (n > X86_AVX2__ZZPRIVATE_FILE_RANGES) return true;
+    for (uint32_t i = 0u; i < n; ++i)
+        if (from < x86_avx2__zzprivate_file_to[i] && x86_avx2__zzprivate_file_from[i] < to) return true;
+    return false;
 }
 /* ⭐ THE PAGERS — a few threads that do nothing but bring a range's pages into memory, by touching them: a page not in
  * memory is read from the disk by the thread that touches it, so several of them keep the disk reading several
@@ -223,11 +251,14 @@ static void x86_avx2__zzprivate_page_in(uintptr_t from, uintptr_t to) {
 }
 
 /* Whether every page of the range is in memory, from the system's own record (`sys__os__memory_resident`), a page-aligned run at a time;
- * when one is not, the range is handed to the pagers and not waited for. Memory the program allocated is always in it. */
+ * when one is not, the range is handed to the pagers and not waited for. Memory the program allocated is always in it, and
+ * is answered at once: asking the system of a routed expert's 4,320 pages took ~0.1 ms of a DeepSeek layer's 2 ms on the
+ * CPU, six experts a position — `MEASURED` node03 2026-10-21 (measurements/2026-10-21_cpu_experts_node03.md). */
 static inline bool x86_avx2__memory_prefetch(const void* at, size_t bytes) {
     if (at == 0 || bytes == 0u) return true;
     const uintptr_t first = (uintptr_t)at / X86_AVX2__ZZPRIVATE_PAGE * X86_AVX2__ZZPRIVATE_PAGE;
     const uintptr_t end = (uintptr_t)at + bytes;
+    if (!x86_avx2__zzprivate_file_backed(first, end)) return true;
     unsigned char in[1024];
     bool all = true;
     for (uintptr_t a = first; a < end && all; a += sizeof in * X86_AVX2__ZZPRIVATE_PAGE) {

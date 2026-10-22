@@ -333,7 +333,16 @@ starts with its share of every layer, and each expert it takes in sends one back
 left. The memory the tier holds is RAM given back — about 18 GB for an 18 GB tier — so a box short of RAM by about the
 tier's size runs the model without the disk. It costs speed where a card cannot copy both ways at once: on our MI50 a
 token went from 107 to 138 ms. The engine measures that at boot and, on such a card, sends an expert back only after
-the one coming in has arrived.
+the one coming in has arrived. Over a group of cards (`tensor_parallel`) each card's exclusive tier is its own: an expert
+is on one card or in RAM, and the group gives back the RAM of every card's tier.
+
+### The experts in RAM, and swap
+
+With swap on, set `vm.swappiness` to 1: `sudo sysctl vm.swappiness=1`, and a line `vm.swappiness=1` in a file under
+`/etc/sysctl.d/` to keep it after a restart. At Linux's default of 60, the kernel can move the experts out to swap to
+keep other files in its cache, and read them back while the model answers. On our MI50 with GLM 5.3 Flash's experts in
+RAM (143 GB of a 251 GB machine), a token took 115–125 ms at 60, with gigabytes swapped each run, and 103–111 ms at 1,
+with almost nothing swapped. Turning swap off does the same.
 
 ## 5. The experts on the disk
 
@@ -347,6 +356,10 @@ when a token picks it, so the disk's speed is the answer's speed. On our test ma
 5.7 tokens a second with 128 GB of RAM from a disk that reads 5 GB/s. Keep the disk cool: a hot NVMe drive slows itself down. Every measurement: [`results.md`](results.md). The engine keeps as many experts
 as the memory there is allows — the process's own limit when it has one — less a quarter of it for everything else,
 at least 3 GB and at most 8 GB.
+
+DeepSeek-V4.1-Flash has no `disk`: the layers RAM does not hold are written once to `models/<name>/experts/` (6.8 GB a
+layer) and read through the system's page cache (`experts_from: "mapped"`, chosen at boot), so leave that much room on
+the disk beside its 491 GB ([`config.md`](config.md#deepseek-v41-flashs-options)).
 
 ## 6. A model over several machines
 

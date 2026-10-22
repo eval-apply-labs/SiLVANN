@@ -12,6 +12,8 @@
 #include "primitives.cuh"
 #include "result.cuh"
 #include "vector.cuh"
+#include "hyper.cuh"
+#include "index.cuh"
 
 /* Into nn's table, once, when the family is first asked for it. */
 static inline void amd_rocm6_wave64__override_doors(nn__doors* doors) {
@@ -22,6 +24,7 @@ static inline void amd_rocm6_wave64__override_doors(nn__doors* doors) {
     doors->attention_residual_mix       = amd_rocm6_wave64__override_attention_residual_mix;
     doors->attention_scores             = amd_rocm6_wave64__override_attention_scores;
     doors->attention_mix                = amd_rocm6_wave64__override_attention_mix;
+    doors->attention_scores_grouped     = amd_rocm6_wave64__override_attention_scores_grouped;
     doors->deltanet_steps               = amd_rocm6_wave64__override_deltanet_steps;
     doors->deltanet_step                = amd_rocm6_wave64__override_deltanet_step;
     doors->hadamard_rotate      = amd_rocm6_wave64__override_hadamard_rotate;
@@ -43,6 +46,8 @@ static inline void amd_rocm6_wave64__override_doors(nn__doors* doors) {
     doors->attention_set             = amd_rocm6_wave64__override_attention_set;
     doors->attention_limits          = amd_rocm6_wave64__override_attention_limits;
     doors->hadamard_ladder_rows      = amd_rocm6_wave64__override_hadamard_ladder_rows;
+    doors->hyper_pre_fp32            = amd_rocm6_wave64__override_hyper_pre_fp32;
+    doors->index_select              = amd_rocm6_wave64__override_index_select;
 }
 
 #endif /* SILVANN__SILICON_FAMILIES_AMD_ROCM6_WAVE64_OVERRIDES_DOORS_CUH */

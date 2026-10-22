@@ -327,7 +327,10 @@ static uint64_t nn__routed__rows(sys__engine__ctx* ctx, const nn__doors* doors, 
         if (!sys__gpu__memory_read(ctx->family, chosen, (const void*)(uintptr_t)(hand + r->picks_at), 8u * K)
          || !sys__gpu__memory_read(ctx->family, weight, (const void*)(uintptr_t)(hand + 2u * H), 2u * K)) { fault = NN__PRIMITIVES__FAULT_NO_DEVICE; break; }
         for (uint64_t j = 0u; j < K; ++j) {
-            if (chosen[j] >= 2u * E) { fault = NN__ROUTED__FAULT_EXPERT; break; }
+            if (chosen[j] >= 3u * E) { fault = NN__ROUTED__FAULT_EXPERT; break; }
+            /* a pick numbered past `2·experts` is held by another card of a group's exclusive tiers: neither this card's
+             *   to compute nor the CPUs' (▶ `nn__expert_tier__chunk`) */
+            if (chosen[j] >= 2u * E) continue;
             const bool marked = chosen[j] >= E;                                    /* held by a card's tier */
             if (marked != holds) continue;
             const uint64_t id = marked ? chosen[j] - E : chosen[j];

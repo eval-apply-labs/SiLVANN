@@ -71,9 +71,6 @@ class DeepSeek4(Generates):
     #   position (`engram_rows`), which `generate`'s loop on the card would leave the last position's — so a session steps
     #   every token (▶ session.py's `GENERATES`)
     GENERATES = False
-    # a conversation brought back reads its tokens again: the state it leaves on the card (each layer's ring, the
-    #   compressed latents and their index keys) is not read off yet (▶ session.py's `PARKS`)
-    PARKS = False
 
     @staticmethod
     def longest_context(config):
@@ -88,8 +85,8 @@ class DeepSeek4(Generates):
         return min(most) if most else None
 
     def __init__(self, folder, machine, max_context=512, layers=None, experts_int8=True, engram_from=None,
-                 experts_from="ram", experts_in_ram=0, experts_dir=None, socket=None, card=0, cards=None,
-                 card_experts=0):
+                 experts_from="ram", experts_in_ram=0, experts_lock=False, experts_dir=None, socket=None, card=0, cards=None,
+                 card_experts=0, chunk=128, card_experts_gb=0, card_shared="auto", card_landing=1, card_landing_line=3):
         if folder.architecture not in ARCHITECTURES:
             raise Refused("%s is a %r model, not one of %s" % (folder.path, folder.architecture, ARCHITECTURES))
         c, b = folder.config, folder.bundle
@@ -176,6 +173,7 @@ class DeepSeek4(Generates):
         if experts_from not in ("ram", "mapped"):
             raise Refused("experts_from is 'ram' or 'mapped', not %r" % (experts_from,))
         self.EXPERTS_FROM, self.EXPERTS_IN_RAM = experts_from, int(experts_in_ram)
+        self.EXPERTS_LOCK, self.LOCKED_GB = bool(experts_lock), 0.0      # ▶ `_plan`
         # ⭐ THE CARDS' SHARE OF THE ROUTED EXPERTS — ⚖ 2026-10-19: *"each card keeps their half of the expert they are
         #   computing, and at the end we add up the two partials"*. Experts 0 .. card_experts-1 of every layer on the cards,
         #   each card its part of their inner width (the shared expert's cut: whole rotation blocks), the rest in the CPU's
@@ -185,8 +183,43 @@ class DeepSeek4(Generates):
         self.NK = int(card_experts)
         if not 0 <= self.NK <= self.EXPERTS:
             raise Refused("card_experts is 0 .. %d, not %d" % (self.EXPERTS, self.NK))
+        # ⭐ A TIER A CARD (NN-99): `card_experts_gb` of each card's memory a cache of whole routed experts, promoted from the
+        #   CPU's RAM as they are picked (▶ nn's `nn__expert_tier`) — in a group every card a tier of its own, a position's
+        #   picks shared out among them and `card_shared` of each card's slots a layer the most picked, kept on every card;
+        #   the CPU computes the rest. A layer mapped from its file feeds no tier: its picks stay the CPU's. `card_landing`
+        #   and `card_landing_line` as GLM's (▶ `expert_tier.tier`).
+        self.CARD_GB = float(card_experts_gb or 0)
+        self.CARD_SHARED = None if card_shared in (None, "auto") else float(card_shared)   # "auto": ▶ `_shared_from_speeds`
+        self.CARD_SPEEDS, self._FED = None, {}
+        self.CARD_LANDING, self.CARD_LANDING_LINE = int(card_landing), int(card_landing_line)
+        if self.CARD_GB and self.NK:
+            raise Refused("card_experts (a fixed share on the cards) or card_experts_gb (a tier a card), not both")
+        if self.CARD_GB and self.TOPK > 12:
+            raise Refused("a tier takes at most 12 picks a position, not %d" % self.TOPK)
         self.experts_dir = experts_dir or os.path.join(folder.path, "experts")
         self._plan()
+        # ⭐ A PROMPT AS ROWS (▶ `prefill`): `chunk` positions a step, a layer at a time — each row's attention in order,
+        #   the routed experts once over the chunk on the CPU; over a group every card's rows sites taking the group's sum of
+        #   the chunk's rows. A card's share of the experts reads a prompt a position at a time
+        self.CHUNK = int(chunk) if not self.NK else 0
+        if self.CHUNK > 4096:
+            raise Refused("chunk is at most 4096 positions, not %d" % self.CHUNK)
+        self.HANDB = ((2 * self.H + 2 * self.TOPK + 7) & ~7) + 8 * self.TOPK    # a hand's bytes: ▶ AI_DEEPSEEK_4__HAND
+        # `experts_rows`' scratch: the rows' inputs, each pick's pair and weight, its gate-and-up, activation and rotated
+        #   rows, and its fp32 sum (▶ nn's `nn__routed__rows`), P the chunk's picks
+        P = self.CHUNK * self.TOPK
+        self.RSCRATCH = 2 * self.CHUNK * self.H + 18 * P + 8 * P * self.MINTER + 4 * P * self.H + 64
+        # the rows verbs' work (▶ the package's `ai_deepseek_4__rows__zzprivate_take`): the pairs, then the attention
+        #   site's rows of each step — its input and rotated input, wq_a's and wkv's, the rank normed and rotated, the
+        #   query (its answer in place), the answer rotated, the groups' answer, the compressor's latents and gates, the
+        #   indexer's queries and weights — or the MoE close's: the shared expert's gate-and-up, activation, rotated, down
+        R, QW, ON, I = self.CHUNK, self.QH * self.HD, self.G * self.OR, self.MINTER
+        att = [8 * R * (3 + self.G), 2 * R * self.H, 2 * R * self.H, 2 * R * (self.QR + self.HD), 2 * R * self.QR, 2 * R * self.QR,
+               2 * R * QW, 2 * R * QW, 2 * R * ON, 4 * R * self.HD, 2 * R * self.IH * self.ID, 2 * R * self.IH]
+        close = [24 * R, 4 * R * I, 2 * R * I, 2 * R * I, 2 * R * self.H]
+        self.AWORK = max(sum(att) + 256 * len(att), sum(close) + 256 * len(close), 2 * R * self.H) if R else 0
+        self.ERWS = {}                    # each engram layer's rows for a chunk, on every card: (card, layer) -> address
+        self.ISEL_AT = {}                 # each index source's choices, on card 0: a row's `index_topk` and their count
         # ⭐ A MASK, where the folder's LoRA is one (▶ `nn_rank1_mask_from_projection.py`): `W' = W + Σ r_i·v_iᵀ` beside wo_b
         #   and the shared expert's down, each a site's cells past its table (▶ the package's AI_DEEPSEEK_4__MASK__* and
         #   `_mask_layout`). Chosen at boot.
@@ -296,6 +329,10 @@ class DeepSeek4(Generates):
         ram = run if self.EXPERTS_FROM == "ram" else run[:self.EXPERTS_IN_RAM]
         self.cpu_slots = sum(self.EXPERTS - self.NK if l in ram else self.EXPERTS for l in run)
         self.cpu_arena = self.EPLAN.slot_bytes * self.cpu_slots
+        # `experts_lock`: the layers copied into RAM locked there, so the system cannot swap them out — a mapped layer is
+        #   its file's (▶ `experts_file.lock_check`)
+        experts_file.lock_check(self.EXPERTS_LOCK, "ram" if ram else self.EXPERTS_FROM,
+                                self.EPLAN.slot_bytes * (self.EXPERTS - self.NK) * len(ram))
         # each card's slot of an expert: its part of the gate and up rows, their scales, its columns of every down row, every
         # down row's scale
         if any(dn.row_bytes * ip % self.MINTER for ip in self.I_OF):
@@ -303,6 +340,21 @@ class DeepSeek4(Generates):
         self.KPLANS = [NL.SlotPlan(2 * ip * gr.row_bytes, 2 * ip * 2, dn.rows * (dn.row_bytes * ip // self.MINTER), dn.rows * 2)
                        for ip in self.I_OF]
         self.T_CEXP = self.T_CACHE + 1
+        self.TIER_LEAST = len(run) * self.EPLAN.slot_bytes            # the least tier it takes: a slot a layer
+        self.CARD_SLOTS = 0
+        if self.CARD_GB:
+            # the tier's slots hold whole experts, as the CPU's do: gate and up rows first, then their scales, the down codes
+            #   and their scales — the layout nn's tier copies from RAM as it is (▶ `nn__expert_tier__stitch`)
+            if self.EPLAN.at_up_data != 0:
+                raise Refused("an expert's slot does not start with its gate rows, which a tier copies as they are")
+            self.CARD_SLOTS = int(self.CARD_GB * (1 << 30)) // self.EPLAN.slot_bytes
+            if self.CARD_SLOTS < len(run):
+                raise Refused("%.1f GB holds %d experts, fewer than one a layer" % (self.CARD_GB, self.CARD_SLOTS))
+            for k in range(self.P):
+                self.COLLECTIONS[k].append((self.T_CEXP, self.EPLAN, self.CARD_SLOTS))
+            self.ARENAS = [sum(p.slot_bytes * n for _, p, n in cs) for cs in self.COLLECTIONS]
+            self.collections, self.arena = self.COLLECTIONS[0], self.ARENAS[0]
+            self.GATE_ROW, self.DOWN_ROW = gr.row_bytes, dn.row_bytes
         if self.NK:
             for k in range(self.P):
                 self.COLLECTIONS[k].append((self.T_CEXP, self.KPLANS[k], self.NK * len(run)))
@@ -335,22 +387,31 @@ class DeepSeek4(Generates):
         """The card's section and the CPU worker's: {worker: text}."""
         kinds = "f" * self.LAYERS
         big = max(8 << 20, self.max_context * self.RD * 4, self.VOCAB * 2)
+        # a chunk's rows on card 0, a big buffer each: their streams, the hands, the experts' answers, the n-gram rows
+        R = self.CHUNK
+        rows = [R * self.MULT * self.H * 4, R * self.HANDB, R * self.H * 2, R * self.H * 2, self.AWORK] + (
+            [R * self.ENG.width * 2 for l in self.run_layers if l in self.ENGRAM] if self.ENG is not None else []) if R else []
         out = {}
+        # a group's other cards: their rows' streams and work, the n-gram rows — the rest fit the smaller classes
+        other = [R * self.MULT * self.H * 4, self.AWORK] + (
+            [R * self.ENG.width * 2 for l in self.run_layers if l in self.ENGRAM] if self.ENG is not None else []) if R else []
         for k in range(self.P):
             ask = self.MASK_ASK.get(k, 0)
-            out[k] = self._section(max(big, ask), self.ARENAS[k], self.COLLECTIONS[k], kinds, bigs=4 if ask else 3)
+            mine = rows if k == 0 else other
+            out[k] = self._section(max([big, ask] + mine), self.ARENAS[k], self.COLLECTIONS[k], kinds,
+                                   bigs=(4 if ask else 3) + len(mine))
             out[k] += ("nn__ram_buffer_result__size_bytes:64\nnn__ram_buffer_result__qty:1\n"
                        "nn__ram_buffer_experts__size_bytes:64\nnn__ram_buffer_experts__qty:1\n"
                        "nn__ram_buffer_table__size_bytes:%d\nnn__ram_buffer_table__qty:1\n" % (self.TABLE_BYTES if k == 0 else 256))
         for c in self.CPUS:
-            out[c["w"]] = self._section(1 << 20, self.cpu_arena, [(0, self.EPLAN, self.cpu_slots)],
-                                        kinds, many=16)
+            out[c["w"]] = self._section(max(1 << 20, R * self.HANDB, R * self.H * 2, self.RSCRATCH if R else 0), self.cpu_arena,
+                                        [(0, self.EPLAN, self.cpu_slots)], kinds, many=16, bigs=3 + (3 if R else 0))
         return out
 
     # ── ② the load ───────────────────────────────────────────────────────────────────────────────────────────
     def load(self, progress=None):
         m, b = self.m, self.b
-        self.ring_at, self.CB, self.MASK_CELLS = {}, {}, {}
+        self.ring_at, self.cache_at, self.CB, self.MASK_CELLS = {}, {}, {}, {}
         for k in range(self.P):
             m.act_as(k)
             loader = m.loader()
@@ -374,9 +435,13 @@ class DeepSeek4(Generates):
                 loader.assign(l, self.T_RING, 0, self.ring_at[(k, l)])
                 if l in self.CACHE_ROWS:
                     loader.layer_width(l, self.T_CACHE, 1)
-                    loader.assign(l, self.T_CACHE, 0, loader.reserve(self.T_CACHE))
+                    self.cache_at[(k, l)] = loader.reserve(self.T_CACHE)
+                    loader.assign(l, self.T_CACHE, 0, self.cache_at[(k, l)])
             if self.NK:
                 self._load_card_experts(k, loader)
+            if self.CARD_GB:
+                for l in self.run_layers:
+                    loader.layer_width(l, self.T_CEXP, self.EXPERTS)
             if loader.handed() != 0:
                 raise Refused("card %d: %d slots were reserved and never published" % (k, loader.handed()))
             self._card_buffers(k)
@@ -389,15 +454,22 @@ class DeepSeek4(Generates):
         for k in range(self.P):
             m.act_as(k)
             self._tables(k)
+        if self.CARD_GB:
+            m.act_as(CARD)
+            expert_tier.bind(m, {k: self.sfx("tier_card", k) for k in range(self.P)}, len(self.workers()))
         if self.P > 1:
             # ⭐ THE GROUP: each card joins it on its own worker, card 0 first (▶ nn's `nn__partials__join`)
             m.node_array("TP_POS", 1)
+            if self.CHUNK:
+                m.node_array("TP_ROWS", 2)          # a chunk's first position and its rows (▶ `_tp_rows`)
             for k in range(self.P):
                 m.act_as(k)
                 m.must("(nn__partials__join %d %d %d %d)" % (self.GROUP, k, self.P, min(4, self.P)),
                        "card %d joining the group" % k, "sys__value_true")
         m.act_as(CARD)
         m.define_programs(self._procedures)
+        if self.CARD_GB and self.P > 1 and self.CARD_SHARED is None:
+            self._shared_from_speeds()
         self.global_ = None
         self.b.release()                            # every layer's file let go (▶ `Bundle.release`)
 
@@ -444,6 +516,7 @@ class DeepSeek4(Generates):
                                         list(range(self.LAYERS)))[0] for l in mapped}
         m.act_as(self.CPU)
         loader, at = m.loader(), {}
+        self.SRC = {}                     # a layer copied into RAM: its experts' addresses there, which a tier copies from
         for i, l in enumerate(self.run_layers):
             view = np.frombuffer(b.blob(l), dtype=np.uint8) if l in ram else None
             loader.layer_width(l, 0, self.EXPERTS)
@@ -456,6 +529,12 @@ class DeepSeek4(Generates):
                     for into, piece in self._expert_pieces(view, l, x, 0):
                         m.write_from(at[(l, x)] + into, piece.ctypes.data, piece.nbytes)
                 loader.assign(l, 0, x - self.NK if x >= self.NK else self.EXPERTS - self.NK + x, at[(l, x)])
+            if l in ram:
+                self.SRC[l] = [at[(l, x)] for x in range(self.EXPERTS)] if not self.NK else None
+                # the layer's file let go once its experts are copied out — the loop's last slice of its map with it — so
+                #   its pages do not sit beside the experts in RAM until the load ends (▶ `Bundle.release`)
+                view = piece = None
+                b.release(l)
             if progress and l in ram:
                 progress(i + 1, len(self.run_layers))
         if loader.handed() != 0:
@@ -466,6 +545,8 @@ class DeepSeek4(Generates):
                 raise Refused("layer %d's slots were not handed out one after another, as its file is laid out" % l)
             # ⛳ A LAYER'S SLOTS ARE A WHOLE NUMBER OF PAGES (384 × 17,714,176 bytes), so each layer starts on a page
             m.map_file(lo, p.slot_bytes * self.EXPERTS, paths[l], 0)
+        self.LOCKED_GB = experts_file.lock_experts(self.EXPERTS_LOCK, [at[(l, x)] for l in ram for x in range(self.NK, self.EXPERTS)],
+                                                   p.slot_bytes)
         m.act_as(CARD)
 
     def _card_buffers(self, k):
@@ -513,14 +594,45 @@ class DeepSeek4(Generates):
             m.buffer(4 * (max(self.CACHE_ROWS.values()) + 1), n("iscores"))
             for l in self.run_layers:
                 if l in self.INDEXERS:
-                    m.buffer(4 * (self.TOPK_C + 1), n("isel%d" % l))
+                    # a choice a row: a chunk's rows each keep theirs (▶ the package's A PROMPT AS ROWS)
+                    at = m.buffer(4 * (self.TOPK_C + 1) * max(1, self.CHUNK), n("isel%d" % l))
+                    if k == 0:
+                        self.ISEL_AT[l] = at
         m.buffer(self.QH * (self.W + self.TOPK_C) * 4, n("scores"))
         QW, ON, I = self.QH * self.HD, self.G * self.OR, self.MINTER
         m.buffer(2 * (5 * H + 3 * self.QR + self.HD + 3 * QW + 2 * ON + 4 * self.HD + self.ID + self.IH * self.ID + self.IH) + 256,
                  n("ascratch"))
         m.buffer(2 * (4 * H + self.EXPERTS) + 8 * I + 256, n("mscratch"))
         cb["hand"] = m.buffer(2 * (H + self.TOPK), n("hand"))
-        if self.NK:
+        if k == 0 and self.CHUNK:
+            # a chunk's rows: their streams and the two sites' mixes, the hands the CPU reads, what its experts give back,
+            #   the n-gram memory's rows and the tokens
+            R = self.CHUNK
+            m.buffer(R * self.MULT * H * 4, "srows")
+            m.buffer(R * MIX_BYTES, "amix")
+            m.buffer(R * MIX_BYTES, "bmix")
+            m.buffer(R * self.HANDB, "hands")
+            m.buffer(R * H * 2, "rrows")
+            m.buffer(R * H * 2, "xrows")
+            m.buffer(self.AWORK, "awork")
+            m.node_array("TOKS", R)
+            m.node_array("ROWS_N", 1)
+        if self.CHUNK and self.P > 1:
+            # a group's chunk on every card: the sums of its rows (▶ ai_deepseek_4's `..._rows__zzprivate_sum`) and the rows'
+            #   embedding — card 0's, the group's sum of its own and the others' zeros; every other card its rows as card 0's
+            R = self.CHUNK
+            m.buffer(R * H * 2, n("tsums"))
+            m.buffer(R * H * 2, n("erows_e"))
+            if k > 0:
+                m.buffer(R * H * 2, n("zerows"), _half(np.zeros(R * H)))
+                m.buffer(R * self.MULT * H * 4, n("srows"))
+                m.buffer(R * MIX_BYTES, n("amix"))
+                m.buffer(R * MIX_BYTES, n("bmix"))
+                m.buffer(R * self.HANDB, n("hands"))
+                m.buffer(R * H * 2, n("xrows"))
+                m.buffer(R * H * 2, n("zrows"), _half(np.zeros(R * H)))
+                m.buffer(self.AWORK, n("awork"))
+        if self.NK or self.CARD_GB:
             m.buffer(8 * self.TOPK * self.MINTER, n("kscratch"))
             cb["routed_k"] = m.buffer(H * 2, n("routed_k"))
         m.node_array(n("picks"), self.TOPK)
@@ -534,6 +646,8 @@ class DeepSeek4(Generates):
                     q, kk = (np.asarray(NU.decode_record(rec(x).rec, self.b.blob(l)), dtype=np.float64)
                              for x in ("engram.q_weight", "engram.k_weight"))
                     m.buffer(self.MULT * H * 2, n("engw%d" % l), _half(q * kk))
+                    if self.CHUNK:
+                        self.ERWS[(k, l)] = m.buffer(self.CHUNK * self.ENG.width * 2, n("erows%d" % l))
             m.buffer(2 * (self.ENG.width + (self.MULT + 1) * H) + 256, n("escratch"))
         if k == 0:
             # card 0's, by the names the rest of this runtime reads them by
@@ -548,6 +662,10 @@ class DeepSeek4(Generates):
         for nm in ("e", "routed"):
             self.at[c(nm)] = m.buffer(H * 2, c(nm))
         m.buffer(2 * (H + self.TOPK), c("hand"))
+        if self.CHUNK:
+            m.buffer(self.CHUNK * self.HANDB, c("hands"))
+            m.buffer(self.CHUNK * H * 2, c("rrows"))
+            m.buffer(self.RSCRATCH, c("rscratch"))
         m.buffer(2 * H, c("zero"), _half(np.zeros(H)))
         m.buffer(8 * self.TOPK * self.MINTER, c("scratch"))
 
@@ -668,17 +786,69 @@ class DeepSeek4(Generates):
                 m.table(n("ek%d" % l), [n("signs"), n("zero_h"), n("kscratch"), l, self.T_CEXP, kp.at_up_lut - kp.at_up_data,
                                         kp.at_down_data - kp.at_up_data, kp.at_down_lut - kp.at_up_data, H, self.I_OF[k],
                                         self.EXPERTS, self.TOPK, self.E_D, 0, self.NK, 0, self.LIMIT])
+        if self.CARD_GB:
+            # the card's tier: a layer's experts table over every expert (its picks the ones the tier holds and the visit
+            #   gives this card), the layers copied into RAM its sources — their arrays made once, read by every card's
+            #   tier — and the tier itself, a layer's slice every card keeps in a group
+            p = self.EPLAN
+            fed = {}
+            for l in self.run_layers:
+                m.table(n("exk%d" % l), [n("signs"), n("zero_h"), n("kscratch"), l, self.T_CEXP, p.at_up_lut - p.at_up_data,
+                                         p.at_down_data - p.at_up_data, p.at_down_lut - p.at_up_data, H, self.MINTER,
+                                         self.EXPERTS, self.TOPK, self.E_D, 0, self.EXPERTS, 0, self.LIMIT])
+                if self.SRC.get(l):
+                    if k == 0:
+                        self._int_array("src%d" % l, self.SRC[l])
+                    fed[l] = "src%d" % l
+            self._FED[k] = fed
+            self._tier(k)
         if k != 0:
             return
         p = self.EPLAN
         m.act_as(self.CPU)
         c = lambda name: self.cn(0, name)
         for l in self.run_layers:
-            m.table("ex%d_0" % l, [c("signs"), c("zero"), c("scratch"), l, 0, p.at_up_lut - p.at_up_data,
-                                   p.at_down_data - p.at_up_data, p.at_down_lut - p.at_up_data, H, self.MINTER,
-                                   self.EXPERTS, self.TOPK, self.E_D, self.NK, self.EXPERTS - self.NK, 1 if self.EXPERTS_INT8 else 0,
-                                   self.LIMIT])
+            cells = [l, 0, p.at_up_lut - p.at_up_data, p.at_down_data - p.at_up_data, p.at_down_lut - p.at_up_data, H, self.MINTER,
+                     self.EXPERTS, self.TOPK, self.E_D, self.NK, self.EXPERTS - self.NK, 1 if self.EXPERTS_INT8 else 0, self.LIMIT]
+            m.table("ex%d_0" % l, [c("signs"), c("zero"), c("scratch")] + cells)
+            if self.CHUNK:                    # a chunk's: the same experts, `experts_rows`' scratch
+                m.table("exr%d_0" % l, [c("signs"), c("zero"), c("rscratch")] + cells)
         m.act_as(k)
+
+    def _tier(self, k):
+        """Card `k`'s tier table (▶ `expert_tier.tier`), with the share of its slots a layer every card keeps in a group —
+        none until it is known (`_shared_from_speeds`)."""
+        p, part = self.EPLAN, self.CARD_SHARED or 0.0
+        shared = int(round(part * self.CARD_SLOTS / len(self.run_layers))) if self.P > 1 else 0
+        expert_tier.tier(self.m, self.sfx("tier_card", k), self.T_CEXP, self.EXPERTS, self.TOPK, self.H, self.MINTER, p, self.LAYERS,
+                         self._FED[k], 1, p, self.GATE_ROW, self.DOWN_ROW, self.CARD_LANDING, None, self.CARD_LANDING_LINE,
+                         ranks=self.P, shared=shared)
+
+    def _shared_from_speeds(self):
+        """`card_shared` "auto" in a group: a CPU pick against a card expert, timed here (▶ `expert_tier.speeds` — the
+        first fed layer's first experts, the head's product on card 0 priced to a routed expert's bytes), the slice from
+        them, and every card's tier made again with it."""
+        m = self.m
+        l = next((l for l in self.run_layers if l in self._FED[0]), self.run_layers[0])
+        cpu_s, card_s = expert_tier.speeds(m, CARD, self.CPU, "picks", list(range(self.TOPK)),
+                                           "(ai_deepseek_4__experts c_hand picks ex%d_0 c_routed)" % l,
+                                           self.EPLAN.slot_bytes / expert_tier.head_bytes(self.HPLAN))
+        self.CARD_SHARED = expert_tier.slice_of(cpu_s, card_s)
+        self.CARD_SPEEDS = dict(cpu_ms=cpu_s * 1e3, card_ms=card_s * 1e3, ratio=cpu_s / max(card_s, 1e-12), shared=self.CARD_SHARED)
+        for k in range(self.P):
+            m.act_as(k)
+            self._tier(k)
+        m.act_as(CARD)
+        expert_tier.bind(m, {k: self.sfx("tier_card", k) for k in range(self.P)}, len(self.workers()))
+
+    def _int_array(self, name, values):
+        """A node array of integers, bound by name — filled a hundred at a time, as a program must fit one heap chunk."""
+        m = self.m
+        m.node_array(name, len(values))
+        for at in range(0, len(values), 100):
+            m.must("(begin %s (< 0 1))" % " ".join("(sys__node_array__set %s %d %d)" % (name, i, v)
+                                                     for i, v in enumerate(values[at:at + 100], at)),
+                   "the array %s" % name, "sys__value_true")
 
     def _compressed(self, l, k=0):
         """A compressing layer's cells past its table (▶ AI_DEEPSEEK_4__CMP__*): its source's cache, the source's own
@@ -713,11 +883,15 @@ class DeepSeek4(Generates):
         tp = " GROUP tsum" if self.P > 1 else ""
         engram = "(ai_deepseek_4__engram streams en%d) " % l if l in self.ENGRAM else ""
         mine = "(ai_deepseek_4__experts hand picks ek%d routed_k) " % l if self.NK else ""
-        add = " (nn__vector__add routed routed_k routed %d)" % H if self.NK else ""
-        return (engram + "(ai_deepseek_4__attention streams at%d pos%s) (ai_deepseek_4__route streams mo%d hand picks) "
-                "(sys__compute %d names xf%d_0) %s(ai_deepseek_4__shared hand mo%d) (sys__result %d) "
+        add = " (nn__vector__add routed routed_k routed %d)" % H if self.NK or self.CARD_GB else ""
+        # ⭐ A TIER'S CARD FIRST: its visit marks the picks the cards compute before the CPU reads them, and the card's share
+        #   is queued; the CPU starts after it, and the writes a promotion held back go once the CPU is done
+        tier = "(ai_deepseek_4__experts hand picks exk%d routed_k %s) " % (l, expert_tier.BINDING) if self.CARD_GB else ""
+        written = " (nn__expert_tier__written %s)" % expert_tier.BINDING if self.CARD_GB else ""
+        return (engram + "(ai_deepseek_4__attention streams at%d pos%s) (ai_deepseek_4__route streams mo%d hand picks) %s"
+                "(sys__compute %d names xf%d_0) %s(ai_deepseek_4__shared hand mo%d) (sys__result %d)%s "
                 "(nn__buffer__copy c_routed %d routed %d)%s (ai_deepseek_4__close streams mo%d routed%s)"
-                % (l, tp, l, CPU, l, mine, l, CPU, CPU, 2 * H, add, l, tp))
+                % (l, tp, l, tier, CPU, l, mine, l, CPU, written, CPU, 2 * H, add, l, tp))
 
     def _tp_layers(self, k):
         """Every layer at the position in TP_POS on card `k` past the first, by its own names: the same sites as card 0's,
@@ -727,12 +901,14 @@ class DeepSeek4(Generates):
         for l in self.run_layers:
             if l in self.ENGRAM:
                 out.append("(ai_deepseek_4__engram %s %s)" % (n("streams"), n("en%d" % l)))
-            mine = ("(ai_deepseek_4__experts %s %s %s %s) " % (n("hand"), n("picks"), n("ek%d" % l), n("routed_k"))
-                    if self.NK else "")
+            mine = ("(ai_deepseek_4__experts %s %s %s %s) " % (n("hand"), n("picks"), n("ek%d" % l), n("routed_k")) if self.NK else
+                    "(ai_deepseek_4__experts %s %s %s %s %s) " % (n("hand"), n("picks"), n("exk%d" % l), n("routed_k"), expert_tier.BINDING)
+                    if self.CARD_GB else "")
             out.append("(ai_deepseek_4__attention %s %s %s GROUP %s) (ai_deepseek_4__route %s %s %s %s) %s(ai_deepseek_4__shared %s %s) "
-                       "(ai_deepseek_4__close %s %s %s GROUP %s)"
+                       "(ai_deepseek_4__close %s %s %s GROUP %s)%s"
                        % (n("streams"), n("at%d" % l), pos, n("tsum"), n("streams"), n("mo%d" % l), n("hand"), n("picks"), mine,
-                          n("hand"), n("mo%d" % l), n("streams"), n("mo%d" % l), n("routed_k") if self.NK else n("zero_h"), n("tsum")))
+                          n("hand"), n("mo%d" % l), n("streams"), n("mo%d" % l), n("routed_k") if self.NK or self.CARD_GB else n("zero_h"),
+                          n("tsum"), " (nn__expert_tier__written %s)" % expert_tier.BINDING if self.CARD_GB else ""))
         return " ".join(out)
 
     def _procedures(self):
@@ -758,6 +934,9 @@ class DeepSeek4(Generates):
         for l in self.run_layers:
             m.picture("xf%d_0" % l, "(begin (nn__buffer__copy hand %d c_hand %d) (ai_deepseek_4__experts c_hand picks ex%d_0 c_routed))"
                       % (CARD, 2 * (self.H + self.TOPK), l))
+            if self.CHUNK:                    # a chunk's experts: its hands across, every expert they picked once
+                m.picture("xr%d_0" % l, "(begin (nn__buffer__copy hands %d c_hands (* (nth ROWS_N 0) %d)) "
+                          "(ai_deepseek_4__experts_rows c_hands exr%d_0 c_rrows (nth ROWS_N 0)))" % (CARD, self.HANDB, l))
         # ⭐ EVERY OTHER CARD OF THE GROUP: its layers, a picture — from card 0's embedding (`tp_first`: the group's reduce of
         #   its zeros with card 0's embedding, into every stream) or from the streams already there (`tp_given`)
         for k in range(1, self.P):
@@ -766,6 +945,8 @@ class DeepSeek4(Generates):
             m.picture(n("tp_first"), "(begin (nn__partials__reduce GROUP %s %s %d) %s %s (type %s))"
                       % (n("zero_h"), n("e"), H, self._spread(k), self._tp_layers(k), n("streams")))
             m.picture(n("tp_given"), "(begin %s (type %s))" % (self._tp_layers(k), n("streams")))
+            if self.CHUNK:
+                m.picture(n("tp_rows"), self._tp_rows(k))
         m.act_as(CARD)
         m.view("names")
         for l in self.run_layers:
@@ -774,6 +955,8 @@ class DeepSeek4(Generates):
         if self.P == 1:
             m.defun("(defun (layers pos) (begin %s (type streams)))" % lays)
             m.defun("(defun (position tok pos) (begin (embed tok) %s (type streams)))" % lays)
+            if self.CHUNK:
+                self._rows_procedures()
             return
         start = lambda pic: " ".join("(sys__compute %d names %s)" % (k, self.sfx(pic, k)) for k in range(1, self.P))
         wait = " ".join("(sys__result %d)" % k for k in range(1, self.P))
@@ -781,6 +964,88 @@ class DeepSeek4(Generates):
                 % (start("tp_given"), lays, wait))
         m.defun("(defun (position tok pos) (begin (sys__node_array__set TP_POS 0 pos) %s (embed_e tok) "
                 "(nn__partials__reduce GROUP e e %d) %s %s %s (type streams)))" % (start("tp_first"), H, self._spread(0), lays, wait))
+        if self.CHUNK:
+            self._rows_procedures(start("tp_rows"), wait)
+
+    def _rows_procedures(self, start="", wait=""):
+        """A chunk of positions as rows (▶ `prefill`): `(rows_chunk first n)` embeds the chunk's tokens (TOKS) into the
+        rows' streams, every row's first mix the one-hot `mix_in`, runs every layer over them — `(rl{l} first n)`: the
+        n-gram memory a row at a time where the layer has it; the attention site over the rows (`attention_rows`, its
+        matrices once a chunk, each row's attention in position order, its mix in its record of `amix`); the router over
+        every row (`route_rows`, the picks in the rows' hands, the rotated inputs in `xrows`); the routed experts on the
+        CPU once over the chunk; the shared expert and the close over the rows (`close_rows`) — and leaves the last row's
+        streams and mix where the head reads them. A chunk's experts can take longer than `sys__result` waits, so the card
+        asks `sys__completed` until the CPU says so, then collects (as GLM's chunks do). Over a group (`start` and `wait`
+        the other cards' `tp_rows`, ▶ `_tp_rows`): the chunk's place and length in TP_ROWS, its embedding the group's sum,
+        and both sites' rows each the group's sum."""
+        m, H, MH2, MIXH = self.m, self.H, 2 * self.MULT * self.H, MIX_BYTES // 2
+        tp = " GROUP tsums" if self.P > 1 else ""
+        row = lambda buf, n: "(nn__vector__range %s (* t %d) %d)" % (buf, n, n)
+        stream = row("srows", MH2)
+        for l in self.run_layers:
+            eng = ""
+            if l in self.ENGRAM:
+                W = self.ENG.width
+                eng = ("(while '(< t n) '(begin (nn__vector__copy %s eng%d %d) (ai_deepseek_4__engram %s en%d) (set! t (+ t 1)))) "
+                       % (row("erows%d" % l, W), l, W, stream, l))
+            m.defun("(defun (rl%d first n) (let ((t 0)) %s"
+                    "(ai_deepseek_4__attention_rows srows at%d first n amix bmix awork%s)"
+                    " (ai_deepseek_4__route_rows srows mo%d hands n amix bmix xrows awork)"
+                    " (sys__compute %d names xr%d_0) (while '(sys__eq (sys__completed %d) (< 1 0)) '(< 0 1)) (sys__result %d)"
+                    " (nn__buffer__copy c_rrows %d rrows (* n %d))"
+                    " (ai_deepseek_4__close_rows srows mo%d xrows rrows n bmix awork%s)"
+                    " n))"
+                    % (l, eng, l, tp, l, self.CPU, l, self.CPU, self.CPU, self.CPU, 2 * H, l, tp))
+        if self.P == 1:
+            spread = " ".join("(nn__vector__widen e (nn__vector__range srows (+ (* t %d) %d) %d) %d)" % (MH2, 2 * j * H, 2 * H, H)
+                              for j in range(self.MULT))
+            m.defun("(defun (rows_embed n) (let ((t 0)) (while '(< t n) '(begin (embed_e (nth TOKS t)) %s"
+                    " (nn__vector__copy mix_in %s %d) (set! t (+ t 1)))) n))" % (spread, row("bmix", MIXH), MIXH))
+        else:
+            # the rows' embeddings, then the group's sum of them — every other card's zeros — spread as one card's are
+            m.defun("(defun (rows_embed n) (let ((t 0)) (while '(< t n) '(begin (embed_e (nth TOKS t)) (nn__vector__copy e %s %d) "
+                    "(set! t (+ t 1)))) (nn__partials__reduce GROUP erows_e erows_e (* n %d)) %s n))"
+                    % (row("erows_e", H), H, H, self._rows_spread(0)))
+        m.defun("(defun (rows_chunk first n) (begin (sys__node_array__set TP_ROWS 0 first) (sys__node_array__set TP_ROWS 1 n) %s "
+                "(rows_embed n) %s"
+                " (nn__vector__copy (nn__vector__range srows (* (- n 1) %d) %d) streams %d)"
+                " (nn__vector__copy (nn__vector__range bmix (* (- n 1) %d) %d) mixb %d) %s (type streams)))"
+                % (start, " ".join("(rl%d first n)" % l for l in self.run_layers), MH2, MH2, MH2, MIXH, MIXH, MIXH, wait)
+                if self.P > 1 else
+                "(defun (rows_chunk first n) (begin (rows_embed n) %s"
+                " (nn__vector__copy (nn__vector__range srows (* (- n 1) %d) %d) streams %d)"
+                " (nn__vector__copy (nn__vector__range bmix (* (- n 1) %d) %d) mixb %d) (type streams)))"
+                % (" ".join("(rl%d first n)" % l for l in self.run_layers), MH2, MH2, MH2, MIXH, MIXH, MIXH))
+
+    def _rows_spread(self, k):
+        """Card `k`'s chunk's embeddings (`erows_e`, a row of halves each) into every one of its rows' streams (floats), and
+        every row's first mix the one-hot `mix_in` — the rows `0 .. (nth TP_ROWS 1)`."""
+        H, MH2, MIXH, n = self.H, 2 * self.MULT * self.H, MIX_BYTES // 2, (lambda name: self.sfx(name, k))
+        spread = " ".join("(nn__vector__widen (nn__vector__range %s (* t %d) %d) (nn__vector__range %s (+ (* t %d) %d) %d) %d)"
+                          % (n("erows_e"), H, H, n("srows"), MH2, 2 * j * H, 2 * H, H) for j in range(self.MULT))
+        return ("(set! t 0) (while '(< t (nth TP_ROWS 1)) '(begin %s (nn__vector__copy %s (nn__vector__range %s (* t %d) %d) %d) "
+                "(set! t (+ t 1))))" % (spread, n("mix_in"), n("bmix"), MIXH, MIXH, MIXH))
+
+    def _tp_rows(self, k):
+        """A chunk's rows on card `k` past the first, by its own names — its place and length in TP_ROWS: the chunk's
+        embedding the group's sum (its zeros, card 0's rows), then every layer's rows sites as card 0's, each output the
+        group's sum, the routed experts none of its share (card 0 adds the CPU's)."""
+        n, H, MH2 = (lambda name: self.sfx(name, k)), self.H, 2 * self.MULT * self.H
+        first, rows = "(nth TP_ROWS 0)", "(nth TP_ROWS 1)"
+        out = ["(nn__partials__reduce GROUP %s %s (* %s %d))" % (n("zerows"), n("erows_e"), rows, H), self._rows_spread(k)]
+        for l in self.run_layers:
+            if l in self.ENGRAM:
+                W = self.ENG.width
+                out.append("(set! t 0) (while '(< t %s) '(begin (nn__vector__copy (nn__vector__range %s (* t %d) %d) %s %d) "
+                           "(ai_deepseek_4__engram (nn__vector__range %s (* t %d) %d) %s) (set! t (+ t 1))))"
+                           % (rows, n("erows%d" % l), W, W, n("eng%d" % l), W, n("srows"), MH2, MH2, n("en%d" % l)))
+            out.append("(ai_deepseek_4__attention_rows %s %s %s %s %s %s %s GROUP %s)"
+                       % (n("srows"), n("at%d" % l), first, rows, n("amix"), n("bmix"), n("awork"), n("tsums")))
+            out.append("(ai_deepseek_4__route_rows %s %s %s %s %s %s %s %s)"
+                       % (n("srows"), n("mo%d" % l), n("hands"), rows, n("amix"), n("bmix"), n("xrows"), n("awork")))
+            out.append("(ai_deepseek_4__close_rows %s %s %s %s %s %s %s GROUP %s)"
+                       % (n("srows"), n("mo%d" % l), n("xrows"), n("zrows"), rows, n("bmix"), n("awork"), n("tsums")))
+        return "(let ((t 0)) %s (type %s))" % (" ".join(out), n("srows"))
 
     def _spread(self, k):
         """Card `k`'s embedding `e` (halves) into every one of its streams (floats)."""
@@ -832,10 +1097,36 @@ class DeepSeek4(Generates):
         return value if greedy or sample else None
 
     def prefill(self, tokens, first, greedy=True, sample=None, rows=None):
+        """A prompt from `first`: as rows, `chunk` positions a step (▶ `_rows_procedures`), where the machine has them; else a
+        position at a time. The last position's head as `step`'s."""
+        if not self.CHUNK or len(tokens) < 2:
+            out = None
+            for i, tok in enumerate(tokens):
+                out = self.step(tok, first + i, greedy, sample if i == len(tokens) - 1 else None)
+            return out
         out = None
-        for i, tok in enumerate(tokens):
-            out = self.step(tok, first + i, greedy, sample if i == len(tokens) - 1 else None)
-        return out
+        for at in range(0, len(tokens), self.CHUNK):
+            part = tokens[at:at + self.CHUNK]
+            last = at + len(part) == len(tokens)
+            out = self._rows(part, first + at, (sample or ("(head)" if greedy else "(head_logits)")) if last else None)
+        return out if greedy or sample else None
+
+    def _rows(self, part, pos, head):
+        """Positions `pos` .. of `part` as one chunk: the n-gram memory's rows of each written for the chunk, the tokens, the
+        chunk's program, and `head` after it where it is not None."""
+        n = len(part)
+        if pos + n > self.max_context:
+            raise Refused("positions %d-%d are past the context of %d" % (pos, pos + n - 1, self.max_context))
+        self.history[pos:] = list(part)
+        if self.ENG is not None:
+            rows = self.ENG.chunk_rows(self.history, pos, n)
+            for (k, l), at in self.ERWS.items():
+                self.m.act_as(k)
+                self.m.write(at, _half(rows[l]))
+            self.m.act_as(CARD)
+        self.m.must("(begin %s (sys__node_array__set ROWS_N 0 %d) 0)"
+                    % (" ".join("(sys__node_array__set TOKS %d %d)" % (i, t) for i, t in enumerate(part)), n), "the chunk's tokens")
+        return self._run("(begin (rows_chunk %d %d) %s)" % (pos, n, head or "0"), "positions %d-%d" % (pos, pos + n - 1))
 
     # ── a pipeline stage: this machine's layers, the streams and the last site's mix crossing between stages ─────────
     def forward(self, pos, token=None, x=None, mix=None, head=False):
@@ -879,9 +1170,38 @@ class DeepSeek4(Generates):
         finally:
             self.m.act_as(CARD)
 
-    def state_regions(self, length, where=None):
-        """Nothing a conversation leaves on the card is read off (`PARKS` False): one brought back reads its tokens again."""
-        return []
+    # ── a conversation's state: put away and brought back (▶ session.py's `_state_read` / `_state_write`) ─────────
+    def state_regions(self, length, where=None, card=0):
+        """(address, bytes) on card `card` of everything a conversation of `length` positions has written there that a
+        later position reads: each layer's window ring, its rows written so far — and each source layer's compressed
+        latents and their index keys to its last whole group, and its partial group's ring whole. A position reads only
+        rows it has written, so what lies past them is no one's. `where` (a table of zeros) answers the sizes before the
+        boot. Every card of a group holds the same, each in its own slots."""
+        ring = (lambda l: 0) if where is not None else (lambda l: self.ring_at[(card, l)])
+        cache = (lambda l: 0) if where is not None else (lambda l: self.cache_at[(card, l)])
+        out = [(ring(l) + self.RPLAN.at_up_data, min(length, self.W) * self.HD * 2) for l in self.run_layers]
+        for s in sorted(self.CACHE_ROWS):
+            at, n = cache(s) + self.CPLAN.at_up_data, length // self.RATIO[s]
+            out += [(at, n * self.HD * 2), (at + self.KEYS_AT, n * self.ID * 2),
+                    (cache(s) + self.CPLAN.at_down_data, 2 * self.RATIO[s] * self.HD * 2)]
+        return out
+
+    def state_read(self, length):
+        """A conversation's state off the card, as `state_regions` lays it out — card 0's, which every card of a group
+        holds the same — and its tokens, which the n-gram memory hashes at the positions after it."""
+        self.m.act_as(CARD)
+        return ([self.m.read(at, n) for at, n in self.state_regions(length) if n]
+                + [np.asarray(self.history[:length], dtype="<i8").tobytes()])
+
+    def state_write(self, length, blobs):
+        """A conversation's state, as `state_read` read it, written back — onto every card of a group — and its tokens."""
+        *rows, tokens = blobs
+        for k in range(self.P):
+            self.m.act_as(k)
+            for (at, _), blob in zip([r for r in self.state_regions(length, card=k) if r[1]], rows):
+                self.m.write(at, blob)
+        self.m.act_as(CARD)
+        self.history = [int(t) for t in np.frombuffer(tokens, dtype="<i8")]
 
     def streams(self):
         return np.frombuffer(self.m.read(self.STREAMS_AT, self.MULT * self.H * 4), dtype="<f4").copy()

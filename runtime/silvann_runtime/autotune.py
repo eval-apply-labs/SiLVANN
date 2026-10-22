@@ -57,7 +57,7 @@ import shutil
 import subprocess
 
 from . import experts_file
-from .machine import Machine
+from .machine import Machine, own_memory
 from .model_folder import ModelFolder, Refused
 from .system import LIBRARY_SUFFIX, memory
 from .vision import video_ram
@@ -73,7 +73,9 @@ POOL = re.compile(r"nn__expert_cache_l1__size_mb:(\d+)")
 CTX_STEP = 1024          # the context's step, where it takes what the card holds (`"max"`)
 MIN_CONTEXT = 4096
 NO_CARD_CONTEXT = 32768  # `"max"` on a machine with no card of its own, and a model that names no length
-NOT_A_CARD = ("x86_avx2", "host", "khronos_opencl1_igpu")   # silicon whose pool is the PC's RAM: never tried
+NOT_A_CARD = ("x86_avx2", "host", "khronos_opencl1_igpu")   # silicon whose pool is the PC's RAM: never tried — but an
+                         # OpenCL 1.2 card whose memory is its own (an NVIDIA card below compute 7.5, NN-96) is a card
+                         # (`machine.own_memory`), and is tried as one
 TIER_MAX_GB = 128        # the binary search's ceiling, past any card's memory
 DISK_CHUNK = 1024        # GLM's prompt rows a step with its experts on the disk (Qwen's chunk is at most 256)
 FREED_GB = 1             # a card this much emptier than when a kept choice was made chooses again (`_freed`)
@@ -85,6 +87,12 @@ FILES_SHARE = 0.10       # what DeepSeek's experts in RAM leave of what this pro
                          # (measurements/2026-10-21_deepseek_chat_node03.md)
 
 
+def _a_card(silicon, machine):
+    """Whether a worker of `silicon` is a card of its own memory: not the CPU's, and not an OpenCL device that shares the
+    PC's RAM (▶ `machine.own_memory`)."""
+    return silicon not in NOT_A_CARD or (silicon == machine.silicon and own_memory(machine))
+
+
 def refused_by_card(ex):
     """Whether a boot's error is the card's refusal of the pool's room."""
     return _refused_by_card(ex)
@@ -94,14 +102,14 @@ def _refused_by_card(ex):
     return "would not allocate the pool" in str(ex) or "allocator refused the pool" in str(ex)
 
 
-def _held(params, workers, mb):
+def _held(params, workers, mb, machine):
     """A trial boot's sections with each card's pool `mb` larger, so what boots leaves `mb` of every card free when it
     boots for real. `params` one section (the card's) or {worker: section}; `workers` (silicon, device) a worker."""
     grow = lambda text: POOL.sub(lambda m: "nn__expert_cache_l1__size_mb:%d" % (int(m.group(1)) + mb), text, count=1)  # noqa: E731
     if not mb:
         return params
     if isinstance(params, dict):
-        return {w: grow(t) if w < len(workers) and workers[w][0] not in NOT_A_CARD else t for w, t in params.items()}
+        return {w: grow(t) if w < len(workers) and _a_card(workers[w][0], machine) else t for w, t in params.items()}
     return grow(params)
 
 
@@ -123,7 +131,7 @@ class _Prober:
         `self.answer`."""
         model = self.model(max_context, options)
         machine = model.m
-        params = _held(model.device_params(), model.workers(), self.margin_mb)
+        params = _held(model.device_params(), model.workers(), self.margin_mb, machine)
         self.tried += 1
         try:
             if isinstance(params, dict):
@@ -317,7 +325,7 @@ def choose(path, max_context, options=None, silicon=None, fresh=False, log=print
             "%s %s" % (k, options[k]) for k in PLACEMENT if k in options)
     machine = Machine(silicon=silicon)
     where = machine.silicon
-    if where in NOT_A_CARD:
+    if where in NOT_A_CARD and not own_memory(machine):
         ctx = min(top, NO_CARD_CONTEXT) if most else top
         why = "%s, not a card of its own: the model's own defaults, the context %d" % (where, ctx)
         # an integrated GPU's pool is refused the pictures' room the model sets aside by default (`MEASURED` 2026-10-14

@@ -46,7 +46,7 @@ class Qwen35(Generates):
 
     def __init__(self, folder, machine, max_context=4096, fused_moe=True, kv="tiered", tiers=None, experts_on="card",
                  experts_from="auto", experts_dir=None, layers=None, chunk=256, experts_ram_gb=None, card_experts_gb=0,
-                 card_landing=1, card_line=None, card_shared=0.1, experts_int8=False, picture_pixels=1 << 22,
+                 card_landing=1, card_line=None, card_shared="auto", experts_int8=False, experts_lock=False, picture_pixels=1 << 22,
                  picture_weights="auto", tensor_parallel=1, lend_cache=True, mtp="no", mtp_rows=False, mtp_pairs=True):
         if folder.architecture not in ARCHITECTURES:
             raise Refused("%s is a %r model, not one of %s" % (folder.path, folder.architecture, ARCHITECTURES))
@@ -236,8 +236,10 @@ class Qwen35(Generates):
         self.CARD_GB, self.CARD_LANDING = float(card_experts_gb or 0), int(card_landing)
         self.CARD_LINE = int(card_line) if card_line else None
         # ⭐ A GROUP'S SHARED SLICE (NN-99 ③): `card_shared` of a card's slots a layer kept on every card of a tensor-parallel
-        #   group — the hottest, chosen again from decayed picks (▶ nn's `NN__EXPERT_TIER__SHARED`); 0, none
-        self.CARD_SHARED = float(card_shared)
+        #   group — the hottest, chosen again from decayed picks (▶ nn's `NN__EXPERT_TIER__SHARED`); 0, none; "auto" from this
+        #   machine's own speeds at boot (▶ `_shared_from_speeds`)
+        self.CARD_SHARED = None if card_shared in (None, "auto") else float(card_shared)
+        self.CARD_SPEEDS = None
         # ⭐ THE CACHE'S ROWS NO CONVERSATION HAS REACHED, LENT TO THE TIER (NN-93) — ▶ `_lend`. `lend_cache` false keeps
         #   the tier to its own run
         self.LEND_ON = bool(lend_cache)
@@ -260,6 +262,9 @@ class Qwen35(Generates):
         if self.CARD_GB and self.EXPERTS_FROM != "ram":
             raise Refused("a card's tier of experts is copied from the experts in RAM — experts_from 'ram', not %r"
                           % self.EXPERTS_FROM)
+        # `experts_lock`: the CPU's experts in RAM locked there, so the system cannot swap them out (▶ `experts_file.lock_check`)
+        self.EXPERTS_LOCK, self.LOCKED_GB = bool(experts_lock), 0.0
+        experts_file.lock_check(self.EXPERTS_LOCK, self.EXPERTS_FROM if self.CPU_EXPERTS else "card", self.cpu_arena)
         # ⭐ FROM THE DISK, THE EXPERTS ARE A CACHE IN THE CPU WORKER'S OWN MEMORY — read from the file into a slot when a
         #   token picks one that is not there, straight from the drive, the layer's least recently used given up for it.
         #   `"mapped"` maps the file instead. ▶ glm5.py's, and nn's loader.
@@ -646,6 +651,8 @@ class Qwen35(Generates):
         self.state_at = self.state_of[0]
         self._bindings()
         m.define_programs(self._procedures)
+        if self.CPLAN is not None and self.CARD_SHARED is None:
+            self._shared_from_speeds()
         if self.CPLAN is not None:          # a prompt's rows through card 0's tier: its line, as one card's (▶ `load`)
             self.CALIBRATION = expert_tier.calibrate(
                 m, CARD, self.CPU, self.KRS_AT, self.EPLAN.slot_bytes, self.C_HANDS_AT, self.HAND_ROW, 2 * self.H,
@@ -901,6 +908,7 @@ class Qwen35(Generates):
                                    backing.get((self.CPU, l), 0)] + self._masked(l, "moe", 16, 14))
         m.array("EXPERTS_CPU", ["exc%d" % l for l in layers])
         m.array("EXPERTS_CPU_ROWS", ["exrc%d" % l for l in layers])
+        self.LOCKED_GB = experts_file.lock_experts(self.EXPERTS_LOCK, [a for xs in self.SRC.values() for a in xs], e.slot_bytes)
         m.act_as(CARD)
 
     def _named(self, name, card):
@@ -1260,12 +1268,33 @@ class Qwen35(Generates):
             m.table(nm("exk%d" % l), [nm("signs"), nm("kscratch"), nm("zero_h")] + cells)
             if card == 0:
                 m.table("exkr%d" % l, ["signs", "krscratch", "zero_h"] + cells)
-        # a card slot laid out as the CPU's, so a promotion copies one whole
-        expert_tier.tier(m, nm("tier_card"), self.T_CEXP, self.EXPERTS, self.TOPK, self.H, self.INTER, e, self.LAYERS,
-                         {l: "src%d" % l for l in self.run_layers if l in self.SRC}, landing=self.CARD_LANDING,
-                         ranks=self.CARDS, shared=int(round(self.CARD_SHARED * self.CARD_SLOTS / len(self.run_layers))))
+        self._tier(card)
         if self.CARDS == 1:
             expert_tier.bind(m, {CARD: "tier_card"}, len(self.workers()))
+
+    def _tier(self, card):
+        """Card `card`'s tier, a card slot laid out as the CPU's so a promotion copies one whole — with, in a group, the
+        share of its slots a layer every card keeps: none until it is known (`_shared_from_speeds`)."""
+        shared = int(round((self.CARD_SHARED or 0.0) * self.CARD_SLOTS / len(self.run_layers)))
+        expert_tier.tier(self.m, self._named("tier_card", card), self.T_CEXP, self.EXPERTS, self.TOPK, self.H, self.INTER,
+                         self.EPLAN, self.LAYERS, {l: "src%d" % l for l in self.run_layers if l in self.SRC},
+                         landing=self.CARD_LANDING, ranks=self.CARDS, shared=shared)
+
+    def _shared_from_speeds(self):
+        """`card_shared` "auto" in a group: a CPU pick against a card expert, timed here (▶ `expert_tier.speeds` — the
+        first layer's first experts, the head's product on card 0 priced to a routed expert's bytes), the slice from them,
+        and every card's tier made again with it."""
+        m, l = self.m, self.run_layers[0]
+        cpu_s, card_s = expert_tier.speeds(m, CARD, self.CPU, "picks", list(range(self.TOPK)),
+                                           "(ai_qwen_3__experts c_hand picks exc%d c_routed)" % l,
+                                           self.EPLAN.slot_bytes / expert_tier.head_bytes(self.HPLAN))
+        self.CARD_SHARED = expert_tier.slice_of(cpu_s, card_s)
+        self.CARD_SPEEDS = dict(cpu_ms=cpu_s * 1e3, card_ms=card_s * 1e3, ratio=cpu_s / max(card_s, 1e-12), shared=self.CARD_SHARED)
+        for k in range(self.CARDS):
+            m.act_as(k)
+            self._tier(k)
+        m.act_as(CARD)
+        expert_tier.bind(m, {k: self._named("tier_card", k) for k in range(self.CARDS)}, len(self.workers()))
 
     # ── the cache's unreached rows lent to the tier (NN-93) ──────────────────────────────────────────────────────
     # ⚖ 2026-10-17: *"progressively shrink the l1 cache as the context grows, maybe in chunks of 8k tokens... this way we

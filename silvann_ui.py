@@ -436,6 +436,7 @@ QWEN_OPTIONS = {
     "lend_cache": "true (default) or false: the tier also holds experts in the cache's rows a conversation has not "
                   "reached, given back as it grows",
     "experts_int8": "false (default) or true: a token's experts on the CPU in integers",
+    "experts_lock": "false (default) or true: the experts in RAM locked there, never swapped out (Linux; ulimit -l past them)",
     "picture_pixels": "default 4194304: the largest picture the card makes room for; 0 reads pictures on the CPU",
     "picture_weights": "\"auto\" (default), \"card\" or \"ram\": the vision tower's weights",
     "tensor_parallel": "1 (default), 2, 4: the model over that many cards of one size; an MoE's experts on the CPU or in RAM (AMD, a developer preview)",
@@ -448,6 +449,7 @@ GLM_OPTIONS = {
     "chunk": "default 256: a prompt's positions a layer at a time; 1024, chosen at boot, with the experts on the disk",
     "sockets": "1 or 2: the CPU sockets the experts are split over; by default all",
     "experts_int8": "true (default) or false: the experts in integers on the CPU",
+    "experts_lock": "false (default) or true: the experts in RAM locked there, never swapped out (Linux; ulimit -l past them)",
     "card_experts": "\"yes\" (default) or \"no\": the card's tier of experts, with them in RAM",
     "card_experts_gb": "gigabytes: the tier's size, rather than the one chosen at boot",
     "card_exclusive": "chosen at boot, or false or true: an expert on the card is not also kept in RAM",
@@ -877,6 +879,8 @@ def _session_default():
         "expanded_cart_id": None,
         # Display toggle: render <think>...</think> blocks in assistant messages or strip them.
         "show_thinking": False,
+        # The page light or dark — this browser's choice.
+        "dark": False,
         # Engine toggle for the active conversation: whether the model is asked to think at all.
         # Synced from the server on activate (the canonical value lives in the cartridge sidecar).
         "active_thinking_mode": True,
@@ -897,6 +901,172 @@ def _session_default():
         # also pops the cache server-side — one-shot semantics).
         "pending_images": {},
     }
+
+
+# The page's head: its layout's styles, the chat's looks (NN-102: the thinking and the tool's sections wrapped, the
+# dark colours, the copy button on code) and the button's script.
+PAGE_HEAD = """
+<style>
+    /* Keep Quasar's natural q-page-container left-padding so the (mini) drawer pushes the
+       content rather than overlapping it. Only zero top-padding (no header here). */
+    .q-page-container { padding-top: 0 !important; }
+    .q-page {
+        padding: 0 !important;
+        /* dvh = dynamic viewport height — tracks the visible area on mobile as the address
+           bar shows/hides. Falls back to vh on older browsers via the duplicate decl. */
+        min-height: 100vh;
+        min-height: 100dvh;
+        /* ⛳ AND EXACTLY THAT TALL: a page only AT LEAST the viewport leaves its flex children an indefinite
+           height, and the chat's scroll area — which needs a definite one — then sizes its track to one
+           height and its content to another (the scrollbar spanning the view, the messages only the top). */
+        height: 100vh;
+        height: 100dvh;
+        display: flex;
+        flex-direction: column;
+        overflow-x: hidden;          /* never scroll the page sideways — overflow goes vertical */
+    }
+    .nicegui-content {
+        padding: 0 !important;
+        flex: 1 1 0;
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
+        overflow-x: hidden;          /* clamp horizontal; the views stack + scroll vertically */
+        overflow-y: auto;
+    }
+    /* The main views: full width, never wider than the area; vertical scroll inside. min-width:0
+       lets flex content shrink instead of forcing a sideways scrollbar. */
+    .silvann-main {
+        flex: 1 1 0; min-height: 0; min-width: 0; max-width: 100%;
+        display: flex; flex-direction: column;
+        overflow-x: hidden;
+    }
+    /* The conversation is as wide as its view: a line longer than a bubble — a tool's value, a model's code —
+       scrolls sideways inside its own code block. A bubble's text is a flex item, which would otherwise grow to
+       its longest line and carry the whole conversation, the user's messages with it, off to the right. */
+    .silvann-chat .q-scrollarea__content { width: 100%; }
+    .silvann-chat .q-message-container > div { min-width: 0; }
+    .silvann-chat .q-message-text pre { overflow-x: auto; }
+
+    /* Menu rows in the drawer. In mini mode (60px wide drawer) only the leading icon shows;
+       when the drawer expands on hover (overflow-x: visible), labels/chevrons reappear. */
+    .silvann-menu-item {
+        cursor: pointer; padding: 0.5rem 0.75rem; border-radius: 0.25rem;
+        display: flex; align-items: center; gap: 0.5rem;
+        user-select: none; white-space: nowrap;
+    }
+    .silvann-menu-item:hover { background: rgba(0,0,0,0.05); }
+    .silvann-menu-active { background: rgba(59, 130, 246, 0.12); color: rgb(37, 99, 235); font-weight: 600; }
+
+    /* The collapsed mini-drawer is 60px wide. Hide everything past the leading icon so
+       labels don't smear into the next item — using `display: none` (not opacity) so the
+       hidden elements don't reserve width and the icon really centers. */
+    .q-drawer--mini .silvann-menu-item > :not(.q-icon:first-child) {
+        display: none;
+    }
+    .q-drawer--mini .silvann-menu-item { justify-content: center; padding: 0.5rem 0; }
+    .q-drawer--mini .silvann-conv-item,
+    .q-drawer--mini .silvann-endpoint,
+    .q-drawer--mini .silvann-brand-label,
+    .q-drawer--mini .silvann-convs-col { display: none; }
+    .q-drawer { transition: width 0.18s ease; }
+    /* The drawer is a fixed-height (~100vh) flex column. Without flex-wrap:nowrap its content
+       WRAPS into side-by-side columns (logo header | Chat/Options/Help | endpoint footer) once
+       it's taller than the drawer — that's the "3 columns / horizontal scroll" bug. Force a
+       single non-wrapping vertical stack and let it scroll vertically instead. */
+    .nicegui-drawer { flex-wrap: nowrap !important; }
+    .nicegui-drawer .q-drawer__content {
+        flex-wrap: nowrap !important;
+        overflow-y: auto;
+        overflow-x: hidden !important;
+    }
+
+    .silvann-conv-item {
+        cursor: pointer; padding: 0.35rem 0.5rem; border-radius: 0.25rem;
+        display: flex; align-items: center; gap: 0.4rem;
+        user-select: none;
+    }
+    .silvann-conv-item:hover { background: rgba(0,0,0,0.05); }
+    .silvann-conv-active { background: rgba(59, 130, 246, 0.15); }
+
+    /* Logo: plain bold "SiLVANN" wordmark (no styling on the 'i'). */
+    .silvann-logo {
+        font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
+        font-weight: 800;
+        font-size: 1.25rem;
+        letter-spacing: -0.02em;
+        display: inline-flex;
+        align-items: baseline;
+    }
+
+    /* ⭐ THE THINKING AND THE TOOL'S SECTIONS WRAP: their code — the tool's calls and answers, a thought the markdown
+       reads as code — goes on to the next line inside its section, where a block that kept its lines widened the
+       section past its bubble and was cut off; an answer's own code keeps its lines and scrolls sideways. Prose wraps
+       already (Quasar's bubble breaks long words). */
+    .silvann-chat .silvann-part pre { white-space: pre-wrap; overflow-wrap: anywhere; overflow-x: visible; }
+
+    /* A code block's copy button (the script below), in the block's top corner, faint until the block is pointed at. */
+    .silvann-copy-host { position: relative; }
+    .silvann-copy {
+        position: absolute; top: 4px; right: 4px; z-index: 1;
+        font: 11px ui-sans-serif, system-ui, sans-serif; padding: 1px 6px; border-radius: 4px; cursor: pointer;
+        border: 1px solid rgba(0,0,0,0.2); background: rgba(255,255,255,0.85); color: #333;
+        opacity: 0.3; transition: opacity 0.15s;
+    }
+    .silvann-copy-host:hover .silvann-copy, .silvann-copy:focus { opacity: 1; }
+
+    /* ⭐ DARK: Quasar darkens its own components; what this page colours itself follows here — and the chat's bubbles,
+       light by Quasar's default, turn dark under the dark colours NiceGUI gives code. */
+    .body--dark .silvann-menu-item:hover, .body--dark .silvann-conv-item:hover { background: rgba(255,255,255,0.08); }
+    .body--dark .silvann-menu-active { background: rgba(96,165,250,0.18); color: rgb(147,197,253); }
+    .body--dark .silvann-conv-active { background: rgba(96,165,250,0.2); }
+    .body--dark .q-message-text--received { color: #24302a; }
+    .body--dark .q-message-text--sent { color: #30353f; }
+    .body--dark .q-message-text-content--received, .body--dark .q-message-text-content--sent { color: #e8e8e8; }
+    .body--dark .bg-amber-50 { background: rgba(245,158,11,0.14) !important; }
+    .body--dark .bg-slate-100 { background: #1e293b !important; }
+    .body--dark .text-slate-800 { color: #e2e8f0 !important; }
+    .body--dark .text-amber-700 { color: #fbbf24 !important; }
+    .body--dark .text-green-700 { color: #4ade80 !important; }
+    .body--dark .text-red-700 { color: #f87171 !important; }
+    .body--dark .silvann-copy { background: rgba(30,30,30,0.85); color: #ddd; border-color: rgba(255,255,255,0.25); }
+</style>
+<script>
+/* ⭐ A COPY BUTTON ON EVERY CODE BLOCK OF THE CONVERSATION — put on each block as it is drawn, and drawn again as a
+   streaming answer's are; it copies the block's text. The clipboard's own call needs a secure page (https or localhost),
+   so a UI reached over the LAN by http copies through a hidden text area. */
+(() => {
+  const copy = (text) => {
+    if (navigator.clipboard && window.isSecureContext) return navigator.clipboard.writeText(text);
+    const area = document.createElement('textarea');
+    area.value = text;
+    area.setAttribute('readonly', '');
+    area.style.cssText = 'position:fixed;top:0;left:0;opacity:0';
+    document.body.appendChild(area);
+    area.select();
+    try { return document.execCommand('copy') ? Promise.resolve() : Promise.reject(); } finally { area.remove(); }
+  };
+  const equip = (pre) => {
+    const host = pre.parentElement && pre.parentElement.classList.contains('codehilite') ? pre.parentElement : pre;
+    if (host.querySelector(':scope > .silvann-copy')) return;
+    host.classList.add('silvann-copy-host');
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'silvann-copy';
+    button.textContent = 'copy';
+    button.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const code = pre.querySelector('code');
+      copy((code || pre).textContent).then(() => { button.textContent = 'copied'; }, () => { button.textContent = 'not copied'; });
+      setTimeout(() => { button.textContent = 'copy'; }, 1500);
+    });
+    host.appendChild(button);
+  };
+  new MutationObserver(() => document.querySelectorAll('.silvann-chat pre').forEach(equip))
+    .observe(document.documentElement, { childList: true, subtree: true });
+})();
+</script>
+"""
 
 
 # ---------- UI ----------
@@ -953,101 +1123,7 @@ async def page():
     # Layout: no top header. Left drawer defaults to mini (icons only); hovering expands it to
     # 280px as an overlay so it doesn't push the main area around. Main area is a flex column
     # holding a thin hamburger bar and three view columns (only one visible at a time).
-    ui.add_head_html("""
-    <style>
-        /* Keep Quasar's natural q-page-container left-padding so the (mini) drawer pushes the
-           content rather than overlapping it. Only zero top-padding (no header here). */
-        .q-page-container { padding-top: 0 !important; }
-        .q-page {
-            padding: 0 !important;
-            /* dvh = dynamic viewport height — tracks the visible area on mobile as the address
-               bar shows/hides. Falls back to vh on older browsers via the duplicate decl. */
-            min-height: 100vh;
-            min-height: 100dvh;
-            /* ⛳ AND EXACTLY THAT TALL: a page only AT LEAST the viewport leaves its flex children an indefinite
-               height, and the chat's scroll area — which needs a definite one — then sizes its track to one
-               height and its content to another (the scrollbar spanning the view, the messages only the top). */
-            height: 100vh;
-            height: 100dvh;
-            display: flex;
-            flex-direction: column;
-            overflow-x: hidden;          /* never scroll the page sideways — overflow goes vertical */
-        }
-        .nicegui-content {
-            padding: 0 !important;
-            flex: 1 1 0;
-            min-height: 0;
-            display: flex;
-            flex-direction: column;
-            overflow-x: hidden;          /* clamp horizontal; the views stack + scroll vertically */
-            overflow-y: auto;
-        }
-        /* The main views: full width, never wider than the area; vertical scroll inside. min-width:0
-           lets flex content shrink instead of forcing a sideways scrollbar. */
-        .silvann-main {
-            flex: 1 1 0; min-height: 0; min-width: 0; max-width: 100%;
-            display: flex; flex-direction: column;
-            overflow-x: hidden;
-        }
-        /* The conversation is as wide as its view: a line longer than a bubble — a tool's value, a model's code —
-           scrolls sideways inside its own code block. A bubble's text is a flex item, which would otherwise grow to
-           its longest line and carry the whole conversation, the user's messages with it, off to the right. */
-        .silvann-chat .q-scrollarea__content { width: 100%; }
-        .silvann-chat .q-message-container > div { min-width: 0; }
-        .silvann-chat .q-message-text pre { overflow-x: auto; }
-
-        /* Menu rows in the drawer. In mini mode (60px wide drawer) only the leading icon shows;
-           when the drawer expands on hover (overflow-x: visible), labels/chevrons reappear. */
-        .silvann-menu-item {
-            cursor: pointer; padding: 0.5rem 0.75rem; border-radius: 0.25rem;
-            display: flex; align-items: center; gap: 0.5rem;
-            user-select: none; white-space: nowrap;
-        }
-        .silvann-menu-item:hover { background: rgba(0,0,0,0.05); }
-        .silvann-menu-active { background: rgba(59, 130, 246, 0.12); color: rgb(37, 99, 235); font-weight: 600; }
-
-        /* The collapsed mini-drawer is 60px wide. Hide everything past the leading icon so
-           labels don't smear into the next item — using `display: none` (not opacity) so the
-           hidden elements don't reserve width and the icon really centers. */
-        .q-drawer--mini .silvann-menu-item > :not(.q-icon:first-child) {
-            display: none;
-        }
-        .q-drawer--mini .silvann-menu-item { justify-content: center; padding: 0.5rem 0; }
-        .q-drawer--mini .silvann-conv-item,
-        .q-drawer--mini .silvann-endpoint,
-        .q-drawer--mini .silvann-brand-label,
-        .q-drawer--mini .silvann-convs-col { display: none; }
-        .q-drawer { transition: width 0.18s ease; }
-        /* The drawer is a fixed-height (~100vh) flex column. Without flex-wrap:nowrap its content
-           WRAPS into side-by-side columns (logo header | Chat/Options/Help | endpoint footer) once
-           it's taller than the drawer — that's the "3 columns / horizontal scroll" bug. Force a
-           single non-wrapping vertical stack and let it scroll vertically instead. */
-        .nicegui-drawer { flex-wrap: nowrap !important; }
-        .nicegui-drawer .q-drawer__content {
-            flex-wrap: nowrap !important;
-            overflow-y: auto;
-            overflow-x: hidden !important;
-        }
-
-        .silvann-conv-item {
-            cursor: pointer; padding: 0.35rem 0.5rem; border-radius: 0.25rem;
-            display: flex; align-items: center; gap: 0.4rem;
-            user-select: none;
-        }
-        .silvann-conv-item:hover { background: rgba(0,0,0,0.05); }
-        .silvann-conv-active { background: rgba(59, 130, 246, 0.15); }
-
-        /* Logo: plain bold "SiLVANN" wordmark (no styling on the 'i'). */
-        .silvann-logo {
-            font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
-            font-weight: 800;
-            font-size: 1.25rem;
-            letter-spacing: -0.02em;
-            display: inline-flex;
-            align-items: baseline;
-        }
-    </style>
-    """)
+    ui.add_head_html(PAGE_HEAD)
 
     # ============================================================
     # LEFT DRAWER (always-on, mini by default, hover-expands to full width)
@@ -1118,6 +1194,11 @@ async def page():
             with help_row:
                 ui.icon("help_outline")
                 ui.label("Help")
+
+            theme_row = ui.row().classes("silvann-menu-item w-full")
+            with theme_row:
+                theme_icon = ui.icon("dark_mode")
+                theme_label = ui.label("Dark mode")
 
         ui.space()
         ui.separator()
@@ -1625,6 +1706,22 @@ async def page():
     chat_row.on("click", lambda: asyncio.create_task(on_chat_click()))
     opts_row.on("click", lambda: asyncio.create_task(select_other_view("options")))
     help_row.on("click", lambda: asyncio.create_task(select_other_view("help")))
+
+    # light or dark, as this browser last chose — the row offers the other
+    dark = ui.dark_mode(bool(state.get("dark", False)))
+
+    def show_theme():
+        on = bool(state.get("dark", False))
+        theme_icon.name = "light_mode" if on else "dark_mode"
+        theme_label.text = "Light mode" if on else "Dark mode"
+
+    def on_theme_click():
+        state["dark"] = not bool(state.get("dark", False))
+        dark.set_value(state["dark"])
+        show_theme()
+
+    show_theme()
+    theme_row.on("click", on_theme_click)
 
     async def ping():
         try:

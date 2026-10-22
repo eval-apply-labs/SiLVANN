@@ -34,7 +34,7 @@ defaults (`image` aside), and the model's options listed in `_options` for you t
 
 | key | default | what it sets |
 |---|---|---|
-| `max_context` | `"auto"` | The longest conversation, in positions. Its cache is on the card from boot, sized for it. `"auto"` (or `"max"`) means as many as the card holds beside the model, up to the model's own length — 262,144 for the Qwen models and Ministral, 1,048,576 for GLM — found when the server starts and kept for the conversations after. A number holds it there instead. A Qwen MoE model's or GLM's tier of experts holds experts in the part of that cache a conversation has not reached, and gives it back as the conversation grows ([below](#the-context-and-the-tier-share-the-card)). The `_note` of a downloaded config says how many positions 100 MB of the card holds for that model. |
+| `max_context` | `"auto"` | The longest conversation, in positions. Its cache is on the card from boot, sized for it. `"auto"` (or `"max"`) means as many as the card holds beside the model, up to the model's own length — 262,144 for the Qwen models and Ministral, 1,048,576 for GLM, 16,384 for DeepSeek-V4.1-Flash in this release (its own is 1,048,576: past 16,384 its candidate blocks take over, and they are not here yet) — found when the server starts and kept for the conversations after. A number holds it there instead. A Qwen MoE model's or GLM's tier of experts holds experts in the part of that cache a conversation has not reached, and gives it back as the conversation grows ([below](#the-context-and-the-tier-share-the-card)). The `_note` of a downloaded config says how many positions 100 MB of the card holds for that model. |
 | `max_tokens_per_video` | `8192` | The most tokens a video attached to a message becomes. Its frames share them. Reading a video holds 57–74 KB of RAM a token, which the server counts when it chooses whether the experts fit in RAM. |
 | `thinking` | `true` | Whether the model reasons before it answers, in a new conversation. A conversation's own switch (the UI's **thinking mode**, `silvann_cli --nothink`) turns it off for that conversation. |
 | `sampler` | `"generation"` | How the next token is chosen. `"generation"` uses the model's own `generation_config.json`. `null` takes the most likely token (greedy). A dict sets its own: `{"temperature", "top_k", "top_p", "repetition_penalty", "seed"}`; what it leaves out is temperature 1.0, top_k 20, top_p 0.95, no penalty, a new seed each time. A `seed` gives the same answer to the same conversation. |
@@ -151,6 +151,7 @@ These options apply to Qwen 3.6 35B-A3B, Qwen 3.8 27B, and Qwen 3.5 122B-A10B an
 | `card_experts_gb` | gigabytes | The tier's size, rather than the size chosen at boot. Named alone, it puts the experts on the CPU. |
 | `lend_cache` | `true` by default, or `false` | With a tier, whether it also holds experts in the cache's rows a conversation has not reached, given back as it grows ([above](#the-context-and-the-tier-share-the-card)). |
 | `experts_int8` | `false` by default, or `true` | With the experts on the CPU, a generated token's experts are multiplied in integers: faster, and slightly less exact. Named alone, it puts the experts on the CPU. |
+| `experts_lock` | `false` by default, or `true` | With the experts copied into RAM (`experts_from: "ram"`), lock them there, so the system never swaps them out to keep files cached (Linux's `mlock`). The boot refuses where the experts are more than the process may lock (`ulimit -l`): raise `memlock` for the user in `/etc/security/limits.conf` and log in again. The system setting `vm.swappiness` 1 makes the system unwilling to swap any process out, though it does not forbid it. |
 | `experts_dir` | a folder | With the experts read from the disk, where they are written when they cannot be read in place ([`users.md` §5](users.md#5-the-experts-on-the-disk)): `experts/` in the model's folder by default — another drive, say. |
 | `picture_pixels` | default `4194304` (2048 × 2048) | The largest picture the boot makes room for on the card, about 23 KB a 16 × 16 patch. A larger picture is made smaller. `0` keeps no room and reads pictures on the CPU. |
 | `picture_weights` | `"auto"` by default, or `"card"`, `"ram"` | Where the vision tower's 0.6 GB of weights sit. In RAM, they are written to the card a block at a time as a picture is read. `auto` puts them on the card when the experts are on the CPU, and in RAM otherwise. |
@@ -165,8 +166,15 @@ These options apply to Qwen 3.6 35B-A3B, Qwen 3.8 27B, and Qwen 3.5 122B-A10B an
 - **a Qwen MoE** (the 35B, the 122B, the 397B), with its experts on the CPU (`experts_on: "cpu"`). A
   `card_experts_gb` tier is then that many gigabytes on each card, and a position's experts go to the cards that
   hold them, the rest to the CPU;
-- **GLM**, with its experts in RAM. Each card keeps its own tier of experts, and 10% of a card's slots are experts
-  every card holds. `MEASURED` on four MI50s: 109 ms a token on one card, 100.7 on two, 80.9–86.5 on four.
+- **GLM**, with its experts in RAM. Each card keeps its own tier of experts, and `card_shared` of a card's slots are
+  experts every card holds: `"auto"` (the default) times a CPU's expert against a card's at boot and keeps 10% where
+  the CPU is less than four times slower, none where it is more (two MI50s beside two Xeon E5-2680 v4: 12–15 times,
+  none), or a number says the share. A mask runs over the group, each card with its share of it, and the tier is lent
+  the cache's rows a conversation has not reached, as on one card. `MEASURED` on four MI50s: 109 ms a token on one
+  card, 100.7 on two, 80.9–86.5 on four. With `card_exclusive: true` every expert is on one card or in RAM: each card's
+  tier holds experts no other card holds, swaps its own, and keeps no shared slice — so the group gives back every
+  card's tier of RAM. `MEASURED` on two MI50s: its answers one card's within the group's rounding, every expert in one
+  place after 4,884 promotions, the same logits from boot to boot.
 
 The server refuses it at boot when:
 
@@ -174,12 +182,12 @@ The server refuses it at boot when:
 - the cards' memory cannot be read: `rocm-smi` or `nvidia-smi` says it;
 - two cards cannot reach each other's memory (peer access);
 - the cards do not split the model's heads evenly;
-- a LoRA is loaded, or the model is a ring's stage;
-- for GLM: `mtp` is on, `card_exclusive` is `true`, or `fused` is off.
+- a LoRA is loaded (a GLM mask runs), or the model is a ring's stage;
+- for GLM: `mtp` is on, `fused` is off, or `card_exclusive` is `true` with a `card_shared` above 0.
 
 Pictures are not read under tensor parallelism yet: the model boots, and a message's picture is refused. A GLM group
-reads a prompt one position at a time, and a conversation's state is not saved, so a conversation brought back reads
-its tokens again.
+reads a prompt as rows, a chunk at a time, as one card does. A conversation's state is not saved, so a conversation
+brought back reads its tokens again.
 
 **Its program:** a Qwen model's folder needs `lisp/qwen3_5_tp.lisp`; GLM's runs the pack's own `lisp/glm5.lisp`. `silvann download <model>` fetches the pack's `lisp/`
 afresh, and a pack that does not carry the file yet cannot run tensor parallelism.
@@ -209,6 +217,7 @@ four.
 | `experts_dir` | a folder | As the Qwen models'. |
 | `sockets` | `1`, `2` | The CPU sockets the experts are split over. By default, all of them. |
 | `experts_int8` | `true` by default, or `false` | The experts are multiplied in integers on the CPU. |
+| `experts_lock` | `false` by default, or `true` | With the experts copied into RAM (`experts_from: "ram"`), lock them there, so the system never swaps them out to keep files cached (Linux's `mlock`). The boot refuses where the experts are more than the process may lock (`ulimit -l`): raise `memlock` for the user in `/etc/security/limits.conf` and log in again. The system setting `vm.swappiness` 1 makes the system unwilling to swap any process out, though it does not forbid it. |
 | `card_experts` | `"yes"` by default, or `"no"` | With the experts in RAM, whether the card keeps its own tier of experts, sized at boot. |
 | `card_experts_gb` | gigabytes | The tier's size, rather than the size chosen at boot. |
 | `lend_cache` | `true` by default, or `false` | As the Qwen models': an inclusive tier also holds experts in the latent cache's rows a conversation has not reached. |
@@ -219,6 +228,24 @@ four.
 Both families take a few more options, for measuring the tier rather than for use (`card_landing`, `card_line`, and GLM's
 `card_hot`, `card_free`, `card_duplex`, `card_duplex_line`, `card_landing_line`, `grid`, `fused`, Qwen's `fused_moe`):
 their defaults are the ones to run with.
+
+## DeepSeek-V4.1-Flash's options
+
+| option | values | what it sets |
+|---|---|---|
+| `experts_from` | chosen at boot; `"ram"`, `"mapped"` | Where its routed experts (272 GB, 6.8 GB a layer) are. `ram` copies every layer's into RAM. `mapped` copies the first `experts_in_ram` layers into RAM and writes the others once, a file a layer in `experts_dir`, which the system's page cache reads. At boot: `ram` where every layer fits beside the server's own memory, a spare and a tenth of what the process may hold (for the system and the files read in place), otherwise `mapped` with as many layers in RAM as fit. |
+| `experts_in_ram` | layers | With `experts_from: "mapped"`, how many of the first layers are in RAM. |
+| `experts_dir` | a folder | Where `mapped` writes its files: by default the model's `experts/`. |
+| `engram_from` | a folder | Where the n-gram memory's tables (203 GB) are read from, a row at a time: by default the pack's `engram/`. Another folder — on a faster drive — holds the same two files and their index. |
+| `experts_int8` | `true` by default, or `false` | The experts are multiplied in integers on the CPU. |
+| `experts_lock` | `false` by default, or `true` | As GLM's: the layers copied into RAM are locked there. |
+| `card_experts_gb` | gigabytes, `0` by default | A tier of the experts used most on the card, promoted from RAM as they are picked, which the card computes while the CPU computes the rest. Off by default; a layer mapped from its file feeds none. |
+| `chunk` | positions, default 128 | How many positions of a prompt go through a layer at once. |
+
+It takes a few more options, for measuring rather than for use: `cards` (a list of the machine's cards that split every
+layer, as `tensor_parallel` does for the Qwen models and GLM — on two MI50s no faster, the CPU's experts being its time),
+`card_experts`, `card_shared`, `card_landing`, `card_landing_line` and `socket`. It reads text: a message's picture is
+refused.
 
 ## Ministral 3 14B's options
 

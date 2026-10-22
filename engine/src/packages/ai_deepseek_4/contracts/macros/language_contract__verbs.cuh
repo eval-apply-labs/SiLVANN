@@ -15,6 +15,12 @@
     X(PKG, 3, "ai_deepseek_4__close",   ai_deepseek_4__close__zzabi_adapter,         AI_DEEPSEEK_4__CLOSE)     \
     X(PKG, 4, "ai_deepseek_4__experts", ai_deepseek_4__experts__zzabi_adapter,       AI_DEEPSEEK_4__EXPERTS)    \
     /* ⭐ THE N-GRAM MEMORY: a position's looked-up rows into the streams, gated by each stream's match, before the site */ \
-    X(PKG, 5, "ai_deepseek_4__engram",  ai_deepseek_4__engram__zzabi_adapter,        AI_DEEPSEEK_4__ENGRAM)
+    X(PKG, 5, "ai_deepseek_4__engram",  ai_deepseek_4__engram__zzabi_adapter,        AI_DEEPSEEK_4__ENGRAM) \
+    /* ⭐ A PROMPT AS ROWS: each site over a chunk's rows, its matrices once a chunk — the router's picks in the rows'   */ \
+    /* hands, the routed experts once over the chunk, expert-major                                               */ \
+    X(PKG, 6, "ai_deepseek_4__route_rows", ai_deepseek_4__route_rows__zzabi_adapter,   AI_DEEPSEEK_4__ROUTE_ROWS) \
+    X(PKG, 7, "ai_deepseek_4__experts_rows", ai_deepseek_4__experts_rows__zzabi_adapter, AI_DEEPSEEK_4__EXPERTS_ROWS) \
+    X(PKG, 8, "ai_deepseek_4__attention_rows", ai_deepseek_4__attention_rows__zzabi_adapter, AI_DEEPSEEK_4__ATTENTION_ROWS) \
+    X(PKG, 9, "ai_deepseek_4__close_rows", ai_deepseek_4__close_rows__zzabi_adapter,   AI_DEEPSEEK_4__CLOSE_ROWS)
 
 #endif /* SILVANN__PACKAGES_AI_DEEPSEEK_4_CONTRACTS_MACROS_LANGUAGE_CONTRACT__VERBS_CUH */

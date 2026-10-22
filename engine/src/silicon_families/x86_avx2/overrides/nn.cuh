@@ -253,6 +253,40 @@ static void x86_avx2__override_turboquant_gemv(uint16_t* out, const uint8_t* wei
     x86_avx2__zzpackage_run(x86_avx2__zzprivate_blocks_for(rows), body, &c);
 }
 
+/* A block `x[0..n)` quantised into `q` as nn's definition says — its largest magnitude over 127 the scale, each element
+ * divided by it and rounded half away from zero — `n` a whole number of 32s; its scale answered. The gemvs' blocks of
+ * 32 and the GEMM's of 256 (`NN__EXPERT__INT8_BLOCK`) alike: nn's scalar body took ~0.15 ms of a DeepSeek layer's 2 ms
+ * on the CPU (measurements/2026-10-21_cpu_experts_node03.md). */
+static inline float x86_avx2__zzprivate_quantise_run(const uint16_t* x, int8_t* q, uint32_t n) {
+    const __m256 absmask = _mm256_castsi256_ps(_mm256_set1_epi32(0x7fffffff));
+    __m256 mx = _mm256_setzero_ps();
+    for (uint32_t k = 0; k < n; k += 8u)
+        mx = _mm256_max_ps(mx, _mm256_and_ps(_mm256_cvtph_ps(_mm_loadu_si128((const __m128i*)(x + k))), absmask));
+    __m128 m4 = _mm_max_ps(_mm256_castps256_ps128(mx), _mm256_extractf128_ps(mx, 1));
+    m4 = _mm_max_ps(m4, _mm_movehl_ps(m4, m4));
+    m4 = _mm_max_ss(m4, _mm_shuffle_ps(m4, m4, 1));
+    const float m = _mm_cvtss_f32(m4), inv = m > 0.0f ? 127.0f / m : 0.0f;
+    const __m256 vinv = _mm256_set1_ps(inv), half = _mm256_set1_ps(0.5f);
+    const __m256i order = _mm256_setr_epi32(0, 4, 1, 5, 2, 6, 3, 7);
+    for (uint32_t k = 0; k < n; k += 32u) {
+        __m256i v[4];
+        for (uint32_t i = 0; i < 4u; ++i) {
+            const __m256 t = _mm256_mul_ps(_mm256_cvtph_ps(_mm_loadu_si128((const __m128i*)(x + k + 8u * i))), vinv);
+            /* half away from zero: the magnitude plus a half, truncated, the sign put back */
+            v[i] = _mm256_sign_epi32(_mm256_cvttps_epi32(_mm256_add_ps(_mm256_and_ps(t, absmask), half)), _mm256_castps_si256(t));
+        }
+        const __m256i p = _mm256_packs_epi16(_mm256_packs_epi32(v[0], v[1]), _mm256_packs_epi32(v[2], v[3]));
+        _mm256_storeu_si256((__m256i*)(q + k), _mm256_permutevar8x32_epi32(p, order));
+    }
+    return m / 127.0f;
+}
+
+/* `x` quantised a block of 32 at a time into the call's scratch, as nn's int8 gemv says. */
+static inline void x86_avx2__zzprivate_quantise_x(const uint16_t* x, uint64_t cols) {
+    for (uint64_t b = 0; b < cols / 32u; ++b)
+        x86_avx2__zzprivate_xs[b] = x86_avx2__zzprivate_quantise_run(x + b * 32u, x86_avx2__zzprivate_xq + b * 32u, 32u);
+}
+
 /* ⭐ THE int8 GEMV: 4 bits (the levels through one `pshufb`); anything else is the generic door. x is
  *   quantised here exactly as nn's definition says — blocks of 32, max|x|/127, half away from zero. */
 static void x86_avx2__override_turboquant_gemv_int8(uint16_t* out, const uint8_t* weights, uint64_t w_room, const uint8_t* luts,
@@ -264,11 +298,7 @@ static void x86_avx2__override_turboquant_gemv_int8(uint16_t* out, const uint8_t
                    && x86_avx2__zzprivate_x_room_for(cols);
     if (!fits) { nn__turboquant__zzabi_launch_gemv_int8(out, weights, w_room, luts, l_room, x, d, rows, cols, over); return; }
     x86_avx2__zzpackage_start();
-    for (uint64_t b = 0; b < cols / 32u; ++b) {
-        uint32_t q[8];
-        x86_avx2__zzprivate_xs[b] = nn__turboquant__zzabi_quantise(x, b * 32u, q);
-        memcpy(x86_avx2__zzprivate_xq + b * 32u, q, 32u);
-    }
+    x86_avx2__zzprivate_quantise_x(x, cols);
     x86_avx2__gemv_call c = { out, weights, luts, row_bytes, rows, cols, d, 0, x86_avx2__zzprivate_xq, x86_avx2__zzprivate_xs, over };
     x86_avx2__zzpackage_run(x86_avx2__zzprivate_blocks_for(rows), x86_avx2__zzprivate_wide ? x86_avx2__zzprivate_int8_4_512 : x86_avx2__zzprivate_int8_4, &c);
 }
@@ -391,6 +421,7 @@ static inline float x86_avx2__zzprivate_dot_i8_4(const uint8_t* row, const int8_
     const __m256i ones = _mm256_set1_epi16(1);
     __m256 acc = _mm256_setzero_ps();
     for (uint64_t k = 0; k < cols; k += 32u) {
+        _mm_prefetch((const char*)(row + k / 2u + 1024u), _MM_HINT_T0);
         const __m128i v = _mm_loadu_si128((const __m128i*)(row + k / 2u));
         const __m128i lo = _mm_and_si128(v, fifteen), hi = _mm_and_si128(_mm_srli_epi16(v, 4), fifteen);
         const __m256i w = _mm256_shuffle_epi8(t8, _mm256_set_m128i(_mm_unpackhi_epi8(lo, hi), _mm_unpacklo_epi8(lo, hi)));
@@ -438,13 +469,6 @@ static inline bool x86_avx2__zzprivate_groups_i8_fit(const nn__turboquant__group
     if (g->count == 0u || g->count > NN__TURBOQUANT__GROUPS_MAX || cols == 0u || cols % 32u != 0u) return false;
     for (uint64_t i = 0u; i < g->count; ++i) if (g->d[i] != 4u || g->rows[i] == 0u) return false;
     return true;
-}
-static inline void x86_avx2__zzprivate_quantise_x(const uint16_t* x, uint64_t cols) {
-    for (uint64_t b = 0; b < cols / 32u; ++b) {
-        uint32_t q[8];
-        x86_avx2__zzprivate_xs[b] = nn__turboquant__zzabi_quantise(x, b * 32u, q);
-        memcpy(x86_avx2__zzprivate_xq + b * 32u, q, 32u);
-    }
 }
 static void x86_avx2__override_gemv_groups_int8(uint16_t* out, nn__turboquant__groups g, const uint16_t* x, uint64_t cols,
                                                 unsigned int* over) {
@@ -932,27 +956,7 @@ typedef struct x86_avx2__int8_call {
 
 /* Block `x[0..256)` quantised into `q` as nn's definition says; its scale answered. */
 static inline float x86_avx2__zzprivate_quantise256(const uint16_t* x, int8_t* q) {
-    const __m256 absmask = _mm256_castsi256_ps(_mm256_set1_epi32(0x7fffffff));
-    __m256 mx = _mm256_setzero_ps();
-    for (uint32_t k = 0; k < NN__EXPERT__INT8_BLOCK; k += 8u)
-        mx = _mm256_max_ps(mx, _mm256_and_ps(_mm256_cvtph_ps(_mm_loadu_si128((const __m128i*)(x + k))), absmask));
-    __m128 m4 = _mm_max_ps(_mm256_castps256_ps128(mx), _mm256_extractf128_ps(mx, 1));
-    m4 = _mm_max_ps(m4, _mm_movehl_ps(m4, m4));
-    m4 = _mm_max_ss(m4, _mm_shuffle_ps(m4, m4, 1));
-    const float m = _mm_cvtss_f32(m4), inv = m > 0.0f ? 127.0f / m : 0.0f;
-    const __m256 vinv = _mm256_set1_ps(inv), half = _mm256_set1_ps(0.5f);
-    const __m256i order = _mm256_setr_epi32(0, 4, 1, 5, 2, 6, 3, 7);
-    for (uint32_t k = 0; k < NN__EXPERT__INT8_BLOCK; k += 32u) {
-        __m256i v[4];
-        for (uint32_t i = 0; i < 4u; ++i) {
-            const __m256 t = _mm256_mul_ps(_mm256_cvtph_ps(_mm_loadu_si128((const __m128i*)(x + k + 8u * i))), vinv);
-            /* half away from zero: the magnitude plus a half, truncated, the sign put back */
-            v[i] = _mm256_sign_epi32(_mm256_cvttps_epi32(_mm256_add_ps(_mm256_and_ps(t, absmask), half)), _mm256_castps_si256(t));
-        }
-        const __m256i p = _mm256_packs_epi16(_mm256_packs_epi32(v[0], v[1]), _mm256_packs_epi32(v[2], v[3]));
-        _mm256_storeu_si256((__m256i*)(q + k), _mm256_permutevar8x32_epi32(p, order));
-    }
-    return m / 127.0f;
+    return x86_avx2__zzprivate_quantise_run(x, q, NN__EXPERT__INT8_BLOCK);
 }
 static void x86_avx2__zzprivate_quantise_rows(void* a) {
     const x86_avx2__int8_call* c = (const x86_avx2__int8_call*)a;

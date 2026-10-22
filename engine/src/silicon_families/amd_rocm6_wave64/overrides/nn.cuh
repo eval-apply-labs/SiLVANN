@@ -11,6 +11,8 @@
 #include "primitives.cuh"   /* rmsnorm */
 #include "result.cuh"       /* argmax */
 #include "vector.cuh"       /* the top k, a router's and a sampler's */
+#include "hyper.cuh"        /* a site's pre over streams of floats */
+#include "index.cuh"        /* the indexer's top k */
 #include "doors.cuh"        /* into nn's table */
 
 /* ⛳ `kernels.cuh` FIRST, since every file uses it, and `doors.cuh` LAST, since it names every door. The groups between

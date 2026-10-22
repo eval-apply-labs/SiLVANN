@@ -59,3 +59,41 @@ def memory():
             elif line.startswith("MemAvailable:"):
                 available = int(line.split()[1]) * 1024
     return total, available
+
+
+def spans(addresses, size):
+    """`(address, bytes)` runs of the blocks of `size` bytes at `addresses` (zeros, none there, left out), neighbours
+    joined — what `lock` takes."""
+    out = []
+    for a in sorted(set(x for x in addresses if x)):
+        if out and out[-1][0] + out[-1][1] == a:
+            out[-1] = (out[-1][0], out[-1][1] + size)
+        else:
+            out.append((a, size))
+    return out
+
+
+def lockable():
+    """The bytes this process may lock into RAM (`ulimit -l`, RLIMIT_MEMLOCK): None where it may lock any, 0 where the
+    system has no lock the runtime asks for (only Linux's `mlock` is)."""
+    if not sys.platform.startswith("linux"):
+        return 0
+    import resource
+    soft, _ = resource.getrlimit(resource.RLIMIT_MEMLOCK)
+    return None if soft == resource.RLIM_INFINITY else soft
+
+
+def lock(runs):
+    """⭐ MEMORY THE SYSTEM MAY NOT SWAP OUT (node-01's NN-99 ④: at `vm.swappiness` 60 the kernel swapped GLM's experts
+    out to keep files cached, and the sockets read them back as they decoded): each `(address, bytes)` run of this
+    process's memory locked into RAM with Linux's `mlock`. Answers the bytes locked; raises OSError with the system's
+    reason where a run is refused — the runs before it stay locked until the process ends."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.mlock.argtypes, libc.mlock.restype = [ctypes.c_void_p, ctypes.c_size_t], ctypes.c_int
+    done = 0
+    for at, n in runs:
+        if libc.mlock(at, n) != 0:
+            e = ctypes.get_errno()
+            raise OSError(e, "mlock of %d bytes at %#x: %s" % (n, at, os.strerror(e)))
+        done += n
+    return done

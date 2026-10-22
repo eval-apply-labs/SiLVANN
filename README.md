@@ -1,6 +1,6 @@
 # SiLVANN
 
-> **Developer preview, v0.15.1.** It runs the models below well on the hardware it was tested on, and it is shared
+> **Developer preview, v0.16.0.** It runs the models below well on the hardware it was tested on, and it is shared
 > for people who can find their way around a build and a stack trace. NVIDIA cards are tested on two, a GeForce
 > RTX 5060 Ti and an RTX 5070 Ti; Windows natively on one PC; macOS is not supported.
 
@@ -67,45 +67,43 @@ v0.11.1, the RTX 5070 Ti's with v0.11.0. v0.11.0's server drew each token with n
 card, through OpenCL and on the CPU alone: the 35B answered in the chat at 32-35 tokens a second on the RTX 5060 Ti,
 and answers at 67 now ([`docs/results.md`](docs/results.md)).
 
-**New in v0.15.1:** Windows has its prebuilt libraries again, and an older NVIDIA card runs through OpenCL 1.2.
+**New in v0.16.0:** DeepSeek-V4.1-Flash runs, GLM 5.3 Flash's exclusive tier runs over several cards and repeats from boot, and a model's
+experts can be locked in RAM.
 
-**Windows.** v0.15.0's Windows evaluator did not build, so its release carried no `silvann_windows_x64.zip` and
-`install.ps1` built the libraries itself. This release carries them again.
+**DeepSeek-V4.1-Flash.** DeepSeek's 384-expert model, its `D8E4` pack 491 GB — 203 GB of it the n-gram memory's tables,
+read from the disk a row at a time ([`docs/models.md`](docs/models.md#deepseek-v41-flash)). Its experts run on the CPU,
+as many layers in RAM as fit and the rest read from files written beside the pack; it reads a prompt as rows, puts a
+conversation away and brings it back exactly, and calls the tool in its own format. Checked against DeepSeek's own code,
+layer by layer over 1,300 positions. It reads text, up to 16,384 positions in this release: past them its candidate
+blocks take over, and they are not here yet. Its rates come with v0.16.1.
 
-**An older NVIDIA card, through OpenCL 1.2.** CUDA's family takes compute capability 7.5 and newer. A card older than
-that — a GTX 10x0 — now runs through the OpenCL 1.2 family instead of the CPU, with nothing to install but the card's
-driver. A developer preview: not yet checked on such a card.
-
-**OpenCL built by every install.** On Linux both OpenCL families are built every time, against Khronos' headers carried
-in the release, and need no package to build. At run time they take only a card no other family takes.
-
-**The installer.** A source other than GitHub (`SILVANN_SOURCE`) is cloned with `git`, which it now asks for; a family
-that does not build says why.
-
-**v0.15.0:** A mixture-of-experts model runs over several cards, GLM 5.3 Flash takes a mask, and a model whose experts are
-copied into RAM needs much less memory to start.
-
-**An MoE over several cards.** `tensor_parallel` now splits a mixture-of-experts model's attention by heads too: the Qwen
-MoE models with their experts on the CPU, and GLM 5.3 Flash with its experts in RAM. Each card keeps its own tier of
-experts, with a tenth of its slots holding experts every card has; a position's experts go to the cards that hold them,
-and the rest to the CPU. On two Xeon E5-2680 v4 with MI50s, GLM answers in 109 ms a token on one card, 100.7 on two and
-80.9–86.5 on four. It needs cards of one size that can read each other's memory, on AMD, and it is a developer preview
+**GLM over several cards.** A mask runs over the group, each card with its share; the tier is lent the cache's rows a
+conversation has not reached; a prompt is read as rows. `card_shared` `"auto"`, the default, times a CPU's expert against
+a card's at boot and keeps a shared slice only where the CPU is less than four times slower — on two Xeon E5-2680 v4
+beside MI50s it is 12–15 times, so none. With `card_exclusive: true` every expert is on one card or in RAM, each card
+swapping its own: the group gives back every card's tier of RAM
 ([`docs/config.md`](docs/config.md#tensor-parallelism)).
 
-**Less memory at the start.** A model whose experts are copied into RAM no longer keeps its weight files mapped beside
-them. GLM 5.3 Flash's peak fell from 242 GB to 147 GB: on a 256 GB machine it no longer pushes its own experts out to
-swap, which had held a few of its layers up by about 15 ms at a time.
+**GLM's exclusive tier repeats from boot.** An exclusive tier's swaps now take effect at a set point rather than when
+their copies land, so GLM's answer with one is the same from boot to boot, and it decodes faster: on an MI50, 8.2–8.3
+tokens a second against 6.7–7.6 before.
 
-**GLM takes a mask.** A rank-1 mask in GLM 5.3 Flash's `loras/`, as the Qwen models take one
-([`docs/tools.md`](docs/tools.md)): with its experts in RAM, on the card's tier, or read from the disk.
+**Experts locked in RAM.** `experts_lock: true` keeps the experts copied into RAM from being swapped out (Linux's
+`mlock`) — the Qwen MoE models, GLM and DeepSeek — and the boot says how to raise the limit when it refuses. With swap on,
+set `vm.swappiness` to 1 ([`docs/users.md`](docs/users.md#the-experts-in-ram-and-swap)).
 
-**The chat.** An answer can be up to 16,384 tokens long. A message sent while the model waits on its own question no
-longer locks the conversation: the message stays in the box, and the question's buttons stay under the answer.
+**Faster on the MI50.** Attention at heads of 512, the hyper-connections' first step and the indexer's choice have AMD
+kernels of their own: GLM 5.3 Flash decodes at 7.00 tokens a second at 3,036 positions, from 6.11.
 
-**Building.** The engine builds with GCC 13 (Ubuntu 24.04's), and `install.sh` names Python's headers (`python3-dev`)
-when they are missing.
+**OpenCL.** An OpenCL 1.2 card with memory of its own — a discrete card, not an integrated GPU — is sized as a card when
+the server starts: the tier of experts and the context are chosen by trying them on it. On Windows, `install.ps1` now
+builds both OpenCL families every time and sends an NVIDIA card older than compute 7.5 to OpenCL 1.2, as `install.sh`
+does — checked against mocked cards, not yet on a Windows PC.
 
-**Why AI on your own machine:** [`docs/local_ai.md`](docs/local_ai.md), for the work that cannot leave the room.
+**The chat.** A dark mode, kept for the browser; a copy button on every block of code; and a long line in the thinking or
+in a tool's section wraps.
+
+**Docker.** No image is published: `docker/` builds one of your own.
 
 Every release before this one, and this one's notes again: [`release_logs/v0.md`](release_logs/v0.md).
 
@@ -113,11 +111,11 @@ Every release before this one, and this one's notes again: [`release_logs/v0.md`
 
 | | |
 |---|---|
-| **Tested** | Linux with AMD Instinct MI50 (gfx906), ROCm 6 — a model on one card, and the 27B's layers over two and four (tensor parallelism); Linux with an NVIDIA GeForce RTX 5060 Ti (sm_120), CUDA 12.9, driver 595 — every pack but GLM's checked against Hugging Face, the 35B's tier of experts included; the CPU alone with AVX2 (Xeon E5-2680 v4) and with AVX-512 (Xeon W-2123); OpenCL 2.0 with sub-groups, on the MI50 — the 27B and the 35B checked against Hugging Face, the 27B answering at 9-11 tokens a second and reading a prompt at 49 positions a second; the 122B's tier of experts, 11.7 tokens a second with 18 GB of the card (9.7 without); OpenCL 1.2 through NVIDIA's OpenCL on the RTX 5060 Ti — the 27B checked against Hugging Face, at 1.6 tokens a second (the family is for integrated GPUs); Windows with an NVIDIA card (an RTX 5070 Ti, a Ryzen 7 5800X), natively: built from source with CUDA 13.4, Ministral 3 14B `D4` on the card ([`docs/users.md`](docs/users.md#on-windows)) |
+| **Tested** | Linux with AMD Instinct MI50 (gfx906), ROCm 6 — a model on one card, and the 27B's layers over two and four (tensor parallelism); DeepSeek-V4.1-Flash on one card with its experts on the CPU, checked against DeepSeek's own code; Linux with an NVIDIA GeForce RTX 5060 Ti (sm_120), CUDA 12.9, driver 595 — every pack but GLM's checked against Hugging Face, the 35B's tier of experts included; the CPU alone with AVX2 (Xeon E5-2680 v4) and with AVX-512 (Xeon W-2123); OpenCL 2.0 with sub-groups, on the MI50 — the 27B and the 35B checked against Hugging Face, the 27B answering at 9-11 tokens a second and reading a prompt at 49 positions a second; the 122B's tier of experts, 11.7 tokens a second with 18 GB of the card (9.7 without); OpenCL 1.2 through NVIDIA's OpenCL on the RTX 5060 Ti — the 27B checked against Hugging Face, at 1.6 tokens a second (the family is for integrated GPUs); Windows with an NVIDIA card (an RTX 5070 Ti, a Ryzen 7 5800X), natively: built from source with CUDA 13.4, Ministral 3 14B `D4` on the card ([`docs/users.md`](docs/users.md#on-windows)) |
 | **Untested** | on Windows: the prebuilt libraries on a PC (GitHub's runners, which build them, have no card), the CPU alone, a model's experts on the CPU or read from the disk, AMD's and Intel's GPUs through OpenCL; Linux booted from a USB SSD; tensor parallelism on NVIDIA cards; other NVIDIA generations (the CUDA family is built for sm_75 to sm_120: Turing to Blackwell; an older card — Kepler, Maxwell, Pascal, Volta — goes to OpenCL 1.2, the GTX 1080 first); GLM 5.3 Flash on an NVIDIA card; other AMD generations; OpenCL on other devices, the integrated GPUs `khronos_opencl1_igpu` is for among them (on one, the model's memory is read where it is, not copied to the GPU: checked only through PoCL, a CPU's OpenCL) — which card goes to OpenCL 1.2 and which to 2 is a best guess from the vendors' published versions (OpenCL 1.2: every NVIDIA card CUDA does not take, Intel's iGPUs before Gen9, AMD's TeraScale and GCN 1; OpenCL 2: the rest), and a card on the wrong one is an issue to open, with its `clinfo`; AVX-512 on processors other than Skylake (AMD's Zen 4 and 5, later Xeons) |
 | **Not supported** | macOS |
 
-Pictures and videos are read by the Qwen models and GLM 5.3 Flash (v0.7.0: [`release_logs/v0.md`](release_logs/v0.md#v070)); Ministral 3 does not read them.
+Pictures and videos are read by the Qwen models and GLM 5.3 Flash (v0.7.0: [`release_logs/v0.md`](release_logs/v0.md#v070)); Ministral 3 and DeepSeek-V4.1-Flash do not read them.
 Every model calls the tool, a Lisp REPL on the machine, in its own trained format (v0.9.0: [`docs/users.md`](docs/users.md#the-models-tool)).
 Pictures are made from a prompt by Qwen-Image 2.1, a server's model of its own (v0.10.0: [`docs/users.md`](docs/users.md#a-picture-model-qwen-image-21)).
 A model's tool draws with the picture model, opens subagents and keeps skills of its own; a dense Qwen model's layers split over AMD cards (v0.11.0: [`docs/tools.md`](docs/tools.md), [`docs/config.md`](docs/config.md)).

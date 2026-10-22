@@ -17,6 +17,7 @@ machine; this page has the rest.
 | Qwen 3.5 397B-A17B (mixture of experts, 17B active) | `D4E4` | 207 GB — 4 bits | [eval-apply/silvann_tq_D4E4_qwen3.5_397b_a17b](https://huggingface.co/eval-apply/silvann_tq_D4E4_qwen3.5_397b_a17b) |
 | GLM 5.3 Flash (288 experts, 8 active) | `D4E4` | 162 GB — 4 bits | [eval-apply/silvann_tq_D4E4_glm_5.3_flash](https://huggingface.co/eval-apply/silvann_tq_D4E4_glm_5.3_flash) |
 | GLM 5.3 Flash | `D8E4` | 166 GB — experts 4 bits, the rest 8 | [eval-apply/silvann_tq_D8E4_glm_5.3_flash](https://huggingface.co/eval-apply/silvann_tq_D8E4_glm_5.3_flash) |
+| DeepSeek-V4.1-Flash-1017 (384 experts, 6 active; text only) | `D8E4` | 491 GB — experts 4 bits, the rest 8; 203 GB of it the n-gram memory's tables, read from the disk | [eval-apply/silvann_tq_D8E4_deepseek_v4.1_flash_1017](https://huggingface.co/eval-apply/silvann_tq_D8E4_deepseek_v4.1_flash_1017) |
 | Qwen-Image 2.1 (pictures from a prompt: a 7B diffusion transformer, Qwen3-VL 8B's text model as its encoder) | `D8` | 18 GB — the transformer and the encoder 8 bits, the picture decoder 16 | [eval-apply/silvann_tq_D8_qwen_image_2.1](https://huggingface.co/eval-apply/silvann_tq_D8_qwen_image_2.1) |
 
 The name says the bits: `D8E4` is the dense matrices at 8 and the experts at 4; `D4` a dense model at 4. The 8-bit dense
@@ -24,7 +25,8 @@ part is the one that pays — ▶ [`compression.md`](compression.md), and how cl
 is in [`results.md`](results.md#how-good-each-pack-is-perplexity). `python3 silvann_core.py list-models` lists them all,
 and `download-model NAME` fetches one into `models/`.
 
-Each model keeps its own licence, which is in its folder once downloaded: Qwen's and Mistral's Apache-2.0, GLM's MIT.
+Each model keeps its own licence, which is in its folder once downloaded: Qwen's and Mistral's Apache-2.0, GLM's and
+DeepSeek's MIT.
 ⚠ Qwen-Image 2.1's is the Qwen Research License Agreement: research and other non-commercial use only. A picture model
 runs as a server's model of its own: [`users.md`](users.md#a-picture-model-qwen-image-21).
 
@@ -71,6 +73,16 @@ a 2,000-position prompt at 39, 23.5 and 57 ([`results.md`](results.md#the-rtx-50
 Every measurement, the prompt rates, and what limits a model reading its experts from the disk:
 [`results.md`](results.md).
 
+## DeepSeek-V4.1-Flash
+
+DeepSeek's model reads text; its vision tower comes in a later release. Its routed experts are 272 GB (6.8 GB a layer,
+40 layers) and run on the CPU: as many layers in RAM as fit beside the server, a spare and a tenth of the memory for the
+system and the files it reads in place; the rest are written once beside the pack (`models/<name>/experts/`) and read
+through the system's page cache. Its n-gram memory's tables (203 GB) stay on the disk and are read a row at a time as
+each token asks for them, so the disk should be an NVMe drive. A conversation holds up to 16,384 positions in this
+release: past that the model's candidate blocks take over, and they are not here yet. Its rates come with v0.16.1;
+its options are in [`config.md`](config.md#deepseek-v41-flashs-options).
+
 ## The card's tier of experts
 
 With a model's experts on the CPU from RAM, part of the card holds the experts used most — on by default, sized when
@@ -88,7 +100,8 @@ many positions as the card holds beside the model, up to the model's own length,
 holds it there instead. The Qwen caches keep their first 256 positions and the latest 4,096 at full precision and the
 rest at 8 bits; past the first 4,352, each 100 MB of the card holds about 10,000 more tokens of the 35B's conversation
 and 3,200 of the 27B's. GLM 5.3 Flash's cache, a latent a position, is every position in halves: about 8,800 a 100 MB. Ministral 3's cache is every position at full precision —
-about 625 positions a 100 MB: on a 16 GB card about 32,000 beside its `D4`.
+about 625 positions a 100 MB: on a 16 GB card about 32,000 beside its `D4`. DeepSeek-V4.1-Flash keeps a window of 128
+positions and compressed latents for the rest: a conversation of 16,384 positions, its longest here, is about 57 MB.
 
 With a mixture-of-experts model's experts on the CPU, the whole length costs a short conversation nothing: the card's
 tier of experts holds experts in the cache's rows no conversation has reached and gives them back as one grows

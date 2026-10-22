@@ -135,6 +135,51 @@ class Engram:
             out[i] = np.concatenate(hashes) + self.offsets[i]
         return out
 
+    def chunk_ids(self, tokens, first, n):
+        """`ids` of positions `first` .. `first + n - 1` at once, `[layer][position][cols]` — each position's as `ids`
+        answers it: the same products, xors and remainders, a column a position."""
+        pos = np.arange(first, first + n, dtype=np.int64)
+        tok = np.asarray(tokens[:first + n], dtype=np.int64)
+        back = np.empty((n, self.N), dtype=np.int64)
+        for s in range(self.N):
+            p = pos - s
+            back[:, s] = np.where(p >= 0, self.map[tok[np.maximum(p, 0)]], self.pad)
+        out = np.empty((len(self.layers), n, self.cols), dtype=np.int64)
+        for i in range(len(self.layers)):
+            products = back * self.mult[i]
+            rolling, hashes = products[:, 0], []
+            for k in range(1, self.N):
+                rolling = np.bitwise_xor(rolling, products[:, k])
+                hashes.append(rolling[:, None] % self.primes[i, k - 1][None, :])
+            out[i] = np.concatenate(hashes, axis=1) + self.offsets[i]
+        return out
+
+    def chunk_rows(self, tokens, first, n):
+        """Every engram layer's rows for positions `first` .. `first + n - 1`, position after position — {layer: floats},
+        `all_rows` of each position's `ids` end to end. ⭐ A CHUNK'S READS ALL AT ONCE, a slice of them a thread: a
+        position at a time a chunk of 128 waited on 128 rounds of reads, each with its own threads' start and join —
+        `MEASURED` node03 2026-10-21 (measurements/2026-10-21_deepseek_host_node03.md), 0.38-0.47 s a chunk of 128,
+        2.2-2.4 s a chunk of 512."""
+        ids = self.chunk_ids(tokens, first, n)
+        slices = 64
+        jobs = {}
+        for i, l in enumerate(self.layers):
+            for what in ("weight", "scale"):
+                fd, base, rb = self.at[(l, what)]
+                offsets = (base + ids[i].reshape(-1) * rb).tolist()
+                step = -(-len(offsets) // slices)
+                jobs[(l, what)] = [self.pool.submit(lambda o, fd=fd, rb=rb: b"".join(os.pread(fd, rb, x) for x in o),
+                                                    offsets[a:a + step]) for a in range(0, len(offsets), step)]
+        out = {}
+        for i, l in enumerate(self.layers):
+            rows = n * self.cols
+            w = np.frombuffer(b"".join(f.result() for f in jobs[(l, "weight")]), dtype=np.uint8).reshape(rows, -1)
+            sb = np.frombuffer(b"".join(f.result() for f in jobs[(l, "scale")]), dtype=np.uint8).reshape(rows, -1)
+            v = self.e4m3[w].astype(np.float32)
+            sc = np.ldexp(np.float32(1), sb.astype(np.int32) - 127).astype(np.float32)
+            out[l] = (v.reshape(rows, -1, 32) * sc[:, :, None]).reshape(-1)
+        return out
+
     def all_rows(self, ids):
         """Every engram layer's rows for `ids` (`[layer][cols]`, as `ids` answers them), dequantised — {layer: floats} —
         every read issued at once."""

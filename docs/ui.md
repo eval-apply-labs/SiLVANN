@@ -9,6 +9,7 @@ another one; it can also start and stop a server on this machine (**Options**).
 - **Chat**: the conversations, under the Chat row. Click one to open it.
 - **Options**: the models on this machine, their configs, and a server to start and stop.
 - **Help**: this guide and the release's documents.
+- **Dark mode** / **Light mode**: the page's colours. The choice is kept for this browser.
 
 The dot next to "SiLVANN" is the server's state: **gray** not asked yet, **green** answering, **red** unreachable. Its
 tooltip names the model. **Endpoint**, at the bottom, is the server the UI talks to: `http://localhost:8765` when both
@@ -60,7 +61,8 @@ The top bar, left to right:
 - **The lock**: set, change or remove the conversation's password. Others using the same server then cannot open it.
 
 A run of the model's calls to its tool is folded in a section headed "tool · N calls": each call after `>`, its value
-under it.
+under it. A long line there, or in the thinking, wraps; in an answer, code keeps its lines and scrolls sideways. Every
+block of code has a **copy** button in its top corner.
 When a call needs your answer, a card below the messages says what the model asks to do, with **allow once** and
 **refuse**; for a read also **allow the folder**, after which every conversation reads there without asking.
 

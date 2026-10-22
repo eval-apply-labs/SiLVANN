@@ -74,10 +74,21 @@ static __global__ AMD_ROCM6_WAVE64__ZZPRIVATE_BOUNDS void amd_rocm6_wave64__zzpr
     amd_rocm6_wave64__zzprivate_rotate_block(out, in, sign, blocks, over);
 }
 
-/* ⭐ THE ROTATION of whole 512-blocks, `out` apart from `in`; anything else is the generic door. */
+static void amd_rocm6_wave64__override_hadamard_ladder_rows(uint16_t* out, const uint16_t* in, const uint16_t* sign, uint64_t cols,
+                                                            uint64_t rows, unsigned int* over);   /* below */
+
+/* ⭐ THE ROTATION of whole 512-blocks, `out` apart from `in`; a length of 128 or 256, or of 512-blocks and then a 256 and a
+ *   128 for what is left — the blocks nn's body cuts it into (DeepSeek's q rank of 1,280, its experts' 2,304) — as the
+ *   ladder's one row: `MEASURED` with rocprof on DeepSeek's chunk (node03), nn's body 43 us a call at those lengths. Anything
+ *   else is the generic door. */
 static void amd_rocm6_wave64__override_hadamard_rotate(uint16_t* out, const uint16_t* in, const uint16_t* sign, uint64_t n,
                                                        unsigned int* over) {
     const bool apart = out + n <= in || in + n <= out;
+    if (n % AMD_ROCM6_WAVE64__ZZPRIVATE_ROT_BLOCK != 0u && n % 128u == 0u && (n > AMD_ROCM6_WAVE64__ZZPRIVATE_ROT_BLOCK || n == 128u || n == 256u)
+     && apart) {
+        amd_rocm6_wave64__override_hadamard_ladder_rows(out, in, sign, n, 1u, over);
+        return;
+    }
     if (n == 0u || n % AMD_ROCM6_WAVE64__ZZPRIVATE_ROT_BLOCK != 0u || !apart) {
         nn__hadamard__zzabi_launch_rotate(out, in, sign, n, over);
         return;
@@ -213,8 +224,10 @@ static __global__ AMD_ROCM6_WAVE64__ZZPRIVATE_BOUNDS void amd_rocm6_wave64__zzpr
 }
 static void amd_rocm6_wave64__override_hadamard_ladder_rows(uint16_t* out, const uint16_t* in, const uint16_t* sign, uint64_t cols,
                                                             uint64_t rows, unsigned int* over) {
+    /* ⛳ APART, as nn's body asks: in place, 1,664 wide, the card's answer is not the host body's (`MEASURED` node03,
+     *   scripts/src_abi_verbs_on_device.sh through `hadamard_rotate`, 5,164 ulp) — so it is nn's generic door */
     const uint64_t n = cols * rows;
-    const bool apart = out == in || out + n <= in || in + n <= out;
+    const bool apart = out + n <= in || in + n <= out;
     if (cols == 0u || rows == 0u || cols % 128u != 0u || !apart) {
         nn__hadamard__zzabi_launch_ladder_rows(out, in, sign, cols, rows, over);
         return;

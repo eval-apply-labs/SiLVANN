@@ -90,9 +90,10 @@ python3 -c "import importlib.metadata as md; [print(n, md.metadata(n).get('Licen
 
 ## 6. The Docker image
 
-`docker/`'s Dockerfile builds the release into an image (published as `ghcr.io/eval-apply-labs/silvann` up to v0.11.1,
-not since): what it holds is listed, each part with its licence, in `/opt/silvann/IMAGE_NOTICES.md`, which
-`docker/image_notices.py` writes from what is installed when the image is built.
+`docker/`'s Dockerfile builds the release into an image of your own; no image is published (the registry's
+`ghcr.io/eval-apply-labs/silvann`, which held v0.11.1 and earlier, was deleted on 2026-10-21). What an image holds is
+listed, each part with its licence, in `/opt/silvann/IMAGE_NOTICES.md`, which `docker/image_notices.py` writes from what
+is installed when the image is built.
 
 | part | licence | its notice in the image |
 |---|---|---|

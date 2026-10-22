@@ -67,6 +67,63 @@ def _unindent(text):
 _ENTRY = re.compile(r"^;; (defun|picture|view)(?: (\S+))?, as worker (-?\d+)$")
 
 
+OPENCL_FAMILIES = ("khronos_opencl2", "khronos_opencl1_igpu")
+
+
+def opencl_own_memory():
+    """{a GPU's name: whether its memory is its own} for every GPU the system's OpenCL loader lists — an NVIDIA card named by
+    its compute capability (`sm_61`), any other by its device name (`gfx906:sramecc+:xnack-`), as the OpenCL families name
+    theirs — its own where it says `CL_DEVICE_HOST_UNIFIED_MEMORY` false: a card, where an integrated GPU's is the PC's
+    RAM. Empty where the system has no OpenCL loader. Asked of OpenCL here rather than of a family, which has no door for
+    it, so it reads the same devices the families would."""
+    lib = None
+    for name in (("OpenCL.dll",) if os.name == "nt" else ("libOpenCL.so.1", "libOpenCL.so")):
+        try:
+            lib = ctypes.CDLL(name)
+            break
+        except OSError:
+            continue
+    if lib is None:
+        return {}
+    out, n = {}, ctypes.c_uint(0)
+    if lib.clGetPlatformIDs(0, None, ctypes.byref(n)) != 0 or n.value == 0:
+        return {}
+    platforms = (ctypes.c_void_p * n.value)()
+    lib.clGetPlatformIDs(n.value, platforms, None)
+    info = lambda d, what, value: lib.clGetDeviceInfo(ctypes.c_void_p(d), ctypes.c_uint(what), ctypes.sizeof(value),
+                                                      ctypes.byref(value), None) == 0
+    for p in platforms:
+        k = ctypes.c_uint(0)
+        if lib.clGetDeviceIDs(ctypes.c_void_p(p), ctypes.c_ulonglong(1 << 2), 0, None, ctypes.byref(k)) != 0 or k.value == 0:
+            continue
+        devices = (ctypes.c_void_p * k.value)()
+        lib.clGetDeviceIDs(ctypes.c_void_p(p), ctypes.c_ulonglong(1 << 2), k.value, devices, None)
+        for d in devices:
+            major, minor, unified = ctypes.c_uint(0), ctypes.c_uint(0), ctypes.c_uint(1)
+            if info(d, 0x4000, major) and info(d, 0x4001, minor):      # cl_nv_device_attribute_query's
+                name = "sm_%d%d" % (major.value, minor.value)
+            else:
+                text = ctypes.create_string_buffer(256)
+                if lib.clGetDeviceInfo(ctypes.c_void_p(d), ctypes.c_uint(0x102B), 255, text, None) != 0:
+                    continue
+                name = text.value.decode(errors="replace")
+            out[name] = info(d, 0x1035, unified) and unified.value == 0   # CL_DEVICE_HOST_UNIFIED_MEMORY
+    return out
+
+
+def own_memory(machine):
+    """Whether the cards an OpenCL family drives for `machine` have memory of their own — every one of them, by the names
+    the roster gave them (a device's name starts with its card's), or with SILVANN_OPENCL1_TAKE the devices it names. False
+    for any other silicon, and where OpenCL cannot say."""
+    if machine.silicon not in OPENCL_FAMILIES:
+        return False
+    names = [c["card"] for c in machine.e.cards() if c.get("silicon_family") == machine.silicon]
+    take = os.environ.get("SILVANN_OPENCL1_TAKE") if machine.silicon == "khronos_opencl1_igpu" else None
+    devices = opencl_own_memory()
+    mine = [own for name, own in devices.items() if any(name.startswith(n) for n in names) or (take and name.startswith(take))]
+    return bool(mine) and all(mine)
+
+
 class Machine:
     def __init__(self, silicon=None, engine="cpu"):
         # every procedure, picture and view defined, in order: (what, worker, name, text) — ▶ `write_programs`

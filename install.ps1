@@ -20,7 +20,8 @@ and, only to build the libraries here (build.ps1, or a release whose libraries d
   SILVANN_SOURCE   the repository it fetches            default https://github.com/eval-apply-labs/SiLVANN
   SILVANN_REF      a branch of it                       default the repository's own
   SILVANN_NVCC     CUDA's compiler, when not found      default %CUDA_PATH%\bin\nvcc.exe
-  SILVANN_SILICON_FAMILIES  the families to build, e.g. "x86_avx2 nvidia_cuda12"   default what this PC's card needs
+  SILVANN_SILICON_FAMILIES  the families to build, e.g. "x86_avx2 nvidia_cuda12"   default the CPU's and OpenCL's, and
+                            CUDA's for an NVIDIA card of compute 7.5 or newer
 
   install.ps1               fetch (or update), the environment, the libraries, the command
   install.ps1 -FromSource   the same, the libraries built here (build.ps1 runs this)
@@ -107,42 +108,56 @@ function Stop-If-Missing($missing) {
 
 # the cards, and the compiler each one's family is built with; what is chosen goes to build.py as its variables
 function Find-Cards {
-    $script:Families = "x86_avx2"
+    # the OpenCL families always, as install.sh builds them: they need nothing installed to be built (the headers carried,
+    # OpenCL.dll's import library made from them), and at run time they take only the cards no other family does - an
+    # NVIDIA card older than CUDA's (OpenCL 1.2), an AMD or Intel GPU (OpenCL 2.0) - so a PC whose card CUDA runs is unchanged
+    $script:Families = "x86_avx2 khronos_opencl2 khronos_opencl1_igpu"
+    $openclCard = $false
     $cpu = (Get-CimInstance Win32_Processor | Select-Object -First 1).Name
     Note "the CPU: $cpu"
     $smi = Get-Command nvidia-smi -ErrorAction SilentlyContinue
     if ($smi) {
         $cards = (& nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>$null) -join "; "
-        $caps = (& nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>$null | ForEach-Object { $_.Trim().Replace(".", "") } |
-                 Sort-Object -Unique) -join ","
+        $caps = @(& nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>$null | ForEach-Object { "$_".Trim().Replace(".", "") } |
+                  Where-Object { $_ -match "^[0-9]+$" } | Sort-Object -Unique)
         if ($cards) {
             Note "NVIDIA: $cards"
-            $nvcc = $env:SILVANN_NVCC
-            if (-not $nvcc -and $env:CUDA_PATH) { $nvcc = Join-Path $env:CUDA_PATH "bin\nvcc.exe" }
-            if (-not $nvcc) { $c = Get-Command nvcc -ErrorAction SilentlyContinue; if ($c) { $nvcc = $c.Source } }
-            if ($nvcc -and (Test-Path $nvcc)) {
-                $release = (& $nvcc --version | Select-String -Pattern "release [0-9.]+").Matches.Value
-                Note "   built with $nvcc ($release)$(if ($caps) { ", for compute capability $caps" })"
-                $env:SILVANN_NVCC = $nvcc
-                if ($caps) { $env:SILVANN_CUDA_ARCHES = $caps }
-                $script:Families = "$script:Families nvidia_cuda12"
-            } else {
-                Note "   no nvcc: the card's family needs CUDA's compiler (12 or 13) - the CUDA toolkit from"
-                Note "   developer.nvidia.com/cuda-downloads (the driver is installed already), then 'silvann build'."
-                Note "   Until then the CPU runs the models."
+            # CUDA's family takes compute 7.5 and newer (its targets, sm_75 ...): an older card - Pascal's GTX 10x0, compute
+            # 6.1 - is not built for (CUDA 13 builds no sm_61, and 12.9 stops at its tensor cores), and runs through OpenCL 1.2
+            $new = @($caps | Where-Object { [int]$_ -ge 75 })
+            $old = @($caps | Where-Object { [int]$_ -lt 75 })
+            if ($old.Count -gt 0) {
+                $said = ($old | ForEach-Object { $_.Substring(0, $_.Length - 1) + "." + $_.Substring($_.Length - 1) }) -join ", "
+                Note "   compute capability $said is older than CUDA's family takes (7.5 and newer): that card runs through OpenCL 1.2"
+                $openclCard = $true
+            }
+            if ($new.Count -gt 0 -or $old.Count -eq 0) {     # a card CUDA's family takes, or none whose compute was read
+                $nvcc = $env:SILVANN_NVCC
+                if (-not $nvcc -and $env:CUDA_PATH) { $nvcc = Join-Path $env:CUDA_PATH "bin\nvcc.exe" }
+                if (-not $nvcc) { $c = Get-Command nvcc -ErrorAction SilentlyContinue; if ($c) { $nvcc = $c.Source } }
+                if ($nvcc -and (Test-Path $nvcc)) {
+                    $release = (& $nvcc --version | Select-String -Pattern "release [0-9.]+").Matches.Value
+                    Note "   built with $nvcc ($release)$(if ($new.Count -gt 0) { ", for compute capability $($new -join ',')" })"
+                    $env:SILVANN_NVCC = $nvcc
+                    if ($new.Count -gt 0) { $env:SILVANN_CUDA_ARCHES = $new -join "," }
+                    $script:Families = "$script:Families nvidia_cuda12"
+                } else {
+                    Note "   no nvcc: the card's family needs CUDA's compiler (12 or 13) - the CUDA toolkit from"
+                    Note "   developer.nvidia.com/cuda-downloads (the driver is installed already), then 'silvann build'."
+                    Note "   Until then the CPU runs the models."
+                }
             }
         }
     }
-    # the other GPUs - AMD's, Intel's - through OpenCL, whose OpenCL.dll their driver installs
+    # the other GPUs - AMD's, Intel's - through OpenCL
     $others = @(Get-CimInstance Win32_VideoController | Where-Object { $_.Name -and $_.AdapterCompatibility -notmatch "NVIDIA|Microsoft" })
     if ($others.Count -gt 0) {
-        Note "other GPUs: $(($others | ForEach-Object { $_.Name }) -join '; ')"
-        if (Test-Path (Join-Path $env:SystemRoot "System32\OpenCL.dll")) {
-            Note "   through their driver's OpenCL: the OpenCL 2.0 and 1.2 families"
-            $script:Families = "$script:Families khronos_opencl2 khronos_opencl1_igpu"
-        } else {
-            Note "   no OpenCL.dll: the GPU's own driver installs it - its vendor's current driver, then 'silvann build'"
-        }
+        Note "other GPUs: $(($others | ForEach-Object { $_.Name }) -join '; ') - through their driver's OpenCL"
+        $openclCard = $true
+    }
+    # an OpenCL family runs on OpenCL.dll, which a GPU's driver installs
+    if ($openclCard -and -not (Test-Path (Join-Path $env:SystemRoot "System32\OpenCL.dll"))) {
+        Note "   no OpenCL.dll: the GPU's own driver installs it - its vendor's current driver; until then the CPU runs the models"
     }
     $ram = [math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB)
     Note "memory: $ram GB of RAM"

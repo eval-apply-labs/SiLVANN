@@ -215,11 +215,10 @@ static __device__ inline uint64_t nn__expert__count(unsigned which);
 /* ⭐ A PROMOTION (NN-48): `expert` of a (layer, type) band of this worker's collection given a slot — by the same rule as a
  *   read's: a free one, or the least recently used expert not among `pinned` — and its bytes gathered into it by a loader
  *   thread (▶ `nn__expert__gather`). RESIDENT if it already is, ARRIVING once queued or while on the way, REFUSED when
- *   there is no slot or no room in flight. `settle_ready` admits every promotion of the band that has finished and waits
- *   for none, so the expert is computed where it was until its copy has landed. */
+ *   there is no slot or no room in flight. The tier's next visit of the band waits for it and admits it (`settle`), so
+ *   the expert is computed where it was until then — the same visit on every boot. */
 static __device__ inline int nn__expert__promote(sys__silicon_family__id family, uint64_t layer, uint64_t type, uint64_t expert,
                                                  const nn__expert__gather* gather, const uint64_t* pinned, unsigned npinned);
-static __device__ inline bool nn__expert__settle_ready(uint64_t layer, uint64_t type);
 /* How many more reads or promotions may be on their way at once — so a verb can choose which of its experts get the room. */
 static __device__ inline unsigned nn__expert__flight_free(void);
 

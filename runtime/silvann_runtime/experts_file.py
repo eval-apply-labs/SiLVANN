@@ -20,7 +20,7 @@ import os
 import numpy as np
 
 from .model_folder import Refused
-from .system import BINARY, WINDOWS, memory, write_at
+from .system import BINARY, WINDOWS, lock, lockable, memory, spans, write_at
 
 
 def available():
@@ -265,3 +265,32 @@ def _write(bundle, todo, plan, layers, experts, directory, pieces, progress):
         os.close(fd)
         with open(path + ".json", "w") as f:
             json.dump(dict(ident=ident, bytes=size, part=part, parts=parts), f)
+
+
+# ⭐ THE EXPERTS LOCKED INTO RAM (`experts_lock`, node-01's NN-99 ④ item): opt-in, for a machine whose `vm.swappiness`
+#   still lets the kernel swap experts out to keep files cached — Linux's mlock, which needs `ulimit -l` past the experts.
+def lock_check(on, where, total):
+    """`experts_lock` refused at once where it cannot hold: the experts not copied into RAM (`where` not "ram"), or more of
+    them (`total` bytes) than this process may lock (`ulimit -l`) — before a long load."""
+    if not on:
+        return
+    if where != "ram":
+        said = {"card": "on the card", "disk": "read from the disk", "mapped": "mapped from their files"}.get(where, repr(where))
+        raise Refused("experts_lock locks the experts the CPU holds in RAM (experts_from 'ram'), and here they are %s" % said)
+    most = lockable()
+    if most == 0:
+        raise Refused("experts_lock is Linux's (mlock): on this system the experts stay in RAM as the system keeps them")
+    if most is not None and total > most:
+        raise Refused("experts_lock: %.1f GB of experts, and this process may lock %.1f GB (ulimit -l) — raise memlock for "
+                      "this user (/etc/security/limits.conf, then log in again) or leave experts_lock off"
+                      % (total / 2 ** 30, most / 2 ** 30))
+
+
+def lock_experts(on, addresses, size):
+    """`experts_lock`'s lock once the experts are loaded: each at `addresses`, `size` bytes. The GB locked, 0 when off."""
+    if not on:
+        return 0.0
+    try:
+        return lock(spans(addresses, size)) / 2 ** 30
+    except OSError as ex:
+        raise Refused("experts_lock: the system would not lock the experts — %s" % ex.strerror)

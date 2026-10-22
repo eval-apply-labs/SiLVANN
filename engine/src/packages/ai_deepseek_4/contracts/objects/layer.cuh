@@ -175,5 +175,6 @@
  * halves), and its picks as words (`k`), at the next eight bytes. */
 #define AI_DEEPSEEK_4__HAND_PICKS(hidden, k)  ((2ull * (hidden) + 2ull * (k) + 7ull) & ~7ull)
 #define AI_DEEPSEEK_4__HAND(hidden, k)        (AI_DEEPSEEK_4__HAND_PICKS(hidden, k) + 8ull * (k))
+#define AI_DEEPSEEK_4__ROWS_MAX       4096ull /* a chunk's rows, at most */
 
 #endif /* SILVANN__PACKAGES_AI_DEEPSEEK_4_CONTRACTS_OBJECTS_LAYER_CUH */

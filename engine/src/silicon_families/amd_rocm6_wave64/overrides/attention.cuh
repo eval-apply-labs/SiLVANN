@@ -2,7 +2,8 @@
 #define SILVANN__SILICON_FAMILIES_AMD_ROCM6_WAVE64_OVERRIDES_ATTENTION_CUH
 /* ══ attention's DOORS, RUN FASTER — amd_rocm6_wave64 ═════════════════════════════════════════════════════════════════
  * nn's attention doors (`nn/cpu/opcodes/attention__abi.cuh`), where this family covers them: the scores and the mix
- * over heads of 128 or 256, as one call or as the two residual passes, and two residuals' merge. */
+ * over heads of 128 or 256, as one call or as the two residual passes, and two residuals' merge; the grouped scores and
+ * the mix as halves over heads of 512 too. */
 
 /* What this file needs, named where a reader — and an editor — can follow it. */
 #include <stdint.h>
@@ -128,8 +129,65 @@ static __device__ inline void amd_rocm6_wave64__zzprivate_attention_mix(float* r
         __syncthreads();
     }
 }
-/* The eight entry points, written out — a head of 128 and of 256 for each — so every kernel name has a definition a reader
- * (and the C-subset gate) can find. */
+/* ⭐ A KV HEAD'S QUERY HEADS' SCORES AND NOTHING AFTER — `attention_scores_grouped`, the softmax left to the caller. nn's
+ *   body gives a lane a query head and eight positions and walks the whole head alone: at 64 heads on one kv head of 512
+ *   over 640 positions that is 20 blocks and 578 us a call (`MEASURED` with rocprof, DeepSeek's chunk on node03,
+ *   measurements/2026-10-21_deepseek_attention_kernels_node03.md). Here, as `attention_weights` above, a block a query
+ *   head and sixteen lanes a position, each holding `D / 16` of the query, four positions a lane group in flight; the
+ *   score `dot · 1/√D` into `p`. The products are nn's; the sixteen parts are summed by shuffles. */
+template <uint32_t D>
+static __device__ inline void amd_rocm6_wave64__zzprivate_attention_raw(float* p, const uint16_t* q, const uint16_t* k, uint64_t q_heads,
+                                                                         uint64_t kv_heads, uint64_t length) {
+    const uint32_t PER = D / 16u;                                         /* a lane's halves of a head: 8, 16 or 32 */
+    const uint32_t t = (uint32_t)nn__silicon__lane(), sub = t % 16u, slot = t / 16u;
+    const uint64_t group = q_heads / kv_heads, row = kv_heads * D;
+    const float scale = 1.0f / nn__silicon__sqrtf((float)D);
+    for (uint64_t h = nn__silicon__block(); h < q_heads; h += nn__silicon__blocks()) {
+        const uint16_t* kh = k + (h / group) * D + sub * PER;
+        float* ph = p + h * length;
+        uint32_t qv[PER / 2u];
+        const uint32_t* qw = (const uint32_t*)(q + h * D + sub * PER);
+#pragma unroll
+        for (uint32_t i = 0u; i < PER / 2u; ++i) qv[i] = qw[i];
+        for (uint64_t base = slot; base < length; base += 64u) {           /* four positions a lane group in flight */
+            uint32_t kv[4][PER / 2u];
+#pragma unroll
+            for (uint32_t u = 0u; u < 4u; ++u) {
+                const uint64_t pos = base + 16u * u < length ? base + 16u * u : base;
+                const uint32_t* kw = (const uint32_t*)(kh + pos * row);
+#pragma unroll
+                for (uint32_t i = 0u; i < PER / 2u; ++i) kv[u][i] = kw[i];
+            }
+#pragma unroll
+            for (uint32_t u = 0u; u < 4u; ++u) {
+                float dot = 0.0f;
+#pragma unroll
+                for (uint32_t i = 0u; i < PER / 2u; ++i) dot = nn__silicon__dot2(qv[i], kv[u][i], dot);
+                for (uint32_t off = 8u; off > 0u; off >>= 1) dot += __shfl_xor(dot, (int)off);
+                const uint64_t pos = base + 16u * u;
+                if (pos < length && sub == 0u) ph[pos] = dot * scale;
+            }
+        }
+    }
+}
+/* The entry points, written out — a head of 128 and of 256 for each, and of 512 for the grouped scores and the mix as
+ * halves — so every kernel name has a definition a reader (and the C-subset gate) can find. */
+static __global__ AMD_ROCM6_WAVE64__ZZPRIVATE_BOUNDS void amd_rocm6_wave64__zzprivate_attention_raw_128(float* p, const uint16_t* q, const uint16_t* k,
+    uint64_t q_heads, uint64_t kv_heads, uint64_t length) {
+    amd_rocm6_wave64__zzprivate_attention_raw<128u>(p, q, k, q_heads, kv_heads, length);
+}
+static __global__ AMD_ROCM6_WAVE64__ZZPRIVATE_BOUNDS void amd_rocm6_wave64__zzprivate_attention_raw_256(float* p, const uint16_t* q, const uint16_t* k,
+    uint64_t q_heads, uint64_t kv_heads, uint64_t length) {
+    amd_rocm6_wave64__zzprivate_attention_raw<256u>(p, q, k, q_heads, kv_heads, length);
+}
+static __global__ AMD_ROCM6_WAVE64__ZZPRIVATE_BOUNDS void amd_rocm6_wave64__zzprivate_attention_raw_512(float* p, const uint16_t* q, const uint16_t* k,
+    uint64_t q_heads, uint64_t kv_heads, uint64_t length) {
+    amd_rocm6_wave64__zzprivate_attention_raw<512u>(p, q, k, q_heads, kv_heads, length);
+}
+static __global__ AMD_ROCM6_WAVE64__ZZPRIVATE_BOUNDS void amd_rocm6_wave64__zzprivate_attention_mix_halves_512(uint16_t* o, const float* p, const uint16_t* v, uint64_t q_heads,
+    uint64_t kv_heads, uint64_t length, unsigned int* over) {
+    amd_rocm6_wave64__zzprivate_attention_mix<512u, true>(0, o, p, v, q_heads, kv_heads, length, over);
+}
 static __global__ AMD_ROCM6_WAVE64__ZZPRIVATE_BOUNDS void amd_rocm6_wave64__zzprivate_attention_weights_128(float* p, float* res, const uint16_t* q, const uint16_t* k,
     uint64_t q_heads, uint64_t kv_heads, uint64_t length) {
     amd_rocm6_wave64__zzprivate_attention_weights<128u, false>(p, res, q, k, q_heads, kv_heads, length);
@@ -166,6 +224,13 @@ static __global__ AMD_ROCM6_WAVE64__ZZPRIVATE_BOUNDS void amd_rocm6_wave64__zzpr
 static inline bool amd_rocm6_wave64__zzprivate_attention_fit(const void* a, const void* b, uint64_t q_heads, uint64_t kv_heads,
                                                              uint64_t head_dim) {
     return (head_dim == 128u || head_dim == 256u) && kv_heads != 0u && q_heads % kv_heads == 0u && q_heads != 0u
+        && ((uint64_t)(uintptr_t)a) % 4u == 0u && ((uint64_t)(uintptr_t)b) % 4u == 0u;
+}
+/* ...and the grouped scores and the mix as halves, which take heads of 512 as well — a latent attention's 64 query heads
+ * on one kv head of 512 (GLM's, DeepSeek's). */
+static inline bool amd_rocm6_wave64__zzprivate_attention_fit_wide(const void* a, const void* b, uint64_t q_heads, uint64_t kv_heads,
+                                                                  uint64_t head_dim) {
+    return (head_dim == 128u || head_dim == 256u || head_dim == 512u) && kv_heads != 0u && q_heads % kv_heads == 0u && q_heads != 0u
         && ((uint64_t)(uintptr_t)a) % 4u == 0u && ((uint64_t)(uintptr_t)b) % 4u == 0u;
 }
 static void amd_rocm6_wave64__override_attention_weights(float* p, float* res, const uint16_t* q, const uint16_t* k, uint64_t q_heads,
@@ -213,17 +278,33 @@ static void amd_rocm6_wave64__override_attention_scores(float* p, const uint16_t
 }
 static void amd_rocm6_wave64__override_attention_mix(uint16_t* o, const float* p, const uint16_t* v, uint64_t q_heads,
                                                      uint64_t kv_heads, uint64_t head_dim, uint64_t length, unsigned int* over) {
-    if (!amd_rocm6_wave64__zzprivate_attention_fit(v, v, q_heads, kv_heads, head_dim)) {
+    if (!amd_rocm6_wave64__zzprivate_attention_fit_wide(v, v, q_heads, kv_heads, head_dim)) {
         nn__attention__zzabi_launch_mix(o, p, v, q_heads, kv_heads, head_dim, length, over);
         return;
     }
     const void* kernel = head_dim == 128u ? (const void*)amd_rocm6_wave64__zzprivate_attention_mix_halves_128
-                                          : (const void*)amd_rocm6_wave64__zzprivate_attention_mix_halves_256;
+                       : head_dim == 256u ? (const void*)amd_rocm6_wave64__zzprivate_attention_mix_halves_256
+                                          : (const void*)amd_rocm6_wave64__zzprivate_attention_mix_halves_512;
     const uint32_t blocks = q_heads < NN__KERNELS__BLOCKS_MAX ? (uint32_t)q_heads : NN__KERNELS__BLOCKS_MAX;
     void* args[] = { &o, &p, &v, &q_heads, &kv_heads, &length, &over };
     const size_t sizes[] = { sizeof o, sizeof p, sizeof v, sizeof q_heads, sizeof kv_heads, sizeof length, sizeof over };
     nn__silicon__launch(kernel, "amd_rocm6_wave64__zzprivate_attention_mix", blocks,
                         AMD_ROCM6_WAVE64__ZZPRIVATE_ROWS * AMD_ROCM6_WAVE64__ZZPRIVATE_WAVE, args, sizes, 7u);
+}
+static void amd_rocm6_wave64__override_attention_scores_grouped(float* p, const uint16_t* q, const uint16_t* k, uint64_t q_heads,
+                                                                uint64_t kv_heads, uint64_t head_dim, uint64_t length) {
+    if (!amd_rocm6_wave64__zzprivate_attention_fit_wide(q, k, q_heads, kv_heads, head_dim)) {
+        nn__attention__zzabi_launch_scores_grouped(p, q, k, q_heads, kv_heads, head_dim, length);
+        return;
+    }
+    const void* kernel = head_dim == 128u ? (const void*)amd_rocm6_wave64__zzprivate_attention_raw_128
+                       : head_dim == 256u ? (const void*)amd_rocm6_wave64__zzprivate_attention_raw_256
+                                          : (const void*)amd_rocm6_wave64__zzprivate_attention_raw_512;
+    const uint32_t blocks = q_heads < NN__KERNELS__BLOCKS_MAX ? (uint32_t)q_heads : NN__KERNELS__BLOCKS_MAX;
+    void* args[] = { &p, &q, &k, &q_heads, &kv_heads, &length };
+    const size_t sizes[] = { sizeof p, sizeof q, sizeof k, sizeof q_heads, sizeof kv_heads, sizeof length };
+    nn__silicon__launch(kernel, "amd_rocm6_wave64__zzprivate_attention_raw", blocks,
+                        AMD_ROCM6_WAVE64__ZZPRIVATE_ROWS * AMD_ROCM6_WAVE64__ZZPRIVATE_WAVE, args, sizes, 6u);
 }
 
 /* ⭐ TWO RESIDUALS INTO ONE, A WAVE A HEAD — what the tiered cache does once a tier is in: nn's `attention_merge` gives a

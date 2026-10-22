@@ -337,8 +337,9 @@ typedef struct nn__expert__gather { nn__expert__run run[NN__EXPERT__GATHER_RUNS]
 /* ⭐ optional, an EXCLUSIVE tier (NN-48) — an expert lives on the card or in the CPUs' memory, never both, so a model can be
  * bigger than the RAM. A promotion lands in a FREE card slot (a recycled one); the card's least recently used expert of
  * the band then goes OUTGOING — its bytes read off the card into an evacuation channel while it is still computed there —
- * and at the next commit (a layer's visit or a chunk's note, the CPUs idle) it leaves the card, its slot back to FREE, and
- * takes the RAM slots the promoted expert gave up; the channel is written into them, and a CPU reaching it first waits.
+ * and at its commit (a layer's visit or a chunk's note, the CPUs idle: the promoted expert's layer's next, or the
+ * COMMIT_VISITS-th since, its copies waited for if late) it leaves the card, its slot back to FREE, and takes the RAM
+ * slots the promoted expert gave up; the channel is written into them, and a CPU reaching it first waits.
  *   EXCLUSIVE     1, or absent / 0 for an inclusive tier
  *   PART_WORKER   the worker that holds part 0 of every expert; part p is that worker plus p
  *   PART_TYPE     the CPUs' collection of expert parts */
@@ -347,7 +348,7 @@ typedef struct nn__expert__gather { nn__expert__run run[NN__EXPERT__GATHER_RUNS]
 #define NN__EXPERT_TIER__PART_TYPE   18u
 /*   DUPLEX        1 where a copy to the card and one back run at once at full speed (measured at boot, bound in Lisp as
  *                 `nn__expert_tier_duplex`): a promotion's gather and its evacuation are launched together. 0: the gather
- *                 first, the evacuation at the next commit, once it has landed. */
+ *                 first, the evacuation once it has landed. */
 #define NN__EXPERT_TIER__DUPLEX      19u
 #define NN__EXPERT_TIER__LENGTH_EXCLUSIVE 20u
 /*   LANDING_LINE  the hits of a visit above which it starts one promotion, at or below it `LANDING` — ⚖ 2026-10-06: *"1 if
@@ -362,7 +363,12 @@ typedef struct nn__expert__gather { nn__expert__run run[NN__EXPERT__GATHER_RUNS]
  * Every card visits its own tier, then the cards trade what each holds (a wait for the group, ▶ `nn__expert_tier__share`)
  * and every card makes the same assignment from it: a pick one card holds is that card's, a pick several hold the one of
  * them with the fewest so far, a pick none holds the CPUs' — and the card with the fewest is the one that may promote it.
- * Each card computes its own; every pick a card computes is marked held for the CPUs. */
+ * Each card computes its own; every pick a card computes is marked held for the CPUs.
+ * A group's tiers may be EXCLUSIVE, with no slice: every expert on one card or in RAM, each card's promotions swaps of its
+ * own (a share of the evacuation channels each), its swaps committed before it trades. Over a prompt's chunk every card
+ * says which of the layer's experts it holds and computes the picks it holds; a pick another card holds is numbered
+ * `2 · experts` past itself, which neither this card's experts nor the CPUs compute (▶ `nn__routed__rows`), and a chunk's
+ * promotions go to the CPUs until their commit. */
 #define NN__EXPERT_TIER__RANKS        21u
 #define NN__EXPERT_TIER__LENGTH_GROUP 22u
 /*   SHARED      the experts of a layer every card keeps (NN-99 ③, ⚖ *"we can keep 10% of the l1 cache into the top shared
@@ -390,6 +396,8 @@ typedef struct nn__expert_tier {
 } nn__expert_tier;
 #define NN__EXPERT_TIER__CHANNELS  16u   /* evacuation channels, each an expert's bytes in pinned memory */
 #define NN__EXPERT_TIER__OUTGOING  64u   /* swaps in flight, over every layer */
+#define NN__EXPERT_TIER__COMMIT_VISITS 4u   /* a swap's worker's visits, at any layer, before it commits — at its own layer's
+                                             * next if that comes first (▶ `nn__expert_tier__commit`) */
 /* What a request found: the expert in memory, its read on the way, or no way to have it. */
 #define NN__EXPERT__RESIDENT   0
 #define NN__EXPERT__ARRIVING   1

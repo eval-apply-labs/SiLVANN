@@ -191,9 +191,10 @@ def main(argv):
             print(json.dumps([{"name": name, "repo": repo, "size": size, "here": present(str(MODELS / name))}
                               for name, (repo, size) in sorted(KNOWN.items())]))
             return 0
+        wide = max(len(name) for name in KNOWN)
         for name, (repo, size) in sorted(KNOWN.items()):
             here = present(str(MODELS / name))
-            print("%-36s %-8s %s  %s" % (name, size, "here" if here else "     ", "huggingface.co/" + repo))
+            print("%-*s %-8s %s  %s" % (wide, name, size, "here" if here else "     ", "huggingface.co/" + repo))
         return 0
     print(__doc__.strip())
     return 2

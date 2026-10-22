@@ -66,6 +66,26 @@ that leaves the impersonation nothing to work on:
 
 None of this needs AI kept away from anyone. It closes the door the fake would have walked through.
 
+## Authentication and anonymity
+
+Impersonation points at a habit worth changing: how we prove who we are. A voice, a face or a password can be copied or
+guessed. A signing key is something you hold rather than something you look or sound like, so a model cannot copy it
+from a recording. Each person keeps a private key, on a phone or a small device of its own, and publishes the matching
+public key. A message signed with the private key can only have come from its holder, and anyone can check it against
+the public key. Logging in becomes signing a challenge instead of typing a password, and a payment, a contract or a
+message from your bank carries a signature you can check, the way a website already carries a certificate.
+
+An electronic signature can then be the normal way to identify someone, without identifying anyone more than a task
+needs. Proving you are over 18 does not need your name. An anonymous account, bought at a shop that checks your ID once
+at the counter, the way a phone top-up card is sold today, can carry that one fact, signed by whoever issued it, and
+nothing that leads back to you. Your full identity stays for the few things that need it.
+
+Keys need somewhere to be looked up, and a way to be replaced when one is lost. A general ledger, kept by many parties
+rather than one company, can hold that register: which public key belongs to which account, which keys were withdrawn,
+which name points where. [go-ledger](https://github.com/eval-apply-labs/go-ledger), another Eval Apply Labs project, is
+a small ledger of this kind. It binds names to accounts in a registry its validators agree on, and every entry is signed,
+so a name can be checked without trusting a single company's database.
+
 ## A change of habits, not for the worse
 
 AI will change some of our habits and expectations, as the telephone and the internet did. That does not mean it has to

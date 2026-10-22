@@ -35,6 +35,7 @@ typedef struct nn__loader__read {
     uint64_t layer, type, expert, slot, room;
     nn__expert__backing backing;
     uint64_t seq;                  /* when it was queued: the threads take the oldest first */
+    uint64_t made;                 /* when its worker asked for it — the order `settle` admits a worker's reads in */
     bool gather;                   /* a promotion: `runs` gathered from memory into `room`, `bytes` long, not a file read */
     uint64_t bytes;
     nn__expert__gather runs;
@@ -59,6 +60,7 @@ typedef struct nn__loader__read {
 #define NN__LOADER__ADMITTED(r)   ((r)->job == NN__LOADER__JOB_READ || (r)->job == NN__LOADER__JOB_GATHER)
 
 static nn__loader__read nn__loader__zzprivate_reads[NN__EXPERT__FLIGHT_MAX];
+static void nn__expert_tier__zzprivate_gathered(const nn__loader__read* gather);   /* ▶ the exclusive tier, below */
 static sys__os__lock    nn__loader__zzprivate_lock = SYS__OS__LOCK_INIT;
 static sys__os__condition nn__loader__zzprivate_work = SYS__OS__CONDITION_INIT;   /* a read was queued */
 static sys__os__condition nn__loader__zzprivate_done = SYS__OS__CONDITION_INIT;   /* a read finished   */
@@ -198,6 +200,7 @@ static void* nn__loader__zzprivate_run(void* unused) {
             __atomic_sub_fetch(&nn__loader__zzprivate_writes_out, 1ull, __ATOMIC_RELEASE);
         } else {
             job->state = ok ? NN__LOADER__DONE : NN__LOADER__FAILED;
+            if (ok && r.job == NN__LOADER__JOB_GATHER) nn__expert_tier__zzprivate_gathered(job);
         }
         sys__os__condition_wake_all(&nn__loader__zzprivate_done);
     }
@@ -342,7 +345,7 @@ static __device__ inline int nn__expert__request(sys__silicon_family__id family,
     free_read->backing = *backing;
     free_read->gather = false;
     free_read->job = NN__LOADER__JOB_READ;
-    free_read->seq = ++nn__loader__zzprivate_seq;
+    free_read->made = free_read->seq = ++nn__loader__zzprivate_seq;
     ++nn__loader__zzprivate_count[predicted ? NN__EXPERT__COUNT_PREDICTED : NN__EXPERT__COUNT_MISSES];
     sys__os__condition_wake_one(&nn__loader__zzprivate_work);
     sys__os__lock_give(&nn__loader__zzprivate_lock);
@@ -399,24 +402,27 @@ static __device__ inline bool nn__expert__settle(uint64_t layer, uint64_t type) 
     bool ok = true;
     const uint64_t owner = nn__expert__zzpackage_owner();
     sys__os__lock_take(&nn__loader__zzprivate_lock);
+    /* ⛳ IN THE ORDER THIS WORKER MADE THEM, NOT THE TABLE'S: an admission makes its expert the band's most recent, and
+     *   which entry a read took depends on the other workers' reads around it */
     for (;;) {
-        bool waiting = false;
+        nn__loader__read* next = 0;
         for (unsigned i = 0u; i < NN__EXPERT__FLIGHT_MAX; ++i) {
             nn__loader__read* r = &nn__loader__zzprivate_reads[i];
             if (r->state == NN__LOADER__FREE || !NN__LOADER__ADMITTED(r) || r->owner != owner || r->layer != layer || r->type != type) continue;
             nn__loader__zzprivate_let_go(r);
-            if (r->state == NN__LOADER__QUEUED || r->state == NN__LOADER__READING) { waiting = true; continue; }
-            /* done or failed: the index learns of it here, on this thread */
-            const bool read = r->state == NN__LOADER__DONE;
-            const uint64_t slot = r->slot, room = r->room, expert = r->expert;
-            r->state = NN__LOADER__FREE;
-            if (!read || !nn__expert__admit(layer, expert, room, type)) {
-                (void)nn__expert__type_give(type, slot);
-                ok = false;
-            }
+            if (next == 0 || r->made < next->made) next = r;
         }
-        if (!waiting) break;
-        nn__loader__zzprivate_wait();
+        if (next == 0) break;
+        if (next->state == NN__LOADER__QUEUED || next->state == NN__LOADER__READING) { nn__loader__zzprivate_wait(); continue; }
+        /* done or failed: the index learns of it here, on this thread */
+        const bool read = next->state == NN__LOADER__DONE;
+        const uint64_t slot = next->slot, room = next->room, expert = next->expert;
+        if (read) nn__loader__zzprivate_landed(next);
+        next->state = NN__LOADER__FREE;
+        if (!read || !nn__expert__admit(layer, expert, room, type)) {
+            (void)nn__expert__type_give(type, slot);
+            ok = false;
+        }
     }
     sys__os__lock_give(&nn__loader__zzprivate_lock);
     return ok;
@@ -445,6 +451,10 @@ static __device__ inline int nn__expert__promote(sys__silicon_family__id family,
     uint64_t slot = 0ull, room = 0ull;
     if (!nn__loader__zzprivate_room(layer, type, pinned, npinned, &slot, &room)) return NN__EXPERT__REFUSED;
     sys__os__lock_take(&nn__loader__zzprivate_lock);
+    /* ⛳ AN ENTRY ANOTHER WORKER TOOK MEANWHILE IS NOT A REFUSAL: a group's cards promote at once, and refusing the second
+     *   would make which promotion each card starts a matter of timing — their tiers part from boot to boot */
+    for (unsigned i = 0u; free_read->state != NN__LOADER__FREE && i < NN__EXPERT__FLIGHT_MAX; ++i)
+        free_read = &nn__loader__zzprivate_reads[i];
     if (free_read->state != NN__LOADER__FREE || !nn__loader__zzprivate_start()) {
         sys__os__lock_give(&nn__loader__zzprivate_lock);
         (void)nn__expert__type_give(type, slot);
@@ -460,7 +470,7 @@ static __device__ inline int nn__expert__promote(sys__silicon_family__id family,
     free_read->slot = slot; free_read->room = room;
     free_read->gather = true; free_read->bytes = bytes; free_read->runs = *gather;
     free_read->job = NN__LOADER__JOB_GATHER;
-    free_read->seq = ++nn__loader__zzprivate_seq;
+    free_read->made = free_read->seq = ++nn__loader__zzprivate_seq;
     free_read->queued_ns = nn__loader__zzprivate_now_ns();
     ++nn__loader__zzprivate_count[NN__EXPERT__COUNT_PROMOTED];
     if (!hold) sys__os__condition_wake_one(&nn__loader__zzprivate_work);
@@ -471,30 +481,14 @@ static __device__ inline int nn__expert__promote(sys__silicon_family__id family,
 static __device__ inline unsigned nn__expert__flight_free(void) {
     unsigned n = 0u;
     sys__os__lock_take(&nn__loader__zzprivate_lock);
-    for (unsigned i = 0u; i < NN__EXPERT__FLIGHT_MAX; ++i) n += nn__loader__zzprivate_reads[i].state == NN__LOADER__FREE;
-    sys__os__lock_give(&nn__loader__zzprivate_lock);
-    return n;
-}
-
-static __device__ inline bool nn__expert__settle_ready(uint64_t layer, uint64_t type) {
-    bool ok = true;
-    const uint64_t owner = nn__expert__zzpackage_owner();
-    sys__os__lock_take(&nn__loader__zzprivate_lock);
+    /* ⛳ A WRITE COUNTS AS FREE: it frees itself when it lands, and a promotion waits for it — counted as taken, how many a
+     *   chunk promotes would be the writes' timing */
     for (unsigned i = 0u; i < NN__EXPERT__FLIGHT_MAX; ++i) {
-        nn__loader__read* r = &nn__loader__zzprivate_reads[i];
-        if (!NN__LOADER__ADMITTED(r) || r->owner != owner || r->layer != layer || r->type != type) continue;
-        if (r->state != NN__LOADER__DONE && r->state != NN__LOADER__FAILED) continue;      /* free, or still on its way */
-        const bool landed = r->state == NN__LOADER__DONE;
-        const uint64_t slot = r->slot, room = r->room, expert = r->expert;
-        if (landed) nn__loader__zzprivate_landed(r);
-        r->state = NN__LOADER__FREE;
-        if (!landed || !nn__expert__admit(layer, expert, room, type)) {
-            (void)nn__expert__type_give(type, slot);
-            ok = false;
-        }
+        const nn__loader__read* r = &nn__loader__zzprivate_reads[i];
+        n += r->state == NN__LOADER__FREE || r->job == NN__LOADER__JOB_WRITE;
     }
     sys__os__lock_give(&nn__loader__zzprivate_lock);
-    return ok;
+    return n;
 }
 
 static __device__ inline bool nn__expert__settle_one(uint64_t layer, uint64_t type, uint64_t expert) {
@@ -614,7 +608,7 @@ static __device__ inline bool nn__expert_tier__of(uint64_t binding, uint64_t lay
     if (sys__node_array__length(entry.args[0]) >= NN__EXPERT_TIER__LENGTH_GROUP) {
         const sys__heap_node n = sys__node_array__borrow(entry.args[0], NN__EXPERT_TIER__RANKS);
         if (n.dtype != SYS__KIND__VALUE_INT || n.args[0] == 0u || n.args[0] > NN__EXPERT_TIER__RANKS_MAX
-         || t.exclusive != 0u || (uint64_t)sys__silicon__worker() >= n.args[0]) return false;   /* a group's tier: inclusive, a card's */
+         || (uint64_t)sys__silicon__worker() >= n.args[0]) return false;   /* a group's tier: a card's */
         t.ranks = n.args[0];
     }
     if (sys__node_array__length(entry.args[0]) >= NN__EXPERT_TIER__LENGTH_SHARED) {
@@ -622,6 +616,7 @@ static __device__ inline bool nn__expert_tier__of(uint64_t binding, uint64_t lay
         if (n.dtype != SYS__KIND__VALUE_INT || n.args[0] > t.experts) return false;
         t.shared = n.args[0];
     }
+    if (t.exclusive == 1u && t.ranks > 1u && t.shared != 0u) return false;   /* a group's exclusive tiers keep no slice */
     *tier = t;
     return true;
 }
@@ -684,8 +679,54 @@ typedef struct nn__expert_tier__out {
     uint64_t owner, lx, x, lv, v;          /* who asked; the arriving expert and its layer; the outgoing one and its */
     unsigned channel;
     nn__loader__read* evacuate;
+    uint64_t made;                         /* its gather's: the order its worker's commits take the swaps in */
+    unsigned visits;                       /* its worker's visits since it was made (▶ COMMIT_VISITS) */
 } nn__expert_tier__out;
 static nn__expert_tier__out nn__expert_tier__zzprivate_out[NN__EXPERT_TIER__OUTGOING];
+
+/* A gather landed, on a loader thread: the swap it is the arriving half of sends its outgoing expert at once where half
+ * duplex held it — the link free of this swap's other copy now — so it is on its way well before the commit waits for it.
+ * Lock held. */
+static void nn__expert_tier__zzprivate_gathered(const nn__loader__read* gather) {
+    for (unsigned i = 0u; i < NN__EXPERT_TIER__OUTGOING; ++i) {
+        nn__expert_tier__out* o = &nn__expert_tier__zzprivate_out[i];
+        if (!o->used || o->owner != gather->owner || o->lx != gather->layer || o->x != gather->expert
+         || o->evacuate->state != NN__LOADER__WAITING) continue;
+        o->evacuate->state = NN__LOADER__QUEUED;
+        o->evacuate->seq = ++nn__loader__zzprivate_seq;
+        sys__os__condition_wake_all(&nn__loader__zzprivate_work);
+    }
+}
+
+/* Every write held until the CPUs are done let go, of any worker: someone waits for a write's record or its bytes. Lock
+ * held. */
+static void nn__loader__zzprivate_let_writes_go(void) {
+    for (unsigned i = 0u; i < NN__EXPERT__FLIGHT_MAX; ++i) {
+        nn__loader__read* r = &nn__loader__zzprivate_reads[i];
+        if (r->state != NN__LOADER__WAITING || r->job != NN__LOADER__JOB_WRITE) continue;
+        r->state = NN__LOADER__QUEUED;
+        r->seq = ++nn__loader__zzprivate_seq;
+        sys__os__condition_wake_all(&nn__loader__zzprivate_work);
+    }
+}
+
+/* How many more swaps worker `owner` may start: a group's cards share the evacuation channels and the swaps' table — each
+ * swap holds one channel until its commit — so each takes at most its share of the channels, `ranks` the group's cards,
+ * and what one card is refused never hangs on another's timing. Lock held. */
+static uint64_t nn__expert_tier__zzprivate_swaps_left(uint64_t owner, uint64_t ranks) {
+    const uint64_t share = NN__EXPERT_TIER__CHANNELS / (ranks == 0u ? 1u : ranks);
+    uint64_t mine = 0u;
+    for (unsigned i = 0u; i < NN__EXPERT_TIER__OUTGOING; ++i)
+        mine += nn__expert_tier__zzprivate_out[i].used && nn__expert_tier__zzprivate_out[i].owner == owner;
+    return mine < share ? share - mine : 0u;
+}
+
+/* The records free now. Lock held. */
+static unsigned nn__loader__zzprivate_free_records(void) {
+    unsigned n = 0u;
+    for (unsigned i = 0u; i < NN__EXPERT__FLIGHT_MAX; ++i) n += nn__loader__zzprivate_reads[i].state == NN__LOADER__FREE;
+    return n;
+}
 
 /* Nanoseconds since `a`. */
 static inline uint64_t nn__loader__zzprivate_since(const struct timespec* a) {
@@ -804,15 +845,33 @@ static __device__ inline int nn__expert_tier__promote(sys__silicon_family__id fa
     nn__expert__gather g;
     if (bytes == 0ull || !nn__expert_tier__stitch(t, x, &g)) return NN__EXPERT__REFUSED;     /* not in RAM: none to gather */
     sys__os__lock_take(&nn__loader__zzprivate_lock);
-    if (nn__loader__zzprivate_find(owner, layer, type, x) != 0) { sys__os__lock_give(&nn__loader__zzprivate_lock); return NN__EXPERT__ARRIVING; }
-    /* ⛳ AN EXPERT STILL BEING WRITTEN INTO RAM — demoted a moment ago — is not gathered back from bytes not yet there */
-    if (nn__loader__zzprivate_writing(layer, t->part_type, x)) { sys__os__lock_give(&nn__loader__zzprivate_lock); return NN__EXPERT__REFUSED; }
-    /* ⛳ THE CHANNEL FIRST: taking one may wait for a pending one, and a wait lets the lock go — so nothing is reserved
-     *   until the last wait is behind */
-    const int channel = nn__loader__zzprivate_channel_take(family, bytes);
-    if (channel < 0) { sys__os__lock_give(&nn__loader__zzprivate_lock); return NN__EXPERT__REFUSED; }
+    /* ⛳ THE WAITS FIRST, AND EACH LETS THE LOCK GO — so nothing is reserved until the last is behind, and what they wait for
+     *   is asked again after each: a channel (it may wait for a pending one); an expert still being written into RAM —
+     *   demoted a moment ago — gathered back once its bytes are there; and the swap's two records, where writes hold them.
+     *   ⛔ WAITED FOR, NOT REFUSED: a write frees itself when it lands, so a refusal would make which promotions start the
+     *   writes' timing (⚖ one config, one answer) */
+    int channel = -1;
+    if (nn__expert_tier__zzprivate_swaps_left(owner, t->ranks) == 0u) { sys__os__lock_give(&nn__loader__zzprivate_lock); return NN__EXPERT__REFUSED; }
+    for (;;) {
+        if (nn__loader__zzprivate_find(owner, layer, type, x) != 0) {
+            if (channel >= 0) nn__loader__zzprivate_channels[channel].held = false;
+            sys__os__lock_give(&nn__loader__zzprivate_lock);
+            return NN__EXPERT__ARRIVING;
+        }
+        if (channel < 0) {
+            channel = nn__loader__zzprivate_channel_take(family, bytes);
+            if (channel < 0) { sys__os__lock_give(&nn__loader__zzprivate_lock); return NN__EXPERT__REFUSED; }
+            continue;
+        }
+        const bool writes = __atomic_load_n(&nn__loader__zzprivate_writes_out, __ATOMIC_ACQUIRE) != 0ull;
+        if (nn__loader__zzprivate_writing(layer, t->part_type, x) || (writes && nn__loader__zzprivate_free_records() < 2u)) {
+            nn__loader__zzprivate_let_writes_go();
+            nn__loader__zzprivate_wait();
+            continue;
+        }
+        break;
+    }
     nn__loader__channel* ch = &nn__loader__zzprivate_channels[channel];
-    if (nn__loader__zzprivate_find(owner, layer, type, x) != 0) { ch->held = false; sys__os__lock_give(&nn__loader__zzprivate_lock); return NN__EXPERT__ARRIVING; }
     nn__expert_tier__out* o = 0;
     for (unsigned i = 0u; i < NN__EXPERT_TIER__OUTGOING && o == 0; ++i)
         if (!nn__expert_tier__zzprivate_out[i].used) o = &nn__expert_tier__zzprivate_out[i];
@@ -835,13 +894,14 @@ static __device__ inline int nn__expert_tier__promote(sys__silicon_family__id fa
     rg->layer = layer; rg->type = type; rg->expert = x; rg->slot = slot; rg->room = room;
     rg->gather = true; rg->bytes = bytes; rg->runs = g; rg->job = NN__LOADER__JOB_GATHER;
     rg->queued_ns = nn__loader__zzprivate_now_ns();
-    rg->seq = ++nn__loader__zzprivate_seq;
+    rg->made = rg->seq = ++nn__loader__zzprivate_seq;
     re->state = t->duplex == 1u ? NN__LOADER__QUEUED : NN__LOADER__WAITING;
     re->predicted = false; re->owner = owner; re->family = family;
     re->layer = vl; re->type = type; re->expert = v; re->slot = 0ull; re->room = vm.args[NN__EXPERT__SLOT_AT];
     re->gather = false; re->bytes = bytes; re->job = NN__LOADER__JOB_EVACUATE; re->channel = (unsigned)channel;
     re->seq = ++nn__loader__zzprivate_seq;
     o->used = true; o->owner = owner; o->lx = layer; o->x = x; o->lv = vl; o->v = v; o->channel = (unsigned)channel; o->evacuate = re;
+    o->made = rg->made; o->visits = 0u;
     ++nn__loader__zzprivate_count[NN__EXPERT__COUNT_PROMOTED];
     sys__os__condition_wake_all(&nn__loader__zzprivate_work);
     sys__os__lock_give(&nn__loader__zzprivate_lock);
@@ -872,10 +932,16 @@ static bool nn__expert_tier__zzprivate_source(const nn__expert_tier* t, uint64_t
     return sys__node_array__set(arr.args[0], e * t->parts + p, &cell);
 }
 
-/* ⭐ THE COMMIT — every swap of this worker whose arriving expert has landed and whose outgoing one is in its channel:
- * the outgoing one leaves the card and takes the arriving one's RAM slots, the channel is written into them. Called at a
- * layer's visit and a chunk's note, before the CPUs are handed anything, so no CPU is reading a slot this changes. A swap
- * whose gather failed is undone: the outgoing expert stays on the card. False on a step that could not be done. */
+/* ⭐ THE COMMIT — every swap of this worker that is due: its arriving expert admitted, its outgoing one leaving the card
+ * for the arriving one's RAM slots, the channel written into them. Called at a layer's visit and a chunk's note, before
+ * the CPUs are handed anything, so no CPU is reading a slot this changes. A swap whose gather failed is undone: the
+ * outgoing expert stays on the card. False on a step that could not be done.
+ * ⭐ A SWAP IS DUE AT A SET VISIT, ITS COPIES WAITED FOR THERE IF LATE: its arriving layer's next visit, or its worker's
+ *   COMMIT_VISITS-th since it was made, whichever comes first. The visit an expert leaves the card at decides whether the
+ *   card or the CPUs compute it, and the two round apart — so committing the swaps whose copies happen to have landed
+ *   would make the answer the copies' timing (⚖ one config, one answer). A visit takes a few ms, an expert's copy one or
+ *   two. And the due ones in the order they were made, as `settle` admits a worker's reads: the order the indices learn
+ *   of them is the order their LRU chains are in. */
 static __device__ inline bool nn__expert_tier__commit(sys__silicon_family__id family, const nn__expert_tier* t) {
     const uint64_t owner = nn__expert__zzpackage_owner(), type = t->type, P = t->parts;
     const int acting = sys__silicon__host_acting_as();
@@ -886,14 +952,25 @@ static __device__ inline bool nn__expert_tier__commit(sys__silicon_family__id fa
     nn__loader__zzprivate_release_writes(owner);
     for (unsigned i = 0u; i < NN__EXPERT_TIER__OUTGOING; ++i) {
         nn__expert_tier__out* o = &nn__expert_tier__zzprivate_out[i];
-        if (!o->used || o->owner != owner) continue;
+        if (o->used && o->owner == owner) ++o->visits;
+    }
+    for (;;) {
+        /* the due swap made first — asked again after every wait, which lets the lock go */
+        nn__expert_tier__out* o = 0;
+        for (unsigned i = 0u; i < NN__EXPERT_TIER__OUTGOING; ++i) {
+            nn__expert_tier__out* c = &nn__expert_tier__zzprivate_out[i];
+            if (!c->used || c->owner != owner || (c->lx != t->layer && c->visits < NN__EXPERT_TIER__COMMIT_VISITS)) continue;
+            if (o == 0 || c->made < o->made) o = c;
+        }
+        if (o == 0) break;
         nn__loader__read* rx = nn__loader__zzprivate_find(owner, o->lx, type, o->x);
         if (rx != 0) {
-            if (rx->state != NN__LOADER__DONE && rx->state != NN__LOADER__FAILED) continue;      /* still arriving */
             /* ⛳ ITS GATHER SETTLED HERE, WHATEVER LAYER THIS VISIT IS FOR: left to its own layer's visit it waits a token,
              *   holding its channel all that time — MEASURED, 16 channels then carried 15.3 swaps a token, 60 more a
              *   token were refused for want of one, and the card waited 19 ms a token for one to come free. The commit
              *   runs on the card's thread between layers, so no one is reading that layer's index. */
+            nn__loader__zzprivate_let_go(rx);
+            if (rx->state != NN__LOADER__DONE && rx->state != NN__LOADER__FAILED) { nn__loader__zzprivate_wait(); continue; }
             const bool got = rx->state == NN__LOADER__DONE;
             const uint64_t slot = rx->slot, room = rx->room;
             if (got) nn__loader__zzprivate_landed(rx);
@@ -901,17 +978,24 @@ static __device__ inline bool nn__expert_tier__commit(sys__silicon_family__id fa
             if (!got || !nn__expert__admit(o->lx, o->x, room, type)) (void)nn__expert__type_give(type, slot);
         }
         nn__loader__read* re = o->evacuate;
-        if (re->state == NN__LOADER__WAITING) {                      /* half duplex: the gather has landed — now the evacuation */
+        if (re->state == NN__LOADER__WAITING) {         /* half duplex, its gather landed (▶ `…_gathered`, which sends it) */
             sys__heap_node lm;
             if (nn__expert__slot(o->lx, type, o->x, &lm) && lm.args[NN__EXPERT__SLOT_AT] != 0ull) {
                 re->state = NN__LOADER__QUEUED;
                 re->seq = ++nn__loader__zzprivate_seq;
                 sys__os__condition_wake_all(&nn__loader__zzprivate_work);
-                continue;
+            } else {
+                re->state = NN__LOADER__FAILED;                      /* the gather failed: undone below */
             }
-            re->state = NN__LOADER__FAILED;                          /* the gather failed: undone below */
         }
-        if (re->state == NN__LOADER__QUEUED || re->state == NN__LOADER__READING) continue;      /* still going out */
+        if (re->state == NN__LOADER__QUEUED || re->state == NN__LOADER__READING) { nn__loader__zzprivate_wait(); continue; }
+        /* ⛳ A RECORD FOR EACH PART'S WRITE, WAITED FOR WHILE WRITES HOLD THEM — a write frees its own when it lands */
+        if (re->state == NN__LOADER__DONE && nn__loader__zzprivate_free_records() < P
+         && __atomic_load_n(&nn__loader__zzprivate_writes_out, __ATOMIC_ACQUIRE) != 0ull) {
+            nn__loader__zzprivate_let_writes_go();
+            nn__loader__zzprivate_wait();
+            continue;
+        }
         sys__heap_node xm;
         const bool landed = re->state == NN__LOADER__DONE && nn__expert__slot(o->lx, type, o->x, &xm) && xm.args[NN__EXPERT__SLOT_AT] != 0ull;
         re->state = NN__LOADER__FREE;
@@ -1009,7 +1093,11 @@ static __device__ inline bool nn__expert_tier__visit(sys__silicon_family__id fam
     const uint64_t layer = t->layer, type = t->type;
     const unsigned k = (unsigned)t->top_k;
     const bool fed = t->sources != 0ull;
-    if (fed) (void)nn__expert__settle_ready(layer, type);
+    /* ⭐ A PROMOTION COUNTS AT ITS LAYER'S NEXT VISIT, LANDED OR WAITED FOR: every one this worker started on the layer —
+     *   at the visit before — is admitted here, so which experts a card holds at a visit is the same on every boot (⚖ one
+     *   config, one answer); admitting those landed by then would make it the copies' timing. A layer's next visit is a
+     *   position later — ~250 ms in a whole model, where a copy lands in ~12 ms. */
+    if (fed) (void)nn__expert__settle(layer, type);
     if (t->exclusive == 1u && !nn__expert_tier__commit(family, t)) return false;   /* the swaps that are ready: ▶ commit */
     const uint64_t now = nn__expert__tick();
     uint64_t pinned[NN__EXPERT__TIER_K_MAX];
@@ -1138,6 +1226,25 @@ static void nn__expert_tier__zzprivate_choose(nn__expert_tier__slice* v, uint64_
     free(was);
 }
 
+/* Every other card's post of `call` waited for on a board's `gen`; false when one never comes. */
+static inline bool nn__expert_tier__zzprivate_posted(const uint64_t* gen, uint32_t me, uint32_t ranks, uint64_t call) {
+    for (uint32_t r = 0u; r < ranks; ++r) {
+        if (r == me) continue;
+        if (__atomic_load_n(&gen[r], __ATOMIC_ACQUIRE) < call) {
+            struct timespec t0, t;
+            sys__os__clock(&t0);
+            for (uint32_t spin = 1u; __atomic_load_n(&gen[r], __ATOMIC_ACQUIRE) < call; ++spin) {
+                if (spin < 256u) continue;
+                sys__os__yield();
+                if ((spin & 1023u) != 0u) continue;
+                sys__os__clock(&t);
+                if ((uint64_t)(t.tv_sec - t0.tv_sec) > (uint64_t)NN__EXPERT_TIER__PATIENCE) return false;
+            }
+        }
+    }
+    return true;
+}
+
 /* Card `me` of `ranks` posts its `k` picks and which it holds, and waits for every other card's post of the same call;
  * false when one never comes, or routed the position otherwise — the cards would sum different experts. `ids` and
  * `held` come back every card's, card by card. */
@@ -1147,25 +1254,43 @@ static inline bool nn__expert_tier__zzprivate_share(uint32_t me, uint32_t ranks,
     const uint64_t call = ++b->calls[me], at = call & 1u;
     for (unsigned j = 0u; j < k; ++j) { b->ids[at][me][j] = ids[j]; b->held[at][me][j] = held[j] ? 1u : 0u; }
     __atomic_store_n(&b->gen[me], call, __ATOMIC_RELEASE);
-    for (uint32_t r = 0u; r < ranks; ++r) {
-        if (r == me) continue;
-        if (__atomic_load_n(&b->gen[r], __ATOMIC_ACQUIRE) < call) {
-            struct timespec t0, t;
-            sys__os__clock(&t0);
-            for (uint32_t spin = 1u; __atomic_load_n(&b->gen[r], __ATOMIC_ACQUIRE) < call; ++spin) {
-                if (spin < 256u) continue;
-                sys__os__yield();
-                if ((spin & 1023u) != 0u) continue;
-                sys__os__clock(&t);
-                if ((uint64_t)(t.tv_sec - t0.tv_sec) > (uint64_t)NN__EXPERT_TIER__PATIENCE) return false;
-            }
-        }
-    }
+    if (!nn__expert_tier__zzprivate_posted(b->gen, me, ranks, call)) return false;
     for (uint32_t r = 0u; r < ranks; ++r)
         for (unsigned j = 0u; j < k; ++j) {
             if (b->ids[at][r][j] != ids[j]) return false;
             all_held[r][j] = b->held[at][r][j];
         }
+    return true;
+}
+
+/* ⭐ A CHUNK'S HOLDINGS SHARED OUT AMONG A GROUP'S EXCLUSIVE TIERS (NN-99): every card posts which of the layer's
+ * experts it holds — after its commit, so every card's post is the layout the chunk runs on — and reads the others'. Its
+ * cards call it layer by layer in the same order, and its posts alternate as the board's do. */
+#define NN__EXPERT_TIER__CHUNK_WORDS 16u   /* a layer's experts a chunk's post holds, 64 a word */
+typedef struct nn__expert_tier__chunk_board {
+    uint64_t gen[NN__EXPERT_TIER__RANKS_MAX];
+    uint64_t calls[NN__EXPERT_TIER__RANKS_MAX];
+    uint64_t held[2][NN__EXPERT_TIER__RANKS_MAX][NN__EXPERT_TIER__CHUNK_WORDS];
+} nn__expert_tier__chunk_board;
+static nn__expert_tier__chunk_board nn__expert_tier__zzprivate_chunk_board;
+
+/* Card `me` posts `mine` (1: it holds that expert) and waits for every other card's post of the same call: `other` comes
+ * back 1 where another card holds the expert. False when a card never posts, or the layer has more experts than a post
+ * holds. */
+static inline bool nn__expert_tier__zzprivate_share_held(uint32_t me, uint32_t ranks, uint64_t experts, const uint8_t* mine,
+                                                        uint8_t* other) {
+    if (experts > 64u * NN__EXPERT_TIER__CHUNK_WORDS) return false;
+    nn__expert_tier__chunk_board* b = &nn__expert_tier__zzprivate_chunk_board;
+    const uint64_t call = ++b->calls[me], at = call & 1u;
+    for (unsigned w = 0u; w < NN__EXPERT_TIER__CHUNK_WORDS; ++w) b->held[at][me][w] = 0ull;
+    for (uint64_t e = 0u; e < experts; ++e) if (mine[e]) b->held[at][me][e >> 6] |= 1ull << (e & 63u);
+    __atomic_store_n(&b->gen[me], call, __ATOMIC_RELEASE);
+    if (!nn__expert_tier__zzprivate_posted(b->gen, me, ranks, call)) return false;
+    for (uint64_t e = 0u; e < experts; ++e) {
+        other[e] = 0u;
+        for (uint32_t r = 0u; r < ranks; ++r)
+            if (r != me && (b->held[at][r][e >> 6] >> (e & 63u) & 1ull) != 0ull) other[e] = 1u;
+    }
     return true;
 }
 
@@ -1184,7 +1309,10 @@ static __device__ inline bool nn__expert_tier__visit_group(sys__silicon_family__
     const unsigned k = (unsigned)t->top_k;
     const uint32_t ranks = (uint32_t)t->ranks, me = (uint32_t)sys__silicon__worker();
     const bool fed = t->sources != 0ull;
-    if (fed) (void)nn__expert__settle_ready(layer, type);
+    if (fed) (void)nn__expert__settle(layer, type);           /* the visit before's promotions, as `visit` admits them */
+    /* an exclusive tier's swaps that are due, before this card says what it holds (▶ commit): every card's post is then the
+     *   layout this position runs on */
+    if (t->exclusive == 1u && !nn__expert_tier__commit(family, t)) return false;
     const uint64_t now = nn__expert__tick();
     bool held[NN__EXPERT__TIER_K_MAX];
     uint64_t pinned[NN__EXPERT__TIER_K_MAX];
@@ -1281,8 +1409,9 @@ static __device__ inline bool nn__expert_tier__visit_group(sys__silicon_family__
     unsigned started = 0u;
     for (unsigned c = 0u; c < n_cand && started < land; ++c) {
         nn__expert__gather g;
-        if (nn__expert_tier__stitch(t, ids[cand[c]], &g)
-         && nn__expert__promote(family, layer, type, ids[cand[c]], &g, pinned, n_pinned) == NN__EXPERT__ARRIVING)
+        if (t->exclusive == 1u ? nn__expert_tier__promote(family, t, ids[cand[c]], pinned, n_pinned) == NN__EXPERT__ARRIVING
+                               : (nn__expert_tier__stitch(t, ids[cand[c]], &g)
+                                  && nn__expert__promote(family, layer, type, ids[cand[c]], &g, pinned, n_pinned) == NN__EXPERT__ARRIVING))
             ++started;
     }
     for (unsigned j = 0u; j < k; ++j) (void)nn__expert__called(layer, type, ids[j], now);
@@ -1294,13 +1423,20 @@ static __device__ inline bool nn__expert_tier__chunk(sys__silicon_family__id fam
     const uint64_t layer = t->layer, type = t->type, experts = t->experts;
     const unsigned k = (unsigned)t->top_k;
     const bool fed = t->sources != 0ull;
-    if (fed) (void)nn__expert__settle_ready(layer, type);
-    if (t->exclusive == 1u && !nn__expert_tier__commit(family, t)) return false;   /* the swaps that are ready: ▶ commit */
+    if (fed) (void)nn__expert__settle(layer, type);           /* the chunk before's promotions, as `visit` admits them */
+    if (t->exclusive == 1u && !nn__expert_tier__commit(family, t)) return false;   /* the swaps that are due: ▶ commit */
+    /* ⭐ A GROUP'S EXCLUSIVE TIERS EACH TOLD OF THE CHUNK (NN-99): each card computes the chunk's picks it holds, and the
+     *   others' are marked `2·experts` past their number, which this card's experts and the CPUs both leave (▶
+     *   `nn__routed__rows`) — card 0's hands are the ones the CPUs are handed. An inclusive group's chunk is card 0's
+     *   alone: its CPUs hold every expert. */
+    const bool group = t->ranks > 1u && t->exclusive == 1u;
+    const uint32_t ranks = (uint32_t)t->ranks, rank = (uint32_t)sys__silicon__worker();
     uint32_t* picked = (uint32_t*)calloc(experts, sizeof(uint32_t));
     uint8_t* card = (uint8_t*)calloc(experts, 1u);                 /* 1: the card computes this expert for the chunk */
+    uint8_t* other = group ? (uint8_t*)calloc(experts, 1u) : 0;    /* 1: another card of the group does */
     uint64_t* list = (uint64_t*)malloc(sizeof(uint64_t) * experts);
     uint64_t* pinned = (uint64_t*)malloc(sizeof(uint64_t) * experts);
-    bool ok = picked != 0 && card != 0 && list != 0 && pinned != 0;
+    bool ok = picked != 0 && card != 0 && list != 0 && pinned != 0 && (!group || other != 0);
     /* every call recorded a row at a time, every resident expert touched */
     for (uint64_t r = 0u; r < n && ok; ++r) {
         const uint64_t now = nn__expert__tick();
@@ -1313,6 +1449,7 @@ static __device__ inline bool nn__expert_tier__chunk(sys__silicon_family__id fam
             (void)nn__expert__called(layer, type, id, now);
         }
     }
+    if (ok && group) ok = nn__expert_tier__zzprivate_share_held(rank, ranks, experts, card, other);
     unsigned n_pinned = 0u;
     for (uint64_t e = 0u; e < experts && ok; ++e) if (card[e]) pinned[n_pinned++] = e;
     /* the line: the experts not on the card picked `threshold` times or more, the most picked first, as many as there is room */
@@ -1320,22 +1457,39 @@ static __device__ inline bool nn__expert_tier__chunk(sys__silicon_family__id fam
         uint64_t m = 0u;
         for (uint64_t e = 0u; e < experts; ++e) {
             if (card[e] || picked[e] == 0u || picked[e] < threshold) continue;
+            /* in a group, an expert another card holds is not this one's to take, and each card takes the ones numbered
+             *   its own modulo the group — the same split on every card, from the same picks */
+            if (group && (other[e] || e % ranks != rank)) continue;
             uint64_t q = m++;
             while (q > 0u && picked[list[q - 1u]] < picked[e]) { list[q] = list[q - 1u]; --q; }
             list[q] = e;
         }
-        const uint64_t room = nn__expert__flight_free();
+        /* an exclusive tier: as many as this card may start swaps (▶ `…_swaps_left`), the most picked — each holds a
+         *   channel until its commit */
+        uint64_t room = 0u;
+        if (t->exclusive == 1u) {
+            sys__os__lock_take(&nn__loader__zzprivate_lock);
+            room = nn__expert_tier__zzprivate_swaps_left(nn__expert__zzpackage_owner(), t->ranks);
+            sys__os__lock_give(&nn__loader__zzprivate_lock);
+        } else {
+            room = nn__expert__flight_free();
+        }
         if (m > room) m = room;
         for (uint64_t q = m; q-- > 0u; ) {                         /* queued from the fewest picks to the most */
             nn__expert__gather g;
+            /* ⛳ IN A GROUP A PROMOTION IS NOT THE CHUNK'S: the others cannot know it started, so the CPUs compute it this
+             *   chunk — from the RAM an exclusive tier's arriving expert keeps until its commit */
             if (t->exclusive == 1u ? nn__expert_tier__promote(family, t, list[q], pinned, n_pinned) == NN__EXPERT__ARRIVING
                                    : (nn__expert_tier__stitch(t, list[q], &g)
                                       && nn__expert__promote(family, layer, type, list[q], &g, pinned, n_pinned) == NN__EXPERT__ARRIVING))
-                card[list[q]] = 1u;
+                card[list[q]] = group ? 0u : 1u;
         }
     }
-    for (uint64_t i = 0u; i < n * k && ok; ++i) if (card[chosen[i]]) chosen[i] += experts;
-    free(picked); free(card); free(list); free(pinned);
+    for (uint64_t i = 0u; i < n * k && ok; ++i) {
+        if (card[chosen[i]]) chosen[i] += experts;
+        else if (group && other[chosen[i]]) chosen[i] += 2u * experts;
+    }
+    free(picked); free(card); free(other); free(list); free(pinned);
     return ok;
 }
 

@@ -119,6 +119,42 @@ def tier(m, name, type_, experts, top_k, hidden, inter, plan, layers, sources=No
             + [LANDING_LINE] + ([int(ranks), int(shared)] if ranks > 1 else []))
 
 
+# ⭐ THE SHARED SLICE FROM THE MACHINE'S OWN SPEEDS (NN-99) — ⚖ 2026-10-21 *"it is likely better to have zero shared if we
+#   have even one expert on the ram … let's keep that 10% cause if avx512 or an igpu reduces the gap to 4x then the shared
+#   setup still pays"*: a slot every card keeps is a slot fewer of distinct experts, so a pick more sent to the CPUs,
+#   and it pays only where a CPU's pick costs less than CROSSOVER card experts. `speeds` measures both at boot.
+SHARED = 0.1
+CROSSOVER = 4.0
+
+
+def slice_of(cpu_s, card_s):
+    """The share of a card's slots every card keeps, from a CPU pick's and a card expert's seconds."""
+    return SHARED if card_s > 0 and cpu_s / card_s < CROSSOVER else 0.0
+
+
+def speeds(m, card, cpu, picks, ids, cpu_text, card_scale, card_text="(head)", readings=3):
+    """(a CPU pick's seconds, a card expert's seconds), each the best of `readings`. The CPU's: its experts verb
+    (`cpu_text`, as the worker `cpu`) over the experts `ids`, written into the node array `picks`. The card's: an expert's
+    bytes at the rate the card reads a large matrix of its own — `card_text`, the model's head and its greedy token read
+    back, so the card is done — times `card_scale`, a routed expert's bytes over the head's. ⛳ A RATE, NOT AN EXPERT: a
+    card's tier is empty at boot, and a matrix an expert's size takes mostly its launches' time, which a visit's picks
+    share — so the head's hundreds of MB price an expert's bytes. `REASONED`: a card expert's product as fast a byte as
+    the head's, its share of a visit's launches left out; the rule is a factor of 4."""
+    m.act_as(card)
+    m.must("(begin %s 0)" % " ".join("(sys__node_array__set %s %d %d)" % (picks, j, x) for j, x in enumerate(ids)), "the picks")
+    best = lambda run: min(_timed(run) for _ in range(readings))
+    card_s = best(lambda: m.must(card_text, "the card's reading")) * card_scale
+    m.act_as(cpu)
+    cpu_s = best(lambda: m.must("(begin %s 0)" % cpu_text, "a CPU's reading")) / len(ids)
+    m.act_as(card)
+    return cpu_s, card_s
+
+
+def head_bytes(plan):
+    """The bytes the head's product reads: its codes and its scales (▶ the models' HPLAN)."""
+    return plan.up_data + plan.down_lut
+
+
 def bind(m, tiers, workers):
     """The binding `nn__expert_tier`: an entry for every worker, the name of the tier its card holds (`tiers`, {worker:
     name}) or 0 — the programs hand it to the verbs that use it, and each reads its own worker's entry."""

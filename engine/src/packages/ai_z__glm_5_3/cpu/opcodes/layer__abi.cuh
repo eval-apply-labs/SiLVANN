@@ -673,6 +673,21 @@ static inline void ai_z__glm_5_3__rows__zzprivate_place(const nn__doors* doors, 
                            (const float*)(uintptr_t)mixes, H, M, n, AI_Z__GLM_5_3__ROWS__MIX_FLOATS, over);
 }
 
+/* The rows' sublayer outputs `y` placed — under a group (`tp`), the group's sum of every card's `n` rows of them, one
+ * reduce, as a position's site takes its own (▶ `..._layer__zzprivate_place_group`). 0, or the fault. */
+static inline uint64_t ai_z__glm_5_3__rows__zzprivate_place_group(sys__engine__ctx* ctx, const nn__doors* doors, unsigned int* over,
+                                                                 uint64_t mixes, uint64_t streams, uint64_t y, uint64_t H,
+                                                                 uint64_t M, uint64_t n, const uint64_t* tp) {
+    if (tp != 0) {
+        if (!nn__primitives__fits(n * H, tp[2])) return AI_Z__GLM_5_3__LAYER__FAULT_TABLE;
+        const uint64_t f = nn__partials__reduce_onto(ctx, doors, tp[0], y, tp[1], n * H, 0u);
+        if (f != 0u) return f;
+        y = tp[1];
+    }
+    ai_z__glm_5_3__rows__zzprivate_place(doors, over, mixes, streams, y, H, M, n);
+    return 0u;
+}
+
 /* `out = W x` for every row: a matrix of the table (codes, then scales) over the rows of `x`, `cols` wide. */
 static inline void ai_z__glm_5_3__rows__zzprivate_gemm(const nn__doors* doors, unsigned int* over, const uint64_t* at,
                                                     const uint64_t* room, unsigned plane, uint64_t out, uint64_t x, uint64_t pairs,
@@ -713,13 +728,15 @@ static inline bool ai_z__glm_5_3__rows__zzprivate_open(const sys__heap_node* arg
         && nn__primitives__room(&argv[w], work, w_room);
 }
 
-/* `(ai_z__glm_5_3__kda_rows streams table n work)` -> `streams`. The KDA site over `n` rows: the six projections one grouped
- * launch, the three convolutions and the recurrence walking the rows in order, a launch each, the gates' second
- * projections and the output projection one launch each. */
+/* `(ai_z__glm_5_3__kda_rows streams table n work [group sums])` -> `streams`. The KDA site over `n` rows: the six projections
+ * one grouped launch, the three convolutions and the recurrence walking the rows in order, a launch each, the gates' second
+ * projections and the output projection one launch each — under a group, every card's rows summed before they are placed. */
 static sys__heap_node ai_z__glm_5_3__kda_rows__zzabi_apply(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx) {
-    if (argc != 4u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
-    uint64_t streams = 0, s_room = 0, n = 0, work = 0, w_room = 0;
-    if (!ai_z__glm_5_3__rows__zzprivate_open(argv, 2u, 3u, &streams, &s_room, &n, &work, &w_room))
+    if (argc != 4u && argc != 6u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
+    uint64_t streams = 0, s_room = 0, n = 0, work = 0, w_room = 0, tp[3] = {0u, 0u, 0u};
+    const uint64_t* group = 0;
+    if (!ai_z__glm_5_3__rows__zzprivate_open(argv, 2u, 3u, &streams, &s_room, &n, &work, &w_room)
+     || !ai_z__glm_5_3__layer__zzprivate_group(argv, argc, 4u, tp, &group))
         return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
     uint64_t at[AI_Z__GLM_5_3__KDA__TABLE], room[AI_Z__GLM_5_3__KDA__TABLE], v[AI_Z__GLM_5_3__KDA__TABLE];
     float r[AI_Z__GLM_5_3__KDA__TABLE];
@@ -787,21 +804,24 @@ static sys__heap_node ai_z__glm_5_3__kda_rows__zzabi_apply(const sys__heap_node*
                      r[AI_Z__GLM_5_3__KDA__LOWER], r[AI_Z__GLM_5_3__KDA__EPS], n, over);
     doors->hadamard_rotate((uint16_t*)(uintptr_t)kor, (const uint16_t*)(uintptr_t)ko, (const uint16_t*)(uintptr_t)signs, n * KW, over);
     ai_z__glm_5_3__rows__zzprivate_gemm(doors, over, at, room, AI_Z__GLM_5_3__KDA__O, y, kor, pairs, n, d[8], H, KW);
-    const uint64_t f = ai_z__glm_5_3__table__zzpackage_masked(doors, over, argv[1].args[0], AI_Z__GLM_5_3__KDA__MASK, y, kor, n, H, KW,
-                                                           AI_Z__GLM_5_3__LAYER__FAULT_TABLE);
+    uint64_t f = ai_z__glm_5_3__table__zzpackage_masked(doors, over, argv[1].args[0], AI_Z__GLM_5_3__KDA__MASK, y, kor, n, H, KW,
+                                                     AI_Z__GLM_5_3__LAYER__FAULT_TABLE);
+    if (f == 0u) f = ai_z__glm_5_3__rows__zzprivate_place_group(ctx, doors, over, mixes, streams, y, H, M, n, group);
     if (f != 0u) return sys__engine__abi__error(f);
-    ai_z__glm_5_3__rows__zzprivate_place(doors, over, mixes, streams, y, H, M, n);
     return nn__doors_answer(&argv[0]);
 }
 
-/* `(ai_z__glm_5_3__mla_rows streams table first n work)` -> `streams`: row `t` is position `first + t`. Every row's
- * projections, norms and latent — written rotated into the cache's rows `first ..` before any row attends — over the
+/* `(ai_z__glm_5_3__mla_rows streams table first n work [group sums])` -> `streams`: row `t` is position `first + t`. Every
+ * row's projections, norms and latent — written rotated into the cache's rows `first ..` before any row attends — over the
  * chunk at once, and the indexer's projections too; then a row at a time, in order, the indexer's ring and pools and
- * the attention over the cache up to the row's own position; then the output projection over every row. */
+ * the attention over the cache up to the row's own position; then the output projection over every row — under a group,
+ * this card's heads', every card's rows summed before they are placed. */
 static sys__heap_node ai_z__glm_5_3__mla_rows__zzabi_apply(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx) {
-    if (argc != 5u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
-    uint64_t streams = 0, s_room = 0, n = 0, work = 0, w_room = 0;
-    if (argv[2].dtype != SYS__KIND__VALUE_INT || !ai_z__glm_5_3__rows__zzprivate_open(argv, 3u, 4u, &streams, &s_room, &n, &work, &w_room))
+    if (argc != 5u && argc != 7u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
+    uint64_t streams = 0, s_room = 0, n = 0, work = 0, w_room = 0, tp[3] = {0u, 0u, 0u};
+    const uint64_t* group = 0;
+    if (argv[2].dtype != SYS__KIND__VALUE_INT || !ai_z__glm_5_3__rows__zzprivate_open(argv, 3u, 4u, &streams, &s_room, &n, &work, &w_room)
+     || !ai_z__glm_5_3__layer__zzprivate_group(argv, argc, 5u, tp, &group))
         return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
     const uint64_t first = argv[2].args[0];
     uint64_t at[AI_Z__GLM_5_3__IDX__TABLE], room[AI_Z__GLM_5_3__IDX__TABLE], v[AI_Z__GLM_5_3__IDX__TABLE];
@@ -981,18 +1001,21 @@ static sys__heap_node ai_z__glm_5_3__mla_rows__zzabi_apply(const sys__heap_node*
     }
     doors->hadamard_rotate((uint16_t*)(uintptr_t)vhr, (const uint16_t*)(uintptr_t)vh, (const uint16_t*)(uintptr_t)signs, n * heads * VD, over);
     ai_z__glm_5_3__rows__zzprivate_gemm(doors, over, at, room, AI_Z__GLM_5_3__MLA__O, y, vhr, pairs, n, d[3], H, heads * VD);
-    const uint64_t f = ai_z__glm_5_3__table__zzpackage_masked(doors, over, argv[1].args[0], AI_Z__GLM_5_3__MLA__MASK, y, vhr, n, H,
-                                                           heads * VD, AI_Z__GLM_5_3__LAYER__FAULT_TABLE);
+    uint64_t f = ai_z__glm_5_3__table__zzpackage_masked(doors, over, argv[1].args[0], AI_Z__GLM_5_3__MLA__MASK, y, vhr, n, H,
+                                                     heads * VD, AI_Z__GLM_5_3__LAYER__FAULT_TABLE);
+    if (f == 0u) f = ai_z__glm_5_3__rows__zzprivate_place_group(ctx, doors, over, mixes, streams, y, H, M, n, group);
     if (f != 0u) return sys__engine__abi__error(f);
-    ai_z__glm_5_3__rows__zzprivate_place(doors, over, mixes, streams, y, H, M, n);
     return nn__doors_answer(&argv[0]);
 }
 
-/* `(ai_z__glm_5_3__mlp_rows streams table n work)` -> `streams`. The dense MLP site over `n` rows. */
+/* `(ai_z__glm_5_3__mlp_rows streams table n work [group sums])` -> `streams`. The dense MLP site over `n` rows — under a
+ * group, this card's share of its inner width, every card's rows summed before they are placed. */
 static sys__heap_node ai_z__glm_5_3__mlp_rows__zzabi_apply(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx) {
-    if (argc != 4u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
-    uint64_t streams = 0, s_room = 0, n = 0, work = 0, w_room = 0;
-    if (!ai_z__glm_5_3__rows__zzprivate_open(argv, 2u, 3u, &streams, &s_room, &n, &work, &w_room))
+    if (argc != 4u && argc != 6u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
+    uint64_t streams = 0, s_room = 0, n = 0, work = 0, w_room = 0, tp[3] = {0u, 0u, 0u};
+    const uint64_t* group = 0;
+    if (!ai_z__glm_5_3__rows__zzprivate_open(argv, 2u, 3u, &streams, &s_room, &n, &work, &w_room)
+     || !ai_z__glm_5_3__layer__zzprivate_group(argv, argc, 4u, tp, &group))
         return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
     uint64_t at[AI_Z__GLM_5_3__MLP__TABLE], room[AI_Z__GLM_5_3__MLP__TABLE], v[AI_Z__GLM_5_3__MLP__TABLE];
     float r[AI_Z__GLM_5_3__MLP__TABLE];
@@ -1025,7 +1048,8 @@ static sys__heap_node ai_z__glm_5_3__mlp_rows__zzabi_apply(const sys__heap_node*
     doors->hadamard_rotate((uint16_t*)(uintptr_t)hr, (const uint16_t*)(uintptr_t)h, (const uint16_t*)(uintptr_t)signs, n * H, over);
     ai_z__glm_5_3__rows__zzprivate_swiglu(doors, over, at, room, AI_Z__GLM_5_3__MLP__GATE, AI_Z__GLM_5_3__MLP__UP, AI_Z__GLM_5_3__MLP__DOWN,
                                        &v[AI_Z__GLM_5_3__MLP__D], hr, pairs, gu, act, actr, signs, y, H, I, n, r[AI_Z__GLM_5_3__MLP__LIMIT]);
-    ai_z__glm_5_3__rows__zzprivate_place(doors, over, mixes, streams, y, H, M, n);
+    const uint64_t f = ai_z__glm_5_3__rows__zzprivate_place_group(ctx, doors, over, mixes, streams, y, H, M, n, group);
+    if (f != 0u) return sys__engine__abi__error(f);
     return nn__doors_answer(&argv[0]);
 }
 
@@ -1087,13 +1111,17 @@ static sys__heap_node ai_z__glm_5_3__route_rows__zzabi_apply(const sys__heap_nod
     return nn__doors_answer(&argv[2]);
 }
 
-/* `(ai_z__glm_5_3__close_rows streams table routed carries n work)` -> `streams`. Every row's routed sum (a row of `routed`)
- * added to its shared expert's, and its streams mixed again by the weights its route kept. */
+/* `(ai_z__glm_5_3__close_rows streams table routed carries n work [group sums])` -> `streams`. Every row's routed sum (a row
+ * of `routed`) added to its shared expert's, and its streams mixed again by the weights its route kept — under a group,
+ * every card's rows summed before they are placed: its share of the shared expert's, and the routed sum where it holds one
+ * (card 0 the CPUs', the others none). */
 static sys__heap_node ai_z__glm_5_3__close_rows__zzabi_apply(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx) {
-    if (argc != 6u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
-    uint64_t streams = 0, s_room = 0, routed = 0, r_room = 0, carries = 0, c_room = 0, n = 0u, work = 0, w_room = 0;
+    if (argc != 6u && argc != 8u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
+    uint64_t streams = 0, s_room = 0, routed = 0, r_room = 0, carries = 0, c_room = 0, n = 0u, work = 0, w_room = 0, tp[3] = {0u, 0u, 0u};
+    const uint64_t* group = 0;
     if (!ai_z__glm_5_3__rows__zzprivate_open(argv, 4u, 5u, &streams, &s_room, &n, &work, &w_room)
-     || !nn__primitives__room(&argv[2], &routed, &r_room) || !nn__primitives__room(&argv[3], &carries, &c_room))
+     || !nn__primitives__room(&argv[2], &routed, &r_room) || !nn__primitives__room(&argv[3], &carries, &c_room)
+     || !ai_z__glm_5_3__layer__zzprivate_group(argv, argc, 6u, tp, &group))
         return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
     uint64_t at[AI_Z__GLM_5_3__MOE__TABLE], room[AI_Z__GLM_5_3__MOE__TABLE], v[AI_Z__GLM_5_3__MOE__TABLE];
     float r[AI_Z__GLM_5_3__MOE__TABLE];
@@ -1107,7 +1135,8 @@ static sys__heap_node ai_z__glm_5_3__close_rows__zzabi_apply(const sys__heap_nod
     const uint64_t y = work;
     doors->vector_add((uint16_t*)(uintptr_t)y, (const uint16_t*)(uintptr_t)(carries + AI_Z__GLM_5_3__CARRY_MIX * n),
                       (const uint16_t*)(uintptr_t)routed, n * H, ctx->fault_word);
-    ai_z__glm_5_3__rows__zzprivate_place(doors, ctx->fault_word, carries, streams, y, H, M, n);
+    const uint64_t f = ai_z__glm_5_3__rows__zzprivate_place_group(ctx, doors, ctx->fault_word, carries, streams, y, H, M, n, group);
+    if (f != 0u) return sys__engine__abi__error(f);
     return nn__doors_answer(&argv[0]);
 }
 
