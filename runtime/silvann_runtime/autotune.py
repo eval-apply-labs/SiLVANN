@@ -422,9 +422,9 @@ def _setup(p, ctx, options, takes, grow=False):
             return _most(p, opts, ctx)
         return ctx if p.boots(ctx, opts) else None
 
-    # DeepSeek's experts: on the CPU, the first layers' in RAM and the rest mapped from their files — as many layers in
-    #   RAM as fit beside the server's own memory, the spare and FILES_SHARE (`experts_file.in_ram`'s rule, a layer at a
-    #   time, less the share the files it reads in place need)
+    # DeepSeek's experts: on the CPU, the first layers' in RAM and the rest mapped (from the pack, or their files) — as
+    #   many layers in RAM as fit beside the server's own memory, the spare and FILES_SHARE (`experts_file.in_ram`'s rule,
+    #   a layer at a time, less the share the files it reads in place need)
     if "experts_in_ram" in takes and "experts_from" not in options:
         whole = p.model(MIN_CONTEXT, dict(options, experts_from="ram"))
         layers, held = len(whole.run_layers), experts_file.limit()
@@ -434,7 +434,7 @@ def _setup(p, ctx, options, takes, grow=False):
         placed = (dict(options, experts_from="ram") if n == layers else
                   dict(options, experts_from="mapped", experts_in_ram=n))
         why = ("the experts on the CPU, in RAM" if n == layers else
-               "the experts on the CPU, %d of %d layers' in RAM and the rest mapped from their files" % (n, layers))
+               "the experts on the CPU, %d of %d layers' in RAM and the rest mapped from the pack (or their files)" % (n, layers))
         got = sized(placed)
         return None if got is None else (placed, got, why + " (%.1f GB a layer, %.0f GB this process may hold)"
                                          % (a_layer / 2**30, held / 2**30))

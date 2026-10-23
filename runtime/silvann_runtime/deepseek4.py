@@ -552,10 +552,12 @@ class DeepSeek4(Generates):
         m, b, p = self.m, self.b, self.EPLAN
         ram = self.run_layers if self.EXPERTS_FROM == "ram" else self.run_layers[:self.EXPERTS_IN_RAM]
         mapped = [l for l in self.run_layers if l not in ram]
-        # ⭐ A FILE A LAYER, so a stage of a pipeline, or a test's few layers, maps the same files as the whole model: each
-        #   written once (from the bundle on the RAID) if it is not there already
-        paths = {l: experts_file.ensure(b, [(self.CPU, 0, 1)], p, [l], self.EXPERTS, self.experts_dir, self._expert_pieces,
-                                        list(range(self.LAYERS)))[0] for l in mapped}
+        # ⭐ A LAYER MAPPED FROM THE PACK where its experts lie as its slots do (NN-109: an expert one record, its gate and up
+        #   one); else A FILE A LAYER, so a stage of a pipeline, or a test's few layers, maps the same files as the whole
+        #   model: each written once (from the bundle on the RAID) if it is not there already
+        lie = {l: experts_file.in_slots(b, l, self.EXPERTS, self._expert_pieces, p.slot_bytes) for l in mapped}
+        paths = {l: lie[l] or (experts_file.ensure(b, [(self.CPU, 0, 1)], p, [l], self.EXPERTS, self.experts_dir,
+                                                   self._expert_pieces, list(range(self.LAYERS)))[0], 0) for l in mapped}
         m.act_as(self.CPU)
         loader, at = m.loader(), {}
         self.SRC = {}                     # a layer copied into RAM: its experts' addresses there, which a tier copies from
@@ -586,7 +588,7 @@ class DeepSeek4(Generates):
             if any(at[(l, x)] - lo != x * p.slot_bytes for x in range(self.EXPERTS)):
                 raise Refused("layer %d's slots were not handed out one after another, as its file is laid out" % l)
             # ⛳ A LAYER'S SLOTS ARE A WHOLE NUMBER OF PAGES (384 × 17,714,176 bytes), so each layer starts on a page
-            m.map_file(lo, p.slot_bytes * self.EXPERTS, paths[l], 0)
+            m.map_file(lo, p.slot_bytes * self.EXPERTS, *paths[l])
         self.LOCKED_GB = experts_file.lock_experts(self.EXPERTS_LOCK, [at[(l, x)] for l in ram for x in range(self.NK, self.EXPERTS)],
                                                    p.slot_bytes)
         m.act_as(CARD)

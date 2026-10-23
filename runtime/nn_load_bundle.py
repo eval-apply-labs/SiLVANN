@@ -62,6 +62,11 @@ DOWN = "mlp.experts.down_proj"
 #   experts' order — each expert one run of the layer's file, as its slot lays it out. `Bundle.record` answers either
 #   stacked name with a view of them (`StackedRecord`), and `names` names them so.
 PER_EXPERT = re.compile(r"^mlp\.experts\.(\d+)\.(gate_up_proj|down_proj)$")
+# ⭐ AND AN EXPERT'S GATE AND UP AS ONE RECORD (GLM's and DeepSeek's: `mlp.experts.N.gate_up_proj.weight`, gate's rows then
+#   up's, `scripts/pack_expert_order.py`, NN-109): their slot holds the two as one matrix, so the record is the slot's up
+#   half byte for byte. `Bundle.record` answers each of the two names with its half (`RowView`), and `names` names them so.
+FUSED = re.compile(r"^(.*experts\.\d+\.)gate_up_proj\.weight$")
+HALF = re.compile(r"^(.*experts\.\d+\.)(gate|up)_proj\.weight$")
 
 FORMAT = "silvann-packed-v3"
 
@@ -254,6 +259,12 @@ class Bundle:
         idx = self.index(layer)
         if full in idx:
             return Record(self, layer, full, idx[full])
+        half = HALF.match(short_name)
+        fused = self._prefix(layer) + half.group(1) + "gate_up_proj.weight" if half else None
+        if fused in idx:
+            whole = Record(self, layer, fused, idx[fused])
+            n = whole.rows // 2
+            return RowView(whole, 0 if half.group(2) == "gate" else n, n, full)
         if short_name in (GATE_UP, DOWN):
             pre, tail, each = self._prefix(layer), short_name[len("mlp.experts."):], []
             while "%smlp.experts.%d.%s" % (pre, len(each), tail) in idx:
@@ -266,8 +277,13 @@ class Bundle:
     def names(self, layer):
         """Every record this layer carries, short — the layer prefix stripped, an expert's own record named as the
         stacked one its experts make."""
-        pre = self._prefix(layer)
-        return sorted({PER_EXPERT.sub(r"mlp.experts.\2", k[len(pre):]) for k in self.index(layer) if k.startswith(pre)})
+        pre, out = self._prefix(layer), set()
+        for k in self.index(layer):
+            if k.startswith(pre):
+                short = PER_EXPERT.sub(r"mlp.experts.\2", k[len(pre):])
+                m = FUSED.match(short)
+                out |= {m.group(1) + "gate_proj.weight", m.group(1) + "up_proj.weight"} if m else {short}
+        return sorted(out)
 
     def close(self):
         if self.overlay is not None:
@@ -416,6 +432,23 @@ class Record:
         if n < self.rows * 2:
             raise Refused("%s: the scale plane holds %d bytes, not one scale a row" % (self.name, n))
         return (d + which * per * self.row_bytes, per * self.row_bytes), (s + which * per * 2, per * 2)
+
+
+class RowView(Record):
+    """Rows `first` to `first + rows` of a record, read as a record of their own — a fused gate-and-up record's gate or up
+    (▶ `FUSED`): its codes one span of the layer blob and its scales another, its index entry rewritten to say so."""
+
+    def __init__(self, whole, first, rows, name):
+        (d_at, _), (s_at, s_n) = whole.data_span(), whole.lut_span()
+        if s_n < whole.rows * 2 or first + rows > whole.rows:
+            raise Refused("%s: rows [%d,%d) are not a view of one scale a row" % (whole.name, first, first + rows))
+        rb, fd, fl = whole.row_bytes, whole.rec["fields"]["vbr_data"], whole.rec["fields"]["vbr_lut"]
+        rec = dict(whole.rec, fields=dict(
+            vbr_data=dict(fd, rel=d_at - whole.offset + first * rb, nbytes=rows * rb, shape=[rows * rb]),
+            vbr_lut=dict(fl, rel=s_at - whole.offset + first * 2, nbytes=rows * 2, shape=[rows])),
+            scalars=dict(whole.rec["scalars"], rows=rows, original_shape=[rows] + list(whole.original_shape[1:])))
+        rec["scalars"].pop("dead_rows", None)
+        Record.__init__(self, whole.bundle, whole.layer, name, rec)
 
 
 class StackedRecord(Record):

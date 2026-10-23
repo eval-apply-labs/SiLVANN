@@ -1,6 +1,8 @@
 # The Contributor License Agreement, asked once per contributor on their first pull request.
 # A contributor accepts by replying with the sentence below; the signature is stored in this repository,
-# on the `cla-signatures` branch, in signatures/version1/cla.json. CLA.md is the agreement.
+# on the `cla-signatures` branch, in signatures/version1/cla.json. CLA.md is the agreement. The branch is made once,
+# from main, and left unprotected: the action writes to it but does not make it, and a signature given before it
+# exists is not kept (the contributor signs again).
 # The action is pinned to the commit of its v2.6.1 release, because it runs with write access on
 # pull requests opened by anyone.
 name: "CLA"

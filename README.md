@@ -1,6 +1,6 @@
 # SiLVANN
 
-> **Developer preview, v0.18.0.** It runs the models below well on the hardware it was tested on, and it is shared
+> **Developer preview, v0.18.1.** It runs the models below well on the hardware it was tested on, and it is shared
 > for people who can find their way around a build and a stack trace. NVIDIA cards are tested on two, a GeForce
 > RTX 5060 Ti and an RTX 5070 Ti; Windows natively on one PC; macOS is not supported.
 
@@ -67,25 +67,18 @@ v0.11.1, the RTX 5070 Ti's with v0.11.0. v0.11.0's server drew each token with n
 card, through OpenCL and on the CPU alone: the 35B answered in the chat at 32-35 tokens a second on the RTX 5060 Ti,
 and answers at 67 now ([`docs/results.md`](docs/results.md)).
 
-**New in v0.18.0:** a Qwen MoE model reads an expert from the disk in one read, the server answers while a model
-generates, and the `D4E4` packs are retired.
+**New in v0.18.1:** GLM 5.3 Flash and DeepSeek-V4.1-Flash read an expert from the disk in one read too, and DeepSeek
+maps the experts RAM does not hold from its pack instead of writing them beside it.
 
-**One read an expert.** Qwen 3.6 35B-A3B's and Qwen 3.5 122B-A10B's packs keep each routed expert as a record of its
-own, laid out as the engine holds it, so an expert the CPU reads from the disk is one read where it was four. The 122B
-with its experts read from an NVMe array, held to 32 GB of RAM, answers at 9.3-9.4 tokens a second where the pack before
-gave 8.0-8.3. The new packs need v0.18.0; a pack downloaded before keeps working as it did — download it again for the
-new layout ([`docs/users.md`](docs/users.md#5-the-experts-on-the-disk)).
+**One read an expert, for GLM and DeepSeek.** Their packs, uploaded again, keep each routed expert's gate and up as one
+record beside its down — the layout the engine holds — so an expert read from the disk is one read where it was five.
+GLM on one socket held to 55 GB, its experts read from the disk, answers at 3.06 tokens a second where the pack
+before gave 2.56-2.79. DeepSeek's layers that RAM does not hold are mapped from the pack itself: nothing is written beside it,
+where a pack before wrote 6.3 GB a layer (89 GB on our test machine). The new packs need v0.18.1; a pack downloaded
+before keeps working as it did ([`docs/users.md`](docs/users.md#5-the-experts-on-the-disk)).
 
-**The server answers while a model generates.** A model's turn no longer holds the server's other requests: `/health`,
-`/busy` and the rest answer in a few milliseconds through an answer, where they waited seconds.
-
-**AMD's prompt mixes as its tokens do.** On an AMD card the attention's mix of a prompt read as rows is now the same, to
-the bit, as the same positions read a token at a time, and the prompt reads 2% faster on the 27B.
-
-**The `D4E4` packs are retired, and the 397B is not published.** The 35B's, the 122B's and GLM 5.3 Flash's `D4E4` are
-no longer offered: their `D8E4` hold the same 4-bit experts, and the dense part at 8 bits is the one that pays
-([`docs/compression.md`](docs/compression.md)). Qwen 3.5 397B-A17B still runs, but its pack is no longer published: GLM
-5.3 Flash and DeepSeek-V4.1-Flash do more at its size.
+v0.18.0 brought the same layout to the Qwen packs, the server answering while a model generates, AMD's prompt mixing as
+its tokens do, and retired the `D4E4` packs.
 
 Every release before this one, and this one's notes again: [`release_logs/v0.md`](release_logs/v0.md).
 

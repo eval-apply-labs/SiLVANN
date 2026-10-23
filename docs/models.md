@@ -83,8 +83,8 @@ has no `vision.pkl` — it reads text, and a picture is refused — and this fet
 `venv/bin/hf download eval-apply/silvann_tq_D8E4_deepseek_v4.1_flash_1017 vision.pkl --local-dir
 models/silvann_tq_D8E4_deepseek_v4.1_flash_1017`. Its routed experts are 272 GB (6.8 GB a layer,
 40 layers) and run on the CPU: as many layers in RAM as fit beside the server, a spare and a tenth of the memory for the
-system and the files it reads in place; the rest are written once beside the pack (`models/<name>/experts/`) and read
-through the system's page cache. Its n-gram memory's tables (203 GB) stay on the disk and are read a row at a time as
+system and the files it reads in place; the rest are mapped from the pack and read through the system's page cache
+(a pack downloaded before v0.18.1 writes them once beside it, in `models/<name>/experts/`). Its n-gram memory's tables (203 GB) stay on the disk and are read a row at a time as
 each token asks for them, so the disk should be an NVMe drive. A conversation reaches the model's own length,
 1,048,576 positions: past 16,384, layer 20's candidate blocks choose where the later layers look, as DeepSeek's own
 code does. Its rates come with a later release;

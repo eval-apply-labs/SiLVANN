@@ -233,6 +233,24 @@ def _in_place(bundle, workers, layers, experts, pieces, slot_bytes):
     return found
 
 
+def in_slots(bundle, layer, experts, pieces, slot_bytes):
+    """Where a layer's experts lie in the pack exactly as its slots do — (its file, the first expert's offset) — when an
+    expert is one run of the slot's whole size from a page, the next at the next slot (a pack one record an expert, its
+    gate and up one: NN-109): the pack then maps over the slots as a written file would, nothing written beside it —
+    DeepSeek's mapped layers, 6.3 GB a layer written before (`MEASURED` node03 2026-10-23,
+    measurements/2026-10-23_nn109_one_run_glm_deepseek_node03.md). Else None."""
+    lie = _in_place(bundle, [(0, 0, 1)], [layer], experts, pieces, slot_bytes)
+    if lie is None:
+        return None
+    path, runs = lie[0][layer]
+    if len(runs) != 1:
+        return None
+    at, n, into, step = runs[0]
+    if into != 0 or n != slot_bytes or step != slot_bytes or at % PAGE or at + experts * slot_bytes > os.path.getsize(path):
+        return None
+    return path, at
+
+
 def _runs(slices, slot_bytes, file_bytes, experts):
     """An expert's slices as few reads as the pack allows: two that step alike and lie apart in the file as in the slot,
     the gap between them the slot's padding (at most `GAP`), are one run; and a run that starts on a page and ends
@@ -305,7 +323,7 @@ def lock_check(on, where, total):
     if not on:
         return
     if where != "ram":
-        said = {"card": "on the card", "disk": "read from the disk", "mapped": "mapped from their files"}.get(where, repr(where))
+        said = {"card": "on the card", "disk": "read from the disk", "mapped": "mapped from the pack or their files"}.get(where, repr(where))
         raise Refused("experts_lock locks the experts the CPU holds in RAM (experts_from 'ram'), and here they are %s" % said)
     most = lockable()
     if most == 0:

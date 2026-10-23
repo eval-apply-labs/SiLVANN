@@ -357,19 +357,22 @@ With `experts_from: "disk"`, a model's experts are read from its pack as they ar
 it. A Qwen pack from v0.18.0 on keeps each routed expert as a record of its own, laid out as the engine holds it, so an
 expert is one read; one downloaded before stacks a layer's experts by tensor and reads an expert in four — it works, and
 on our NVMe array the 122B answered at 8.0-8.3 tokens a second that way against 9.3-9.4 (download it again for the new
-layout). Where they do not lie in the pack as the CPU reads them — a GLM 5.3 Flash pack downloaded before 19 October 2026,
-which keeps an expert's records in the order of their names (download it again for one in the experts' order), a model
-under a LoRA that holds experts of its own, or a model split over two CPU sockets — they are written once, at the first
-start, to `models/<name>/experts/` in that layout (about 150 GB for GLM 5.3 Flash), and later starts read the file. Before v0.12.0 a Qwen model's were written so too: its `experts/` folder (55 GB for the 122B, 16 GB for the 35B)
+layout). A GLM 5.3 Flash pack from v0.18.1 on keeps an expert's gate and up as one record beside its down, its slot's
+layout, so an expert is one read too; one downloaded before reads an expert in six. Where they do not lie in the pack as
+the CPU reads them — a GLM pack downloaded before 19 October 2026, which keeps an expert's records in the order of their
+names, a model under a LoRA that holds experts of its own, or a model split over two CPU sockets — they are written
+once, at the first start, to `models/<name>/experts/` in that layout (about 150 GB for GLM 5.3 Flash), and later starts read the file. Before v0.12.0 a Qwen model's were written so too: its `experts/` folder (55 GB for the 122B, 16 GB for the 35B)
 is not read any more on one socket, and can be deleted. The disk should be an NVMe drive: RAM keeps the experts that are used, and every other one is read from the disk
 when a token picks it, so the disk's speed is the answer's speed. On our test machine GLM 5.3 Flash answered at
 5.7 tokens a second with 128 GB of RAM from a disk that reads 5 GB/s. Keep the disk cool: a hot NVMe drive slows itself down. Every measurement: [`results.md`](results.md). The engine keeps as many experts
 as the memory there is allows — the process's own limit when it has one — less a quarter of it for everything else,
 at least 3 GB and at most 8 GB.
 
-DeepSeek-V4.1-Flash has no `disk`: the layers RAM does not hold are written once to `models/<name>/experts/` (6.8 GB a
-layer) and read through the system's page cache (`experts_from: "mapped"`, chosen at boot), so leave that much room on
-the disk beside its 492 GB ([`config.md`](config.md#deepseek-v41-flashs-options)).
+DeepSeek-V4.1-Flash has no `disk`: the layers RAM does not hold are read through the system's page cache
+(`experts_from: "mapped"`, chosen at boot). From v0.18.1 its pack lays each layer's experts out as the engine holds
+them, and those layers are mapped from the pack itself, nothing written; a pack downloaded before has them written once
+to `models/<name>/experts/` (6.8 GB a layer), so leave that much room beside it — or download it again
+([`config.md`](config.md#deepseek-v41-flashs-options)).
 
 ## 6. A model over several machines
 

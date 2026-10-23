@@ -274,9 +274,9 @@ These are for measuring the engine rather than for use: their defaults are the o
 
 | option | values | what it sets |
 |---|---|---|
-| `experts_from` | chosen at boot; `"ram"`, `"mapped"` | Where its routed experts (272 GB, 6.8 GB a layer) are. `ram` copies every layer's into RAM. `mapped` copies the first `experts_in_ram` layers into RAM and writes the others once, a file a layer in `experts_dir`, which the system's page cache reads. At boot: `ram` where every layer fits beside the server's own memory, a spare and a tenth of what the process may hold (for the system and the files read in place), otherwise `mapped` with as many layers in RAM as fit. |
+| `experts_from` | chosen at boot; `"ram"`, `"mapped"` | Where its routed experts (272 GB, 6.8 GB a layer) are. `ram` copies every layer's into RAM. `mapped` copies the first `experts_in_ram` layers into RAM and maps the others from the pack, which the system's page cache reads (a pack from before v0.18.1 has them written once, a file a layer in `experts_dir`). At boot: `ram` where every layer fits beside the server's own memory, a spare and a tenth of what the process may hold (for the system and the files read in place), otherwise `mapped` with as many layers in RAM as fit. |
 | `experts_in_ram` | layers | With `experts_from: "mapped"`, how many of the first layers are in RAM. |
-| `experts_dir` | a folder | Where `mapped` writes its files: by default the model's `experts/`. |
+| `experts_dir` | a folder | Where `mapped` writes its files for a pack from before v0.18.1: by default the model's `experts/`. |
 | `engram_from` | a folder | Where the n-gram memory's tables (203 GB) are read from, a row at a time: by default the pack's `engram/`. Another folder — on a faster drive — holds the same two files and their index. |
 | `experts_int8` | `true` by default, or `false` | The experts are multiplied in integers on the CPU. |
 | `experts_lock` | `false` by default, or `true` | As GLM's: the layers copied into RAM are locked there. |
