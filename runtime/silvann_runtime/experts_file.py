@@ -161,7 +161,7 @@ def cache_experts(m, bundle, workers, plan, layers, experts, directory, pieces, 
     straight from the drive) — from the pack itself where its experts lie as the slots take them (`_in_place`, NN-97:
     nothing written beside it), else from the worker's file, written first if it is not there. Answers each worker's
     backing tables, {(worker, layer): name}, for the experts tables to name. ▶ nn's `nn__expert__backing`."""
-    lie = _in_place(bundle, workers, layers, experts, pieces)
+    lie = _in_place(bundle, workers, layers, experts, pieces, plan.slot_bytes)
     paths = None if lie is not None else ensure(bundle, workers, plan, layers, experts, directory, pieces, all_layers,
                                                 progress)
     names = {}
@@ -187,16 +187,19 @@ def cache_experts(m, bundle, workers, plan, layers, experts, directory, pieces, 
 
 
 SLICES = 8      # an expert's byte runs a backing names (nn's `NN__EXPERT__SLICES`)
+PAGE = 4096     # what a read straight from the drive takes whole: its offset, its length and its memory
+GAP = 64 << 10  # the most of a slot's padding one run reads over (▶ `_runs`)
 CELLS = 1 + 4 * SLICES      # a backing as a program holds it: the file, then each slice's start, bytes, place, stride
 _UNSPELLED = set(" \t\r\n()'\"")    # what ends a name in a program: a path holding one cannot be handed as a name
 
 
-def _in_place(bundle, workers, layers, experts, pieces):
+def _in_place(bundle, workers, layers, experts, pieces, slot_bytes):
     """Where a worker's experts lie in the pack itself — {part: {layer: (its file, [(expert 0's slice there, its bytes,
     its place in the slot, the step to the next expert's), ...])}} — when every piece `pieces` cuts, of every expert, is
     a run of its layer's mapped file and each slice steps by one stride; else None, and the file is written (NN-97).
     A Qwen layer's four slices, its experts stacked by tensor, and GLM's six on one socket lie so; a socket's share of
-    GLM's down rows (a column cut of each) and a LoRA's experts (another file) do not."""
+    GLM's down rows (a column cut of each) and a LoRA's experts (another file) do not. The slices are read as few runs
+    as they lie in (`_runs`): a pack with one record an expert, in the slot's order, is one run an expert."""
     found = {}
     for _, part, _parts in workers:
         found[part] = {}
@@ -225,8 +228,35 @@ def _in_place(bundle, workers, layers, experts, pieces):
                         g != (f[0] + x * s, f[1], f[2]) for g, f, s in zip(got, first, step)):
                     return None
             path = os.path.join(bundle.layer_dir(l), bundle.manifest["layout"]["weights_bin"])
-            found[part][l] = (path, [(f[0], f[1], f[2], s) for f, s in zip(first, step)])
+            found[part][l] = (path, _runs([(f[0], f[1], f[2], s) for f, s in zip(first, step)], slot_bytes,
+                                          os.path.getsize(path), experts))
     return found
+
+
+def _runs(slices, slot_bytes, file_bytes, experts):
+    """An expert's slices as few reads as the pack allows: two that step alike and lie apart in the file as in the slot,
+    the gap between them the slot's padding (at most `GAP`), are one run; and a run that starts on a page and ends
+    inside one is taken on to that page's end where the slot has room before the next run and the file has the bytes —
+    so the drive is asked once an expert, straight into the slot. ⛳ FOUR READS TO FOUR PLACES TOOK ~1.3x ONE READ OF THE
+    SAME BYTES: the 122B's experts from node03's NVMe array, 8.0-8.3 tokens a second from the pack stacked by tensor, 9.2
+    from the file in the slots' order, 9.3-9.4 from the pack one record an expert — `MEASURED` 2026-10-23,
+    measurements/2026-10-23_nn97_one_run_node03.md."""
+    out = []
+    for f, n, into, step in sorted(slices, key=lambda v: v[2]):
+        if out:
+            pf, pn, pinto, pstep = out[-1]
+            gap = into - (pinto + pn)
+            if step == pstep and 0 <= gap <= GAP and f - pf == into - pinto:
+                out[-1] = (pf, into + n - pinto, pinto, pstep)
+                continue
+        out.append((f, n, into, step))
+    for i, (f, n, into, step) in enumerate(out):
+        whole = (n + PAGE - 1) // PAGE * PAGE
+        room = out[i + 1][2] if i + 1 < len(out) else slot_bytes
+        if (whole != n and f % PAGE == 0 and into % PAGE == 0 and step % PAGE == 0 and into + whole <= room
+                and f + (experts - 1) * step + whole <= file_bytes):
+            out[i] = (f, whole, into, step)
+    return out
 
 
 def _open(m, path, what):

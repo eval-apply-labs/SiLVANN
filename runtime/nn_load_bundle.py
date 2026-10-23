@@ -51,12 +51,17 @@ import hashlib
 import json
 import os
 import pickle
+import re
 
 # ⛳ THE FOUR NAMES THIS FILE KNOWS, AND IT KNOWS NO OTHERS. A model whose MoE is spelled differently
 #   is a different loader, not a flag here — the point of naming them is that a typo is a KeyError at
 #   load time and not a silently empty slot.
 GATE_UP = "mlp.experts.gate_up_proj"
 DOWN = "mlp.experts.down_proj"
+# ⭐ OR ONE RECORD AN EXPERT (`scripts/pack_expert_order.py`, NN-97): `mlp.experts.N.gate_up_proj`, then its down, in the
+#   experts' order — each expert one run of the layer's file, as its slot lays it out. `Bundle.record` answers either
+#   stacked name with a view of them (`StackedRecord`), and `names` names them so.
+PER_EXPERT = re.compile(r"^mlp\.experts\.(\d+)\.(gate_up_proj|down_proj)$")
 
 FORMAT = "silvann-packed-v3"
 
@@ -241,19 +246,28 @@ class Bundle:
         return self._blob[layer][1]
 
     def record(self, layer, short_name):
-        """One record, by the name it carries after the layer prefix is stripped — the overlay's when it has one."""
+        """One record, by the name it carries after the layer prefix is stripped — the overlay's when it has one. A
+        layer whose experts are one record each answers the stacked name with a view of them (▶ `PER_EXPERT`)."""
         full = self._prefix(layer) + short_name
         if self.overlay is not None and layer in self._overlaid and full in self.overlay.index(layer):
             return Record(self.overlay, layer, full, self.overlay.index(layer)[full])
         idx = self.index(layer)
-        if full not in idx:
-            raise Refused("layer %d has no record %r" % (layer, short_name))
-        return Record(self, layer, full, idx[full])
+        if full in idx:
+            return Record(self, layer, full, idx[full])
+        if short_name in (GATE_UP, DOWN):
+            pre, tail, each = self._prefix(layer), short_name[len("mlp.experts."):], []
+            while "%smlp.experts.%d.%s" % (pre, len(each), tail) in idx:
+                one = "%smlp.experts.%d.%s" % (pre, len(each), tail)
+                each.append(Record(self, layer, one, idx[one]))
+            if each:
+                return StackedRecord(self, layer, full, each)
+        raise Refused("layer %d has no record %r" % (layer, short_name))
 
     def names(self, layer):
-        """Every record this layer carries, short — the layer prefix stripped."""
+        """Every record this layer carries, short — the layer prefix stripped, an expert's own record named as the
+        stacked one its experts make."""
         pre = self._prefix(layer)
-        return sorted(k[len(pre):] for k in self.index(layer) if k.startswith(pre))
+        return sorted({PER_EXPERT.sub(r"mlp.experts.\2", k[len(pre):]) for k in self.index(layer) if k.startswith(pre)})
 
     def close(self):
         if self.overlay is not None:
@@ -392,6 +406,65 @@ class Record:
         if which < 0 or which >= experts:
             raise Refused("%s: expert %d is not inside %d" % (self.name, which, experts))
         return self.data_bytes(which * per, per), self.lut_bytes(which * per, per)
+
+    def expert_spans(self, which, experts):
+        """Expert `which`'s two planes as byte ranges in the layer blob: ((codes at, bytes), (scales at, bytes))."""
+        per = self.expert_rows(experts)
+        if which < 0 or which >= experts:
+            raise Refused("%s: expert %d is not inside %d" % (self.name, which, experts))
+        (d, _), (s, n) = self.data_span(), self.lut_span()
+        if n < self.rows * 2:
+            raise Refused("%s: the scale plane holds %d bytes, not one scale a row" % (self.name, n))
+        return (d + which * per * self.row_bytes, per * self.row_bytes), (s + which * per * 2, per * 2)
+
+
+class StackedRecord(Record):
+    """A layer's experts kept one record each (▶ `PER_EXPERT`), read as the stacked record they make: `rows` every
+    expert's, `original_shape` the expert count first, a run of rows cut from the experts' own records. ⛳ ITS PLANES ARE
+    NOT ONE RUN, so `data_span` and `lut_span` refuse: an expert's are `expert_spans`."""
+
+    def __init__(self, bundle, layer, name, each):
+        first = each[0]
+        shape = (first.rows, first.cols, first.d, first.row_bytes, first.family, first.original_shape)
+        for r in each:
+            if (r.rows, r.cols, r.d, r.row_bytes, r.family, r.original_shape) != shape:
+                raise Refused("%s: %s and %s are not the same shape" % (name, first.name, r.name))
+        self.bundle, self.layer, self.name, self.each, self.per = bundle, layer, name, each, first.rows
+        self.rec = None
+        self.rows = first.rows * len(each)
+        self.cols, self.d, self.row_bytes, self.family = first.cols, first.d, first.row_bytes, first.family
+        self.original_shape = [len(each)] + list(first.original_shape)
+
+    def _field(self, which):
+        raise Refused("%s: its experts are one record each, and its %s no one run of the file" % (self.name, which))
+
+    def _rows(self, row0, nrows, plane):
+        nrows = self.rows if nrows is None else nrows
+        if row0 < 0 or nrows < 0 or row0 + nrows > self.rows:
+            raise Refused("%s: rows [%d,%d) are not inside %d" % (self.name, row0, row0 + nrows, self.rows))
+        out = []
+        while nrows > 0:
+            x, r = divmod(row0, self.per)
+            n = min(nrows, self.per - r)
+            out.append(plane(self.each[x], r, n))
+            row0, nrows = row0 + n, nrows - n
+        return b"".join(out)
+
+    def data_bytes(self, row0=0, nrows=None):
+        return self._rows(row0, nrows, lambda rec, r, n: rec.data_bytes(r, n))
+
+    def lut_bytes(self, row0=0, nrows=None):
+        return self._rows(row0, nrows, lambda rec, r, n: rec.lut_bytes(r, n))
+
+    def expert_spans(self, which, experts):
+        self.expert_rows(experts)
+        if which < 0 or which >= experts:
+            raise Refused("%s: expert %d is not inside %d" % (self.name, which, experts))
+        r = self.each[which]
+        (d, _), (s, n) = r.data_span(), r.lut_span()
+        if n < r.rows * 2:
+            raise Refused("%s: the scale plane holds %d bytes, not one scale a row" % (r.name, n))
+        return (d, r.rows * r.row_bytes), (s, r.rows * 2)
 
 
 # ══ ⭐⭐ THE SLOT — WHAT THE FOUR SLICES LOOK LIKE ONCE THEY ARE ON THE CARD ══════════════════════

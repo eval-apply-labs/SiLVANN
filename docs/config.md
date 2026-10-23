@@ -151,7 +151,7 @@ of a conversation (measured from the cache each model sizes at two contexts):
 |---|---|
 | Qwen 3.6 35B-A3B (`silvann_tq_D8E4_qwen3.6_35b_a3b`) | 10,000 |
 | Qwen 3.8 27B (`silvann_tq_D4_qwen3.8_27b`) | 3,200 |
-| GLM 5.3 Flash (D4E4 and D8E4: the same cache) | 8,800 |
+| GLM 5.3 Flash (`silvann_tq_D8E4_glm_5.3_flash`) | 8,800 |
 | Ministral 3 14B (D4 and D8: every position in halves) | 625 |
 | DeepSeek-V4.1-Flash (`silvann_tq_D8E4_deepseek_v4.1_flash_1017`: a window, then compressed latents) | 18,600 |
 

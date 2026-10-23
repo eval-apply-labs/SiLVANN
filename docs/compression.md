@@ -32,7 +32,7 @@ conversation's cache uses the same codec for its older positions — 8 bits, the
 | the **scale** | a row | it is what makes the fixed codebook fit the row at all; one scale for a whole tensor costs from a few percent to many times the error, and more at more bits |
 
 A model's widths are chosen by name when it is packed: the published models put their routed experts at 4 bits
-and the rest at 8 (`D8E4`, the 35B) or at 4 (`D4`, the 27B; `D4E4`, GLM 5.3 Flash) — ▶ the section below for why the
+and the rest at 8 (`D8E4`, the 35B) or at 4 (`D4`, the 27B) — ▶ the section below for why the
 dense part is the one worth the bits. The embedding and the output
 head are at 8 bits; one-dimensional tensors — norms, biases — are kept at 16, and so are the router
 (`mlp.gate.weight`), the short convolutions' weights (`conv1d.weight`) and GLM 5.3 Flash's hyper-connection maps.
@@ -62,7 +62,7 @@ So a clean base makes up for slightly noisier experts, and the measurements agre
 | **D8E4** — the dense part at 8 bits, the experts at 4 | **8.959** | **+0.8%** |
 | D4E4 — everything at 4 bits | 9.430 | +6.1% |
 
-On the 122B the gap between the two published packs is wider: D8E4 5.926, D4E4 7.017, 18% higher. Taking the experts
+On the 122B the gap between its two packs is wider: D8E4 5.926, D4E4 7.017, 18% higher. Taking the experts
 past 4 bits buys well under 1%; taking the dense part from 4 to 8 bits buys 6% on the 35B and 18% on the 122B. The
 experts are most of a model's bytes, so D8E4 keeps nearly all of the size saving and loses almost none of the quality.
 
@@ -71,8 +71,8 @@ experts are most of a model's bytes, so D8E4 keeps nearly all of the size saving
 only — at 5 bits the generic ones run, at half the speed. So no 5-bit pack is offered; the width stays in the format, and
 fast 5-bit kernels can be added if a model ever wants it.
 
-**Choosing a pack:** take D8E4 wherever it fits. D4E4 exists for cards too small to hold D8E4's dense part (the 122B
-on an 8 GB card); it works, at the cost the table shows. The CPU's `experts_int8` arithmetic changes the 35B's
+**Choosing a pack:** take D8E4. The D4E4 packs, for cards too small to hold D8E4's dense part, were retired in
+v0.18.0: the dense part at 4 bits saved the 122B 2.3 GB on the card, at the cost the table shows. The CPU's `experts_int8` arithmetic changes the 35B's
 perplexity by 0.02%.
 
 ## The files

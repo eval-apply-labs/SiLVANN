@@ -1,7 +1,8 @@
 # Results
 
 Every number on this page was measured on one of these machines, and every row names the version it was measured with.
-The README's table of machines is drawn from this page.
+The README's table of machines is drawn from this page. The `D4E4` packs named below were retired in v0.18.0, and the
+397B's pack is no longer published: their rows stay as they were measured.
 
 | | The R730 (the test server) | The Precision 5820 (a desktop) | A Ryzen desktop |
 |---|---|---|---|

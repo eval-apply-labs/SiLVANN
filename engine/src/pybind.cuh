@@ -23,6 +23,7 @@
 #include <stdlib.h>
 #include <algorithm>
 #include <map>
+#include <mutex>
 #include <string>
 #include <tuple>
 #include <vector>
@@ -188,6 +189,42 @@ static void silvann_wheel_load_silicon_families(void) {
     }
 }
 
+/* ══ ONE ENGINE CALL AT A TIME, AND PYTHON FREE WHILE ONE RUNS ══════════════════════════════════════════
+ * The engine's heap takes one caller at a time, and every door below that reaches it takes this lock. A door
+ * that runs a program — `execute`, `eval`, `run_grid`, `dispatch` — or moves memory gives the interpreter's lock
+ * back first, so the server's other threads (its HTTP, the stream, a status request) run while a token's work
+ * does (NN-107: /health waited 1.4-2.8 s through a 35B answer, `MEASURED` node-01,
+ * measurements/2026-10-22_server_stall_node-01.md; with this lock 2-3 ms through the 35B's and GLM's answers, `MEASURED`
+ * node03, measurements/2026-10-23_server_stall_node03.md). Any other door takes the engine's lock at once when it is
+ * free, keeping the interpreter's, since a call of microseconds would only hand that lock to another thread
+ * and wait to get it back.
+ * ⛔ A THREAD NEVER WAITS FOR THE ENGINE'S LOCK WHILE IT HOLDS THE INTERPRETER'S: a program finishing in
+ *   another thread needs the interpreter's lock to hand back its answer, so a door finding the engine busy
+ *   gives the interpreter's lock up before it waits. The guards end in that order too: the engine's lock is
+ *   let go before the interpreter's is taken again.
+ * ⛳ The resident launch's four doors (`stop_residing`, `place`, `poll`, `result_release`) take neither:
+ *   `stop_residing` waits for blocks that `place` and `poll` speak to, and a lock across that wait would hold
+ *   them out. */
+static std::mutex silvann_wheel_engine;
+
+template <typename F> static auto silvann_wheel_long(F&& f) -> decltype(f()) {
+    decltype(f()) got{};
+    { py::gil_scoped_release step_aside;
+      std::lock_guard<std::mutex> one(silvann_wheel_engine);
+      got = f(); }
+    return got;
+}
+
+template <typename F> static auto silvann_wheel_short(F&& f) -> decltype(f()) {
+    std::unique_lock<std::mutex> free_now(silvann_wheel_engine, std::try_to_lock);
+    if (free_now.owns_lock()) return f();
+    decltype(f()) got{};
+    { py::gil_scoped_release step_aside;
+      std::lock_guard<std::mutex> one(silvann_wheel_engine);
+      got = f(); }
+    return got;
+}
+
 /* ══ A PACKAGE'S CALLS, BOUND FROM THE TABLE IT ANSWERS ════════════════════════════════════════════════
  * Each package describes its C interface as data (`sys/contracts/abi/cpu.cuh` for the table and the
  * shapes), and this turns every row into a function under the package's name, by its shape: the C function
@@ -206,7 +243,8 @@ static void silvann_python_bind_surface(py::module_& m, const char* package, con
         case SYS__ABI_SHAPE_NUMBER_TO_NUMBER: {
             typedef unsigned long long (*call)(unsigned long long);
             const call f = (call)e.call;
-            sub.def(e.name, [f](unsigned long long x) { return f(x); }, py::arg(e.args[0]), e.doc);
+            sub.def(e.name, [f](unsigned long long x) { return silvann_wheel_short([&] { return f(x); }); },
+                    py::arg(e.args[0]), e.doc);
             break;
         }
         case SYS__ABI_SHAPE_ADDRESS_TO_NODE: {
@@ -214,7 +252,7 @@ static void silvann_python_bind_surface(py::module_& m, const char* package, con
             const call f = (call)e.call;
             sub.def(e.name, [f, refused](unsigned long long address) {
                 sys__heap_node got;
-                if (!f(address, &got)) throw std::runtime_error(refused);
+                if (!silvann_wheel_short([&] { return f(address, &got); })) throw std::runtime_error(refused);
                 std::vector<unsigned long long> args(got.args, got.args + 6);
                 return py::make_tuple((unsigned int)got.dtype, got.op_code, args);
             }, py::arg(e.args[0]), e.doc);
@@ -228,7 +266,7 @@ static void silvann_python_bind_surface(py::module_& m, const char* package, con
             sub.def(e.name, [f, refused, answers]() {
                 unsigned long long words[SYS__ABI_MOST_WORDS] = {0};
                 int present[SYS__ABI_MOST_WORDS] = {0};
-                if (!f(words, present)) throw std::runtime_error(refused);
+                if (!silvann_wheel_short([&] { return f(words, present); })) throw std::runtime_error(refused);
                 py::dict out;
                 for (size_t j = 0; j < answers.size(); ++j)
                     out[answers[j].c_str()] = present[j] ? py::cast(words[j]) : py::none();
@@ -239,7 +277,8 @@ static void silvann_python_bind_surface(py::module_& m, const char* package, con
         case SYS__ABI_SHAPE_NOTHING: {
             typedef int (*call)(void);
             const call f = (call)e.call;
-            sub.def(e.name, [f, refused]() { if (!f()) throw std::runtime_error(refused); }, e.doc);
+            sub.def(e.name, [f, refused]() { if (!silvann_wheel_short([&] { return f(); })) throw std::runtime_error(refused); },
+                    e.doc);
             break;
         }
         case SYS__ABI_SHAPE_READ_BYTES: {
@@ -247,8 +286,7 @@ static void silvann_python_bind_surface(py::module_& m, const char* package, con
             const call f = (call)e.call;
             sub.def(e.name, [f, refused](unsigned long long address, unsigned long long bytes) {
                 std::string room((size_t)bytes, '\0');
-                int ok = 0;
-                { py::gil_scoped_release step_aside; ok = f(address, bytes, &room[0]); }
+                const int ok = silvann_wheel_long([&] { return f(address, bytes, &room[0]); });
                 if (!ok) throw std::runtime_error(refused);
                 return py::bytes(room);
             }, py::arg(e.args[0]), py::arg(e.args[1]), e.doc);
@@ -259,8 +297,7 @@ static void silvann_python_bind_surface(py::module_& m, const char* package, con
             const call f = (call)e.call;
             sub.def(e.name, [f, refused](unsigned long long address, py::bytes payload) {
                 std::string room = payload;
-                int ok = 0;
-                { py::gil_scoped_release step_aside; ok = f(address, room.size(), room.data()); }
+                const int ok = silvann_wheel_long([&] { return f(address, room.size(), room.data()); });
                 if (!ok) throw std::runtime_error(refused);
                 return (unsigned long long)room.size();
             }, py::arg(e.args[0]), py::arg(e.args[1]), e.doc);
@@ -282,12 +319,14 @@ PYBIND11_MODULE(SILVANN_MODULE_NAME, m) {
      * takes no arguments at all — and the status is a sentence rather than a number, because a caller
      * that only learns "no" has to guess which of `eng__boot__why`'s refusals it hit. */
     m.def("boot", [](unsigned blocks, unsigned chunks, unsigned chunk_nodes, const std::string& config) {
-        const int st = eng_abi_boot_with(blocks, chunks, chunk_nodes,
-                                         config.empty() ? 0 : config.c_str(),
-                                         (unsigned long long)config.size());
-        if (st != 0) throw std::runtime_error(std::string("boot refused: ") + eng_abi_status_text(st));
         unsigned b = 0, c = 0, n = 0;
-        eng_abi_geometry(&b, &c, &n);
+        const int st = silvann_wheel_long([&] {
+            const int st = eng_abi_boot_with(blocks, chunks, chunk_nodes, config.empty() ? 0 : config.c_str(),
+                                             (unsigned long long)config.size());
+            if (st == 0) eng_abi_geometry(&b, &c, &n);
+            return st;
+        });
+        if (st != 0) throw std::runtime_error(std::string("boot refused: ") + eng_abi_status_text(st));
         std::map<std::string, unsigned> got;
         got["blocks"] = b; got["chunks"] = c; got["chunk_nodes"] = n;
         return got;
@@ -298,36 +337,42 @@ PYBIND11_MODULE(SILVANN_MODULE_NAME, m) {
        "lines. Each package's host init reads it for its own sizing before the machine exists, and the\n"
        "device_params section is handed to the card VERBATIM for the settings register row.");
 
-    m.def("shutdown", &eng_abi_shutdown, "Give the device memory back.");
+    m.def("shutdown", []() { silvann_wheel_long([] { eng_abi_shutdown(); return 0; }); }, "Give the device memory back.");
 
     /* Which silicon. A name the binary has no card for is an error rather than a quiet fallback, because a
      * caller that asked for one card and got another would be told it had what it asked for. */
     m.def("choose_silicon", [](const std::string& name) {
-        if (!eng_abi_choose_silicon(name.c_str()))
+        if (!silvann_wheel_short([&] { return eng_abi_choose_silicon(name.c_str()); }))
             throw std::runtime_error("no card for silicon '" + name + "' in this binary");
     }, py::arg("name"), "Name the silicon the next boot stands up on: 'host', 'amd_rocm6_wave64', 'nvidia_cuda12'.");
     /* The workers the next boot stands up — a device of a family each, block `w` running as worker `w`. */
     m.def("choose_workers", [](const std::vector<std::pair<std::string, unsigned int>>& workers) {
         std::vector<const char*> names; std::vector<unsigned int> devices;
         for (const auto& w : workers) { names.push_back(w.first.c_str()); devices.push_back(w.second); }
-        if (!eng_abi_choose_workers((unsigned int)workers.size(), names.data(), devices.data()))
+        if (!silvann_wheel_short([&] { return eng_abi_choose_workers((unsigned int)workers.size(), names.data(),
+                                                                     devices.data()); }))
             throw std::runtime_error("a worker names a family this binary has no card for, or a device it does not count");
     }, py::arg("workers"), "Name the workers the next boot stands up: [(silicon, device), ...]; [] for one, as choose_silicon says.");
     m.def("act_as", [](int w) {
-        if (!eng_abi_act_as(w)) throw std::runtime_error("no such worker, or the machine is not free");
+        if (!silvann_wheel_short([&] { return eng_abi_act_as(w); })) throw std::runtime_error("no such worker, or the machine is not free");
     }, py::arg("worker"), "Run what this thread runs next as worker `w` (its device, context, hatch, settings); -1 is back to worker 0.");
     m.def("workers", []() {
+        std::vector<std::pair<std::string, unsigned int>> got;
+        silvann_wheel_short([&] {
+            for (unsigned int w = 0u; w < eng_abi_workers(); ++w) {
+                unsigned int device = 0u;
+                const char* name = eng_abi_worker_silicon(w, &device);
+                got.emplace_back(std::string(name ? name : ""), device);
+            }
+            return 0;
+        });
         py::list out;
-        for (unsigned int w = 0u; w < eng_abi_workers(); ++w) {
-            unsigned int device = 0u;
-            const char* name = eng_abi_worker_silicon(w, &device);
-            out.append(py::make_tuple(std::string(name ? name : ""), device));
-        }
+        for (const auto& w : got) out.append(py::make_tuple(w.first, w.second));
         return out;
     }, "The workers of the machine that is up: [(silicon, device), ...].");
     m.def("load_silicon_family", [](const std::string& path) {
         std::string why;
-        const std::string silicon = silvann_wheel_load_silicon_family(path, &why);
+        const std::string silicon = silvann_wheel_short([&] { return silvann_wheel_load_silicon_family(path, &why); });
         silvann_wheel_silicon_family rec; rec.path = path; rec.silicon = silicon; rec.outcome = why;
         silvann_wheel_silicon_families.push_back(rec);
         if (silicon.empty()) throw std::runtime_error("family '" + path + "' not loaded: " + why);
@@ -370,22 +415,23 @@ PYBIND11_MODULE(SILVANN_MODULE_NAME, m) {
     }, "The directory the families were loaded from at import, or None when none was found.");
     /* A family loaded by someone else, handed over as the address `silvann_silicon_family_get` answered. */
     m.def("offer_silicon_family", [](unsigned long long table) {
-        if (!eng_abi_offer_silicon_family((const void*)(uintptr_t)table))
+        if (!silvann_wheel_short([&] { return eng_abi_offer_silicon_family((const void*)(uintptr_t)table); }))
             throw std::runtime_error("the family's table was refused");
     }, py::arg("table"), "Hand the engine a loaded family's table, by address.");
-    m.def("devices", [](const std::string& name) { return eng_abi_devices(name.c_str()); },
+    m.def("devices", [](const std::string& name) { return silvann_wheel_short([&] { return eng_abi_devices(name.c_str()); }); },
           py::arg("name"), "How many devices of this silicon its family counts; 0 with no family.");
     m.def("silicon", []() -> py::object {
-        const char* s = eng_abi_silicon();
+        const char* s = silvann_wheel_short([] { return eng_abi_silicon(); });
         return s ? py::object(py::str(s)) : py::object(py::none());
     }, "The silicon the machine stood up on, or the one a boot would use; None when there is no card.");
 
     /* Building a program. A cell is a kind, a verb and one value — and the three of them cover every
      * shape a program is written with, so this is the only builder there is. */
-    m.def("list_create", &eng_abi_list_create, "An empty list. 0 means it could not be made.");
+    m.def("list_create", []() { return silvann_wheel_short([] { return eng_abi_list_create(); }); },
+          "An empty list. 0 means it could not be made.");
     m.def("list_append", [](unsigned long long list, unsigned kind,
                             unsigned long long verb, unsigned long long value) {
-        return eng_abi_list_append(list, kind, verb, value) != 0;
+        return silvann_wheel_short([&] { return eng_abi_list_append(list, kind, verb, value); }) != 0;
     }, py::arg("list"), py::arg("kind"), py::arg("verb") = 0ull, py::arg("value") = 0ull,
        "Put one cell at the end of a list.");
     /* A whole list in one crossing. The cells go in as the triples everything here builds them as, and what
@@ -397,7 +443,7 @@ PYBIND11_MODULE(SILVANN_MODULE_NAME, m) {
         for (const auto& c : cells)
             room.push_back(eng_abi_cell(std::get<0>(c), std::get<1>(c), std::get<2>(c)));
         sys__heap_node got;
-        if (!eng_abi_create_executable(room.data(), (unsigned int)room.size(), &got))
+        if (!silvann_wheel_short([&] { return eng_abi_create_executable(room.data(), (unsigned int)room.size(), &got); }))
             throw std::runtime_error("the list was refused");
         return py::make_tuple((unsigned int)got.dtype, got.op_code, got.args[0]);
     }, py::arg("cells"),
@@ -409,16 +455,16 @@ PYBIND11_MODULE(SILVANN_MODULE_NAME, m) {
      * itself, the way nothing else through this door does either. */
     m.def("freeze", [](std::tuple<unsigned int, unsigned long long, unsigned long long> program) {
         sys__heap_node got;
-        if (!eng_abi_freeze(eng_abi_cell(std::get<0>(program), std::get<1>(program), std::get<2>(program)),
-                            &got))
+        const sys__heap_node cell = eng_abi_cell(std::get<0>(program), std::get<1>(program), std::get<2>(program));
+        if (!silvann_wheel_short([&] { return eng_abi_freeze(cell, &got); }))
             throw std::runtime_error("the program has no picture");
         return py::make_tuple((unsigned int)got.dtype, got.op_code, got.args[0]);
     }, py::arg("program"), "Freeze a program into a picture; answers the cell that names it.");
 
     m.def("thaw", [](std::tuple<unsigned int, unsigned long long, unsigned long long> picture) {
         sys__heap_node got;
-        if (!eng_abi_thaw(eng_abi_cell(std::get<0>(picture), std::get<1>(picture), std::get<2>(picture)),
-                          &got))
+        const sys__heap_node cell = eng_abi_cell(std::get<0>(picture), std::get<1>(picture), std::get<2>(picture));
+        if (!silvann_wheel_short([&] { return eng_abi_thaw(cell, &got); }))
             throw std::runtime_error("the picture did not come back");
         return py::make_tuple((unsigned int)got.dtype, got.op_code, got.args[0]);
     }, py::arg("picture"), "Make a private list from a picture; answers the cell that names it.");
@@ -427,27 +473,32 @@ PYBIND11_MODULE(SILVANN_MODULE_NAME, m) {
     m.def("execute", [](std::tuple<unsigned int, unsigned long long, unsigned long long> bindings,
                         std::tuple<unsigned int, unsigned long long, unsigned long long> program) {
         sys__heap_node got;
-        if (!eng_abi_execute(eng_abi_cell(std::get<0>(bindings), std::get<1>(bindings), std::get<2>(bindings)),
-                             eng_abi_cell(std::get<0>(program), std::get<1>(program), std::get<2>(program)),
-                             &got))
+        const sys__heap_node env = eng_abi_cell(std::get<0>(bindings), std::get<1>(bindings), std::get<2>(bindings));
+        const sys__heap_node pic = eng_abi_cell(std::get<0>(program), std::get<1>(program), std::get<2>(program));
+        if (!silvann_wheel_long([&] { return eng_abi_execute(env, pic, &got); }))
             throw std::runtime_error("execute did not run");
         return py::make_tuple((unsigned int)got.dtype, got.args[0]);
     }, py::arg("bindings"), py::arg("program"),
        "Run a PICTURE of a program against an environment, both named by a cell.");
 
-    m.def("release", &eng_abi_release, py::arg("offset"),
+    m.def("release", [](unsigned long long offset) { return silvann_wheel_short([&] { return eng_abi_release(offset); }); },
+          py::arg("offset"),
           "Let go of one hold; answers how many are left. Nothing this interface hands out frees itself.");
-    m.def("bindings_create", &eng_abi_bindings_create,
-          py::arg("symbols"), py::arg("base") = 0ull,
+    m.def("bindings_create", [](unsigned long long symbols, unsigned long long base) {
+        return silvann_wheel_short([&] { return eng_abi_bindings_create(symbols, base); });
+    },    py::arg("symbols"), py::arg("base") = 0ull,
           "An environment with room for `symbols` names.");
-    m.def("bindings_symbols", &eng_abi_bindings_symbols, py::arg("bindings"),
+    m.def("bindings_symbols", [](unsigned long long bindings) {
+        return silvann_wheel_short([&] { return eng_abi_bindings_symbols(bindings); });
+    },    py::arg("bindings"),
           "How many numbered names an environment holds; a name numbered at or past it is spelled. 0 = refused.");
     m.attr("BINDINGS_WIDTH_MAX") = eng_abi_bindings_width_max();
     /* Text. A `str` arrives as its UTF-8 bytes and a `bytes` as itself; what comes back is the cell that
      * names the string, and reading one answers its text and its hash as two `bytes`. */
     m.def("string_create", [](const std::string& text) {
         sys__heap_node got;
-        if (!eng_abi_string_create((const unsigned char*)text.data(), (unsigned long long)text.size(), &got))
+        if (!silvann_wheel_short([&] { return eng_abi_string_create((const unsigned char*)text.data(),
+                                                                   (unsigned long long)text.size(), &got); }))
             throw std::runtime_error("the string was refused");
         return py::make_tuple((unsigned int)got.dtype, got.op_code, got.args[0]);
     }, py::arg("text"), "A string holding this text; answers the cell that names it.");
@@ -455,8 +506,8 @@ PYBIND11_MODULE(SILVANN_MODULE_NAME, m) {
         std::string text((size_t)SYS__STRING__BYTES_MAX, '\0');
         std::string hash(sizeof(sys__heap_node), '\0');
         unsigned long long length = 0ull;
-        if (!eng_abi_string_read(string, (unsigned char*)&text[0], (unsigned long long)text.size(),
-                                 (unsigned char*)&hash[0], &length))
+        if (!silvann_wheel_short([&] { return eng_abi_string_read(string, (unsigned char*)&text[0], (unsigned long long)text.size(),
+                                                                 (unsigned char*)&hash[0], &length); }))
             throw std::runtime_error("not a string");
         text.resize((size_t)length);
         return py::make_tuple(py::bytes(text), py::bytes(hash));
@@ -464,22 +515,23 @@ PYBIND11_MODULE(SILVANN_MODULE_NAME, m) {
     /* Names. A number is the machine's and is never given back, so every composer on one machine agrees
      * on it. */
     m.def("intern", [](const std::string& name) {
-        const unsigned long long symbol =
-            eng_abi_intern((const unsigned char*)name.data(), (unsigned long long)name.size(), 0);
+        const unsigned long long symbol = silvann_wheel_short([&] {
+            return eng_abi_intern((const unsigned char*)name.data(), (unsigned long long)name.size(), 0); });
         if (symbol == ~0ull) throw std::runtime_error("the name was refused");
         return symbol;
     }, py::arg("name"), "The number this name is known by on this machine, dealt the first time.");
     m.def("intern_string", [](const std::string& name) {
         unsigned long long string = 0ull;
-        const unsigned long long symbol =
-            eng_abi_intern((const unsigned char*)name.data(), (unsigned long long)name.size(), &string);
+        const unsigned long long symbol = silvann_wheel_short([&] {
+            return eng_abi_intern((const unsigned char*)name.data(), (unsigned long long)name.size(), &string); });
         if (symbol == ~0ull) throw std::runtime_error("the name was refused");
         return py::make_tuple(symbol, string);
     }, py::arg("name"), "(number, string): the name's number, and the interned string a cell spells it with.");
     m.def("symbol_name", [](unsigned long long symbol) {
         std::string text((size_t)SYS__STRING__BYTES_MAX, '\0');
         unsigned long long length = 0ull;
-        if (!eng_abi_symbol_name(symbol, (unsigned char*)&text[0], (unsigned long long)text.size(), &length))
+        if (!silvann_wheel_short([&] { return eng_abi_symbol_name(symbol, (unsigned char*)&text[0],
+                                                                 (unsigned long long)text.size(), &length); }))
             throw std::runtime_error("no name has that number");
         text.resize((size_t)length);
         return py::bytes(text);
@@ -488,7 +540,7 @@ PYBIND11_MODULE(SILVANN_MODULE_NAME, m) {
     /* Running one. The answer is the kind it came back as and the one value that kind carries. */
     m.def("eval", [](unsigned long long bindings, unsigned long long program) {
         unsigned kind = 0; unsigned long long value = 0ull;
-        if (!eng_abi_eval(bindings, program, &kind, &value))
+        if (!silvann_wheel_long([&] { return eng_abi_eval(bindings, program, &kind, &value); }))
             throw std::runtime_error("eval did not run");
         return py::make_tuple(kind, value);
     }, py::arg("bindings"), py::arg("program"),
@@ -499,9 +551,7 @@ PYBIND11_MODULE(SILVANN_MODULE_NAME, m) {
      * can tell a refusal from a program that answered nothing. */
     m.def("dispatch", [](unsigned long long bindings, unsigned long long program, unsigned onto) {
         unsigned kind = 0; unsigned long long value = 0ull; int outcome = 0;
-        int ok = 0;
-        { py::gil_scoped_release step_aside;
-          ok = eng_abi_dispatch(bindings, program, onto, &kind, &value, &outcome); }
+        const int ok = silvann_wheel_long([&] { return eng_abi_dispatch(bindings, program, onto, &kind, &value, &outcome); });
         return py::make_tuple(kind, value, outcome, ok != 0);
     }, py::arg("bindings"), py::arg("program"), py::arg("onto") = 1u,
        "Dispatch a program picture onto a block. -> (kind, value, outcome, ran).");
@@ -517,9 +567,7 @@ PYBIND11_MODULE(SILVANN_MODULE_NAME, m) {
      * LATER THAN THE THING YOU MEANT. */
     m.def("run_grid", [](unsigned long long bindings, unsigned long long program) {
         unsigned kind = 0; unsigned long long value = 0ull;
-        int ok = 0;
-        { py::gil_scoped_release step_aside;
-          ok = eng_abi_run_grid(bindings, program, &kind, &value); }
+        const int ok = silvann_wheel_long([&] { return eng_abi_run_grid(bindings, program, &kind, &value); });
         return py::make_tuple(kind, value, ok != 0);
     }, py::arg("bindings"), py::arg("program"),
        "Run a program with every booted block available to it. -> (kind, value, ran).");
@@ -530,9 +578,9 @@ PYBIND11_MODULE(SILVANN_MODULE_NAME, m) {
      * addresses FIRST; asking for a list while sixty blocks are parked would otherwise be a wait for a
      * device that has been told never to go quiet. What stays open is `place`/`poll`/`result_release`
      * and `peek`, which is the whole scheduling vocabulary. */
-    m.def("reside", []() { return eng_abi_reside() != 0; },
+    m.def("reside", []() { return silvann_wheel_short([] { return eng_abi_reside(); }) != 0; },
           "Launch every block into its waiting loop and leave it running. Build everything first.");
-    m.def("residing", []() { return eng_abi_residing() != 0; },
+    m.def("residing", []() { return silvann_wheel_short([] { return eng_abi_residing(); }) != 0; },
           "Whether a launch is out there that is not going to end on its own.");
     m.def("stop_residing", []() {
         int ok = 0;

@@ -24,6 +24,7 @@ static inline void amd_rocm6_wave64__override_doors(nn__doors* doors) {
     doors->attention_residual_mix       = amd_rocm6_wave64__override_attention_residual_mix;
     doors->attention_scores             = amd_rocm6_wave64__override_attention_scores;
     doors->attention_mix                = amd_rocm6_wave64__override_attention_mix;
+    doors->attention_causal_mix         = amd_rocm6_wave64__override_attention_causal_mix;
     doors->attention_scores_grouped     = amd_rocm6_wave64__override_attention_scores_grouped;
     doors->deltanet_steps               = amd_rocm6_wave64__override_deltanet_steps;
     doors->deltanet_step                = amd_rocm6_wave64__override_deltanet_step;

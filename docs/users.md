@@ -212,9 +212,9 @@ MB, put away to its folder, as one is when the UI or client that opened it has b
 **Activate** brings it back.
 
 On a machine with no card the model runs on the CPU's own cores (the `x86_avx2` family, which needs AVX2, FMA and F16C:
-Intel from Haswell, 2013, AMD from Excavator, 2015; an older processor has no family to run on). The pack made for
-that is `silvann_tq_D4E4_qwen3.6_35b_a3b`: its dense part at 4 bits, about 15 tokens a second on the test machine's
-two Xeons. On a processor with AVX-512 (F, BW, VL and DQ) the family's matrix products use it: on a four-core Xeon
+Intel from Haswell, 2013, AMD from Excavator, 2015; an older processor has no family to run on). The pack for it is
+`silvann_tq_D8E4_qwen3.6_35b_a3b`, the one for a card too: on the test machine's two Xeons its `D4E4`, retired in
+v0.18.0, answered at about 15 tokens a second, and the `D8E4` reads twice the dense bytes a token. On a processor with AVX-512 (F, BW, VL and DQ) the family's matrix products use it: on a four-core Xeon
 W-2123 with two DDR4-2400 sticks the 35B D8E4 alone ran at 9.0 tokens a second against 1.7 with AVX2, and with its
 experts on the CPU beside a card at 27-29 against 15-17. `SILVANN_CPU_AVX512=0` keeps the AVX2 code.
 
@@ -354,7 +354,10 @@ with almost nothing swapped. Turning swap off does the same.
 ## 5. The experts on the disk
 
 With `experts_from: "disk"`, a model's experts are read from its pack as they are wanted: nothing is written beside
-it. Where they do not lie in the pack as the CPU reads them — a GLM 5.3 Flash pack downloaded before 19 October 2026,
+it. A Qwen pack from v0.18.0 on keeps each routed expert as a record of its own, laid out as the engine holds it, so an
+expert is one read; one downloaded before stacks a layer's experts by tensor and reads an expert in four — it works, and
+on our NVMe array the 122B answered at 8.0-8.3 tokens a second that way against 9.3-9.4 (download it again for the new
+layout). Where they do not lie in the pack as the CPU reads them — a GLM 5.3 Flash pack downloaded before 19 October 2026,
 which keeps an expert's records in the order of their names (download it again for one in the experts' order), a model
 under a LoRA that holds experts of its own, or a model split over two CPU sockets — they are written once, at the first
 start, to `models/<name>/experts/` in that layout (about 150 GB for GLM 5.3 Flash), and later starts read the file. Before v0.12.0 a Qwen model's were written so too: its `experts/` folder (55 GB for the 122B, 16 GB for the 35B)

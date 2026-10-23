@@ -1,9 +1,8 @@
 """THE PICTURE WORKER — a process of its own that makes a picture model's pictures, one at a time, for the server.
 
-A picture's step is one engine call of seconds, and an engine call holds Python's lock: in the server's own process the
-stream, the UI's heartbeat and every other request would wait out each step. So the server (▶ `image_session`) starts
-this process once and hands it each picture: the engine is booted here, never in the server, and a fault ends this
-process rather than the server. Its 8-bit table (▶ `nn_unpack_model._levels`) is made when it starts, before the first
+A process boots one engine, and the server's is the text model's: a picture model's engine needs a process of its own,
+and a picture's step is one engine call of seconds. So the server (▶ `image_session`) starts this process once and hands
+it each picture: the engine is booted here, never in the server, and a fault ends this process rather than the server. Its 8-bit table (▶ `nn_unpack_model._levels`) is made when it starts, before the first
 picture asks for it.
 
 The two talk over a socket pair, as pickled tuples (`multiprocessing.connection.Connection`):

@@ -853,10 +853,8 @@ class Qwen35(Generates):
         for rec, data_into, lut_into in ((b.record(l, GU), p.at_up_data, p.at_up_lut),
                                          (b.record(l, DN), p.at_down_data, p.at_down_lut)):
             if rec.bundle is b:
-                per = rec.expert_rows(self.EXPERTS)
-                (d, _), (s, _) = rec.data_span(), rec.lut_span()
-                d, s = d + x * per * rec.row_bytes, s + x * per * 2
-                out += [(data_into, view[d:d + per * rec.row_bytes]), (lut_into, view[s:s + per * 2])]
+                (d, nd), (s, ns) = rec.expert_spans(x, self.EXPERTS)
+                out += [(data_into, view[d:d + nd]), (lut_into, view[s:s + ns])]
             else:
                 data, lut = rec.expert_slices(x, self.EXPERTS)
                 out += [(data_into, np.frombuffer(data, dtype=np.uint8)), (lut_into, np.frombuffer(lut, dtype=np.uint8))]

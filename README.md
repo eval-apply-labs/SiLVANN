@@ -1,6 +1,6 @@
 # SiLVANN
 
-> **Developer preview, v0.17.0.** It runs the models below well on the hardware it was tested on, and it is shared
+> **Developer preview, v0.18.0.** It runs the models below well on the hardware it was tested on, and it is shared
 > for people who can find their way around a build and a stack trace. NVIDIA cards are tested on two, a GeForce
 > RTX 5060 Ti and an RTX 5070 Ti; Windows natively on one PC; macOS is not supported.
 
@@ -20,25 +20,25 @@ One model a kind of machine — the one that suits it best — and the machine i
 
 | Your machine | Model | Answer | Measured on |
 |---|---|---|---|
-| No graphics card, 12 GB of RAM, an NVMe disk | [Qwen 3.6 35B-A3B](https://huggingface.co/eval-apply/silvann_tq_D4E4_qwen3.6_35b_a3b) (`D4E4`) on the CPU alone, its experts read from the disk | 11.7 tokens/s | the R730's two Xeons, v0.3 |
+| No graphics card, 12 GB of RAM, an NVMe disk | [Qwen 3.6 35B-A3B](https://huggingface.co/eval-apply/silvann_tq_D8E4_qwen3.6_35b_a3b) (`D8E4`†) on the CPU alone, its experts read from the disk | 11.7 tokens/s | the R730's two Xeons, v0.3 |
 | An 8 GB card | [Ministral 3 14B](https://huggingface.co/eval-apply/silvann_tq_D4_ministral_3_14b) (`D4`) on the card, at a 4,096-token context | 47 tokens/s | an RTX 5060 Ti with 7.8 GB of it free, in the chat, v0.11.1 (an MI50 after a prompt: 42) |
 | An 8 GB card, 32 GB of RAM | [Qwen 3.6 35B-A3B](https://huggingface.co/eval-apply/silvann_tq_D8E4_qwen3.6_35b_a3b) (`D8E4`) — the dense part on the card, the experts on the CPU in RAM, and 3.5 GB of the card the tier of experts used most | 56 tokens/s | an RTX 5060 Ti with 7.8 GB of it free, in the chat, v0.11.1 |
-| An 8 GB card, 32 GB of RAM, an NVMe disk | [Qwen 3.5 122B-A10B](https://huggingface.co/eval-apply/silvann_tq_D4E4_qwen3.5_122b_a10b) (`D4E4`) — the dense part on the card, the experts on the CPU | 8.6 tokens/s | an RTX 5060 Ti with 7.3 GB of it free, in the chat, v0.11.1 |
+| An 8 GB card, 32 GB of RAM, an NVMe disk | [Qwen 3.5 122B-A10B](https://huggingface.co/eval-apply/silvann_tq_D8E4_qwen3.5_122b_a10b) (`D8E4`†) — the dense part on the card, the experts on the CPU | 8.6 tokens/s | an RTX 5060 Ti with 7.3 GB of it free, in the chat, v0.11.1 |
 | A 12 GB card | [Qwen 3.6 35B-A3B](https://huggingface.co/eval-apply/silvann_tq_D8E4_qwen3.6_35b_a3b) (`D8E4`) — the dense part on the card, the experts on the CPU in RAM, and 7 GB of the card the tier | 65 tokens/s | an RTX 5060 Ti with 11.6 GB of it free and 62 GB of RAM, in the chat, v0.11.1 |
 | A 16 GB card | [Qwen 3.8 27B](https://huggingface.co/eval-apply/silvann_tq_D4_qwen3.8_27b) on the card | 26 tokens/s | an RTX 5060 Ti, in the chat, v0.11.1 (an MI50 after a prompt: 31.3) |
 | A 16 GB card — alt | [Ministral 3 14B](https://huggingface.co/eval-apply/silvann_tq_D8_ministral_3_14b) (`D8`) on the card, at an 8,192-token context | 28 tokens/s | an RTX 5060 Ti, in the chat, v0.11.1 (an MI50 after a prompt: 30.6) |
 | A 16 GB card, 28 GB of RAM | [Qwen 3.6 35B-A3B](https://huggingface.co/eval-apply/silvann_tq_D8E4_qwen3.6_35b_a3b) (`D8E4`) — the dense part on the card, the experts on the CPU in RAM, and 11 GB of the card the tier of experts used most | 68 tokens/s | an RTX 5060 Ti, in the chat, v0.11.1 (an RTX 5070 Ti with 32 GB after a prompt: 68.3) |
 | A 16 GB card, 28 GB of RAM, an NVMe disk | [GLM 5.3 Flash](https://huggingface.co/eval-apply/silvann_tq_D8E4_glm_5.3_flash) (`D8E4`) — the dense part on the card, the experts on the CPU, read from the disk | 2.3 tokens/s | an RTX 5060 Ti, in the chat, v0.11.1 |
-| A 16 GB card, 62 GB of RAM | [Qwen 3.5 122B-A10B](https://huggingface.co/eval-apply/silvann_tq_D4E4_qwen3.5_122b_a10b) (`D4E4`) — the dense part on the card, the experts on the CPU in RAM, and 9.5 GB of the card the tier of experts used most | 20 tokens/s | an RTX 5060 Ti, in the chat, v0.11.1 |
-| A 16 GB card, 150 GB of RAM | [GLM 5.3 Flash](https://huggingface.co/eval-apply/silvann_tq_D4E4_glm_5.3_flash), its experts in RAM, a 300,000-token context and 6 GB of the card the tier | 8.0 tokens/s | an MI50, 15.0 GB of it, v0.8.0 |
+| A 16 GB card, 62 GB of RAM | [Qwen 3.5 122B-A10B](https://huggingface.co/eval-apply/silvann_tq_D8E4_qwen3.5_122b_a10b) (`D8E4`†) — the dense part on the card, the experts on the CPU in RAM, and 9.5 GB of the card the tier of experts used most | 20 tokens/s | an RTX 5060 Ti, in the chat, v0.11.1 |
+| A 16 GB card, 150 GB of RAM | [GLM 5.3 Flash](https://huggingface.co/eval-apply/silvann_tq_D8E4_glm_5.3_flash) (`D8E4`†), its experts in RAM, a 300,000-token context and 6 GB of the card the tier | 8.0 tokens/s | an MI50, 15.0 GB of it, v0.8.0 |
 | A 24 GB card | [Qwen 3.6 35B-A3B](https://huggingface.co/eval-apply/silvann_tq_D8E4_qwen3.6_35b_a3b) on the card | 87 tokens/s | an MI50, v0.8.0 |
 | A 32 GB card, 80 GB of RAM | Qwen 3.5 122B-A10B, its experts in RAM and 24 GB of them on the card | 24.5 tokens/s | an MI50, v0.8.0 |
-| A 32 GB card, 256 GB of RAM | [Qwen 3.5 397B-A17B](https://huggingface.co/eval-apply/silvann_tq_D4E4_qwen3.5_397b_a17b), its experts in RAM and 24 GB of them on the card | 9.0 tokens/s | an MI50, v0.3 |
 
 The MI50s are in a Dell R730 with two Xeon E5-2680 v4; the RTX 5060 Ti in a desktop with a four-core Xeon W-2123 and
-two DDR4-2400 sticks; the RTX 5070 Ti beside a Ryzen 7 5800X. Each process was held to the memory its row names (the
-397B ran on the R730's 256 GB, and its row names what the model needs), and a smaller card's room was a larger card
-with the rest of it held. "In the chat" is the server with the model's own config, as the chat's meter reads a short
+two DDR4-2400 sticks; the RTX 5070 Ti beside a Ryzen 7 5800X. Each process was held to the memory its row names, and a
+smaller card's room was a larger card with the rest of it held. † Measured with the model's `D4E4` pack, retired in
+v0.18.0: the `D8E4` linked holds the same 4-bit experts and its dense part at 8 bits — the 122B's layer matrices 4.66 GB
+on the card against 2.37, the 35B's 1.45 against 0.75 — and its rate on that machine is to be measured again. "In the chat" is the server with the model's own config, as the chat's meter reads a short
 conversation, measured with v0.11.1; every other row takes the most likely token after a prompt
 ([`docs/results.md`](docs/results.md)). A row of v0.3 was measured with its card kernels, and where a card does part of the work it is
 a floor. A model whose config names no setup — the default's — chooses its own when the server starts, by trying it on
@@ -58,7 +58,7 @@ and an RTX 5070 Ti 16 GB — in the chat, and after a prompt of about 2,000 posi
 | [Qwen 3.6 35B-A3B](https://huggingface.co/eval-apply/silvann_tq_D8E4_qwen3.6_35b_a3b) (`D8E4`) | the dense part on the card, the experts on the CPU, and the tier of experts the setup chooses at boot | 67 tokens/s | 115 positions/s · 57 tokens/s | 155 positions/s · 68 tokens/s |
 | the same | without the tier | 29 tokens/s | 53 positions/s · 29 tokens/s | — |
 | the same | on the CPU alone | 10.5 tokens/s | 27 positions/s · 8.7 tokens/s | — |
-| [Qwen 3.5 122B-A10B](https://huggingface.co/eval-apply/silvann_tq_D4E4_qwen3.5_122b_a10b) (`D4E4`) | the dense part on the card, the experts on the CPU in RAM (54 GB of the desktop's 62), and the tier the setup chooses at boot | 20 tokens/s | 48 positions/s · 18 tokens/s | — |
+| [Qwen 3.5 122B-A10B](https://huggingface.co/eval-apply/silvann_tq_D8E4_qwen3.5_122b_a10b) (`D8E4`†) | the dense part on the card, the experts on the CPU in RAM (54 GB of the desktop's 62), and the tier the setup chooses at boot | 20 tokens/s | 48 positions/s · 18 tokens/s | — |
 
 "In the chat" is the server with the model's own config — its sampler, the setup it chooses — as the chat's meter reads
 a short conversation (from 54 positions; Ministral's from 583, its own system prompt), measured with v0.11.1
@@ -67,40 +67,25 @@ v0.11.1, the RTX 5070 Ti's with v0.11.0. v0.11.0's server drew each token with n
 card, through OpenCL and on the CPU alone: the 35B answered in the chat at 32-35 tokens a second on the RTX 5060 Ti,
 and answers at 67 now ([`docs/results.md`](docs/results.md)).
 
-**New in v0.17.0:** DeepSeek-V4.1-Flash reads pictures and holds its whole context, a config names how many cards a
-model is split over, and a card's tier of experts takes its landings from the machine's own speeds.
+**New in v0.18.0:** a Qwen MoE model reads an expert from the disk in one read, the server answers while a model
+generates, and the `D4E4` packs are retired.
 
-**DeepSeek-V4.1-Flash reads pictures.** Its vision tower, 32 blocks and the aligner in the pack's new `vision.pkl`
-(464 MB), runs on the card in about 620 MB of it, and a picture is prepared as DeepSeek's own processor prepares it, at
-most 1,024 tokens: 0.37 s for 448 x 448 and 3.6 s for 2048 x 1536 on an MI50. Checked against DeepSeek's own code: the
-tower's output is nearer the release's float32 than the release's own bfloat16, and a question about a picture gets the
-release's next token. Pictures, not videos. A pack downloaded before this release fetches `vision.pkl` alone with one
-command ([`docs/models.md`](docs/models.md#deepseek-v41-flash)); without it the model reads text and refuses a picture.
+**One read an expert.** Qwen 3.6 35B-A3B's and Qwen 3.5 122B-A10B's packs keep each routed expert as a record of its
+own, laid out as the engine holds it, so an expert the CPU reads from the disk is one read where it was four. The 122B
+with its experts read from an NVMe array, held to 32 GB of RAM, answers at 9.3-9.4 tokens a second where the pack before
+gave 8.0-8.3. The new packs need v0.18.0; a pack downloaded before keeps working as it did — download it again for the
+new layout ([`docs/users.md`](docs/users.md#5-the-experts-on-the-disk)).
 
-**DeepSeek's whole context.** A conversation reaches the model's own length, 1,048,576 positions: past 16,384, layer 20's
-candidate blocks choose where the later layers look, as DeepSeek's code does, and a 17,283-position prompt answers as the
-release does. `max_context` `"auto"` sizes it to that length — the cache about 5.5 GB on the card, 90 MB at 16,384.
+**The server answers while a model generates.** A model's turn no longer holds the server's other requests: `/health`,
+`/busy` and the rest answer in a few milliseconds through an answer, where they waited seconds.
 
-**`num_cards`.** How many cards a model is split over is now a key of the config, beside `options` — `1` until you say
-more, the one placement the boot does not choose — for the Qwen models, GLM and DeepSeek. A config written before it
-still reads its `tensor_parallel` ([`docs/config.md`](docs/config.md#tensor-parallelism)).
+**AMD's prompt mixes as its tokens do.** On an AMD card the attention's mix of a prompt read as rows is now the same, to
+the bit, as the same positions read a token at a time, and the prompt reads 2% faster on the 27B.
 
-**`card_landing` `"auto"`.** For the Qwen MoE models, GLM and DeepSeek, the most experts a layer copies onto the card while
-the CPU computes is taken at boot from the machine's own speeds — one CPU expert's time against one expert's copy,
-rounded, at least 1. Checked on GLM over four MI50s: the answers one card's, the busiest card's picks within 10% of a
-replay of real conversations.
-
-**A config is an override.** Configs now carry settings only: every setting a config leaves out is chosen for the machine
-at each boot, so the downloaded `default.json` is the one to run. [`docs/config.md`](docs/config.md) explains every key
-and every model's option, the measuring ones too, and how many positions 100 MB of the card holds for each model.
-
-**The UI.** A **config guide** button beside the configs and in the editor opens that page; **autotune** forgets the setup
-chosen for this machine so the next start tests the setups again; **Download models** and **Config** fold away; **Send
-conversations to**, at the bottom of Options, chooses this machine's server or a remote one. A model's load shows its
-progress as one growing line, and the boot says how many setups it tested.
-
-**GLM over several cards.** A conversation put away is kept as its tokens and read again when it comes back, so an old
-conversation and the memory estimate no longer fail; `/health` counts the group's cards.
+**The `D4E4` packs are retired, and the 397B is not published.** The 35B's, the 122B's and GLM 5.3 Flash's `D4E4` are
+no longer offered: their `D8E4` hold the same 4-bit experts, and the dense part at 8 bits is the one that pays
+([`docs/compression.md`](docs/compression.md)). Qwen 3.5 397B-A17B still runs, but its pack is no longer published: GLM
+5.3 Flash and DeepSeek-V4.1-Flash do more at its size.
 
 Every release before this one, and this one's notes again: [`release_logs/v0.md`](release_logs/v0.md).
 

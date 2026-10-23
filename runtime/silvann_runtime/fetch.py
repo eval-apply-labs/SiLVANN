@@ -17,12 +17,8 @@ from .model_folder import Refused
 
 KNOWN = {
     "silvann_tq_D8E4_qwen3.6_35b_a3b": ("eval-apply/silvann_tq_D8E4_qwen3.6_35b_a3b", "20 GB"),
-    "silvann_tq_D4E4_qwen3.6_35b_a3b": ("eval-apply/silvann_tq_D4E4_qwen3.6_35b_a3b", "19 GB"),
     "silvann_tq_D8E4_qwen3.5_122b_a10b": ("eval-apply/silvann_tq_D8E4_qwen3.5_122b_a10b", "67 GB"),
-    "silvann_tq_D4E4_qwen3.5_122b_a10b": ("eval-apply/silvann_tq_D4E4_qwen3.5_122b_a10b", "65 GB"),
-    "silvann_tq_D4E4_qwen3.5_397b_a17b": ("eval-apply/silvann_tq_D4E4_qwen3.5_397b_a17b", "207 GB"),
     "silvann_tq_D4_qwen3.8_27b": ("eval-apply/silvann_tq_D4_qwen3.8_27b", "16 GB"),
-    "silvann_tq_D4E4_glm_5.3_flash": ("eval-apply/silvann_tq_D4E4_glm_5.3_flash", "162 GB"),
     "silvann_tq_D8E4_glm_5.3_flash": ("eval-apply/silvann_tq_D8E4_glm_5.3_flash", "166 GB"),
     "silvann_tq_D8E4_deepseek_v4.1_flash_1017": ("eval-apply/silvann_tq_D8E4_deepseek_v4.1_flash_1017", "492 GB"),
     "silvann_tq_D4_ministral_3_14b": ("eval-apply/silvann_tq_D4_ministral_3_14b", "7.4 GB"),
