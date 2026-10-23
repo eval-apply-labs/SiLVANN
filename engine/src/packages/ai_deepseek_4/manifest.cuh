@@ -4,6 +4,7 @@
 /* What this file needs, named where a reader — and an editor — can follow it. */
 #include "cpu/package__impl.cuh"
 #include "cpu/opcodes/layer__abi.cuh"
+#include "cpu/opcodes/vision__abi.cuh"
 #include "cpu/abi_surface__impl.cuh"    /* its C interface, as data for a host language to bind */
 #define PACKAGE_ai_deepseek_4_PRESENT 1
 

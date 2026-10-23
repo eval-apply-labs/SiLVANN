@@ -293,7 +293,11 @@ typedef struct nn__expert__backing {
 #define NN__EXPERT__COUNT_PICKED_ARRIVING 13u   /* a token's picks whose expert was still on its way to the card  */
 #define NN__EXPERT__COUNT_PICKS           14u   /* a token's picks a card's tier visited                          */
 #define NN__EXPERT__COUNT_HITS            15u   /* ...of which the card held                                      */
-#define NN__EXPERT__COUNTS               16u
+#define NN__EXPERT__COUNT_CARD_HITS       16u   /* a group's card r: the picks it computed, at 16 + r             */
+#define NN__EXPERT__COUNT_BUSIEST         (NN__EXPERT__COUNT_CARD_HITS + NN__EXPERT_TIER__RANKS_MAX)
+                                                /* a group's visits: the most picks one card computed, summed      */
+#define NN__EXPERT__COUNT_GROUP_VISITS    (NN__EXPERT__COUNT_BUSIEST + 1u)   /* ...over how many visits       */
+#define NN__EXPERT__COUNTS               (NN__EXPERT__COUNT_GROUP_VISITS + 1u)
 
 /* ⭐ AN EXPERT PROMOTED FROM RAM TO A CARD (NN-48). Its bytes are in memory already, so a promotion is a GATHER: a few runs
  * copied into the card's slot in the slot's own layout — through a staging buffer of pinned memory and one write on the

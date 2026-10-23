@@ -5,6 +5,7 @@
 #include "language_contract.cuh"
 #include "cpu/package__header.cuh"
 #include "cpu/opcodes/layer__abi__header.cuh"
+#include "cpu/opcodes/vision__abi__header.cuh"
 #define PACKAGE_ai_deepseek_4_HEADER_PRESENT 1
 
 #endif /* SILVANN__PACKAGES_AI_DEEPSEEK_4_MANIFEST__HEADER_CUH */

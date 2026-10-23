@@ -24,7 +24,8 @@ and a later turn continues from it.
 ```
 A turn with pictures puts each before the text, as the chat template renders a message whose content is the pictures
 then the text: Qwen's `<|vision_start|>`, a pad a token of the picture, `<|vision_end|>` (▶ `vision.py`); GLM's
-`<|begin_of_image|>`, an `<|image|>` a token, `<|end_of_image|>` (▶ `vision_glm.py`). Its videos come after its pictures,
+`<|begin_of_image|>`, an `<|image|>` a token, `<|end_of_image|>` (▶ `vision_glm.py`); DeepSeek's a
+`<｜deepseek_image｜>` a token of its span, then a blank line (▶ `vision_ds4.py`). Its videos come after its pictures,
 each pair of frames framed as Hugging Face's processor frames it in place of the template's video pad: Qwen's
 `<|vision_start|>`, then a pair's time `<0.2 seconds>` (the middle of its two frames), `<|vision_start|>`, a
 `<|video_pad|>` a token, `<|vision_end|>` a pair, then `<|vision_end|>`; GLM's `<|begin_of_video|>`, then a pair's
@@ -147,7 +148,7 @@ class Chat:
         tools = tools and first
         if tools and self.call_start is None:
             raise Refused("a %r model's tokenizer has no tool call" % self.arch)
-        if images and not self.arch.startswith(("qwen3_5", "glm5")):
+        if images and not self.arch.startswith(("qwen3_5", "glm5", "deepseek_v41")):
             raise Refused("a %r model is not given pictures here" % self.arch)
         if videos and not self.arch.startswith(("qwen3_5", "glm5")):
             raise Refused("a %r model is not given videos here" % self.arch)
@@ -157,7 +158,7 @@ class Chat:
                     + "".join("<|begin_of_video|>" + "".join("<|begin_of_image|>" + "<|image|>" * n + "<|end_of_image|>"
                                                               + "%.1f seconds" % t for n, t in v) + "<|end_of_video|>"
                               for v in videos) + text)
-        else:
+        elif not self.arch.startswith("deepseek_v41"):
             text = ("".join("<|vision_start|>" + "<|image_pad|>" * n + "<|vision_end|>" for n in images)
                     + "".join("<|vision_start|>" + "".join("<%.1f seconds><|vision_start|>" % t + "<|video_pad|>" * n
                                                            + "<|vision_end|>" for n, t in v) + "<|vision_end|>"
@@ -176,6 +177,9 @@ class Chat:
             s += "<think>\n" if thinking else "<think>\n\n</think>\n\n"
             return self.encode(s)
         if self.arch.startswith("deepseek_v41"):
+            # a picture a content block before the text's, the release's blocks joined by a blank line (its `encoding.py`):
+            #   `<｜deepseek_image｜>` a token of the picture's span (▶ vision_ds4.py)
+            text = "".join("<｜deepseek_image｜>" * n + "\n\n" for n in images) + text
             s = ""
             if first:
                 s = "<｜begin▁of▁sentence｜>"

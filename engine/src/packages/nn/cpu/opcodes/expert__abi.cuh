@@ -37,7 +37,9 @@ SYS__ENGINE__ABI__BRIDGE(nn__expert__zzabi_adapter_multiply_fp16, nn__expert__zz
 /* `(nn__expert__misses which)` -> the loader's counts: 0 reads picks asked for, 1 reads predictions queued, 2 of
  * those, how many a pick then wanted, 3 the ns layers waited on reads, 4 how many times they waited — and the tier's:
  * 5 promotions, 6 demotions, 7 failed writes into RAM, 8 the ns promotions waited for a channel, 9 the ns CPUs waited
- * for a write into RAM, 10 promotions refused with every channel held. */
+ * for a write into RAM, 10 promotions refused with every channel held — and 14 a tier's picks, 15 those a card held,
+ * 16 + r those card r of a group computed, 24 the most one card of a group computed summed over its visits, 25 those
+ * visits. */
 static sys__heap_node nn__expert__zzabi_apply_misses(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx) {
     (void)ctx;
     if (argc != 1u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);

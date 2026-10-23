@@ -12,9 +12,10 @@ another (▶ `src/packages/ai_deepseek_4/`), each site collapsing the streams by
   card   (ai_deepseek_4__shared hand mo{l}) · (ai_deepseek_4__close streams mo{l} routed)
 ```
 A compressing layer attends its window and its source's compressed latents — all of them up to `index_topk` (512), and
-past that the best 512 its index source's indexer scores. ⛳ The indexer's first level, the candidate blocks layer 20
-picks for the index sources after it, changes nothing until a layer has more latents than those blocks hold (16,384), so
-the context stops there until it is here (▶ `src/docs/design/pending/deepseek_v41.md` ③). The n-gram memory (engram, layers 1 and 14) is
+past that the best 512 its index source's indexer scores; past the 16,384 latents layer 20's 2,048 blocks of 8 hold,
+the index sources after it score only inside the blocks it keeps, the newest always among them (the package's CAND__*,
+▶ `src/docs/design/pending/deepseek_v41.md` ②). A picture is a span of rows from its tower on the card (▶ vision_ds4.py),
+routed by each layer's bias for pictures and left out of the n-gram memory. The n-gram memory (engram, layers 1 and 14) is
 hashed and its rows read on the host each position (▶ `engram_ds4.py`), from the tables' files — `engram_from`, the
 checkpoint's folder until a pack carries them. The routed experts are in one socket's RAM: the inner width (2304) is not a
 whole number of rotation blocks in two equal parts, so two sockets need parts of their own widths.
@@ -27,6 +28,7 @@ begin-of-sentence token's largest |stream| 48,104 after layer 20, 307,505 after 
 `MEASURED` node03 2026-10-21, measurements/2026-10-21_deepseek_streams_fp32_node03.md), which DeepSeek's bf16 holds and a
 half does not. A sublayer's input is normed before it is a half, and its output is added to the streams as a float.
 """
+import json
 import os
 import pickle
 
@@ -72,21 +74,10 @@ class DeepSeek4(Generates):
     #   every token (▶ session.py's `GENERATES`)
     GENERATES = False
 
-    @staticmethod
-    def longest_context(config):
-        """The longest conversation this runtime holds: past `candidate_topk_blocks · candidate_block_size` latents, an
-        index source after the candidate source scores inside the candidate blocks, which are not here yet (▶ the refusal
-        in `__init__`) — None where no layer reaches them."""
-        layers, cand = int(config["num_hidden_layers"]), int(config.get("candidate_source_layer_id", -1))
-        reach = int(config.get("candidate_topk_blocks", 0)) * int(config.get("candidate_block_size", 0))
-        index = list(config["index_source_layer_ids"])
-        most = [reach * r + r - 1 for l, r in enumerate(list(config["compress_ratios"])[:layers])
-                if r and 0 <= cand < max((s for s in index if s <= l), default=-1)]
-        return min(most) if most else None
-
     def __init__(self, folder, machine, max_context=512, layers=None, experts_int8=True, engram_from=None,
                  experts_from="ram", experts_in_ram=0, experts_lock=False, experts_dir=None, socket=None, card=0, cards=None,
-                 card_experts=0, chunk=128, card_experts_gb=0, card_shared="auto", card_landing=1, card_landing_line=3):
+                 card_experts=0, chunk=128, card_experts_gb=0, card_shared="auto", card_landing="auto", card_landing_line=3,
+                 picture_pixels=1 << 22):
         if folder.architecture not in ARCHITECTURES:
             raise Refused("%s is a %r model, not one of %s" % (folder.path, folder.architecture, ARCHITECTURES))
         c, b = folder.config, folder.bundle
@@ -107,7 +98,8 @@ class DeepSeek4(Generates):
         self.TOPK_C = int(c["index_topk"])
         self.IH, self.ID = int(c["index_n_heads"]), int(c["index_head_dim"])
         self.CAND_FROM = int(c.get("candidate_source_layer_id", -1))
-        self.CAND_REACH = int(c.get("candidate_topk_blocks", 0)) * int(c.get("candidate_block_size", 0))
+        self.CAND_BLOCKS, self.CAND_BLOCK = int(c.get("candidate_topk_blocks", 0)), int(c.get("candidate_block_size", 0))
+        self.CAND_REACH = self.CAND_BLOCKS * self.CAND_BLOCK
         rs = c.get("rope_scaling") or {}
         self.YARN = dict(theta=float(c["compress_rope_theta"]), original=int(rs.get("original_max_position_embeddings", 0)),
                          factor=float(rs.get("factor", 1.0)), beta_fast=rs.get("beta_fast", 32), beta_slow=rs.get("beta_slow", 1))
@@ -132,11 +124,14 @@ class DeepSeek4(Generates):
                 raise Refused("layer %d reads layer %d's compressed latents, which this machine does not run" % (l, self.source(l)))
             if r and self.indexer(l) not in self.run_layers:
                 raise Refused("layer %d reads layer %d's selection of latents, which this machine does not run" % (l, self.indexer(l)))
-            # ⛳ an index source past the candidate source scores only inside its candidate blocks, which hold every latent
-            #   up to CAND_REACH of them — so up to there the candidates change nothing, and past it they are not here yet
-            if r and 0 <= self.CAND_FROM < self.indexer(l) and max_context // r > self.CAND_REACH:
-                raise Refused("layer %d: past %d latents its index source scores inside the candidate blocks, which are not "
-                              "here yet — max_context %d" % (l, self.CAND_REACH, max_context))
+            # ⭐ THE CANDIDATE BLOCKS: past CAND_REACH latents the candidate source keeps its best blocks, and an index source
+            #   after it scores only those (▶ the package's CAND__*), reading the source's list at the same ratio
+            if r and self.candidate_role(l) == 2:
+                if self.CAND_FROM not in self.run_layers:
+                    raise Refused("layer %d scores inside layer %d's candidate blocks, which this machine does not run"
+                                  % (l, self.CAND_FROM))
+                if r != self.RATIO[self.CAND_FROM]:
+                    raise Refused("layer %d reads its candidates at ratio %d, its candidate source at %d" % (l, r, self.RATIO[self.CAND_FROM]))
         if self.MINTER % 2 or (self.QH * self.HD) % self.G:
             raise Refused("the shapes do not divide: inner %d, %d heads of %d in %d groups" % (self.MINTER, self.QH, self.HD, self.G))
         g = pickle.load(open(os.path.join(folder.path, "global.pkl"), "rb"))
@@ -187,11 +182,12 @@ class DeepSeek4(Generates):
         #   CPU's RAM as they are picked (▶ nn's `nn__expert_tier`) — in a group every card a tier of its own, a position's
         #   picks shared out among them and `card_shared` of each card's slots a layer the most picked, kept on every card;
         #   the CPU computes the rest. A layer mapped from its file feeds no tier: its picks stay the CPU's. `card_landing`
-        #   and `card_landing_line` as GLM's (▶ `expert_tier.tier`).
+        #   ("auto": ▶ `_from_speeds`) and `card_landing_line` as GLM's (▶ `expert_tier.tier`).
         self.CARD_GB = float(card_experts_gb or 0)
-        self.CARD_SHARED = None if card_shared in (None, "auto") else float(card_shared)   # "auto": ▶ `_shared_from_speeds`
+        self.CARD_SHARED = None if card_shared in (None, "auto") else float(card_shared)   # "auto": ▶ `_from_speeds`
         self.CARD_SPEEDS, self._FED = None, {}
-        self.CARD_LANDING, self.CARD_LANDING_LINE = int(card_landing), int(card_landing_line)
+        self.CARD_LANDING = None if card_landing in (None, "auto") else int(card_landing)
+        self.CARD_LANDING_LINE = int(card_landing_line)
         if self.CARD_GB and self.NK:
             raise Refused("card_experts (a fixed share on the cards) or card_experts_gb (a tier a card), not both")
         if self.CARD_GB and self.TOPK > 12:
@@ -220,16 +216,34 @@ class DeepSeek4(Generates):
         self.AWORK = max(sum(att) + 256 * len(att), sum(close) + 256 * len(close), 2 * R * self.H) if R else 0
         self.ERWS = {}                    # each engram layer's rows for a chunk, on every card: (card, layer) -> address
         self.ISEL_AT = {}                 # each index source's choices, on card 0: a row's `index_topk` and their count
+        self.ISCORES_AT, self.CAND_AT = {}, None   # each index source's scores and the candidate blocks' list, on card 0
         # ⭐ A MASK, where the folder's LoRA is one (▶ `nn_rank1_mask_from_projection.py`): `W' = W + Σ r_i·v_iᵀ` beside wo_b
         #   and the shared expert's down, each a site's cells past its table (▶ the package's AI_DEEPSEEK_4__MASK__* and
         #   `_mask_layout`). Chosen at boot.
         self.active_lora = folder.lora if b.mask is not None else None
         self._lora_cache = {}
         self._mask_layout()
+        # ⭐ PICTURES ON THE CARD (NN-103): the vision tower's planes in a collection of their own and its scratch in another,
+        #   room for a picture of up to `picture_pixels` (0: none, and none of the card's memory for them) — where the pack
+        #   carries the tower (`vision.pkl`), this machine holds layer 0 on one card, and a prompt goes as rows (the only
+        #   way a picture goes in: its chunks run each layer's router bias for pictures, ▶ `prefill`)
+        self.PICTURE_PIXELS = int(picture_pixels or 0)
+        whole = json.load(open(os.path.join(folder.path, "config.json")))       # the text model's config is its part
+        self.VC, self.IMAGE_TOKEN = whole.get("vision_config"), whole.get("image_token_id")
+        self.VIS = bool(self.PICTURE_PIXELS and self.CHUNK and self.P == 1 and 0 in self.run_layers and self.VC
+                        and self.IMAGE_TOKEN is not None and os.path.isfile(os.path.join(folder.path, "vision.pkl")))
+        if self.VIS:
+            self._vision_plan()
 
     def indexer(self, l):
         """The layer whose selection of latents layer `l` attends past `index_topk`: the last index source at or before it."""
         return max(s for s in self.INDEXERS if s <= l)
+
+    def candidate_role(self, l):
+        """Layer `l`'s part in the candidate blocks: 1 the candidate source, 2 an index source after it, 0 neither."""
+        if self.CAND_FROM < 0 or not self.CAND_REACH or not self.RATIO[l] or l not in self.INDEXERS:
+            return 0
+        return 1 if l == self.CAND_FROM else 2 if l > self.CAND_FROM else 0
 
     def source(self, l):
         """The layer whose compressed latents layer `l` reads: the last compressing source at or before it."""
@@ -313,10 +327,16 @@ class DeepSeek4(Generates):
         rows = max([n for n in self.CACHE_ROWS.values()] or [1])
         self.KEYS_AT = rows * self.HD * 2                        # and after the latents, their index keys, a row a latent
         self.CPLAN = NL.SlotPlan(self.KEYS_AT + rows * self.ID * 2, 0, 0, 2 * rmax * self.HD * 2)
+        # the rotary tables — the window's and the compressed latents' (YaRN), a position's cos and sin each — a slot on
+        #   every card: as buffers they would size every big one (268 MB each at a million positions)
+        self.T_ANG = t + 3
+        self.ANG_BYTES = self.max_context * self.RD * 4
+        self.APLAN = NL.SlotPlan(2 * self.ANG_BYTES, 0, 0, 256)
         # every card's collections — the head card 0's alone, a slot of a few bytes on the others
         self.COLLECTIONS = [([(t, self.PLANS[s][members[0]], slots[t]) for t, members in enumerate(groups.values())]
                              + [(self.T_HEAD, self.HPLAN if s == 0 else NL.SlotPlan(256, 0, 0, 256), 1),
-                                (self.T_RING, self.RPLAN, max(1, len(run))), (self.T_CACHE, self.CPLAN, max(1, len(self.CACHE_ROWS)))])
+                                (self.T_RING, self.RPLAN, max(1, len(run))), (self.T_CACHE, self.CPLAN, max(1, len(self.CACHE_ROWS))),
+                                (self.T_ANG, self.APLAN, 1)])
                             for s in range(self.P)]
         self.ARENAS = [sum(p.slot_bytes * n for _, p, n in cs) for cs in self.COLLECTIONS]
         self.collections, self.arena = self.COLLECTIONS[0], self.ARENAS[0]
@@ -339,7 +359,7 @@ class DeepSeek4(Generates):
             raise Refused("a card's part of the down rows does not end on a byte")
         self.KPLANS = [NL.SlotPlan(2 * ip * gr.row_bytes, 2 * ip * 2, dn.rows * (dn.row_bytes * ip // self.MINTER), dn.rows * 2)
                        for ip in self.I_OF]
-        self.T_CEXP = self.T_CACHE + 1
+        self.T_CEXP = self.T_ANG + 1
         self.TIER_LEAST = len(run) * self.EPLAN.slot_bytes            # the least tier it takes: a slot a layer
         self.CARD_SLOTS = 0
         if self.CARD_GB:
@@ -362,10 +382,10 @@ class DeepSeek4(Generates):
             self.collections, self.arena = self.COLLECTIONS[0], self.ARENAS[0]
 
     @staticmethod
-    def _section(big, arena, types, kinds, many=128, bigs=3, mains=2):
+    def _section(big, arena, types, kinds, many=128, bigs=3, mains=2, resids=8):
         typed = "".join("nn__expert__type%d__up_bytes:%d\nnn__expert__type%d__down_bytes:%d\nnn__expert__type%d__slots:%d\n"
                         % (t, p.up_bytes, t, p.down_bytes, t, n) for t, p, n in types)
-        return ("nn__buffer_resid__size_bytes:2097152\nnn__buffer_resid__qty:8\n"
+        return ("nn__buffer_resid__size_bytes:2097152\nnn__buffer_resid__qty:%d\n"
                 "nn__buffer_main__size_bytes:4194304\nnn__buffer_main__qty:%d\n"
                 "nn__buffer_attn_out__size_bytes:1048576\nnn__buffer_attn_out__qty:%d\n"
                 "nn__buffer_logits__size_bytes:%d\nnn__buffer_logits__qty:%d\n"
@@ -378,7 +398,7 @@ class DeepSeek4(Generates):
                 "nn__model__kv_cache_layers_fullattn:%d\nnn__model__kv_cache_layers_deltanet:0\n"
                 "nn__conversation__text_size_kb:4\nnn__deltanet_state__bytes_per_layer:64\n"
                 "nn__model__layer_types:%s\nnn__expert__types:%d\n%s"
-                % (mains, many, big, bigs, (arena + (256 << 20)) >> 20, len(kinds), kinds, len(types), typed))
+                % (resids, mains, many, big, bigs, (arena + (256 << 20)) >> 20, len(kinds), kinds, len(types), typed))
 
     def workers(self):
         return [(self.m.silicon, d) for d in self.CARD_DEVS] + [("x86_avx2", c["dev"]) for c in self.CPUS]
@@ -386,7 +406,7 @@ class DeepSeek4(Generates):
     def device_params(self):
         """The card's section and the CPU worker's: {worker: text}."""
         kinds = "f" * self.LAYERS
-        big = max(8 << 20, self.max_context * self.RD * 4, self.VOCAB * 2)
+        big = max(8 << 20, self.VOCAB * 2)
         # a chunk's rows on card 0, a big buffer each: their streams, the hands, the experts' answers, the n-gram rows
         R = self.CHUNK
         rows = [R * self.MULT * self.H * 4, R * self.HANDB, R * self.H * 2, R * self.H * 2, self.AWORK] + (
@@ -395,11 +415,22 @@ class DeepSeek4(Generates):
         # a group's other cards: their rows' streams and work, the n-gram rows — the rest fit the smaller classes
         other = [R * self.MULT * self.H * 4, self.AWORK] + (
             [R * self.ENG.width * 2 for l in self.run_layers if l in self.ENGRAM] if self.ENG is not None else []) if R else []
+        # every card's indexer: each index source's scores, a float a latent of its source's cache, and the candidate
+        #   blocks' lists, a chunk's — a big buffer each where the smaller classes do not hold it (a long context's)
+        idx = [4 * (self.CACHE_ROWS[self.source(l)] + 1) for l in self.run_layers if l in self.INDEXERS and self.RATIO[l]]
+        if any(self.candidate_role(l) for l in self.run_layers):
+            idx.append(4 * (self.CAND_REACH + 1) * max(1, self.CHUNK))
+        rows, other = rows + idx, other + idx
         for k in range(self.P):
             ask = self.MASK_ASK.get(k, 0)
+            # ⛳ A BUFFER TAKES THE SMALLEST CLASS THAT HOLDS IT, AND AN EXHAUSTED CLASS REFUSES (▶ nn's `getnew`): each of these
+            #   counted in its own — 2 MB, 4 MB, or a big one — beside what the classes hold for the rest
             mine = rows if k == 0 else other
-            out[k] = self._section(max([big, ask] + mine), self.ARENAS[k], self.COLLECTIONS[k], kinds,
-                                   bigs=(4 if ask else 3) + len(mine))
+            large = [n for n in mine if n > (4 << 20)]
+            out[k] = self._section(max([big, ask] + large), self.ARENAS[k], self.COLLECTIONS[k], kinds,
+                                   bigs=(4 if ask else 3) + len(large),
+                                   mains=2 + sum(1 for n in mine if (2 << 20) < n <= (4 << 20)),
+                                   resids=8 + sum(1 for n in mine if (1 << 20) < n <= (2 << 20)))
             out[k] += ("nn__ram_buffer_result__size_bytes:64\nnn__ram_buffer_result__qty:1\n"
                        "nn__ram_buffer_experts__size_bytes:64\nnn__ram_buffer_experts__qty:1\n"
                        "nn__ram_buffer_table__size_bytes:%d\nnn__ram_buffer_table__qty:1\n" % (self.TABLE_BYTES if k == 0 else 256))
@@ -411,13 +442,13 @@ class DeepSeek4(Generates):
     # ── ② the load ───────────────────────────────────────────────────────────────────────────────────────────
     def load(self, progress=None):
         m, b = self.m, self.b
-        self.ring_at, self.cache_at, self.CB, self.MASK_CELLS = {}, {}, {}, {}
+        self.ring_at, self.cache_at, self.ang_at, self.CB, self.MASK_CELLS = {}, {}, {}, {}, {}
         for k in range(self.P):
             m.act_as(k)
             loader = m.loader()
             if k == 0:
                 loader.layer_width(0, self.T_HEAD, 1)
-                loader.load_bytes(self.HPLAN, self.T_HEAD, 0, self.head_data, self.head_lut)
+                self.HEAD_AT = loader.load_bytes(self.HPLAN, self.T_HEAD, 0, self.head_data, self.head_lut)
                 self.EMB_AT = m.buffer(self.TABLE_BYTES, "EMBEDDING", ram=True)
                 m.write(self.EMB_AT, self.emb_data)
                 m.write(self.EMB_AT + self.EMB_DATA_BYTES, self.emb_lut)
@@ -437,11 +468,19 @@ class DeepSeek4(Generates):
                     loader.layer_width(l, self.T_CACHE, 1)
                     self.cache_at[(k, l)] = loader.reserve(self.T_CACHE)
                     loader.assign(l, self.T_CACHE, 0, self.cache_at[(k, l)])
+            l0 = self.run_layers[0]
+            loader.layer_width(l0, self.T_ANG, 1)
+            self.ang_at[k] = loader.reserve(self.T_ANG)
+            loader.write(self.ang_at[k], angles(self.max_context, self.RD, self.THETA).tobytes()
+                         + angles(self.max_context, self.RD, **self.YARN).tobytes())
+            loader.assign(l0, self.T_ANG, 0, self.ang_at[k])
             if self.NK:
                 self._load_card_experts(k, loader)
             if self.CARD_GB:
                 for l in self.run_layers:
                     loader.layer_width(l, self.T_CEXP, self.EXPERTS)
+            if k == 0 and self.VIS:
+                self._vision_load(loader)
             if loader.handed() != 0:
                 raise Refused("card %d: %d slots were reserved and never published" % (k, loader.handed()))
             self._card_buffers(k)
@@ -454,6 +493,9 @@ class DeepSeek4(Generates):
         for k in range(self.P):
             m.act_as(k)
             self._tables(k)
+        if self.VIS:
+            m.act_as(CARD)
+            self._vision_tables()
         if self.CARD_GB:
             m.act_as(CARD)
             expert_tier.bind(m, {k: self.sfx("tier_card", k) for k in range(self.P)}, len(self.workers()))
@@ -468,8 +510,8 @@ class DeepSeek4(Generates):
                        "card %d joining the group" % k, "sys__value_true")
         m.act_as(CARD)
         m.define_programs(self._procedures)
-        if self.CARD_GB and self.P > 1 and self.CARD_SHARED is None:
-            self._shared_from_speeds()
+        if self.CARD_GB and ((self.P > 1 and self.CARD_SHARED is None) or self.CARD_LANDING is None):
+            self._from_speeds()
         self.global_ = None
         self.b.release()                            # every layer's file let go (▶ `Bundle.release`)
 
@@ -586,18 +628,27 @@ class DeepSeek4(Generates):
             sampling.buffers(m)
             self._answer_buffers()
             self.LOGITS_AT = m.buffer(self.VOCAB * 2, "logits_h")
-        cb["angles"] = m.buffer(self.max_context * self.RD * 4, n("angles"), angles(self.max_context, self.RD, self.THETA).tobytes())
         if any(self.RATIO[l] for l in self.run_layers):
-            m.buffer(self.max_context * self.RD * 4, n("angles_c"), angles(self.max_context, self.RD, **self.YARN).tobytes())
             m.buffer((self.W + self.TOPK_C) * self.HD * 2, n("gather"))
             m.buffer(2 * 64 * self.HD, n("czero"), _half(np.zeros(64 * self.HD)))
-            m.buffer(4 * (max(self.CACHE_ROWS.values()) + 1), n("iscores"))
             for l in self.run_layers:
                 if l in self.INDEXERS:
+                    # its scores, a float a latent of its source's cache: an index source's own, so a check reads each
+                    at = m.buffer(4 * (self.CACHE_ROWS[self.source(l)] + 1), n("iscores%d" % l))
+                    if k == 0:
+                        self.ISCORES_AT[l] = at
                     # a choice a row: a chunk's rows each keep theirs (▶ the package's A PROMPT AS ROWS)
                     at = m.buffer(4 * (self.TOPK_C + 1) * max(1, self.CHUNK), n("isel%d" % l))
                     if k == 0:
                         self.ISEL_AT[l] = at
+            if any(self.candidate_role(l) for l in self.run_layers):
+                # the candidate blocks: a list a row, the source's and read by the index sources after it, and a scratch
+                #   for the source's block scores or a later source's scores of its candidates and its choice among them
+                at = m.buffer(4 * (self.CAND_REACH + 1) * max(1, self.CHUNK), n("cand"))
+                if k == 0:
+                    self.CAND_AT = at
+                m.buffer(max(4 * (max(self.CACHE_ROWS.values()) // self.CAND_BLOCK + 1), 4 * self.CAND_REACH + 4 * (self.TOPK_C + 1)),
+                         n("cscratch"))
         m.buffer(self.QH * (self.W + self.TOPK_C) * 4, n("scores"))
         QW, ON, I = self.QH * self.HD, self.G * self.OR, self.MINTER
         m.buffer(2 * (5 * H + 3 * self.QR + self.HD + 3 * QW + 2 * ON + 4 * self.HD + self.ID + self.IH * self.ID + self.IH) + 256,
@@ -608,7 +659,7 @@ class DeepSeek4(Generates):
             # a chunk's rows: their streams and the two sites' mixes, the hands the CPU reads, what its experts give back,
             #   the n-gram memory's rows and the tokens
             R = self.CHUNK
-            m.buffer(R * self.MULT * H * 4, "srows")
+            self.SROWS_AT = m.buffer(R * self.MULT * H * 4, "srows")
             m.buffer(R * MIX_BYTES, "amix")
             m.buffer(R * MIX_BYTES, "bmix")
             m.buffer(R * self.HANDB, "hands")
@@ -653,7 +704,7 @@ class DeepSeek4(Generates):
             # card 0's, by the names the rest of this runtime reads them by
             self.at = {nm: cb[nm] for nm in ("u", "hu", "e", "hm", "hn", "hnr", "routed", "hand")}
             self.STREAMS_AT, self.MIXA_AT, self.MIXB_AT, self.MIXIN_AT = cb["streams"], cb["mixa"], cb["mixb"], cb["mix_in"]
-            self.ANGLES_AT = cb["angles"]
+            self.ANGLES_AT = self.ang_at[0]
             self.ENG_AT = cb.get("eng", {})
 
     def _cpu_buffers(self, i):
@@ -674,6 +725,11 @@ class DeepSeek4(Generates):
         p = self.PLANS[k][n]
         at, size = (p.at_up_data, p.up_data) if which == "data" else (p.at_down_lut, p.down_lut)
         return "(nn__expert__plane %d %d %d %d %d)" % (l, self.TYPE[n], self.WHICH[n], at, size)
+
+    def angle_plane(self, compressed):
+        """The rotary table a layer turns its tails by: the window's, or the compressed latents' (YaRN)."""
+        return "(nn__expert__plane %d %d 0 %d %d)" % (self.run_layers[0], self.T_ANG, self.ANG_BYTES if compressed else 0,
+                                                       self.ANG_BYTES)
 
     def ring(self, l):
         return "(nn__expert__plane %d %d 0 %d %d)" % (l, self.T_RING, self.RPLAN.at_up_data, self.RING_BYTES)
@@ -767,15 +823,19 @@ class DeepSeek4(Generates):
             m.table(n("at%d" % l), hc(l, "attn") + [data(l, "input_layernorm.weight"), n("mixa"), earlier]
                     + [c for x in mats for c in pair(l, x)]
                     + [data(l, s + "q_norm.weight"), data(l, s + "kv_norm.weight"), data(l, s + "attn_sink"), self.ring(l),
-                       n("angles_c") if self.RATIO[l] else n("angles"), n("scores"), n("signs"), n("ascratch")]
+                       self.angle_plane(bool(self.RATIO[l])), n("scores"), n("signs"), n("ascratch")]
                     + head + [self.QHC, self.HD, self.RD, self.QR, self.OR, self.GC, self.W] + [d(l, x) for x in mats]
                     + [self.EPS, self.HC_EPS] + self._compressed(l, k) + self._masked(k, l, "attn"))
             mats = ["mlp.shared_experts.%s_proj.weight" % x for x in ("gate", "up", "down")]
-            m.table(n("mo%d" % l), hc(l, "ffn") + [data(l, "post_attention_layernorm.weight"), n("mixb"), n("mixa"),
-                                                   data(l, "mlp.gate.weight"), data(l, "mlp.gate.e_score_correction_bias")]
-                    + [c for x in mats for c in pair(l, x)] + [n("signs"), n("mscratch")]
-                    + head + [self.EXPERTS, self.TOPK, self.I_OF[k]] + [d(l, x) for x in mats]
-                    + [self.EPS, self.HC_EPS, self.RSCALE, self.LIMIT] + self._masked(k, l, "shared"))
+            mo = (hc(l, "ffn") + [data(l, "post_attention_layernorm.weight"), n("mixb"), n("mixa"),
+                                  data(l, "mlp.gate.weight"), data(l, "mlp.gate.e_score_correction_bias")]
+                  + [c for x in mats for c in pair(l, x)] + [n("signs"), n("mscratch")]
+                  + head + [self.EXPERTS, self.TOPK, self.I_OF[k]] + [d(l, x) for x in mats]
+                  + [self.EPS, self.HC_EPS, self.RSCALE, self.LIMIT] + self._masked(k, l, "shared"))
+            m.table(n("mo%d" % l), mo)
+            if self.VIS and k == 0:
+                # a picture's rows: the same site, the router's bias the layer's for pictures (▶ AI_DEEPSEEK_4__MOE__BIAS)
+                m.table("mv%d" % l, mo[:7] + [self._vplane("bias_vl.%d" % l)] + mo[8:])
         for l in self.run_layers:
             if l in self.ENGRAM:
                 m.table(n("en%d" % l), [n("eng%d" % l)] + pair(l, "engram.wkv.weight") + [n("engw%d" % l), n("signs"), n("escratch")]
@@ -817,24 +877,33 @@ class DeepSeek4(Generates):
 
     def _tier(self, k):
         """Card `k`'s tier table (▶ `expert_tier.tier`), with the share of its slots a layer every card keeps in a group —
-        none until it is known (`_shared_from_speeds`)."""
+        none until it is known (`_from_speeds`)."""
         p, part = self.EPLAN, self.CARD_SHARED or 0.0
         shared = int(round(part * self.CARD_SLOTS / len(self.run_layers))) if self.P > 1 else 0
         expert_tier.tier(self.m, self.sfx("tier_card", k), self.T_CEXP, self.EXPERTS, self.TOPK, self.H, self.MINTER, p, self.LAYERS,
-                         self._FED[k], 1, p, self.GATE_ROW, self.DOWN_ROW, self.CARD_LANDING, None, self.CARD_LANDING_LINE,
+                         self._FED[k], 1, p, self.GATE_ROW, self.DOWN_ROW, self.CARD_LANDING or 1, None, self.CARD_LANDING_LINE,
                          ranks=self.P, shared=shared)
 
-    def _shared_from_speeds(self):
-        """`card_shared` "auto" in a group: a CPU pick against a card expert, timed here (▶ `expert_tier.speeds` — the
-        first fed layer's first experts, the head's product on card 0 priced to a routed expert's bytes), the slice from
-        them, and every card's tier made again with it."""
+    def _from_speeds(self):
+        """`card_shared` "auto" in a group and `card_landing` "auto": a CPU pick against a card expert and an expert's
+        copy, timed here (▶ `expert_tier.speeds` — the first fed layer's first experts, the head's product on card 0
+        priced to a routed expert's bytes; `expert_tier.copy_seconds` over the head's codes, as it calibrates no line), the
+        slice and a visit's landings from them, and every card's tier made again with them."""
         m = self.m
         l = next((l for l in self.run_layers if l in self._FED[0]), self.run_layers[0])
         cpu_s, card_s = expert_tier.speeds(m, CARD, self.CPU, "picks", list(range(self.TOPK)),
                                            "(ai_deepseek_4__experts c_hand picks ex%d_0 c_routed)" % l,
                                            self.EPLAN.slot_bytes / expert_tier.head_bytes(self.HPLAN))
-        self.CARD_SHARED = expert_tier.slice_of(cpu_s, card_s)
+        calibrated = (getattr(self, "CALIBRATION", None) or {}).get("copy_ms")
+        copy_s = calibrated / 1e3 if calibrated else expert_tier.copy_seconds(m, CARD, self.HEAD_AT + self.HPLAN.at_up_data,
+                                                                              min(self.EPLAN.slot_bytes, self.HPLAN.up_data))
+        if self.CARD_SHARED is None:
+            self.CARD_SHARED = expert_tier.slice_of(cpu_s, card_s)
         self.CARD_SPEEDS = dict(cpu_ms=cpu_s * 1e3, card_ms=card_s * 1e3, ratio=cpu_s / max(card_s, 1e-12), shared=self.CARD_SHARED)
+        self.CARD_SPEEDS["copy_ms"] = copy_s * 1e3
+        if self.CARD_LANDING is None:
+            self.CARD_LANDING = expert_tier.landing_of(cpu_s, copy_s)
+        self.CARD_SPEEDS["landing"] = self.CARD_LANDING
         for k in range(self.P):
             m.act_as(k)
             self._tier(k)
@@ -869,11 +938,13 @@ class DeepSeek4(Generates):
         own = [ix + "wq_b.weight", ix + "weights_proj.weight"]
         idx = ([self.cache(l, "k")] + (pair(own[0]) + pair(own[1]) if l in self.INDEXERS else [n("signs")] * 4)
                + (pair(ix + "wk.weight") + [data(ix + "k_norm.weight")] if l in self.SOURCES else [n("signs")] * 3)
-               + [n("iscores"), n("isel%d" % self.indexer(l)), 1 if l in self.INDEXERS else 0, self.IH, self.ID]
+               + [n("iscores%d" % self.indexer(l)), n("isel%d" % self.indexer(l)), 1 if l in self.INDEXERS else 0, self.IH, self.ID]
                + [self.b.record(l, x).d if l in self.INDEXERS else 0 for x in own]
                + [self.b.record(l, ix + "wk.weight").d if l in self.SOURCES else 0])
+        role = self.candidate_role(l)
+        cand = [n("cand"), n("cscratch"), role, self.CAND_BLOCKS, self.CAND_BLOCK] if role else []
         return ([self.cache(l, "c")] + comp + [n("gather"), r, 1 if l in self.SOURCES else 0, self.CACHE_ROWS[self.source(l)],
-                                               self.TOPK_C] + d + idx)
+                                               self.TOPK_C] + d + idx + cand)
 
     # ── ③ the program ────────────────────────────────────────────────────────────────────────────────────────
     def _layer(self, l):
@@ -982,20 +1053,32 @@ class DeepSeek4(Generates):
         tp = " GROUP tsums" if self.P > 1 else ""
         row = lambda buf, n: "(nn__vector__range %s (* t %d) %d)" % (buf, n, n)
         stream = row("srows", MH2)
+        def rl(name, l, eng, mo):
+            m.defun("(defun (%s%d first n) (let ((t 0)) %s"
+                    "(ai_deepseek_4__attention_rows srows at%d first n amix bmix awork%s)"
+                    " (ai_deepseek_4__route_rows srows %s%d hands n amix bmix xrows awork)"
+                    " (sys__compute %d names xr%d_0) (while '(sys__eq (sys__completed %d) (< 1 0)) '(< 0 1)) (sys__result %d)"
+                    " (nn__buffer__copy c_rrows %d rrows (* n %d))"
+                    " (ai_deepseek_4__close_rows srows %s%d xrows rrows n bmix awork%s)"
+                    " n))"
+                    % (name, l, eng, l, tp, mo, l, self.CPU, l, self.CPU, self.CPU, self.CPU, 2 * H, mo, l, tp))
         for l in self.run_layers:
             eng = ""
             if l in self.ENGRAM:
                 W = self.ENG.width
                 eng = ("(while '(< t n) '(begin (nn__vector__copy %s eng%d %d) (ai_deepseek_4__engram %s en%d) (set! t (+ t 1)))) "
                        % (row("erows%d" % l, W), l, W, stream, l))
-            m.defun("(defun (rl%d first n) (let ((t 0)) %s"
-                    "(ai_deepseek_4__attention_rows srows at%d first n amix bmix awork%s)"
-                    " (ai_deepseek_4__route_rows srows mo%d hands n amix bmix xrows awork)"
-                    " (sys__compute %d names xr%d_0) (while '(sys__eq (sys__completed %d) (< 1 0)) '(< 0 1)) (sys__result %d)"
-                    " (nn__buffer__copy c_rrows %d rrows (* n %d))"
-                    " (ai_deepseek_4__close_rows srows mo%d xrows rrows n bmix awork%s)"
-                    " n))"
-                    % (l, eng, l, tp, l, self.CPU, l, self.CPU, self.CPU, self.CPU, 2 * H, l, tp))
+            rl("rl", l, eng, "mo")
+            if self.VIS:
+                # ⭐ A PICTURE'S ROWS: no n-gram memory (the release shuts its gate on them) and the router's bias for
+                #   pictures — a chunk of them holds nothing else (▶ `prefill`)
+                rl("rlv", l, "", "mv")
+        if self.VIS:
+            # a picture's chunk: embedded as any chunk, its rows then written over the streams (▶ `_rows`), then its layers
+            m.defun("(defun (rows_pictures first n) (begin %s"
+                    " (nn__vector__copy (nn__vector__range srows (* (- n 1) %d) %d) streams %d)"
+                    " (nn__vector__copy (nn__vector__range bmix (* (- n 1) %d) %d) mixb %d) (type streams)))"
+                    % (" ".join("(rlv%d first n)" % l for l in self.run_layers), MH2, MH2, MH2, MIXH, MIXH, MIXH))
         if self.P == 1:
             spread = " ".join("(nn__vector__widen e (nn__vector__range srows (+ (* t %d) %d) %d) %d)" % (MH2, 2 * j * H, 2 * H, H)
                               for j in range(self.MULT))
@@ -1098,27 +1181,41 @@ class DeepSeek4(Generates):
 
     def prefill(self, tokens, first, greedy=True, sample=None, rows=None):
         """A prompt from `first`: as rows, `chunk` positions a step (▶ `_rows_procedures`), where the machine has them; else a
-        position at a time. The last position's head as `step`'s."""
+        position at a time. The last position's head as `step`'s. A picture's tokens come with `rows` {index in `tokens`:
+        its span's row, ▶ vision_ds4.py}: a run of them its own chunks, read with the router's bias for pictures and no
+        n-gram memory, as the release reads a picture's span."""
+        pictures = rows or {}
+        if pictures and not self.VIS:
+            raise Refused("this boot reads no pictures: the pack's vision.pkl, picture_pixels, chunk and one card")
         if not self.CHUNK or len(tokens) < 2:
+            if pictures:
+                raise Refused("a picture goes in with a prompt read as rows")
             out = None
             for i, tok in enumerate(tokens):
                 out = self.step(tok, first + i, greedy, sample if i == len(tokens) - 1 else None)
             return out
-        out = None
-        for at in range(0, len(tokens), self.CHUNK):
-            part = tokens[at:at + self.CHUNK]
-            last = at + len(part) == len(tokens)
-            out = self._rows(part, first + at, (sample or ("(head)" if greedy else "(head_logits)")) if last else None)
+        out, at = None, 0
+        while at < len(tokens):
+            # a chunk is `chunk` positions of text, or of a picture's span, never both
+            shown, end = at in pictures, at + 1
+            while end < len(tokens) and end - at < self.CHUNK and (end in pictures) == shown:
+                end += 1
+            last = end == len(tokens)
+            out = self._rows(tokens[at:end], first + at, (sample or ("(head)" if greedy else "(head_logits)")) if last else None,
+                             [pictures[i] for i in range(at, end)] if shown else None)
+            at = end
         return out if greedy or sample else None
 
-    def _rows(self, part, pos, head):
+    def _rows(self, part, pos, head, pictures=None):
         """Positions `pos` .. of `part` as one chunk: the n-gram memory's rows of each written for the chunk, the tokens, the
-        chunk's program, and `head` after it where it is not None."""
+        chunk's program, and `head` after it where it is not None. `pictures`, a row a position: the chunk is a picture's
+        span — its rows written over the embeddings, each layer's picture site run, no n-gram memory — and its positions
+        dead to the n-gram memory, which hashes no n-gram across them."""
         n = len(part)
         if pos + n > self.max_context:
             raise Refused("positions %d-%d are past the context of %d" % (pos, pos + n - 1, self.max_context))
-        self.history[pos:] = list(part)
-        if self.ENG is not None:
+        self.history[pos:] = [-1] * n if pictures else list(part)
+        if self.ENG is not None and not pictures:
             rows = self.ENG.chunk_rows(self.history, pos, n)
             for (k, l), at in self.ERWS.items():
                 self.m.act_as(k)
@@ -1126,7 +1223,151 @@ class DeepSeek4(Generates):
             self.m.act_as(CARD)
         self.m.must("(begin %s (sys__node_array__set ROWS_N 0 %d) 0)"
                     % (" ".join("(sys__node_array__set TOKS %d %d)" % (i, t) for i, t in enumerate(part)), n), "the chunk's tokens")
+        if pictures:
+            self._run("(begin (rows_embed %d) 0)" % n, "the picture's chunk embedded")
+            block = np.repeat(np.asarray(pictures, dtype=np.float32)[:, None, :], self.MULT, axis=1)
+            self.m.write(self.SROWS_AT, np.ascontiguousarray(block, dtype="<f4").tobytes())
+            return self._run("(begin (rows_pictures %d %d) %s)" % (pos, n, head or "0"), "positions %d-%d" % (pos, pos + n - 1))
         return self._run("(begin (rows_chunk %d %d) %s)" % (pos, n, head or "0"), "positions %d-%d" % (pos, pos + n - 1))
+
+    # ── pictures: the vision tower on the card ─────────────────────────────────────────────────────────────────
+    def _vision_plan(self):
+        """Where the tower's planes go, and its scratch's: a collection each, after the model's. Every record of vision.pkl
+        is a plane as the pack keeps it — a matrix's codes and its scales, a vector's halves — but the patch embedding,
+        decoded into a matrix of halves (1024 rows of 588), and the span's three learned rows, kept on the host."""
+        from .vision import decoded
+        vc = self.VC
+        rec = self.VREC_ALL = pickle.load(open(os.path.join(self.folder.path, "vision.pkl"), "rb"))
+        H, I, P, R = vc["hidden_size"], vc["intermediate_size"], vc["patch_size"], vc["downsample_ratio"]
+        self.VREC, self.D_VIS, at = {}, {}, 0
+
+        def place(name, nbytes, d=16):
+            nonlocal at
+            self.VREC[name] = (at, nbytes)
+            self.D_VIS[name] = d
+            at += (nbytes + 255) // 256 * 256
+        for name in sorted(k for k in rec if k != "__signs__" and not k.startswith("image_")):
+            r = rec[name]
+            if name.startswith("bias_vl_mtp."):
+                continue                                       # the MTP layers read no picture here
+            if name == "vision.patch_embed.proj.weight":
+                place(name, 2 * int(np.prod(r["original_shape"])))
+                continue
+            d = int(r["d"])
+            place(name, len(np.asarray(r["vbr_data"]).tobytes()), d)
+            if d != 16:
+                place(name + ":lut", 2 * int(r["rows"]))
+        self.VPLAN = NL.SlotPlan(at, 0, 0, 256)               # every plane in the up half (nn takes no empty half)
+        # the most patches a picture is made into: its tokens' grid at most `max_image_tokens` less 3 blocks (a row's
+        #   newline, the span's two ends) of R x R patches — or what `picture_pixels` makes room for, and its tokens then
+        #   fewer
+        most = int(vc["max_image_tokens"])
+        self.VIS_ROWS = min(R * R * (most - 3), self.PICTURE_PIXELS // (P * P))
+        self.VIS_TOKENS = min(most, self.VIS_ROWS // (R * R) + 3)
+        if self.VIS_TOKENS < 4:
+            raise Refused("picture_pixels %d holds no block of %d x %d patches" % (self.PICTURE_PIXELS, R, R))
+        self.VIS_CHUNK = 1024                                  # the MLPs' rows a step
+        n, hd, blocks = self.VIS_ROWS, H // vc["num_attention_heads"], self.VIS_TOKENS - 3
+        K, step = R * R * H, min(self.VIS_CHUNK, n)
+        pairs = lambda rows: (8 * rows + 255) & ~255
+        # ▶ ai_deepseek_4's `vision_block` and `vision_tail`: their scratch, one after the other in the same room
+        block = pairs(n) + 2 * (n * H + max(n * H, step * I) + 3 * n * H + 2 * step * I + 2 * step * I + step * H) + 4 * n * hd
+        tail = pairs(blocks) + 2 * (n * H + 2 * max(blocks * K, blocks * self.H) + blocks * self.H)
+        self.VSCR, at = {}, 0
+        for name, nbytes in (("x", 2 * n * H), ("pix", 2 * n * 3 * P * P), ("rc", 8 * n), ("out", 2 * blocks * self.H),
+                             ("scratch", max(block, tail, pairs(n)))):
+            self.VSCR[name] = (at, nbytes)
+            at += (nbytes + 255) // 256 * 256
+        self.VSPLAN = NL.SlotPlan(at, 0, 0, 256)
+        self.T_VIS = max(t for t, _, _ in self.COLLECTIONS[0]) + 1
+        self.T_VSCR = self.T_VIS + 1
+        self.COLLECTIONS[0] += [(self.T_VIS, self.VPLAN, 1), (self.T_VSCR, self.VSPLAN, 1)]
+        self.ARENAS[0] += self.VPLAN.slot_bytes + self.VSPLAN.slot_bytes
+        self.collections, self.arena = self.COLLECTIONS[0], self.ARENAS[0]
+        self.VIS_MARKS = {k: decoded(rec[k]).astype(np.float32) for k in ("image_start", "image_end", "image_newline")}
+
+    def _vision_load(self, loader):
+        """The tower's planes into its slot, the records let go of once they are there; the scratch's slot reserved."""
+        from .vision import decoded
+        rec = self.VREC_ALL
+        loader.layer_width(0, self.T_VIS, 1)
+        self.VIS_AT = loader.reserve(self.T_VIS)
+        put = lambda name, data: loader.write(self.VIS_AT + self.VREC[name][0], data)
+        for name in self.VREC:
+            if name.endswith(":lut"):
+                continue
+            r = rec[name]
+            if self.D_VIS[name] == 16:
+                put(name, decoded(r).astype("<f2").tobytes())
+            else:
+                put(name, np.asarray(r["vbr_data"]).tobytes())
+                put(name + ":lut", np.asarray(r["vbr_lut"]).astype("<f2").tobytes())
+        loader.assign(0, self.T_VIS, 0, self.VIS_AT)
+        loader.layer_width(0, self.T_VSCR, 1)
+        self.VSCR_AT = loader.reserve(self.T_VSCR)
+        loader.assign(0, self.T_VSCR, 0, self.VSCR_AT)
+        self.VREC_ALL = None
+
+    def _vplane(self, name):
+        at, nbytes = self.VREC[name]
+        return "(nn__expert__plane 0 %d 0 %d %d)" % (self.T_VIS, at, nbytes)
+
+    def _vision_tables(self):
+        """The tower's tables — the embedding's, a block's each, the tail's — and the scratch's planes."""
+        m, vc = self.m, self.VC
+        H, heads, eps = vc["hidden_size"], vc["num_attention_heads"], 1e-6        # the release's RMSNorm
+        w = self._vplane
+        sp = lambda name: "(nn__expert__plane 0 %d 0 %d %d)" % ((self.T_VSCR,) + self.VSCR[name])
+        d = lambda name: int(self.D_VIS[name])
+        # a matrix's codes and scales; at 16 bits the scales' cell is not read, and the codes stand in
+        pair = lambda x: [w(x), w(x + ":lut") if d(x) != 16 else w(x)]
+        m.table("DVE", pair("vision.patch_embed.proj.weight") + [w("vision.patch_embed.proj.bias"), sp("scratch"), H,
+                                                                 3 * vc["patch_size"] ** 2, 16])
+        for i in range(vc["num_hidden_layers"]):
+            p = "vision.blocks.%d." % i
+            m.table("DVB%d" % i, [w(p + "norm1.weight")] + pair(p + "attn.wqkv.weight") + [w(p + "attn.wqkv.bias")]
+                    + pair(p + "attn.wo.weight") + [w(p + "attn.wo.bias"), w(p + "norm2.weight")]
+                    + pair(p + "mlp.w1.weight") + pair(p + "mlp.w2.weight") + ["signs", sp("scratch"),
+                       H, heads, H // heads, vc["intermediate_size"], d(p + "attn.wqkv.weight"), d(p + "attn.wo.weight"),
+                       d(p + "mlp.w1.weight"), d(p + "mlp.w2.weight"), int(vc.get("rope_theta", 10000)), self.VIS_CHUNK, eps])
+        m.table("DVT", [w("vision.norm.weight")] + pair("aligner.w1.weight") + [w("aligner.w1.bias")]
+                + pair("aligner.w2.weight") + [w("aligner.w2.bias"), "signs", sp("scratch"),
+                   H, vc["downsample_ratio"], self.H, d("aligner.w1.weight"), d("aligner.w2.weight"), eps])
+        self.VPLANES = {k: sp(k) for k in ("x", "pix", "rc", "out")}
+
+    def vision_rows(self, patches, gh, gw, blocks=None):
+        """A picture's `gh` x `gw` patches (a row of 588 a patch, in reading order) through the tower on the card; the
+        aligner's rows (a block of R x R patches a row, in reading order, float32) out — or, given `blocks`, the patches'
+        residual after that many blocks (a check's stage)."""
+        n, vc = gh * gw, self.VC
+        if n > self.VIS_ROWS or len(patches) != n:
+            raise Refused("%d patches, and this boot holds %d (picture_pixels %d)" % (n, self.VIS_ROWS, self.PICTURE_PIXELS))
+        R = vc["downsample_ratio"]
+        m, base, P = self.m, self.VSCR_AT, self.VPLANES
+        rc = np.stack(np.divmod(np.arange(n), gw), axis=1)
+        m.write(base + self.VSCR["pix"][0], np.ascontiguousarray(patches, dtype="<f2").tobytes())
+        m.write(base + self.VSCR["rc"][0], np.ascontiguousarray(rc, dtype="<u4").tobytes())
+        depth = vc["num_hidden_layers"] if blocks is None else blocks
+        words = (["(ai_deepseek_4__vision_embed %s DVE %d %s)" % (P["pix"], n, P["x"])]
+                 + ["(ai_deepseek_4__vision_block %s %s DVB%d %d)" % (P["x"], P["rc"], i, n) for i in range(depth)]
+                 + (["(ai_deepseek_4__vision_tail %s DVT %d %d %s)" % (P["x"], gh, gw, P["out"])] if blocks is None else []))
+        for word in words:
+            # a word's answer is its out plane, or the error that says why it did not run
+            if m.must("(type %s)" % word, "the tower's word %s" % word.split()[0][1:]) == m.K["sys__error"]:
+                raise Refused("the tower's word %s answered an error" % word.split()[0][1:])
+        if blocks is not None:
+            return np.frombuffer(m.read(base + self.VSCR["x"][0], n * vc["hidden_size"] * 2), dtype="<f2").reshape(n, -1).astype(np.float32)
+        tokens = -(-gh // R) * -(-gw // R)
+        return np.frombuffer(m.read(base + self.VSCR["out"][0], tokens * self.H * 2), dtype="<f2").reshape(tokens, -1).astype(np.float32)
+
+    def vision(self):
+        """The model's vision tower (▶ `vision_ds4.DeepSeekVision`), on the card where the boot put it there."""
+        if not self.VIS:
+            raise Refused("this boot reads no pictures: the pack's vision.pkl, picture_pixels, chunk, layer 0 and one card")
+        if getattr(self, "_vision", None) is None:
+            from .vision_ds4 import DeepSeekVision
+            self._vision = DeepSeekVision(self)
+        return self._vision
 
     # ── a pipeline stage: this machine's layers, the streams and the last site's mix crossing between stages ─────────
     def forward(self, pos, token=None, x=None, mix=None, head=False):

@@ -11,6 +11,7 @@
 """
 import glob
 import hashlib
+import inspect
 import json
 import os
 
@@ -25,8 +26,38 @@ ARCHITECTURES = {"qwen3_5_text": Qwen35, "qwen3_5_moe_text": Qwen35, "qwen3_vl_t
                  "deepseek_v41_text": DeepSeek4}
 
 
-def open_model(path, lora=None, max_context=4096, silicon=None, **options):
-    """A model folder booted onto a card, loaded and ready for a conversation."""
+def with_cards(path, num_cards, options):
+    """A config's `num_cards` as its family's option: `tensor_parallel` for the Qwen models and GLM, the `cards` list for
+    DeepSeek — every layer split over the machine's first `num_cards` cards. One card adds nothing (every family's
+    default); more refused for a family that runs on one, or where `options` already names another number. `options`'
+    own `tensor_parallel` is still read where `num_cards` is left out (the configs written before it). `num_cards` is
+    the config's own key, beside `options`: inside them it is refused, with where it goes."""
+    options = dict(options)
+    if "num_cards" in options:
+        raise Refused("num_cards is a key of the config, beside options — not one of them: move \"num_cards\": %s out of "
+                      "options" % (options["num_cards"],))
+    num_cards = 1 if num_cards is None else num_cards
+    n = int(num_cards)
+    if n < 1:
+        raise Refused("num_cards is 1 or more, not %r" % (num_cards,))
+    if n == 1:
+        return options
+    arch = ARCHITECTURES.get(ModelFolder(path).architecture)
+    takes = inspect.signature(arch.__init__).parameters if arch is not None else {}
+    if "tensor_parallel" in takes:
+        if int(options.get("tensor_parallel", n)) != n:
+            raise Refused("num_cards %d and options.tensor_parallel %s say two numbers: num_cards alone" % (n, options["tensor_parallel"]))
+        options["tensor_parallel"] = n
+    elif "cards" in takes:
+        options["cards"] = list(range(n))
+    else:
+        raise Refused("%s runs on one card: num_cards 1" % os.path.basename(path.rstrip(os.sep)))
+    return options
+
+
+def open_model(path, lora=None, max_context=4096, silicon=None, progress=None, **options):
+    """A model folder booted onto a card, loaded and ready for a conversation; `progress(done, total)` called as its
+    load goes, a layer at a time."""
     folder = ModelFolder(path, lora=lora)
     arch = ARCHITECTURES.get(folder.architecture)
     if arch is None:
@@ -42,7 +73,7 @@ def open_model(path, lora=None, max_context=4096, silicon=None, **options):
         machine.boot(params[0], workers=model.workers(), worker_params=params, bindings=getattr(model, "BINDINGS", 512))
     else:
         machine.boot(params)
-    model.load()
+    model.load(progress)
     # ⭐ THE MODEL AS THE PROGRAMS IT RUNS, beside it — written when they were composed, for the boots that follow
     if machine.read_from is None:
         try:

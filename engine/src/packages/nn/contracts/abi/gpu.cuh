@@ -175,6 +175,7 @@ typedef struct nn__gemm__tile {
     X(PKG, void, index_scores,             nn__index__zzabi_launch_scores,             (float* scores, const uint16_t* q, const uint16_t* w, const uint16_t* pooled, uint64_t heads, uint64_t dim, uint64_t pools, float scale)) \
     X(PKG, void, index_select,             nn__index__zzabi_launch_select,             (uint32_t* index, uint32_t* count, const float* scores, uint64_t pools, uint64_t k, uint64_t kpool, uint64_t tail_first, uint64_t tail)) \
     X(PKG, void, index_gather,             nn__index__zzabi_launch_gather,             (uint16_t* out, const uint16_t* src, const uint32_t* index, uint64_t n, uint64_t row)) \
+    X(PKG, void, index_blocks,             nn__index__zzabi_launch_blocks,             (float* out, const float* scores, uint64_t pools, uint64_t block)) \
     X(PKG, void, vector_copy,              nn__vector__zzabi_launch_copy,              (uint16_t* out, const uint16_t* in, uint64_t n)) \
     X(PKG, void, hyper_logits_rows,        nn__hyper__zzabi_launch_logits_rows,        (float* lg, const uint16_t* streams, const uint16_t* fn, uint64_t hidden, uint64_t mult, float norm_eps, uint64_t rows, uint64_t lg_stride)) \
     X(PKG, void, hyper_pre_rows,           nn__hyper__zzabi_launch_pre_rows,           (uint16_t* out, float* mix, const uint16_t* streams, const uint16_t* base, const uint16_t* scale, uint64_t hidden, uint64_t mult, uint64_t iters, float eps, uint64_t rows, uint64_t mix_stride, unsigned int* over)) \

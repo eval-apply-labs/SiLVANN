@@ -150,6 +150,7 @@
 #define nn__index__zzabi_launch_scores__RUNS             NN__GPU__ZZPRIVATE_WIDE,     nn__index__zzabi_body_scores,             NN__GPU__ZZPRIVATE_UP_TO(pools, NN__KERNELS__BLOCKS_MAX), 64u, (scores, q, w, pooled, heads, dim, pools, scale)
 #define nn__index__zzabi_launch_select__RUNS             NN__GPU__ZZPRIVATE_WIDE,     nn__index__zzabi_body_select,             1u, 256u, (index, count, scores, pools, k, kpool, tail_first, tail)
 #define nn__index__zzabi_launch_gather__RUNS             NN__GPU__ZZPRIVATE_WIDE,     nn__index__zzabi_body_gather,             NN__GPU__ZZPRIVATE_EACH(n * row), 256u, (out, src, index, n, row)
+#define nn__index__zzabi_launch_blocks__RUNS             NN__GPU__ZZPRIVATE_WIDE,     nn__index__zzabi_body_blocks,             NN__GPU__ZZPRIVATE_EACH((pools + block - 1u) / block), 256u, (out, scores, pools, block)
 #define nn__vector__zzabi_launch_copy__RUNS              NN__GPU__ZZPRIVATE_WIDE,     nn__vector__zzabi_body_copy,              NN__GPU__ZZPRIVATE_EACH(n), 256u, (out, in, n)
 #define nn__hyper__zzabi_launch_logits_rows__RUNS        NN__GPU__ZZPRIVATE_WIDE,     nn__hyper__zzabi_body_logits_rows,        NN__GPU__ZZPRIVATE_UP_TO(rows * NN__HYPER__MIX(mult), NN__KERNELS__BLOCKS_MAX), 256u, (lg, streams, fn, hidden, mult, norm_eps, rows, lg_stride)
 #define nn__hyper__zzabi_launch_pre_rows__RUNS           NN__GPU__ZZPRIVATE_WIDE,     nn__hyper__zzabi_body_pre_rows,           NN__GPU__ZZPRIVATE_EACH(rows * hidden), 256u, (out, mix, streams, base, scale, hidden, mult, iters, eps, rows, mix_stride, over)

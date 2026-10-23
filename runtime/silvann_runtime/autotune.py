@@ -369,14 +369,14 @@ def choose(path, max_context, options=None, silicon=None, fresh=False, log=print
                 raise Refused("%s does not fit this card even at a %d-token context%s: a larger card, or a smaller pack"
                               % (folder.path, ctx, how))
             ctx = max(MIN_CONTEXT, ctx // 2)
-    why = "%s; %d MB of the card kept free (%d boots tried)" % (why, margin_mb, p.tried)
+    why = "%s; %d MB of the card kept free (%d setups tested)" % (why, margin_mb, p.tried)
     _remember(folder, key, chosen, ctx, why, used)
     return chosen, ctx, why
 
 
 def model_length(folder):
     """The longest conversation the model was made for: its configuration's `max_position_embeddings` — or less where its
-    runtime holds less (its architecture's `longest_context`: DeepSeek's, to its candidate blocks)."""
+    runtime holds less (its architecture's `longest_context`, where it has one)."""
     c = folder.config
     length = int((c.get("text_config") or c).get("max_position_embeddings") or NO_CARD_CONTEXT)
     from . import ARCHITECTURES

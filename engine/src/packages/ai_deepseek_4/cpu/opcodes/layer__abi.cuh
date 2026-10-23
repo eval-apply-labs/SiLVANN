@@ -58,6 +58,8 @@ typedef struct ai_deepseek_4__compressed {
     /* the indexer, where the table carries it */
     bool indexed;
     uint64_t indexer, heads, dim, di[3], topk;
+    /* the candidate blocks, where the table carries them: `cand_role` 0 without */
+    uint64_t cand_role, cand_blocks, cand_block, cand, cand_room, cscratch, cscratch_room;
 } ai_deepseek_4__compressed;
 
 /* The compressed part read and checked: 0, or the fault to answer with. */
@@ -83,6 +85,25 @@ static uint64_t ai_deepseek_4__attention__zzprivate_compressed(uint64_t table, c
             iv[i] = n->args[0];
         }
     }
+    /* the candidate blocks' cells, past the indexer's */
+    if (c->indexed && length >= AI_DEEPSEEK_4__CAND__TABLE) {
+        uint64_t cv[AI_DEEPSEEK_4__CAND__TABLE - AI_DEEPSEEK_4__IDX__TABLE];
+        for (unsigned i = AI_DEEPSEEK_4__IDX__TABLE; i < AI_DEEPSEEK_4__CAND__TABLE; ++i, sys__node_array__next(&w)) {
+            const sys__heap_node* n = sys__node_array__walk_cell(&w);
+            if (n == 0) return AI_DEEPSEEK_4__LAYER__FAULT_TABLE;
+            if (i == AI_DEEPSEEK_4__CAND__SELECT) {
+                if (!nn__primitives__room(n, &c->cand, &c->cand_room)) return AI_DEEPSEEK_4__LAYER__FAULT_TABLE;
+            } else if (i == AI_DEEPSEEK_4__CAND__SCRATCH) {
+                if (!nn__primitives__room(n, &c->cscratch, &c->cscratch_room)) return AI_DEEPSEEK_4__LAYER__FAULT_TABLE;
+            } else {
+                if (n->dtype != SYS__KIND__VALUE_INT) return AI_DEEPSEEK_4__LAYER__FAULT_TABLE;
+                cv[i - AI_DEEPSEEK_4__IDX__TABLE] = n->args[0];
+            }
+        }
+        c->cand_role = cv[AI_DEEPSEEK_4__CAND__ROLE - AI_DEEPSEEK_4__IDX__TABLE];
+        c->cand_blocks = cv[AI_DEEPSEEK_4__CAND__BLOCKS - AI_DEEPSEEK_4__IDX__TABLE];
+        c->cand_block = cv[AI_DEEPSEEK_4__CAND__BLOCK - AI_DEEPSEEK_4__IDX__TABLE];
+    }
     const uint64_t ratio = iv[AI_DEEPSEEK_4__CMP__RATIO], source = iv[AI_DEEPSEEK_4__CMP__SOURCE];
     const uint64_t rows = iv[AI_DEEPSEEK_4__CMP__ROWS], topk = iv[AI_DEEPSEEK_4__CMP__TOPK];
     c->d[0] = iv[AI_DEEPSEEK_4__CMP__D]; c->d[1] = iv[AI_DEEPSEEK_4__CMP__D + 1u];
@@ -106,6 +127,18 @@ static uint64_t ai_deepseek_4__attention__zzprivate_compressed(uint64_t table, c
          || (c->indexer && c->room[AI_DEEPSEEK_4__IDX__SCORES] / 4u < latents)
          || (source && !nn__primitives__fits(c->dim, c->room[AI_DEEPSEEK_4__IDX__KNORM])))
             return AI_DEEPSEEK_4__LAYER__FAULT_ROOM;
+        /* the candidate blocks: an index source's, a list a row; the source's scratch a float a block of its latents, an
+         *   index source's after it the candidates' scores and its choice among them */
+        if (c->cand_role != 0u) {
+            const uint64_t reach = c->cand_blocks * c->cand_block;
+            if (c->cand_role > 2u || !c->indexer || c->cand_blocks < 2u || c->cand_block == 0u || c->cand_block > 64u
+             || reach > (1ull << 24))
+                return AI_DEEPSEEK_4__LAYER__FAULT_TABLE;
+            if (c->cand_room < 4u * (reach + 1u)
+             || (c->cand_role == 1u && c->cscratch_room / 4u < (rows + c->cand_block - 1u) / c->cand_block)
+             || (c->cand_role == 2u && c->cscratch_room < 4u * reach + 4u * (topk + 1u)))
+                return AI_DEEPSEEK_4__LAYER__FAULT_ROOM;
+        }
     }
     c->topk = topk;
     (void)at; (void)room;
@@ -117,7 +150,8 @@ static uint64_t ai_deepseek_4__attention__zzprivate_compressed(uint64_t table, c
 /* Where an attention table's mask begins: past its last part — the window's, the compressed latents' or the indexer's. */
 static inline unsigned ai_deepseek_4__attention__zzprivate_mask_first(uint64_t table) {
     const uint64_t length = sys__node_array__length(table);
-    return length >= AI_DEEPSEEK_4__IDX__TABLE ? AI_DEEPSEEK_4__IDX__TABLE
+    return length >= AI_DEEPSEEK_4__CAND__TABLE ? AI_DEEPSEEK_4__CAND__TABLE
+         : length >= AI_DEEPSEEK_4__IDX__TABLE ? AI_DEEPSEEK_4__IDX__TABLE
          : length >= AI_DEEPSEEK_4__CMP__TABLE ? AI_DEEPSEEK_4__CMP__TABLE : AI_DEEPSEEK_4__ATT__TABLE;
 }
 
@@ -193,11 +227,12 @@ static void ai_deepseek_4__attention__zzprivate_index_project(const nn__doors* d
  *   answer into `o` (which may be `q`): the latent normed into the ring's row `pos % window`, the tails of both turned at
  *   `pos`; where the layer compresses, the source's step (its latent `ck`, its gate `cg`, `cwork` its scratch) and the
  *   rows it attends gathered — past `topk` latents the indexer's choice, which an index source makes from its query `iq`
- *   and weights `iw` into `sel` and the layers after it read there; every head over the rows with its sink; the
- *   answer's tails turned back. A position's verb and a chunk's rows, a row at a time in position order, both run it. */
+ *   and weights `iw` into `sel` and the layers after it read there; past the candidate blocks' reach the candidate source
+ *   writes `cand` and an index source after it chooses within it; every head over the rows with its sink; the answer's
+ *   tails turned back. A position's verb and a chunk's rows, a row at a time in position order, both run it. */
 static void ai_deepseek_4__attention__zzprivate_core(const nn__doors* doors, unsigned int* over, const uint64_t* at, const float* r,
                                                      const ai_deepseek_4__compressed* cmp, uint64_t q, uint64_t kv, uint64_t ck, uint64_t cg,
-                                                     uint64_t cwork, uint64_t iq, uint64_t iw, uint64_t sel, uint64_t o, uint64_t pos,
+                                                     uint64_t cwork, uint64_t iq, uint64_t iw, uint64_t sel, uint64_t cand, uint64_t o, uint64_t pos,
                                                      uint64_t heads, uint64_t HD, uint64_t RD, uint64_t W) {
     const uint64_t ring = at[AI_DEEPSEEK_4__ATT__RING], scores = at[AI_DEEPSEEK_4__ATT__SCORES];
     const uint64_t len = pos + 1u < W ? pos + 1u : W;
@@ -230,8 +265,30 @@ static void ai_deepseek_4__attention__zzprivate_core(const nn__doors* doors, uns
                 doors->index_scores((float*)(uintptr_t)cmp->at[AI_DEEPSEEK_4__IDX__SCORES], (const uint16_t*)(uintptr_t)iq,
                                     (const uint16_t*)(uintptr_t)iw, (const uint16_t*)(uintptr_t)cmp->at[AI_DEEPSEEK_4__IDX__KEYS], IH, ID, latents,
                                     1.0f / sqrtf((float)ID));
-                doors->index_select((uint32_t*)(uintptr_t)sel, (uint32_t*)(uintptr_t)(sel + 4u * cmp->topk),
-                                    (const float*)(uintptr_t)cmp->at[AI_DEEPSEEK_4__IDX__SCORES], latents, cmp->topk, 1u, latents, 0u);
+                const uint64_t scored = cmp->at[AI_DEEPSEEK_4__IDX__SCORES], block = cmp->cand_block;
+                const uint64_t reach = cmp->cand_blocks * block, last = cmp->cand_role != 0u ? (latents - 1u) / block : 0u;
+                if (cmp->cand_role == 2u && latents > reach) {
+                    /* ⭐ LEVEL TWO, an index source after the candidate source: its own scores, only the candidates' —
+                     *   gathered (a float, two halves, a candidate), the top `topk` of them, turned back into latents */
+                    const uint64_t n = (cmp->cand_blocks - 1u) * block + latents - last * block, picked = cmp->cscratch + 4u * reach;
+                    doors->index_gather((uint16_t*)(uintptr_t)cmp->cscratch, (const uint16_t*)(uintptr_t)scored, (const uint32_t*)(uintptr_t)cand,
+                                        n, 2u);
+                    doors->index_select((uint32_t*)(uintptr_t)picked, (uint32_t*)(uintptr_t)(picked + 4u * cmp->topk),
+                                        (const float*)(uintptr_t)cmp->cscratch, n, cmp->topk, 1u, n, 0u);
+                    doors->index_gather((uint16_t*)(uintptr_t)sel, (const uint16_t*)(uintptr_t)cand, (const uint32_t*)(uintptr_t)picked,
+                                        cmp->topk, 2u);
+                    doors->vector_copy((uint16_t*)(uintptr_t)(sel + 4u * cmp->topk), (const uint16_t*)(uintptr_t)(picked + 4u * cmp->topk), 2u);
+                } else {
+                    doors->index_select((uint32_t*)(uintptr_t)sel, (uint32_t*)(uintptr_t)(sel + 4u * cmp->topk), (const float*)(uintptr_t)scored,
+                                        latents, cmp->topk, 1u, latents, 0u);
+                }
+                if (cmp->cand_role == 1u && latents > reach) {
+                    /* ⭐ LEVEL ONE, at the candidate source: the full blocks before the newest scored by their best latent,
+                     *   the best `blocks` - 1 of them, then the newest — written as their latents, in order */
+                    doors->index_blocks((float*)(uintptr_t)cmp->cscratch, (const float*)(uintptr_t)scored, last * block, block);
+                    doors->index_select((uint32_t*)(uintptr_t)cand, (uint32_t*)(uintptr_t)(cand + 4u * reach), (const float*)(uintptr_t)cmp->cscratch,
+                                        last, cmp->cand_blocks - 1u, block, last * block, latents - last * block);
+                }
             }
             doors->index_gather((uint16_t*)(uintptr_t)(cmp->gather + 2u * len * HD), (const uint16_t*)(uintptr_t)cmp->cache,
                                 (const uint32_t*)(uintptr_t)sel, cmp->topk, HD);
@@ -338,8 +395,8 @@ static uint64_t ai_deepseek_4__attention__zzprivate_row(const sys__heap_node* ar
     if (cmp->ratio != 0u && cmp->source) ai_deepseek_4__attention__zzprivate_project(doors, over, cmp, hr, ck, H, HD);
     if (cmp->ratio != 0u && cmp->indexer && (pos + 1u) / cmp->ratio > cmp->topk)
         ai_deepseek_4__attention__zzprivate_index_project(doors, over, cmp, qnr, hr, iq, iw, QR, H);
-    ai_deepseek_4__attention__zzprivate_core(doors, over, at, s.r, cmp, q, kv, ck, cg, cwork, iq, iw, cmp->at[AI_DEEPSEEK_4__IDX__SELECT], o,
-                                             pos, heads, HD, RD, W);
+    ai_deepseek_4__attention__zzprivate_core(doors, over, at, s.r, cmp, q, kv, ck, cg, cwork, iq, iw, cmp->at[AI_DEEPSEEK_4__IDX__SELECT],
+                                             cmp->cand, o, pos, heads, HD, RD, W);
     /* ⭐ THE OUTPUT, LOW-RANK IN GROUPS: group `j`'s heads (`GW` halves of the answer) through its own `OR` rows of wo_a —
      *   one record of `G · OR` rows, so group `j`'s rows start `j · OR` rows in, its codes and its scales alike */
     doors->hadamard_rotate((uint16_t*)(uintptr_t)orot, (const uint16_t*)(uintptr_t)o, (const uint16_t*)(uintptr_t)signs, QW, over);
@@ -644,8 +701,10 @@ static sys__heap_node ai_deepseek_4__attention_rows__zzabi_apply(const sys__heap
     const bool source = cmp->ratio != 0u && cmp->source;
     const bool indexing = cmp->ratio != 0u && cmp->indexer && (first + n) / cmp->ratio > cmp->topk;
     const uint64_t sel_bytes = 4u * (cmp->topk + 1u), IH = cmp->heads, ID = cmp->dim;
+    const uint64_t cand_bytes = 4u * (cmp->cand_blocks * cmp->cand_block + 1u);   /* a row's candidates (▶ CAND__SELECT) */
     if (s_room / SB < n || a_room / mix < n || b_room / mix < n || room[AI_DEEPSEEK_4__ATT__SCRATCH] < 4u * H + 2u * (2u * HD + ID)
-     || (cmp->ratio != 0u && cmp->indexed && cmp->room[AI_DEEPSEEK_4__IDX__SELECT] / sel_bytes < n))
+     || (cmp->ratio != 0u && cmp->indexed && cmp->room[AI_DEEPSEEK_4__IDX__SELECT] / sel_bytes < n)
+     || (cmp->ratio != 0u && cmp->cand_role != 0u && cmp->cand_room / cand_bytes < n))
         return sys__engine__abi__error(AI_DEEPSEEK_4__LAYER__FAULT_ROOM);
     uint64_t next = work;
     const uint64_t end = work + w_room;
@@ -713,8 +772,9 @@ static sys__heap_node ai_deepseek_4__attention_rows__zzabi_apply(const sys__heap
     for (uint64_t t = 0u; t < n; ++t)
         ai_deepseek_4__attention__zzprivate_core(doors, over, at, s.r, cmp, q + 2u * t * QW, kv + 2u * t * HD, ck + 2u * t * HD,
                                                  ck + 2u * (n + t) * HD, cwork, iq + 2u * t * IH * ID, iw + 2u * t * IH,
-                                                 cmp->at[AI_DEEPSEEK_4__IDX__SELECT] + t * sel_bytes, q + 2u * t * QW, first + t, heads, HD,
-                                                 RD, W);
+                                                 cmp->at[AI_DEEPSEEK_4__IDX__SELECT] + t * sel_bytes,
+                                                 cmp->cand_role != 0u ? cmp->cand + t * cand_bytes : 0u, q + 2u * t * QW, first + t, heads,
+                                                 HD, RD, W);
     /* ⭐ THE OUTPUT over every row: row `t`'s group `j` of heads, `GW` wide, through group `j`'s `OR` rows of wo_a — the
      *   answer viewed as `n · G` rows of `GW`, the groups' as `n · G` rows of `OR` — then wo_b */
     doors->hadamard_rotate((uint16_t*)(uintptr_t)orot, (const uint16_t*)(uintptr_t)q, (const uint16_t*)(uintptr_t)signs, n * QW, over);

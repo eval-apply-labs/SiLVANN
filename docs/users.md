@@ -182,6 +182,13 @@ v0.7.0 lacks `lisp/qwen3_5_pictures.lisp` and refuses pictures until `silvann do
 the card, a picture at most 4 megapixels by default (`picture_pixels`; 21,396 patches of 14 x 14) — 0.25 s for 448 x 448
 and 12 s for 2044 x 2044 on an MI50.
 
+**DeepSeek-V4.1-Flash reads pictures**, not videos: its tower (32 blocks, then an aligner that makes
+each 3 x 3 block of 14-pixel patches one token) runs on the card, and a picture is prepared as DeepSeek's own processor
+prepares it — one under 544 x 544 pixels enlarged to that, one past 1,024 tokens made smaller, its aspect kept and the
+rest grey. A picture is a span of tokens of its own: a row of blocks then a line's end, between a start and an end;
+the model routes those tokens by its router's bias for pictures, and its n-gram memory leaves them out. 0.37 s for 448 x
+448 (184 tokens) and 3.6 s for 2048 x 1536 (1,001 tokens) on an MI50.
+
 **Videos**, for the Qwen models and GLM, are attached with the same button: an animated GIF, WebP or PNG is read as it
 is, any other video file (MP4 and the like) through PyAV, which `install.sh` installs from `requirements-nonfree.txt`
 (an image built from `docker/` leaves it out: [`docker/README.md`](../docker/README.md)). Its frames are taken
@@ -333,7 +340,7 @@ starts with its share of every layer, and each expert it takes in sends one back
 left. The memory the tier holds is RAM given back — about 18 GB for an 18 GB tier — so a box short of RAM by about the
 tier's size runs the model without the disk. It costs speed where a card cannot copy both ways at once: on our MI50 a
 token went from 107 to 138 ms. The engine measures that at boot and, on such a card, sends an expert back only after
-the one coming in has arrived. Over a group of cards (`tensor_parallel`) each card's exclusive tier is its own: an expert
+the one coming in has arrived. Over a group of cards (`num_cards`) each card's exclusive tier is its own: an expert
 is on one card or in RAM, and the group gives back the RAM of every card's tier.
 
 ### The experts in RAM, and swap
@@ -359,7 +366,7 @@ at least 3 GB and at most 8 GB.
 
 DeepSeek-V4.1-Flash has no `disk`: the layers RAM does not hold are written once to `models/<name>/experts/` (6.8 GB a
 layer) and read through the system's page cache (`experts_from: "mapped"`, chosen at boot), so leave that much room on
-the disk beside its 491 GB ([`config.md`](config.md#deepseek-v41-flashs-options)).
+the disk beside its 492 GB ([`config.md`](config.md#deepseek-v41-flashs-options)).
 
 ## 6. A model over several machines
 

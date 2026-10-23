@@ -1386,6 +1386,14 @@ static __device__ inline bool nn__expert_tier__visit_group(sys__silicon_family__
         sys__os__lock_take(&nn__loader__zzprivate_lock);
         nn__loader__zzprivate_count[NN__EXPERT__COUNT_PICKS] += k;
         nn__loader__zzprivate_count[NN__EXPERT__COUNT_HITS] += hits;
+        nn__loader__zzprivate_count[NN__EXPERT__COUNT_CARD_HITS + me] += hits;
+        if (me == 0u) {                                   /* every card assigns alike: card 0 counts the busiest */
+            unsigned routed[NN__EXPERT_TIER__RANKS_MAX] = {}, most = 0u;
+            for (unsigned j = 0u; j < k; ++j) if (owner_of[j] < ranks) ++routed[owner_of[j]];
+            for (uint32_t r = 0u; r < ranks; ++r) if (routed[r] > most) most = routed[r];
+            nn__loader__zzprivate_count[NN__EXPERT__COUNT_BUSIEST] += most;
+            ++nn__loader__zzprivate_count[NN__EXPERT__COUNT_GROUP_VISITS];
+        }
         for (unsigned j = 0u; j < k; ++j)
             if (!held[j] && nn__loader__zzprivate_find(owner, layer, type, ids[j]) != 0)
                 ++nn__loader__zzprivate_count[NN__EXPERT__COUNT_PICKED_ARRIVING];

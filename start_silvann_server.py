@@ -109,6 +109,26 @@ class SaveReq(BaseModel):
 
 
 # ── passwords: scrypt, as before ────────────────────────────────────────────────────────────────────────────
+def _cards(m):
+    """How many cards the model is split over: the Qwen runtime's `CARDS`, GLM's and DeepSeek's `P`."""
+    return int(getattr(m, "CARDS", None) or getattr(m, "P", None) or 1)
+
+
+def _loading():
+    """`progress(done, total)` for a model's load: a dot every 2.5% and the tens, the whole line so far each time it grows
+    (`loading: ...10...20...30.`) — the UI shows it as one line growing — so a long load (GLM's experts copied into RAM,
+    minutes) is seen to move."""
+    said = [0]
+
+    def tick(done, total):
+        step = done * 40 // max(1, total)                 # 40 steps of 2.5%
+        if step > said[0]:
+            said[0] = step
+            print("[silvann_server] loading: " + "".join(str(i * 10 // 4) if i % 4 == 0 else "."
+                                                          for i in range(1, step + 1)), flush=True)
+    return tick
+
+
 def _hash_password(password):
     salt = secrets.token_bytes(16)
     h = hashlib.scrypt(password.encode(), salt=salt, n=16384, r=8, p=1, dklen=32)
@@ -321,7 +341,8 @@ def _boot(args):
     asked = "max" if str(asked).lower() in ("max", "auto") else int(asked)
     # a video's tokens at most, and what reading one holds of RAM beside the experts (▶ vision.MAX_VIDEO_TOKENS)
     S.video_tokens = int(cfg.get("max_tokens_per_video", MAX_VIDEO_TOKENS))
-    options = dict(cfg.get("options", {}))
+    # how many of the machine's cards the model is split over — the one placement a config names (▶ `SR.with_cards`)
+    options = SR.with_cards(str(folder), cfg.get("num_cards"), cfg.get("options", {}))
     # the model's tool (▶ the classifier): what its commands may do unasked in a new conversation — or "no", no
     #   conversation has it
     S.tools = str(cfg.get("tools", "chill")).lower()
@@ -345,10 +366,13 @@ def _boot(args):
         named = options                                   # the config's own: what a second choice is made around
         options, max_context, why = autotune.choose(str(folder), asked, named, video_tokens=S.video_tokens,
                                                     margin_mb=cfg.get("vram_margin_mb"))
+        n = int(options.get("tensor_parallel") or len(options.get("cards") or ()) or 1)
+        if n > 1:
+            why = "every layer over %d cards; %s" % (n, why)
         S.why = why
         print("[silvann_server] the setup: %s" % why, flush=True)
         try:
-            S.model = SR.open_model(str(folder), lora=cfg.get("lora"), max_context=max_context, **options)
+            S.model = SR.open_model(str(folder), lora=cfg.get("lora"), max_context=max_context, progress=_loading(), **options)
         except Exception as ex:                               # noqa: BLE001 — the engine's refusal is a plain error
             if "kept in autotune.json" not in why or not autotune.refused_by_card(ex):
                 raise
@@ -356,7 +380,7 @@ def _boot(args):
                                                         video_tokens=S.video_tokens, margin_mb=cfg.get("vram_margin_mb"))
             S.why = why
             print("[silvann_server] the card refused the setup kept for it; chosen again: %s" % why, flush=True)
-            S.model = SR.open_model(str(folder), lora=cfg.get("lora"), max_context=max_context, **options)
+            S.model = SR.open_model(str(folder), lora=cfg.get("lora"), max_context=max_context, progress=_loading(), **options)
     if ring:
         if not hasattr(S.model, "forward"):
             raise SR.Refused("%s runs on one machine only: its model has no stages" % folder.name)
@@ -577,7 +601,7 @@ def _whoami(cid):
     """⭐ THE REPL'S (whoami): which model this is, where, and what a subagent can be — so the model knows itself."""
     m, c = S.model, S.runtime.cartridges.get(cid)
     session = S.tool_sessions.get(cid)
-    cards = getattr(m, "CARDS", 1)
+    cards = _cards(m)
     lines = ["you are %s (%s), LoRA %s" % (S.model_id, m.folder.architecture, getattr(m, "active_lora", None) or "none"),
              "you run on %s: %s" % ("%d cards" % cards if cards > 1 else "one card" if m.m.silicon not in ("host", "x86_avx2")
                                     else "the CPU", m.m.silicon),
@@ -679,7 +703,7 @@ def _put_down():
 def _bring_back():
     """The text model booted again as it booted first (`S.setup`), and the runtime handed it."""
     up = S.setup
-    S.model = SR.open_model(up["folder"], lora=up["lora"], max_context=up["max_context"], **up["options"])
+    S.model = SR.open_model(up["folder"], lora=up["lora"], max_context=up["max_context"], progress=_loading(), **up["options"])
     S.runtime.model = S.model
 
 
@@ -698,10 +722,11 @@ def _lend(folder, conf, rt=None):
     try:
         asked = conf.get("max_context", "auto")
         asked = "max" if str(asked).lower() in ("max", "auto") else int(asked)
-        options, ctx, why = autotune.choose(str(folder), asked, dict(conf.get("options") or {}),
+        options, ctx, why = autotune.choose(str(folder), asked, SR.with_cards(str(folder), conf.get("num_cards"),
+                                                                          conf.get("options") or {}),
                                             video_tokens=S.video_tokens,
                                             margin_mb=conf.get("vram_margin_mb", S.config.get("vram_margin_mb")))
-        m = SR.open_model(str(folder), lora=conf.get("lora"), max_context=ctx, **options)
+        m = SR.open_model(str(folder), lora=conf.get("lora"), max_context=ctx, progress=_loading(), **options)
     except Exception:
         _bring_back()
         holder.done.set()
@@ -822,7 +847,7 @@ def health():
             "lora": m.active_lora if m else None, "loras": m.folder.loras() if m else [],
             "tenants_loaded": len(S.runtime.cartridges) if S.runtime else 0,
             "active": S.runtime.active.id if S.runtime and S.runtime.active else None,
-            "model_dir": m.folder.path if m else None, "pp_slice": "all", "num_gpus": getattr(m, "CARDS", 1),
+            "model_dir": m.folder.path if m else None, "pp_slice": "all", "num_gpus": _cards(m),
             "max_context": m.max_context if m else 0,
             "adapter": "silvann_runtime", "images": _reads_pictures(), "files": not S.image, "pictures": S.image,
             "picture_settings": S.model.settings if S.image else None}
@@ -901,7 +926,7 @@ async def estimate_cartridge(req: EstimateReq):
     it costs its state in RAM, up to the figure here. Under tensor parallelism each card holds its share of that state,
     `per_card`."""
     m = S.model
-    total, cards = state_bytes(m, m.max_context), getattr(m, "CARDS", 1)
+    total, cards = state_bytes(m, m.max_context), _cards(m)
     return {"mode": "flat", "bytes": int(total), "gb": total / 2 ** 30, "breakdown": {"state": int(total)},
             "num_gpus": cards, "per_card": {"bytes": int(total // cards), "gb": total / cards / 2 ** 30},
             "defaults": dict(chunk_tokens=m.max_context, hot_chunks=1, warm_chunks=0, cold_chunks=0, system_chunks=0),

@@ -56,7 +56,7 @@ class Glm5(Generates):
 
     def __init__(self, folder, machine, max_context=2048, layers=None, grid=True, fused=True, sockets=None, experts_int8=True,
                  experts_lock=False, experts_from="auto", experts_dir=None, chunk=256, experts_ram_gb=None, card_experts_gb=0, card_hot=None,
-                 card_landing=1, card_line=None, card_exclusive=False, card_free=16, card_duplex_line=1200, card_duplex=None, card_landing_line=3,
+                 card_landing="auto", card_line=None, card_exclusive=False, card_free=16, card_duplex_line=1200, card_duplex=None, card_landing_line=3,
                  lend_cache=True, picture_pixels=1 << 22, mtp=False, mtp_hidden="hn", tensor_parallel=1, card_shared="auto", card_visit_first=False,
                  ):
         if folder.architecture not in ARCHITECTURES:
@@ -153,6 +153,9 @@ class Glm5(Generates):
         #   `card_shared`: of a card's slots a layer, the share every card keeps (NN-99 ③) — "auto" from this machine's own
         #   speeds at boot (▶ `expert_tier.slice_of`), a number as it says
         self.P = int(tensor_parallel or 1)
+        # a group's state is every card's share, which `state_regions` does not lay out yet: a conversation put away is
+        #   its tokens, read again when it comes back (▶ session's PARKS, as a ring's)
+        self.PARKS = self.P == 1
         self.CARD_SHARED = None if card_shared in (None, "auto") else float(card_shared)
         if card_exclusive and self.P > 1:
             self.CARD_SHARED = 0.0             # ▶ the refusal below: an exclusive group's slice is none, not measured
@@ -198,10 +201,12 @@ class Glm5(Generates):
         # ⭐ THE CARD'S TIER OF ROUTED EXPERTS (NN-48): `card_experts_gb` of whole experts on the card, which computes the
         #   picks it holds while the CPU computes the rest. An expert the CPU computed earns a slot by nn's qualifier — three
         #   calls, the older of its last two newer than the card's least recent resident's — and is stitched from the
-        #   sockets' parts in RAM into it while the card computes (`card_landing` a layer's visit at most). `card_hot`, a
+        #   sockets' parts in RAM into it while the card computes (`card_landing` a layer's visit at most, "auto" from this
+        #   machine's own speeds at boot: ▶ `_from_speeds`). `card_hot`, a
         #   router log (▶ `test/src_glm5_router_log.py`), fills it at boot with each layer's most picked; without one it
         #   starts empty and fills itself.
-        self.CARD_GB, self.CARD_HOT, self.CARD_LANDING = float(card_experts_gb or 0), card_hot, int(card_landing)
+        self.CARD_GB, self.CARD_HOT = float(card_experts_gb or 0), card_hot
+        self.CARD_LANDING = None if card_landing in (None, "auto") else int(card_landing)
         # a prompt chunk's line — the rows past which an expert is worth its copy to the card — measured at boot and bound
         # as `nn__expert_major__vram_promotion_threshold_picks` (▶ `_calibrate_line`); `card_line` fixes it instead
         self.CARD_LINE = int(card_line) if card_line else None
@@ -596,14 +601,14 @@ class Glm5(Generates):
         else:
             m.bind_values(dict(VOCAB=self.VOCAB, STOPS=0, SEEN=sampling.SEEN))      # what the sampler and `generate` read
         m.define_programs(self._procedures)
-        if self.CPLAN is not None and self.P > 1 and self.CARD_SHARED is None:
-            self._shared_from_speeds()
         if self.CPLAN is not None and self.CH and self.EPLAN is not None:
             self._calibrate_line()
-            if self.P > 1:
-                # the other cards' blocks read the bindings through `names`, taken when the programs were defined: again,
-                #   so their tiers' notes see the threshold just bound
-                m.view("names")
+        if self.CPLAN is not None and ((self.P > 1 and self.CARD_SHARED is None) or self.CARD_LANDING is None):
+            self._from_speeds()                     # after the line: a visit's landings from its copy reading
+        if self.CPLAN is not None and self.CH and self.EPLAN is not None and self.P > 1:
+            # the other cards' blocks read the bindings through `names`, taken when the programs were defined: again, so
+            #   their tiers' notes see the threshold just bound
+            m.view("names")
         self.global_ = None                         # what was left of global.pkl, read by the buffers
         self.b.release()                            # every layer's file let go, now on the card or in RAM (▶ `Bundle.release`)
 
@@ -617,7 +622,7 @@ class Glm5(Generates):
         the 35B and GLM; the 14B through x86_avx2 holds 7.36 GB after its load, against 9.98, and peaks at 7.38, against 10.58."""
         m = self.m
         loader.layer_width(0, self.T_HEAD, 1)
-        loader.load_bytes(self.HPLAN, self.T_HEAD, 0, self.head_data, self.head_lut)
+        self.HEAD_AT = loader.load_bytes(self.HPLAN, self.T_HEAD, 0, self.head_data, self.head_lut)
         self.EMB_AT = m.buffer(self.TABLE_BYTES, "EMBEDDING", ram=True)
         m.write(self.EMB_AT, self.emb_data)
         m.write(self.EMB_AT + self.EMB_DATA_BYTES, self.emb_lut)
@@ -1150,26 +1155,36 @@ class Glm5(Generates):
 
     def _tier(self, k):
         """Card `k`'s tier table (▶ `expert_tier.tier`), with the share of its slots a layer every card keeps in a group —
-        none until it is known (`_shared_from_speeds`)."""
+        none until it is known (`_from_speeds`)."""
         moe = sum(1 for l in self.run_layers if self.moe[l])
         part = self.CARD_SHARED or 0.0
         shared = int(round(part * self.CARD_SLOTS / moe)) if self.P > 1 and moe else 0
         t = self._TIER[k]
         expert_tier.tier(self.m, self.sfx("tier_card", k), self.T_CEXP, self.EXPERTS, self.TOPK, self.H, self.MINTER, self.CPLAN,
-                         self.LAYERS, t["fed"], self.PARTS, self.EPLAN, self.GATE_ROW, self.DOWN_ROW, self.CARD_LANDING,
+                         self.LAYERS, t["fed"], self.PARTS, self.EPLAN, self.GATE_ROW, self.DOWN_ROW, self.CARD_LANDING or 1,
                          t["exclusive"], self.CARD_LANDING_LINE, ranks=self.P, shared=shared)
 
-    def _shared_from_speeds(self):
-        """`card_shared` "auto" in a group: a CPU pick against a card expert, timed here (▶ `expert_tier.speeds` — the
-        first MoE layer's first experts on the first socket, the head's product on card 0 priced to a routed expert's
-        bytes), the slice from them, and every card's tier made again with it."""
+    def _from_speeds(self):
+        """`card_shared` "auto" in a group and `card_landing` "auto": a CPU pick against a card expert and an expert's
+        copy, timed here (▶ `expert_tier.speeds` — the first MoE layer's first experts in RAM on the first socket, the head's
+        product on card 0 priced to a routed expert's bytes; the copy `_calibrate_line`'s, or `expert_tier.copy_seconds`
+        where the line is fixed), the slice and a visit's landings from them, and every card's tier made again with them."""
         m, l, c = self.m, next(l for l in self.run_layers if self.moe[l]), self.CPUS[0]
+        held = set(self.CARD_HELD.get(l, ())) if self.CARD_EXCLUSIVE else set()   # an exclusive tier's are not in RAM
         cpu_s, card_s = expert_tier.speeds(
-            m, CARD, c["w"], "picks", list(range(self.TOPK)),
+            m, CARD, c["w"], "picks", [x for x in range(self.EXPERTS) if x not in held][:self.TOPK],
             "(ai_z__glm_5_3__experts %s picks ex%d_%d %s)" % (self.cn(0, "hand"), l, 0, self.cn(0, "routed")),
             self.CPLAN.slot_bytes / expert_tier.head_bytes(self.HPLAN))
-        self.CARD_SHARED = expert_tier.slice_of(cpu_s, card_s)
+        calibrated = (getattr(self, "CALIBRATION", None) or {}).get("copy_ms")
+        copy_s = calibrated / 1e3 if calibrated else expert_tier.copy_seconds(m, CARD, self.HEAD_AT + self.HPLAN.at_up_data,
+                                                                              min(self.CPLAN.slot_bytes, self.HPLAN.up_data))
+        if self.CARD_SHARED is None:
+            self.CARD_SHARED = expert_tier.slice_of(cpu_s, card_s)
         self.CARD_SPEEDS = dict(cpu_ms=cpu_s * 1e3, card_ms=card_s * 1e3, ratio=cpu_s / max(card_s, 1e-12), shared=self.CARD_SHARED)
+        self.CARD_SPEEDS["copy_ms"] = copy_s * 1e3
+        if self.CARD_LANDING is None:
+            self.CARD_LANDING = expert_tier.landing_of(cpu_s, copy_s)
+        self.CARD_SPEEDS["landing"] = self.CARD_LANDING
         for k in range(self.P):
             m.act_as(k)
             self._tier(k)

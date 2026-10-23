@@ -46,7 +46,7 @@ class Qwen35(Generates):
 
     def __init__(self, folder, machine, max_context=4096, fused_moe=True, kv="tiered", tiers=None, experts_on="card",
                  experts_from="auto", experts_dir=None, layers=None, chunk=256, experts_ram_gb=None, card_experts_gb=0,
-                 card_landing=1, card_line=None, card_shared="auto", experts_int8=False, experts_lock=False, picture_pixels=1 << 22,
+                 card_landing="auto", card_line=None, card_shared="auto", experts_int8=False, experts_lock=False, picture_pixels=1 << 22,
                  picture_weights="auto", tensor_parallel=1, lend_cache=True, mtp="no", mtp_rows=False, mtp_pairs=True):
         if folder.architecture not in ARCHITECTURES:
             raise Refused("%s is a %r model, not one of %s" % (folder.path, folder.architecture, ARCHITECTURES))
@@ -230,14 +230,16 @@ class Qwen35(Generates):
                                                                   and machine.silicon not in ("host", "x86_avx2")))
         # ⭐ THE CARD'S TIER OF ROUTED EXPERTS (NN-48) — the experts on the CPU, and `card_experts_gb` of them on the card as
         #   well: the card computes the picks it holds, the CPU the rest; an expert the CPU computed earns a slot by nn's
-        #   qualifier and is copied whole from the CPU's memory while the card computes (`card_landing` a visit at most); a
+        #   qualifier and is copied whole from the CPU's memory while the card computes (`card_landing` a visit at most, "auto"
+        #   from this machine's own speeds at boot: ▶ `_from_speeds`); a
         #   prompt chunk gives the card every expert past `nn__expert_major__vram_promotion_threshold_picks`, measured at boot
         #   (`card_line` fixes it). ▶ glm5.py's, and nn's `nn__expert_tier__*`
-        self.CARD_GB, self.CARD_LANDING = float(card_experts_gb or 0), int(card_landing)
+        self.CARD_GB = float(card_experts_gb or 0)
+        self.CARD_LANDING = None if card_landing in (None, "auto") else int(card_landing)
         self.CARD_LINE = int(card_line) if card_line else None
         # ⭐ A GROUP'S SHARED SLICE (NN-99 ③): `card_shared` of a card's slots a layer kept on every card of a tensor-parallel
         #   group — the hottest, chosen again from decayed picks (▶ nn's `NN__EXPERT_TIER__SHARED`); 0, none; "auto" from this
-        #   machine's own speeds at boot (▶ `_shared_from_speeds`)
+        #   machine's own speeds at boot (▶ `_from_speeds`)
         self.CARD_SHARED = None if card_shared in (None, "auto") else float(card_shared)
         self.CARD_SPEEDS = None
         # ⭐ THE CACHE'S ROWS NO CONVERSATION HAS REACHED, LENT TO THE TIER (NN-93) — ▶ `_lend`. `lend_cache` false keeps
@@ -594,6 +596,8 @@ class Qwen35(Generates):
                 (2 * (self.H + 16 + self.INTER) + 7) & ~7, self.TOPK, self.EXPERTS,
                 lambda n: "(ai_qwen_3__experts_rows c_hands exrc%d c_rrows %d)" % (self.run_layers[0], n),
                 self.CHUNK, fixed=self.CARD_LINE)
+        if self.CPLAN is not None and self.CARD_LANDING is None:
+            self._from_speeds()                     # after the line: a visit's landings from its copy reading
         self.active_lora, self._lora_cache = self.folder.lora, {}     # a LoRA chosen at boot is in the slots already
         self.global_ = None                         # what was left of global.pkl, read by the buffers
         self.b.release()                            # every layer's file let go (▶ `Bundle.release`)
@@ -651,14 +655,14 @@ class Qwen35(Generates):
         self.state_at = self.state_of[0]
         self._bindings()
         m.define_programs(self._procedures)
-        if self.CPLAN is not None and self.CARD_SHARED is None:
-            self._shared_from_speeds()
         if self.CPLAN is not None:          # a prompt's rows through card 0's tier: its line, as one card's (▶ `load`)
             self.CALIBRATION = expert_tier.calibrate(
                 m, CARD, self.CPU, self.KRS_AT, self.EPLAN.slot_bytes, self.C_HANDS_AT, self.HAND_ROW, 2 * self.H,
                 (2 * (self.H + 16 + self.INTER) + 7) & ~7, self.TOPK, self.EXPERTS,
                 lambda n: "(ai_qwen_3__experts_rows c_hands exrc%d c_rrows %d)" % (self.run_layers[0], n),
                 self.CHUNK, fixed=self.CARD_LINE)
+        if self.CPLAN is not None and (self.CARD_SHARED is None or self.CARD_LANDING is None):
+            self._from_speeds()                     # after the line: a visit's landings from its copy reading
         self.active_lora, self._lora_cache = self.folder.lora, {}
         self.global_ = None
         self.b.release()                            # every layer's file let go (▶ `Bundle.release`)
@@ -832,7 +836,7 @@ class Qwen35(Generates):
         the 35B and GLM; the 14B through x86_avx2 holds 7.36 GB after its load, against 9.98, and peaks at 7.38, against 10.58."""
         m = self.m
         loader.layer_width(0, self.T_HEAD, 1)
-        loader.load_bytes(self.HPLAN, self.T_HEAD, 0, self.head_data, self.head_lut)
+        self.HEAD_AT = loader.load_bytes(self.HPLAN, self.T_HEAD, 0, self.head_data, self.head_lut)
         self.EMB_AT = m.buffer(self.TABLE_BYTES, "EMBEDDING", ram=True)
         m.write(self.EMB_AT, self.emb_data)
         m.write(self.EMB_AT + self.EMB_DATA_BYTES, self.emb_lut)
@@ -1274,22 +1278,31 @@ class Qwen35(Generates):
 
     def _tier(self, card):
         """Card `card`'s tier, a card slot laid out as the CPU's so a promotion copies one whole — with, in a group, the
-        share of its slots a layer every card keeps: none until it is known (`_shared_from_speeds`)."""
+        share of its slots a layer every card keeps: none until it is known (`_from_speeds`)."""
         shared = int(round((self.CARD_SHARED or 0.0) * self.CARD_SLOTS / len(self.run_layers)))
         expert_tier.tier(self.m, self._named("tier_card", card), self.T_CEXP, self.EXPERTS, self.TOPK, self.H, self.INTER,
                          self.EPLAN, self.LAYERS, {l: "src%d" % l for l in self.run_layers if l in self.SRC},
-                         landing=self.CARD_LANDING, ranks=self.CARDS, shared=shared)
+                         landing=self.CARD_LANDING or 1, ranks=self.CARDS, shared=shared)
 
-    def _shared_from_speeds(self):
-        """`card_shared` "auto" in a group: a CPU pick against a card expert, timed here (▶ `expert_tier.speeds` — the
-        first layer's first experts, the head's product on card 0 priced to a routed expert's bytes), the slice from them,
-        and every card's tier made again with it."""
+    def _from_speeds(self):
+        """`card_shared` "auto" in a group and `card_landing` "auto": a CPU pick against a card expert and an expert's
+        copy, timed here (▶ `expert_tier.speeds` — the first layer's first experts, the head's product on card 0 priced to a
+        routed expert's bytes; the copy the line's calibration read, or `expert_tier.copy_seconds` where the line is fixed),
+        the slice and a visit's landings from them, and every card's tier made again with them."""
         m, l = self.m, self.run_layers[0]
         cpu_s, card_s = expert_tier.speeds(m, CARD, self.CPU, "picks", list(range(self.TOPK)),
                                            "(ai_qwen_3__experts c_hand picks exc%d c_routed)" % l,
                                            self.EPLAN.slot_bytes / expert_tier.head_bytes(self.HPLAN))
-        self.CARD_SHARED = expert_tier.slice_of(cpu_s, card_s)
+        calibrated = (getattr(self, "CALIBRATION", None) or {}).get("copy_ms")
+        copy_s = calibrated / 1e3 if calibrated else expert_tier.copy_seconds(m, CARD, self.HEAD_AT + self.HPLAN.at_up_data,
+                                                                              min(self.CPLAN.slot_bytes, self.HPLAN.up_data))
+        if self.CARD_SHARED is None:
+            self.CARD_SHARED = expert_tier.slice_of(cpu_s, card_s)
         self.CARD_SPEEDS = dict(cpu_ms=cpu_s * 1e3, card_ms=card_s * 1e3, ratio=cpu_s / max(card_s, 1e-12), shared=self.CARD_SHARED)
+        self.CARD_SPEEDS["copy_ms"] = copy_s * 1e3
+        if self.CARD_LANDING is None:
+            self.CARD_LANDING = expert_tier.landing_of(cpu_s, copy_s)
+        self.CARD_SPEEDS["landing"] = self.CARD_LANDING
         for k in range(self.CARDS):
             m.act_as(k)
             self._tier(k)

@@ -420,69 +420,30 @@ def model_default_config(model: str) -> Optional[str]:
     return dflt if dflt in list_model_configs(model) else None
 
 
-# ⭐ A NEW CONFIG: every key the server reads, at its default, and the model's options listed beside — Help → "A model's
-#   config" (docs/config.md) says each. The options are listed in `_options`, not set: a placement named in `options`
-#   is kept as it is, where one left out is chosen for the machine at each boot.
-CONFIG_GUIDE = "Help → \"A model's config\" (docs/config.md) says every key and option. Keys starting with _ are notes."
-QWEN_OPTIONS = {
-    "kv": "\"tiered\" (default) or \"fp16\": the conversation's cache",
-    "tiers": "[sink, hot, warm]: the tiered cache's sizes, default [256, 4096, \"rest\"]",
-    "chunk": "1-256, default 256: a prompt's positions a layer at a time",
-    "experts_on": "\"card\" or \"cpu\" (MoE models): chosen at boot when left out",
-    "experts_from": "\"auto\", \"ram\", \"disk\" or \"mapped\": with the experts on the CPU",
-    "experts_ram_gb": "gigabytes: with experts_from \"disk\", the RAM that keeps the experts used",
-    "card_experts": "\"yes\" (default) or \"no\": the card's tier of experts, with them in RAM",
-    "card_experts_gb": "gigabytes: the tier's size, rather than the one chosen at boot",
-    "lend_cache": "true (default) or false: the tier also holds experts in the cache's rows a conversation has not "
-                  "reached, given back as it grows",
-    "experts_int8": "false (default) or true: a token's experts on the CPU in integers",
-    "experts_lock": "false (default) or true: the experts in RAM locked there, never swapped out (Linux; ulimit -l past them)",
-    "picture_pixels": "default 4194304: the largest picture the card makes room for; 0 reads pictures on the CPU",
-    "picture_weights": "\"auto\" (default), \"card\" or \"ram\": the vision tower's weights",
-    "tensor_parallel": "1 (default), 2, 4: the model over that many cards of one size; an MoE's experts on the CPU or in RAM (AMD, a developer preview)",
-    "mtp": "\"no\" (default) or \"yes\": the MTP layer drafts the token after next and the model checks both at once — a "
-           "greedy answer the same tokens; not faster yet on the 35B",
-}
-GLM_OPTIONS = {
-    "experts_from": "\"auto\", \"ram\", \"disk\" or \"mapped\": where the routed experts are read from",
-    "experts_ram_gb": "gigabytes: with experts_from \"disk\", the RAM that keeps the experts used",
-    "chunk": "default 256: a prompt's positions a layer at a time; 1024, chosen at boot, with the experts on the disk",
-    "sockets": "1 or 2: the CPU sockets the experts are split over; by default all",
-    "experts_int8": "true (default) or false: the experts in integers on the CPU",
-    "experts_lock": "false (default) or true: the experts in RAM locked there, never swapped out (Linux; ulimit -l past them)",
-    "card_experts": "\"yes\" (default) or \"no\": the card's tier of experts, with them in RAM",
-    "card_experts_gb": "gigabytes: the tier's size, rather than the one chosen at boot",
-    "card_exclusive": "chosen at boot, or false or true: an expert on the card is not also kept in RAM",
-    "lend_cache": "true (default) or false: an inclusive tier also holds experts in the latent cache's rows a "
-                  "conversation has not reached, given back as it grows",
-    "picture_pixels": "default 4194304: the largest picture the card makes room for",
-    "mtp": "\"no\" (default) or \"yes\": the MTP layer drafts the token after next and the model checks both at once — a "
-           "greedy answer the same tokens, faster",
-}
+# ⭐ A NEW CONFIG: every key the server reads, at its default — settings only. Help → "A model's config" (docs/config.md)
+#   says every key and every model's option, and the Options view's **config guide** opens it. Options are left out: a
+#   placement named in `options` is kept as it is, where one left out is chosen for the machine at each boot.
+CONFIG_GUIDE_DOC = "Using SiLVANN · A model's config"
 
 
 def new_config(model: str) -> dict:
-    """A new config for `model`: every key the server reads at its default, and its family's options in `_options`."""
+    """A new config for `model`: every key the server reads at its default."""
     folder = MODELS_DIR / model
     if (folder / "model_index.json").exists():                  # a picture model
-        return {"_guide": CONFIG_GUIDE, "card": "auto",
+        return {"card": "auto",
                 "image": {"width": 1024, "height": 1024, "steps": 40, "seed": None}}
     try:
         c = json.loads((folder / "config.json").read_text(encoding="utf-8"))
-        arch = (c.get("text_config") or c).get("model_type", "")
         layers = (c.get("text_config") or c).get("num_hidden_layers")
     except (OSError, ValueError):
-        arch, layers = "", None
-    listed = (QWEN_OPTIONS if arch.startswith("qwen") else GLM_OPTIONS if arch.startswith("glm")
-              else {"(none)": "Ministral takes no options: max_context sizes it for the card"})
-    return {"_guide": CONFIG_GUIDE,
+        layers = None
+    return {
             # what the card holds beside the model, up to its length, a tier sharing the card with the cache (NN-93)
             "max_context": "auto",
             "max_tokens_per_video": 8192, "thinking": True, "sampler": "generation",
-            "tools": "chill", "tools_folder": None, "lora": None, "card": "auto", "vram_margin_mb": 50,
+            "tools": "chill", "tools_folder": None, "lora": None, "num_cards": 1, "card": "auto", "vram_margin_mb": 50,
             "image_model": "auto", "image_card": None, "workers": [],
             "options": {},
-            "_options": listed,
             "pipeline_parallelism": "no",
             "pipeline_parallelism_layers": "0-%d" % (layers - 1) if layers else "",
             "pipeline_parallelism_next": "192.0.2.2:8766", "pipeline_parallelism_port": 8766}
@@ -576,6 +537,9 @@ def help_link(current: Path, href: str) -> Optional[Path]:
     return path if path in HELP_SHIPPED else None
 
 
+PROGRESS = "[silvann_server] loading: "      # the server's progress line, the whole of it so far each time it grows
+
+
 class ServerProcess:
     """Single subprocess + a shared line buffer that log panes poll."""
 
@@ -584,6 +548,7 @@ class ServerProcess:
         self.cmd: Optional[list] = None
         self.lines: deque[str] = deque(maxlen=2000)
         self.lock = threading.Lock()
+        self.rewrites = 0                      # lines replaced in place (a load's progress): a pane repaints on a change
         self.setup: Optional[str] = None       # what the server said it chose for this machine (its "the setup:" line)
         self.failure: Optional[str] = None     # why the last server it started ended on its own, if it did
         self.started = False                   # whether it had booted when it ended (else it never started)
@@ -655,7 +620,7 @@ class ServerProcess:
                 if not line:
                     break
                 line = line.rstrip()
-                self._log(line)
+                self._log(line, progress=PROGRESS in line)
                 if "[silvann_server] the setup: " in line:
                     self.setup = line.split("[silvann_server] ", 1)[1]
                 if "⛔ not started:" in line:
@@ -677,9 +642,15 @@ class ServerProcess:
                                     else "ended (exit %d): %s" % (rc, last[-300:]))
             self.setup = None
 
-    def _log(self, line: str):
+    def _log(self, line: str, progress: bool = False):
+        """A line of the server's output kept for the panes — a load's progress line in place of the one before it, so
+        the pane shows one line growing (`loading: ...10...20..`)."""
         with self.lock:
-            self.lines.append(line)
+            if progress and self.lines and PROGRESS in self.lines[-1]:
+                self.lines[-1] = line
+                self.rewrites += 1
+            else:
+                self.lines.append(line)
         # the UI's own output too, so a container's log (`docker logs`) carries the server's lines, its setup among them
         try:
             print(line, flush=True)
@@ -889,7 +860,7 @@ def _session_default():
         "view": "chat",            # chat | options | help
         "convs_expanded": True,
         # Options-view prefs (was the Server tab)
-        "server_mode": "remote",   # remote | local
+        "server_mode": "local",    # local (this machine's server) | remote (another's, at `endpoint`)
         "selected_model": "",      # a folder name under main/models/ (drives the config selector)
         "selected_config": "",
         "server_port": 8765,
@@ -966,7 +937,6 @@ PAGE_HEAD = """
     }
     .q-drawer--mini .silvann-menu-item { justify-content: center; padding: 0.5rem 0; }
     .q-drawer--mini .silvann-conv-item,
-    .q-drawer--mini .silvann-endpoint,
     .q-drawer--mini .silvann-brand-label,
     .q-drawer--mini .silvann-convs-col { display: none; }
     .q-drawer { transition: width 0.18s ease; }
@@ -1203,11 +1173,6 @@ async def page():
         ui.space()
         ui.separator()
 
-        # --- Endpoint settings (drawer bottom, hidden in mini mode) ---
-        with ui.column().classes("w-full px-2 py-2 gap-1 silvann-endpoint"):
-            endpoint_in = ui.input(label="Endpoint", value=state["endpoint"]
-                                   ).props("dense outlined").classes("w-full")
-            connect_btn = ui.button("connect").props("flat dense color=primary").classes("w-full")
 
     # ============================================================
     # MAIN AREA — three views (only one visible at a time)
@@ -1408,28 +1373,9 @@ async def page():
     opts_view = ui.column().classes("silvann-main w-full p-4 gap-2 overflow-auto")
     with opts_view:
         ui.label("Server control").classes("text-lg font-bold")
-        with ui.row().classes("items-center gap-4 mb-2"):
-            ui.label("Mode:")
-            mode_toggle = ui.toggle(
-                {"remote": "Remote (connect to existing)",
-                 "local":  "Local (start a server on this box)"},
-                value=state["server_mode"],
-            ).on_value_change(lambda e: state.__setitem__("server_mode", e.value))
 
-        # Remote panel
-        with ui.column().bind_visibility_from(mode_toggle, "value",
-                                              lambda v: v == "remote"
-                                              ).classes("w-full gap-2"):
-            ui.label(
-                "Use the Endpoint field in the left drawer to set the server URL. "
-                "You can't start or stop a remote server from here — sign in to that box and use "
-                "start_silvann_server.py directly, or systemd/tmux for persistent runs."
-            ).classes("opacity-70 max-w-2xl")
-
-        # Local panel
-        with ui.column().bind_visibility_from(mode_toggle, "value",
-                                              lambda v: v == "local"
-                                              ).classes("w-full gap-2"):
+        # this machine's models and its server; which server the UI talks to is chosen at the bottom
+        with ui.column().classes("w-full gap-2"):
             if not LOCAL_AVAILABLE:
                 ui.label(
                     f"Local mode unavailable: this UI process can't find start_silvann_server.py "
@@ -1437,125 +1383,126 @@ async def page():
                 ).classes("text-orange-600 max-w-2xl")
             else:
                 # MODELS — the ones this release can fetch, which are here, and the one downloading
-                ui.label("Models").classes("font-bold")
-                ui.label(f"Downloaded from Hugging Face into {MODELS_DIR}. Help → Running SiLVANN says what "
-                         f"each needs; one larger than the card runs its experts on the CPU."
-                         ).classes("text-xs opacity-70 max-w-2xl whitespace-normal")
+                # collapsed once a model is here: downloading is the first visit's work, starting a server every visit's
+                with ui.expansion("Download models", icon="download", value=not list_models()).classes("w-full"):
+                    ui.label(f"Downloaded from Hugging Face into {MODELS_DIR}. Help → Running SiLVANN says what "
+                             f"each needs; one larger than the card runs its experts on the CPU."
+                             ).classes("text-xs opacity-70 max-w-2xl whitespace-normal")
 
-                # the Hugging Face token: faster downloads than a client that is not signed in, and the repositories
-                #   whose terms its account accepted
-                def token_state():
-                    if os.environ.get("HF_TOKEN"):
-                        return "Hugging Face token: HF_TOKEN, from the environment the UI was started in"
-                    token = saved_token()
-                    if token:
-                        return f"Hugging Face token: saved ({token[:3]}…{token[-4:]})"
-                    return ("Hugging Face token: none — downloads go as a client that is not signed in, which Hugging "
-                            "Face serves more slowly. A token with read access: huggingface.co/settings/tokens")
+                    # the Hugging Face token: faster downloads than a client that is not signed in, and the repositories
+                    #   whose terms its account accepted
+                    def token_state():
+                        if os.environ.get("HF_TOKEN"):
+                            return "Hugging Face token: HF_TOKEN, from the environment the UI was started in"
+                        token = saved_token()
+                        if token:
+                            return f"Hugging Face token: saved ({token[:3]}…{token[-4:]})"
+                        return ("Hugging Face token: none — downloads go as a client that is not signed in, which Hugging "
+                                "Face serves more slowly. A token with read access: huggingface.co/settings/tokens")
 
-                with ui.row().classes("items-end gap-2"):
-                    token_in = ui.input("Hugging Face token", password=True, password_toggle_button=True
-                                        ).props("dense").classes("w-80")
-                    token_save = ui.button("save").props("dense outline")
-                    token_forget = ui.button("forget").props("dense flat")
-                token_lbl = ui.label(token_state()).classes("text-xs opacity-70 max-w-2xl whitespace-normal")
+                    with ui.row().classes("items-end gap-2"):
+                        token_in = ui.input("Hugging Face token", password=True, password_toggle_button=True
+                                            ).props("dense").classes("w-80")
+                        token_save = ui.button("save").props("dense outline")
+                        token_forget = ui.button("forget").props("dense flat")
+                    token_lbl = ui.label(token_state()).classes("text-xs opacity-70 max-w-2xl whitespace-normal")
 
-                async def save_hf_token():
-                    token = (token_in.value or "").strip()
-                    if not token:
-                        safe_notify("paste a token first", type="warning")
-                        return
-                    try:
-                        who = await asyncio.to_thread(token_owner, token)
-                    except ValueError as e:
-                        safe_notify(f"not saved: {e}", type="negative")
-                        return
-                    save_token(token)
-                    token_in.value = ""
-                    token_lbl.set_text(token_state() + (f" — signed in as {who}" if who else
-                                                        " — not checked: Hugging Face did not answer"))
-                    safe_notify("token saved", type="positive")
+                    async def save_hf_token():
+                        token = (token_in.value or "").strip()
+                        if not token:
+                            safe_notify("paste a token first", type="warning")
+                            return
+                        try:
+                            who = await asyncio.to_thread(token_owner, token)
+                        except ValueError as e:
+                            safe_notify(f"not saved: {e}", type="negative")
+                            return
+                        save_token(token)
+                        token_in.value = ""
+                        token_lbl.set_text(token_state() + (f" — signed in as {who}" if who else
+                                                            " — not checked: Hugging Face did not answer"))
+                        safe_notify("token saved", type="positive")
 
-                def forget_hf_token():
-                    save_token("")
-                    token_lbl.set_text(token_state())
-                    safe_notify("token removed", type="info")
-                token_save.on_click(save_hf_token)
-                token_forget.on_click(forget_hf_token)
+                    def forget_hf_token():
+                        save_token("")
+                        token_lbl.set_text(token_state())
+                        safe_notify("token removed", type="info")
+                    token_save.on_click(save_hf_token)
+                    token_forget.on_click(forget_hf_token)
 
-                def _free_bytes():
-                    d = MODELS_DIR
-                    while not d.exists() and d != d.parent:
-                        d = d.parent
-                    return shutil.disk_usage(d).free
+                    def _free_bytes():
+                        d = MODELS_DIR
+                        while not d.exists() and d != d.parent:
+                            d = d.parent
+                        return shutil.disk_usage(d).free
 
-                @ui.refreshable
-                def models_table():
-                    if DOWNLOADS.known is None:
-                        ui.label("reading the list of models…").classes("text-xs opacity-70")
-                        return
-                    ui.label(f"{_free_bytes() / 1e9:.0f} GB free on this disk").classes("text-xs opacity-70")
-                    with ui.grid(columns="auto auto auto").classes("items-center gap-x-6 gap-y-1"):
-                        for m in DOWNLOADS.catalogue():
-                            ui.label(m["name"]).classes("font-mono text-sm")
-                            ui.label(m["size"]).classes("text-sm")
-                            if m["here"]:
-                                ui.label("here").classes("text-sm text-green-700")
-                            elif DOWNLOADS.running() and DOWNLOADS.name == m["name"]:
-                                ui.label("downloading…").classes("text-sm")
-                            else:
-                                ui.button("download", on_click=lambda _, n=m["name"]: start_download(n)
-                                          ).props("dense outline")
-                models_table()
+                    @ui.refreshable
+                    def models_table():
+                        if DOWNLOADS.known is None:
+                            ui.label("reading the list of models…").classes("text-xs opacity-70")
+                            return
+                        ui.label(f"{_free_bytes() / 1e9:.0f} GB free on this disk").classes("text-xs opacity-70")
+                        with ui.grid(columns="auto auto auto").classes("items-center gap-x-6 gap-y-1"):
+                            for m in DOWNLOADS.catalogue():
+                                ui.label(m["name"]).classes("font-mono text-sm")
+                                ui.label(m["size"]).classes("text-sm")
+                                if m["here"]:
+                                    ui.label("here").classes("text-sm text-green-700")
+                                elif DOWNLOADS.running() and DOWNLOADS.name == m["name"]:
+                                    ui.label("downloading…").classes("text-sm")
+                                else:
+                                    ui.button("download", on_click=lambda _, n=m["name"]: start_download(n)
+                                              ).props("dense outline")
+                    models_table()
 
-                async def read_catalogue():
-                    try:
-                        await asyncio.to_thread(DOWNLOADS.catalogue)
-                    except Exception as e:
-                        safe_notify(f"the list of models could not be read: {e}", type="negative")
-                    models_table.refresh()
-                if DOWNLOADS.known is None:
-                    asyncio.create_task(read_catalogue())
-
-                async def start_download(name):
-                    try:
-                        await asyncio.to_thread(DOWNLOADS.start, name)
-                        safe_notify(f"downloading {name}", type="info")
-                    except Exception as e:
-                        safe_notify(f"not downloaded: {e}", type="negative")
-                    models_table.refresh()
-
-                with ui.row().classes("items-center gap-3 w-full") as dl_row:
-                    dl_bar = ui.linear_progress(value=0, show_value=False).classes("w-80")
-                    dl_label = ui.label("").classes("text-xs font-mono")
-                    dl_stop = ui.button("stop the download", on_click=lambda: asyncio.to_thread(DOWNLOADS.cancel)
-                                        ).props("dense flat color=negative")
-                dl_row.set_visibility(False)
-                dl_seen = {"running": DOWNLOADS.running()}
-
-                def refresh_model_select():
-                    opts = list_models()
-                    keep = (model_select.value if model_select.value in opts
-                            else DOWNLOADS.name if DOWNLOADS.name in opts else (opts[0] if opts else None))
-                    model_select.set_options(opts, value=keep)
-
-                def pump_download():
-                    running = DOWNLOADS.running()
-                    if DOWNLOADS.name and (running or DOWNLOADS.message):
-                        have, total = DOWNLOADS.progress()
-                        dl_row.set_visibility(True)
-                        dl_bar.set_value(min(1.0, have / total) if total else 0)
-                        dl_label.set_text(f"{DOWNLOADS.name}: {have / 1e9:.1f} of {total / 1e9:.1f} GB"
-                                          + ("" if running else f" — {DOWNLOADS.message}"))
-                        dl_stop.set_visibility(running)
-                    if running != dl_seen["running"]:
-                        dl_seen["running"] = running
+                    async def read_catalogue():
+                        try:
+                            await asyncio.to_thread(DOWNLOADS.catalogue)
+                        except Exception as e:
+                            safe_notify(f"the list of models could not be read: {e}", type="negative")
                         models_table.refresh()
-                        if not running:
-                            refresh_model_select()
-                ui.timer(1.0, pump_download)
+                    if DOWNLOADS.known is None:
+                        asyncio.create_task(read_catalogue())
 
-                ui.label(f"Models dir: {MODELS_DIR}").classes("text-xs opacity-70 mt-2")
+                    async def start_download(name):
+                        try:
+                            await asyncio.to_thread(DOWNLOADS.start, name)
+                            safe_notify(f"downloading {name}", type="info")
+                        except Exception as e:
+                            safe_notify(f"not downloaded: {e}", type="negative")
+                        models_table.refresh()
+
+                    with ui.row().classes("items-center gap-3 w-full") as dl_row:
+                        dl_bar = ui.linear_progress(value=0, show_value=False).classes("w-80")
+                        dl_label = ui.label("").classes("text-xs font-mono")
+                        dl_stop = ui.button("stop the download", on_click=lambda: asyncio.to_thread(DOWNLOADS.cancel)
+                                            ).props("dense flat color=negative")
+                    dl_row.set_visibility(False)
+                    dl_seen = {"running": DOWNLOADS.running()}
+
+                    def refresh_model_select():
+                        opts = list_models()
+                        keep = (model_select.value if model_select.value in opts
+                                else DOWNLOADS.name if DOWNLOADS.name in opts else (opts[0] if opts else None))
+                        model_select.set_options(opts, value=keep)
+
+                    def pump_download():
+                        running = DOWNLOADS.running()
+                        if DOWNLOADS.name and (running or DOWNLOADS.message):
+                            have, total = DOWNLOADS.progress()
+                            dl_row.set_visibility(True)
+                            dl_bar.set_value(min(1.0, have / total) if total else 0)
+                            dl_label.set_text(f"{DOWNLOADS.name}: {have / 1e9:.1f} of {total / 1e9:.1f} GB"
+                                              + ("" if running else f" — {DOWNLOADS.message}"))
+                            dl_stop.set_visibility(running)
+                        if running != dl_seen["running"]:
+                            dl_seen["running"] = running
+                            models_table.refresh()
+                            if not running:
+                                refresh_model_select()
+                    ui.timer(1.0, pump_download)
+
+                    ui.label(f"Models dir: {MODELS_DIR}").classes("text-xs opacity-70 mt-2")
 
                 def _config_desc(model, name):
                     # Surface the config's "_comment" so users see what each setup does (VRAM,
@@ -1583,15 +1530,39 @@ async def page():
                              else ((_init_model and model_default_config(_init_model))
                                    or (_init_cfgs[0] if _init_cfgs else None)))
                 state["selected_config"] = _init_cfg or ""
-                config_select = ui.select(
-                    _init_cfgs, value=_init_cfg, label="Config",
-                ).classes("w-80")
-                config_desc_label = ui.label(_config_desc(_init_model, _init_cfg)).classes(
-                    "text-xs opacity-70 max-w-2xl whitespace-normal")
+                # ⭐ A CONFIG IS AN OVERRIDE: the boot chooses every setting a config leaves out for this machine, so the
+                #   downloaded default.json — every setting "auto" — is the one to run; this section, collapsed, is
+                #   for naming one
+                cfg_box = ui.expansion("Config: %s" % (_init_cfg or "none"), icon="tune", value=False).classes("w-full")
+                with cfg_box:
+                    ui.label("Every setting a config leaves out is chosen for this machine at each boot: a config names "
+                             "only what it overrides.").classes("text-xs opacity-70 max-w-2xl whitespace-normal")
+                    config_select = ui.select(
+                        _init_cfgs, value=_init_cfg, label="Config",
+                    ).classes("w-80")
+                    config_desc_label = ui.label(_config_desc(_init_model, _init_cfg)).classes(
+                        "text-xs opacity-70 max-w-2xl whitespace-normal")
+                    with ui.row().classes("gap-2 items-end"):
+                        ui.button("edit selected",
+                                  on_click=lambda: open_config_editor(config_select.value)
+                                  ).props("dense outline")
+                        ui.button("new config",
+                                  on_click=lambda: open_config_editor(None)
+                                  ).props("dense outline")
+                        ui.button("autotune", icon="tune",
+                                  on_click=lambda: forget_autotune()
+                                  ).props("dense outline").tooltip("Test the setups again at the next start")
+                        ui.button("delete selected",
+                                  on_click=lambda: delete_config(config_select.value)
+                                  ).props("dense outline color=negative")
+                        ui.button("config guide", icon="help_outline",
+                                  on_click=lambda: open_config_guide()
+                                  ).props("dense flat").tooltip("What every key and every model's option does")
 
                 def _on_config_change(e):
                     state["selected_config"] = e.value
                     config_desc_label.set_text(_config_desc(state["selected_model"], e.value))
+                    cfg_box.set_text("Config: %s" % (e.value or "none"))
                 config_select.on_value_change(_on_config_change)
 
                 def _on_model_change(e):
@@ -1603,19 +1574,11 @@ async def page():
                     config_select.set_options(cfgs, value=new_cfg)
                     state["selected_config"] = new_cfg or ""
                     config_desc_label.set_text(_config_desc(model, new_cfg))
+                    cfg_box.set_text("Config: %s" % (new_cfg or "none"))
                 model_select.on_value_change(_on_model_change)
                 with ui.row().classes("gap-2 items-end"):
                     port_in = ui.number(label="Port", value=state["server_port"],
                                         min=1, max=65535).classes("w-32")
-                    ui.button("edit selected",
-                              on_click=lambda: open_config_editor(config_select.value)
-                              ).props("dense outline")
-                    ui.button("new config",
-                              on_click=lambda: open_config_editor(None)
-                              ).props("dense outline")
-                    ui.button("delete selected",
-                              on_click=lambda: delete_config(config_select.value)
-                              ).props("dense outline color=negative")
                 status_lbl = ui.label("status: ...").classes("font-mono text-sm")
                 # what the server chose for this machine, or why it did not start — said here, not only in the log
                 setup_lbl = ui.label("").classes("text-sm whitespace-pre-wrap")
@@ -1629,6 +1592,21 @@ async def page():
                 log_pane = ui.log(max_lines=500).classes(
                     "w-full h-48 bg-slate-100 text-slate-800 font-mono text-xs p-2 border rounded"
                 )
+
+        # ⭐ THE SERVER THE UI TALKS TO: this machine's, at the port above, or another's at an address — a server
+        #   elsewhere is started and stopped on its own machine
+        ui.separator().classes("mt-4")
+        with ui.row().classes("items-center gap-4"):
+            ui.label("Send conversations to:").classes("font-bold")
+            server_sel = ui.toggle({"local": "this machine", "remote": "remote"}, value=state["server_mode"])
+        with ui.row().classes("items-end gap-2") as remote_row:
+            endpoint_in = ui.input(label="Address", value=state["endpoint"]).props("dense outlined").classes("w-96")
+            connect_btn = ui.button("connect").props("dense outline color=primary")
+        remote_row.bind_visibility_from(server_sel, "value", lambda v: v == "remote")
+        if not LOCAL_AVAILABLE:                           # no server beside this UI to start: another's only
+            server_sel.set_value("remote")
+            server_sel.disable()
+        server_sel.on_value_change(lambda e: asyncio.create_task(on_server_mode(e.value)))
 
     # --- Help view: a document picker over the release's documents, the UI's guide first ---
     help_view = ui.column().classes("silvann-main w-full p-6 overflow-auto")
@@ -1644,6 +1622,13 @@ async def page():
                 help_doc_md.set_content(help_doc(path))
 
             help_doc_select.on_value_change(lambda e: show_help(help_paths[e.value]))
+
+            def open_config_guide():
+                """Help, at the guide to a config's keys and every model's options."""
+                help_doc_select.set_value(CONFIG_GUIDE_DOC)
+                show_help(help_paths[CONFIG_GUIDE_DOC])
+                state["view"] = "help"
+                update_view()
 
             def on_help_link(e):
                 """A link between the documents: the one it names, in the picker where it is listed."""
@@ -1784,6 +1769,13 @@ async def page():
         await render_convs()
 
     connect_btn.on("click", connect_clicked)
+
+    async def on_server_mode(mode):
+        """The server chosen at the bottom of Options: this machine's, at its port, or the address given."""
+        state["server_mode"] = mode
+        if mode == "local":
+            endpoint_in.value = f"http://localhost:{int(state['server_port'])}"
+        await connect_clicked()
 
     # ----- Chat helpers -----
     def show_context(used=None, context=None):
@@ -2739,6 +2731,7 @@ async def page():
                 new_ep = f"http://localhost:{int(port_in.value)}"
                 state["endpoint"] = new_ep
                 endpoint_in.value = new_ep
+                server_sel.set_value("local")
                 client.set_endpoint(new_ep)
                 safe_notify(f"started: {model_select.value} / {config_select.value} "
                             f"on port {int(port_in.value)}", type="positive")
@@ -2762,6 +2755,9 @@ async def page():
         def pump_log():
             snap = SERVER.snapshot()
             cur = state["log_cursor"]
+            if SERVER.rewrites != state.get("log_rewrites"):   # a line replaced in place: the pane again, whole
+                state["log_rewrites"] = SERVER.rewrites
+                cur = len(snap) + 1
             if cur > len(snap):
                 log_pane.clear()
                 cur = 0
@@ -2812,8 +2808,43 @@ async def page():
                 ui.navigate.reload()
 
             with ui.row().classes("justify-end w-full mt-2 gap-2"):
+                ui.button("config guide", icon="help_outline",
+                          on_click=lambda: (dlg.close(), open_config_guide())).props("flat")
                 ui.button("cancel", on_click=dlg.close).props("flat")
                 ui.button("save", on_click=save).props("color=primary")
+        dlg.open()
+
+    def forget_autotune():
+        """The setup the boot chose for the selected model on this machine forgotten (its `autotune.json`): the next start
+        tests the setups again, and what the config leaves on auto is chosen afresh. The configs are not touched."""
+        model = state.get("selected_model") or ""
+        if not model:
+            safe_notify("Pick a model first", type="warning")
+            return
+        target = MODELS_DIR / model / "autotune.json"
+        if not target.exists():
+            safe_notify("Nothing to forget: the next start tests the setups anyway", type="info")
+            return
+        with page_client, ui.dialog() as dlg, ui.card().classes("gap-2"):
+            ui.label("Autotune again?").classes("font-bold")
+            ui.label("Forgets the setup chosen for this machine — where the experts sit, the tier on the card, the "
+                     "context. The next start tests the setups again (a minute or so) and chooses afresh. The configs "
+                     "are not changed." + (" A server running now keeps its setup until it is started again."
+                                           if SERVER.is_running() else "")).classes("text-xs opacity-70 max-w-md")
+
+            def do_forget():
+                try:
+                    target.unlink()
+                except Exception as e:
+                    safe_notify(f"could not forget it: {e}", type="negative")
+                    dlg.close()
+                    return
+                safe_notify("forgotten: the next start tests the setups again", type="positive")
+                dlg.close()
+
+            with ui.row().classes("justify-end w-full gap-2"):
+                ui.button("cancel", on_click=dlg.close).props("flat")
+                ui.button("autotune again", on_click=do_forget).props("color=primary")
         dlg.open()
 
     def delete_config(filename: Optional[str]):
@@ -2910,6 +2941,9 @@ def main():
     p.add_argument("--endpoint", default=None,
                    help="default SiLVANN server endpoint (override on first launch)")
     p.add_argument("--no-browser", action="store_true", help="don't auto-open the browser")
+    # ⛳ off by default: a reload restarts this process, and a server it started goes with it — a boot of minutes lost to
+    #   a file saved beside the UI
+    p.add_argument("--reload", action="store_true", help="restart the UI when its files change (development)")
     p.add_argument("--local", action="store_true",
                    help="the UI as the app over this machine's models: the local panel first, "
                         "the model started last started again, and the server stopped with the UI")
@@ -2923,7 +2957,7 @@ def main():
         app.on_shutdown(_stop_all)
 
     ui.run(port=args.port, title="SiLVANN", show=not args.no_browser, storage_secret="silvann-ui",
-           reload=not args.local, **({"host": args.host} if args.host else {}))
+           reload=args.reload and not args.local, **({"host": args.host} if args.host else {}))
 
 
 if __name__ in {"__main__", "__mp_main__"}:

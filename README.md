@@ -1,6 +1,6 @@
 # SiLVANN
 
-> **Developer preview, v0.16.0.** It runs the models below well on the hardware it was tested on, and it is shared
+> **Developer preview, v0.17.0.** It runs the models below well on the hardware it was tested on, and it is shared
 > for people who can find their way around a build and a stack trace. NVIDIA cards are tested on two, a GeForce
 > RTX 5060 Ti and an RTX 5070 Ti; Windows natively on one PC; macOS is not supported.
 
@@ -67,43 +67,40 @@ v0.11.1, the RTX 5070 Ti's with v0.11.0. v0.11.0's server drew each token with n
 card, through OpenCL and on the CPU alone: the 35B answered in the chat at 32-35 tokens a second on the RTX 5060 Ti,
 and answers at 67 now ([`docs/results.md`](docs/results.md)).
 
-**New in v0.16.0:** DeepSeek-V4.1-Flash runs, GLM 5.3 Flash's exclusive tier runs over several cards and repeats from boot, and a model's
-experts can be locked in RAM.
+**New in v0.17.0:** DeepSeek-V4.1-Flash reads pictures and holds its whole context, a config names how many cards a
+model is split over, and a card's tier of experts takes its landings from the machine's own speeds.
 
-**DeepSeek-V4.1-Flash.** DeepSeek's 384-expert model, its `D8E4` pack 491 GB — 203 GB of it the n-gram memory's tables,
-read from the disk a row at a time ([`docs/models.md`](docs/models.md#deepseek-v41-flash)). Its experts run on the CPU,
-as many layers in RAM as fit and the rest read from files written beside the pack; it reads a prompt as rows, puts a
-conversation away and brings it back exactly, and calls the tool in its own format. Checked against DeepSeek's own code,
-layer by layer over 1,300 positions. It reads text, up to 16,384 positions in this release: past them its candidate
-blocks take over, and they are not here yet. Its rates come with v0.16.1.
+**DeepSeek-V4.1-Flash reads pictures.** Its vision tower, 32 blocks and the aligner in the pack's new `vision.pkl`
+(464 MB), runs on the card in about 620 MB of it, and a picture is prepared as DeepSeek's own processor prepares it, at
+most 1,024 tokens: 0.37 s for 448 x 448 and 3.6 s for 2048 x 1536 on an MI50. Checked against DeepSeek's own code: the
+tower's output is nearer the release's float32 than the release's own bfloat16, and a question about a picture gets the
+release's next token. Pictures, not videos. A pack downloaded before this release fetches `vision.pkl` alone with one
+command ([`docs/models.md`](docs/models.md#deepseek-v41-flash)); without it the model reads text and refuses a picture.
 
-**GLM over several cards.** A mask runs over the group, each card with its share; the tier is lent the cache's rows a
-conversation has not reached; a prompt is read as rows. `card_shared` `"auto"`, the default, times a CPU's expert against
-a card's at boot and keeps a shared slice only where the CPU is less than four times slower — on two Xeon E5-2680 v4
-beside MI50s it is 12–15 times, so none. With `card_exclusive: true` every expert is on one card or in RAM, each card
-swapping its own: the group gives back every card's tier of RAM
-([`docs/config.md`](docs/config.md#tensor-parallelism)).
+**DeepSeek's whole context.** A conversation reaches the model's own length, 1,048,576 positions: past 16,384, layer 20's
+candidate blocks choose where the later layers look, as DeepSeek's code does, and a 17,283-position prompt answers as the
+release does. `max_context` `"auto"` sizes it to that length — the cache about 5.5 GB on the card, 90 MB at 16,384.
 
-**GLM's exclusive tier repeats from boot.** An exclusive tier's swaps now take effect at a set point rather than when
-their copies land, so GLM's answer with one is the same from boot to boot, and it decodes faster: on an MI50, 8.2–8.3
-tokens a second against 6.7–7.6 before.
+**`num_cards`.** How many cards a model is split over is now a key of the config, beside `options` — `1` until you say
+more, the one placement the boot does not choose — for the Qwen models, GLM and DeepSeek. A config written before it
+still reads its `tensor_parallel` ([`docs/config.md`](docs/config.md#tensor-parallelism)).
 
-**Experts locked in RAM.** `experts_lock: true` keeps the experts copied into RAM from being swapped out (Linux's
-`mlock`) — the Qwen MoE models, GLM and DeepSeek — and the boot says how to raise the limit when it refuses. With swap on,
-set `vm.swappiness` to 1 ([`docs/users.md`](docs/users.md#the-experts-in-ram-and-swap)).
+**`card_landing` `"auto"`.** For the Qwen MoE models, GLM and DeepSeek, the most experts a layer copies onto the card while
+the CPU computes is taken at boot from the machine's own speeds — one CPU expert's time against one expert's copy,
+rounded, at least 1. Checked on GLM over four MI50s: the answers one card's, the busiest card's picks within 10% of a
+replay of real conversations.
 
-**Faster on the MI50.** Attention at heads of 512, the hyper-connections' first step and the indexer's choice have AMD
-kernels of their own: GLM 5.3 Flash decodes at 7.00 tokens a second at 3,036 positions, from 6.11.
+**A config is an override.** Configs now carry settings only: every setting a config leaves out is chosen for the machine
+at each boot, so the downloaded `default.json` is the one to run. [`docs/config.md`](docs/config.md) explains every key
+and every model's option, the measuring ones too, and how many positions 100 MB of the card holds for each model.
 
-**OpenCL.** An OpenCL 1.2 card with memory of its own — a discrete card, not an integrated GPU — is sized as a card when
-the server starts: the tier of experts and the context are chosen by trying them on it. On Windows, `install.ps1` now
-builds both OpenCL families every time and sends an NVIDIA card older than compute 7.5 to OpenCL 1.2, as `install.sh`
-does — checked against mocked cards, not yet on a Windows PC.
+**The UI.** A **config guide** button beside the configs and in the editor opens that page; **autotune** forgets the setup
+chosen for this machine so the next start tests the setups again; **Download models** and **Config** fold away; **Send
+conversations to**, at the bottom of Options, chooses this machine's server or a remote one. A model's load shows its
+progress as one growing line, and the boot says how many setups it tested.
 
-**The chat.** A dark mode, kept for the browser; a copy button on every block of code; and a long line in the thinking or
-in a tool's section wraps.
-
-**Docker.** No image is published: `docker/` builds one of your own.
+**GLM over several cards.** A conversation put away is kept as its tokens and read again when it comes back, so an old
+conversation and the memory estimate no longer fail; `/health` counts the group's cards.
 
 Every release before this one, and this one's notes again: [`release_logs/v0.md`](release_logs/v0.md).
 
@@ -115,7 +112,7 @@ Every release before this one, and this one's notes again: [`release_logs/v0.md`
 | **Untested** | on Windows: the prebuilt libraries on a PC (GitHub's runners, which build them, have no card), the CPU alone, a model's experts on the CPU or read from the disk, AMD's and Intel's GPUs through OpenCL; Linux booted from a USB SSD; tensor parallelism on NVIDIA cards; other NVIDIA generations (the CUDA family is built for sm_75 to sm_120: Turing to Blackwell; an older card — Kepler, Maxwell, Pascal, Volta — goes to OpenCL 1.2, the GTX 1080 first); GLM 5.3 Flash on an NVIDIA card; other AMD generations; OpenCL on other devices, the integrated GPUs `khronos_opencl1_igpu` is for among them (on one, the model's memory is read where it is, not copied to the GPU: checked only through PoCL, a CPU's OpenCL) — which card goes to OpenCL 1.2 and which to 2 is a best guess from the vendors' published versions (OpenCL 1.2: every NVIDIA card CUDA does not take, Intel's iGPUs before Gen9, AMD's TeraScale and GCN 1; OpenCL 2: the rest), and a card on the wrong one is an issue to open, with its `clinfo`; AVX-512 on processors other than Skylake (AMD's Zen 4 and 5, later Xeons) |
 | **Not supported** | macOS |
 
-Pictures and videos are read by the Qwen models and GLM 5.3 Flash (v0.7.0: [`release_logs/v0.md`](release_logs/v0.md#v070)); Ministral 3 and DeepSeek-V4.1-Flash do not read them.
+Pictures and videos are read by the Qwen models and GLM 5.3 Flash (v0.7.0: [`release_logs/v0.md`](release_logs/v0.md#v070)), pictures by DeepSeek-V4.1-Flash (v0.17.0: [`docs/users.md`](docs/users.md#3-serve-it-and-chat)); Ministral 3 reads neither.
 Every model calls the tool, a Lisp REPL on the machine, in its own trained format (v0.9.0: [`docs/users.md`](docs/users.md#the-models-tool)).
 Pictures are made from a prompt by Qwen-Image 2.1, a server's model of its own (v0.10.0: [`docs/users.md`](docs/users.md#a-picture-model-qwen-image-21)).
 A model's tool draws with the picture model, opens subagents and keeps skills of its own; a dense Qwen model's layers split over AMD cards (v0.11.0: [`docs/tools.md`](docs/tools.md), [`docs/config.md`](docs/config.md)).

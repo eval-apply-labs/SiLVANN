@@ -94,12 +94,27 @@
 #define AI_DEEPSEEK_4__IDX__DIM       68u
 #define AI_DEEPSEEK_4__IDX__D         69u     /* wq_b, weights, wk */
 #define AI_DEEPSEEK_4__IDX__TABLE     72u
+/* ⭐ optional, THE CANDIDATE BLOCKS — DeepSeek-V4.1's two-level top k — five cells past the indexer's: the CANDIDATE SOURCE
+ *   (an index source) scores every latent and, besides its own top `topk`, keeps the best `blocks` blocks of `block`
+ *   latents by their best score — the newest block, the one filling, always among them — writing their latents in order
+ *   into SELECT; an index source after it scores only those, before its own top `topk`. Up to `blocks · block` latents
+ *   every block is kept and neither step runs. Its index source after it reads at the same ratio. A chunk's rows keep a
+ *   list each, `4 · (blocks · block + 1)` bytes a row.
+ *   SELECT   the candidates: up to blocks · block latents, then their count
+ *   SCRATCH  the source's: a float a block; an index source's after it: the candidates' scores, then its choice among them
+ *   ROLE     1 the candidate source, 2 an index source after it, 0 neither */
+#define AI_DEEPSEEK_4__CAND__SELECT   72u
+#define AI_DEEPSEEK_4__CAND__SCRATCH  73u
+#define AI_DEEPSEEK_4__CAND__ROLE     74u
+#define AI_DEEPSEEK_4__CAND__BLOCKS   75u
+#define AI_DEEPSEEK_4__CAND__BLOCK    76u
+#define AI_DEEPSEEK_4__CAND__TABLE    77u
 
 /* ⭐ A MASK, `W' = W + Σ_i r_i·v_iᵀ` beside a matrix that writes into the streams (▶ nn's rank-1 doors) — three cells past
  *   a site's table: `r` (`rank` rows of `hidden` halves), `v` (`rank` rows of the matrix's input, rotated as that input is,
  *   this card's columns of it) and a scratch of `rank` floats; an integer 0 in the first, or no cells, where the site has
- *   none. The rank is `v`'s rows. The attention's mask follows the table's last part: at ATT__TABLE, CMP__TABLE or
- *   IDX__TABLE, whichever the table carries (▶ `ai_deepseek_4__attention__zzprivate_mask_first`); it is on wo_b's answer.
+ *   none. The rank is `v`'s rows. The attention's mask follows the table's last part: at ATT__TABLE, CMP__TABLE, IDX__TABLE
+ *   or CAND__TABLE, whichever the table carries (▶ `ai_deepseek_4__attention__zzprivate_mask_first`); it is on wo_b's answer.
  *   The MoE site's is on the shared expert's down. */
 #define AI_DEEPSEEK_4__MASK__RANK_MAX 8u
 

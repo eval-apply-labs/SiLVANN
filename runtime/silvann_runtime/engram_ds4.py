@@ -124,7 +124,11 @@ class Engram:
     def ids(self, tokens, pos):
         """Position `pos`'s row ids in each engram layer, `[layer][cols]`: the n-grams ending there, over `tokens` (the
         conversation's ids from position 0), padded before the first."""
-        back = [int(self.map[tokens[pos - s]]) if pos - s >= 0 else self.pad for s in range(self.N)]
+        back, dead = [], False
+        for s in range(self.N):
+            # a picture's position (-1) takes no part in an n-gram: the look back stops at it, as at the first position
+            dead = dead or pos - s < 0 or tokens[pos - s] < 0
+            back.append(self.pad if dead else int(self.map[tokens[pos - s]]))
         out = np.empty((len(self.layers), self.cols), dtype=np.int64)
         for i in range(len(self.layers)):
             products = np.array(back, dtype=np.int64) * self.mult[i]
@@ -141,9 +145,12 @@ class Engram:
         pos = np.arange(first, first + n, dtype=np.int64)
         tok = np.asarray(tokens[:first + n], dtype=np.int64)
         back = np.empty((n, self.N), dtype=np.int64)
+        dead = np.zeros(n, dtype=bool)
         for s in range(self.N):
             p = pos - s
-            back[:, s] = np.where(p >= 0, self.map[tok[np.maximum(p, 0)]], self.pad)
+            got = tok[np.maximum(p, 0)]
+            dead |= (p < 0) | (got < 0)
+            back[:, s] = np.where(dead, self.pad, self.map[np.maximum(got, 0)])
         out = np.empty((len(self.layers), n, self.cols), dtype=np.int64)
         for i in range(len(self.layers)):
             products = back * self.mult[i]

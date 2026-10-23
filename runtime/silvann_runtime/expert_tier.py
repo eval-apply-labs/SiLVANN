@@ -42,12 +42,10 @@ def calibrate(m, card, cpu, copy_to, slot_bytes, hands_at, hand_bytes, weights_a
     measurements/2026-10-07_S115_glm_on_its_lisp.md). `fixed` binds a number instead."""
     line, measured = fixed, {}
     if line is None:
-        blank = np.zeros(slot_bytes, np.uint8)
         pool = list(range(experts)) if pool is None else list(pool)
         taken, x0 = [], 0
         for _ in range(readings):
-            m.act_as(card)
-            copy = min(_timed(lambda: m.write_from(copy_to, blank.ctypes.data, slot_bytes)) for _ in range(3))
+            copy = copy_seconds(m, card, copy_to, slot_bytes)
             costs = {}
             m.act_as(cpu)
             for rows in (1, 64):
@@ -130,6 +128,27 @@ CROSSOVER = 4.0
 def slice_of(cpu_s, card_s):
     """The share of a card's slots every card keeps, from a CPU pick's and a card expert's seconds."""
     return SHARED if card_s > 0 and cpu_s / card_s < CROSSOVER else 0.0
+
+
+# ⭐ A VISIT'S LANDINGS FROM THE MACHINE'S OWN SPEEDS (NN-99) — ⚖ 2026-10-22 *"we can try landing 2 as an autotuned option
+#   compared against the length of computing a cpu expert vs uploading it to vram, and see how many fit. we round to the
+#   closest and set it at 1 if the result is 0"*: a promotion is copied while the CPUs compute the visit's picks the cards
+#   do not hold, so as many fit as one expert's copy goes into a CPU expert's time. ⚖ *"reuse calibrate's copy time"*:
+#   the copy is `calibrate`'s median reading where it measured one, `copy_seconds` where it did not.
+def landing_of(cpu_s, copy_s):
+    """A visit's promotions at most, from a CPU pick's seconds and one expert's copy to the card's: the nearest whole
+    number, at least 1."""
+    return max(1, int(round(cpu_s / copy_s))) if copy_s > 0 else 1
+
+
+def copy_seconds(m, card, at, nbytes, readings=3):
+    """One expert's copy to `card`, the best of `readings`: the `nbytes` of the card's memory at `at` read back once,
+    then written back where they were from a host buffer — the card's bytes the same before and after, so `at` may be any
+    span the card holds (a scratch, the head's codes). ⛳ A CARD AT REST: a promotion's write shares the bus with what the
+    card computes meanwhile, so this is its fastest."""
+    m.act_as(card)
+    held = np.frombuffer(m.read(at, nbytes), dtype=np.uint8).copy()
+    return min(_timed(lambda: m.write_from(at, held.ctypes.data, nbytes)) for _ in range(readings))
 
 
 def speeds(m, card, cpu, picks, ids, cpu_text, card_scale, card_text="(head)", readings=3):

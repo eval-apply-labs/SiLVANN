@@ -12,8 +12,7 @@ another one; it can also start and stop a server on this machine (**Options**).
 - **Dark mode** / **Light mode**: the page's colours. The choice is kept for this browser.
 
 The dot next to "SiLVANN" is the server's state: **gray** not asked yet, **green** answering, **red** unreachable. Its
-tooltip names the model. **Endpoint**, at the bottom, is the server the UI talks to: `http://localhost:8765` when both
-run here. **connect** asks it again.
+tooltip names the model. Which server the UI talks to is chosen at the bottom of **Options** ([below](#options-a-server-on-this-machine)).
 
 ## Conversations
 
@@ -83,25 +82,31 @@ Its chat has no thinking and no tool switches, and no context meter.
 
 ## Options: a server on this machine
 
-**Mode**:
-- **Remote** talks to a server started elsewhere: set its address in the Endpoint field.
-- **Local** starts one on this machine: the rest of this section.
+**Send conversations to**, at the bottom, is the server the UI talks to:
+- **this machine**: the one started here, at its **Port** (`http://localhost:8765` by default);
+- **remote**: a server started on another machine — its **Address** appears, and **connect** asks it. That server is
+  started and stopped on its own machine.
 
-**Models** lists the models this release can fetch, their sizes and which are here.
+**Download models** lists the models this release can fetch, their sizes and which are here.
 - **download** fetches one from Hugging Face into the data folder's `models/`, with its progress. One downloads at a
   time. A download is refused when the disk has less room than the model needs; stopped and started again, it keeps the
   files it finished.
 - A **Hugging Face token** (read access, from huggingface.co/settings/tokens) makes the downloads faster. **save**
   checks it with Hugging Face and keeps it for every download after; **forget** removes it.
 
-Pick a **model** and one of its **configs**, a **Port**, and **start**. The UI runs the server, points the Endpoint at
+Pick a **model** and one of its **configs**, a **Port**, and **start**. The UI runs the server, connects to
 it, and shows its output in the **Subprocess log**. Under **status** the server says what it chose for this machine:
 where the experts are, the tier on the card, the context. A server that cannot start says why there, and what to change.
 **stop** saves the conversations and stops it.
 
+**Download models** (collapsed once a model is here) fetches them. **Config** (collapsed) names the config to run: every setting
+a config leaves out is chosen for the machine at each boot, so the downloaded `default.json` is the one to run, and a
+config of your own is for holding a setting where you want it.
+
 A config is a file in the model's `configs/`. **new config** writes one with every key the server reads at its default,
-and the model's own options listed under `_options`. **edit selected** opens one as JSON, and **delete selected**
-removes it (not the model). [`config.md`](config.md) says what each key does. For example:
+**edit selected** opens one as JSON, **autotune** forgets the setup chosen for this machine so the next start tests the
+setups again (the configs are not changed), and **delete selected** removes one (not the model). **config guide** — beside them,
+and in the editor — opens [`config.md`](config.md), which says what every key and every model's option does. For example:
 
 ```json
 { "max_context": "auto", "thinking": true, "tools": "chill", "lora": null, "sampler": "generation", "options": { } }

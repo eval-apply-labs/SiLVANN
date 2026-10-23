@@ -3394,6 +3394,18 @@ static __device__ inline void nn__index__zzabi_body_select(uint32_t* index, uint
     count[0] = (uint32_t)n;
 }
 
+/* Each block of `block` scores' largest into `out` — `pools` scores, the last block what is left of them: the first level of
+ * a two-level top k scores a block by its best position (DeepSeek's candidate blocks). */
+static __device__ inline void nn__index__zzabi_body_blocks(float* out, const float* scores, uint64_t pools, uint64_t block) {
+    const uint64_t blocks = (pools + block - 1ull) / block;
+    for (uint64_t b = nn__kernels__zzprivate_first(); b < blocks; b += nn__kernels__zzprivate_stride()) {
+        const uint64_t end = (b + 1ull) * block < pools ? (b + 1ull) * block : pools;
+        float best = scores[b * block];
+        for (uint64_t p = b * block + 1ull; p < end; ++p) best = scores[p] > best ? scores[p] : best;
+        out[b] = best;
+    }
+}
+
 /* Rows `index[0 .. n)` of `src`, `row` halves each, into `out` one after another. */
 static __device__ inline void nn__index__zzabi_body_gather(uint16_t* out, const uint16_t* src, const uint32_t* index, uint64_t n,
                                                            uint64_t row) {

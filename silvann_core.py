@@ -32,64 +32,27 @@ from silvann_runtime.model_folder import Refused                   # noqa: E402
 DATA = Path(os.environ.get("SILVANN_DATA") or ROOT)
 MODELS = DATA / "models"
 TOKEN_FILE = DATA / ".huggingface_token"
-DEFAULT_CONFIG = {"max_context": "auto", "max_tokens_per_video": 8192, "card": "auto", "vram_margin_mb": 50,
+DEFAULT_CONFIG = {"max_context": "auto", "max_tokens_per_video": 8192, "num_cards": 1, "card": "auto", "vram_margin_mb": 50,
                   "lora": None, "thinking": True,
                   "sampler": "generation", "options": {},
                   "pipeline_parallelism": "no", "pipeline_parallelism_layers": "", "pipeline_parallelism_next": "192.0.2.2:8766",
                   "pipeline_parallelism_port": 8766, "tools": "chill", "image_model": "auto", "workers": []}
-TOOLS_NOTE = ("tools gives a conversation a tool: a Lisp REPL on this machine the model opens in its answer, to list "
-              "folders, read and write files, run commands and read web pages (it asks with (help) what it can do). "
-              "It starts in the workspace folder beside the conversations (tools_folder to name another). tools is "
-              "what it may do in a new conversation without asking you: \"ask\" — read in the workspace and in "
-              "folders you allowed (tools.json beside the conversations keeps them); \"chill\" — read anywhere; "
-              "\"full-auto\" — everything. Anything else it asks you in the UI, where a conversation's switch turns "
-              "its tool off and its own mode is chosen. \"no\" turns the tool off for every conversation.")
-PIPELINE_NOTE = ("pipeline_parallelism \"yes\" runs the model over several machines in a ring, each holding a run of its "
-                 "layers (pipeline_parallelism_layers, first-last, as \"0-23\") and naming the machine after it "
-                 "(pipeline_parallelism_next, host:port — the last machine names the first). The machine whose layers "
-                 "begin at 0 answers the UI; start every machine's server the same way, with the same max_context. "
-                 "card: which of this machine's cards to run on (0, 1, ...), \"auto\" the first, \"cpu\" none: its CPU and "
-                 "RAM.")
-IMAGE_NOTE = ("A picture model: each message is a prompt and its answer a picture. image holds a picture's settings — "
-              "width and height (multiples of 32, 256-2048), steps (more is finer and slower: 40 is the model's own), "
-              "seed (null: a new one each picture, said under it). A message may set them for itself: --size 768x1024, "
-              "--steps 20, --seed 7. card: which of this machine's cards to run on (0, 1, ...), \"auto\" the first.")
 IMAGE_CONFIG = {"card": "auto", "image": {"width": 1024, "height": 1024, "steps": 40, "seed": None}}
-VIDEO_NOTE = ("max_tokens_per_video is the most tokens a video attached to a message becomes: more sees a longer video "
-              "in more detail and takes as many positions of the conversation. Reading a video holds 57-74 KB of RAM "
-              "a token, depending on the model (0.45-0.58 GB at 8,192), and the server counts it when it chooses "
-              "whether the experts fit in RAM.")
 
-# how many more positions of a conversation 100 MB of the card holds, past the first 4,352 (kept at 16 bits);
-# measured from the cache each model sizes at two contexts
-TOKENS_PER_100MB = {
-    "silvann_tq_D8E4_qwen3.6_35b_a3b": 10000,
-    "silvann_tq_D4_qwen3.8_27b": 3200,
-    "silvann_tq_D4E4_glm_5.3_flash": 8800,
-    "silvann_tq_D8E4_glm_5.3_flash": 8800,         # the same cache: a pack's widths are its weights', not its cache's
-    "silvann_tq_D4_ministral_3_14b": 625,          # every position in halves: 40 layers' keys and values
-    "silvann_tq_D8_ministral_3_14b": 625,
-}
 
 def default_config(folder):
-    """`configs/default.json` in a model folder, written when it has none."""
+    """`configs/default.json` in a model folder, written when it has none: settings only — docs/config.md (the UI's
+    Help → "A model's config") says what each does."""
     cfg = Path(folder) / "configs" / "default.json"
-    if not cfg.exists() and (Path(folder) / "model_index.json").exists():       # a picture model's (▶ IMAGE_NOTE)
+    if not cfg.exists() and (Path(folder) / "model_index.json").exists():       # a picture model's
         cfg.parent.mkdir(parents=True, exist_ok=True)
-        cfg.write_text(json.dumps({"_note": IMAGE_NOTE, **IMAGE_CONFIG}, indent=2) + "\n")
+        cfg.write_text(json.dumps(IMAGE_CONFIG, indent=2) + "\n")
     if not cfg.exists():
         # no options: where the experts sit and how much of the card holds them are chosen for the machine at each boot
         # (silvann_runtime/autotune.py), unless the config is edited to name them
         # ⚖ 2026-10-17 *"ideally auto should always be the default, as it sizes the tokens against the remaining space
         #   after the model and it sizes the l1 cache against the actual tokens on the moe setups"*
         config = dict(DEFAULT_CONFIG, options={})
-        per = TOKENS_PER_100MB.get(Path(folder).name)
-        config = {"_note": "max_context is the longest conversation, and its cache is on the card from boot. \"auto\": "
-                           "as many positions as the card holds beside the model, up to the model's own length, found "
-                           "when the server starts — with the experts on the CPU, their tier on the card holds experts "
-                           "in the rows a conversation has not reached. A number holds the context to it instead%s."
-                           % (": every 100 MB of the card holds about %d positions" % per if per else ""), **config}
-        config = {"_note_video": VIDEO_NOTE, "_note_pipeline": PIPELINE_NOTE, "_note_tools": TOOLS_NOTE, **config}
         if not config.get("pipeline_parallelism_layers"):
             try:
                 c = json.loads((Path(folder) / "config.json").read_text())

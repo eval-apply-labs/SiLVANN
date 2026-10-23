@@ -24,7 +24,7 @@ KNOWN = {
     "silvann_tq_D4_qwen3.8_27b": ("eval-apply/silvann_tq_D4_qwen3.8_27b", "16 GB"),
     "silvann_tq_D4E4_glm_5.3_flash": ("eval-apply/silvann_tq_D4E4_glm_5.3_flash", "162 GB"),
     "silvann_tq_D8E4_glm_5.3_flash": ("eval-apply/silvann_tq_D8E4_glm_5.3_flash", "166 GB"),
-    "silvann_tq_D8E4_deepseek_v4.1_flash_1017": ("eval-apply/silvann_tq_D8E4_deepseek_v4.1_flash_1017", "491 GB"),
+    "silvann_tq_D8E4_deepseek_v4.1_flash_1017": ("eval-apply/silvann_tq_D8E4_deepseek_v4.1_flash_1017", "492 GB"),
     "silvann_tq_D4_ministral_3_14b": ("eval-apply/silvann_tq_D4_ministral_3_14b", "7.4 GB"),
     "silvann_tq_D8_ministral_3_14b": ("eval-apply/silvann_tq_D8_ministral_3_14b", "13.5 GB"),
     "silvann_tq_D8_qwen_image_2.1": ("eval-apply/silvann_tq_D8_qwen_image_2.1", "18 GB"),

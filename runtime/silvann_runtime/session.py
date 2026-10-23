@@ -41,7 +41,10 @@ def _state_read(m, length):
 
 
 def state_bytes(m, length):
-    """What a conversation of `length` positions holds of state, every card's share of it."""
+    """What a conversation of `length` positions holds of state, every card's share of it — none where the model keeps a
+    conversation put away as its tokens (`PARKS` false: a ring's, a GLM group's)."""
+    if not getattr(m, "PARKS", True):
+        return 0
     return sum(n for _, n in m.state_regions(length)) * getattr(m, "CARDS", 1)
 
 
@@ -156,11 +159,12 @@ class Runtime:
             self.stats["lora_swaps"] += 1
         if c.lora is not None:
             c.lora = m.lora_identity()                # the weights it runs under, recorded
-        if c.state is not None:
+        if c.state is not None and getattr(m, "PARKS", True):
             _state_write(m, c.length, c.state)
             c.state = None
         else:
-            m.reset()                                 # without its state, every token it has seen is run again
+            m.reset()                                 # without its state, every token it has seen is run again — or with
+            c.state = None                            #   one this model cannot take back (a GLM group: ▶ glm5's PARKS)
             c.length = 0
             c.lag = 0
         self.active = c
