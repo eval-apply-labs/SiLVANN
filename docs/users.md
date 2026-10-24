@@ -19,7 +19,7 @@ engine and the families this machine needs (the whole build's output in `silvann
 command in `~/.local/bin`: `silvann list`, `silvann download <model>`, `silvann serve <model>`, `silvann ui`, and
 `silvann update` for the next release (stop the server first); `silvann help` lists the rest.
 
-`silvann models <folder>` keeps what SiLVANN keeps for you in that folder from then on: SiLVANN on a USB drive, say, with
+`silvann data <folder>` keeps what SiLVANN keeps for you in that folder from then on: SiLVANN on a USB drive, say, with
 its models on the machine's own disk. That is the models (`models/`), the conversations (`user_sessions/`), and beside
 them your skills (`skills/`), the tool's workspace, the folders it was allowed and the definitions it kept
 (`workspace/`, `tools.json`, `tools_library.json`), the Hugging Face token (`.huggingface_token`) and the UI's last start
@@ -159,7 +159,8 @@ venv/bin/python silvann_cli.py [--notools] [--nothink]     # or the chat in this
 written as it comes, its thinking dimmed, the model's tool calls and their values shown. A new conversation takes the
 server's defaults, its thinking and its tool in the config's mode, unless `--notools` or `--nothink` says otherwise; an
 ask stops the answer at a prompt — `y` allows it once, `f` the folder (a read), `n` or Enter refuses. In the
-conversation: `/new`, `/sys <prompt>` (a new conversation with it), `/mode ask|chill|full-auto`, `/quit`; Ctrl-C stops
+conversation: `/new`, `/sys <prompt>` (a new conversation with it, where the server's `user_system_prompt` allows
+one), `/mode ask|chill|full-auto`, `/quit`; Ctrl-C stops
 an answer. `--endpoint` names another server (`http://localhost:8765` by default).
 
 **In the browser** ([`ui.md`](ui.md) goes through the UI, view by view; it is the first document in its Help), a model
@@ -213,8 +214,8 @@ MB, put away to its folder, as one is when the UI or client that opened it has b
 
 On a machine with no card the model runs on the CPU's own cores (the `x86_avx2` family, which needs AVX2, FMA and F16C:
 Intel from Haswell, 2013, AMD from Excavator, 2015; an older processor has no family to run on). The pack for it is
-`silvann_tq_D8E4_qwen3.6_35b_a3b`, the one for a card too: on the test machine's two Xeons its `D4E4`, retired in
-v0.18.0, answered at about 15 tokens a second, and the `D8E4` reads twice the dense bytes a token. On a processor with AVX-512 (F, BW, VL and DQ) the family's matrix products use it: on a four-core Xeon
+`silvann_tq_D8E4_qwen3.6_35b_a3b`, the one for a card too: on the test machine's two Xeons it answers at 14-16 tokens a
+second after a 1,000-position prompt, and at 11.9 held to 12 GB of RAM with its experts read from the disk (v0.18.1). On a processor with AVX-512 (F, BW, VL and DQ) the family's matrix products use it: on a four-core Xeon
 W-2123 with two DDR4-2400 sticks the 35B D8E4 alone ran at 9.0 tokens a second against 1.7 with AVX2, and with its
 experts on the CPU beside a card at 27-29 against 15-17. `SILVANN_CPU_AVX512=0` keeps the AVX2 code.
 
@@ -354,25 +355,21 @@ with almost nothing swapped. Turning swap off does the same.
 ## 5. The experts on the disk
 
 With `experts_from: "disk"`, a model's experts are read from its pack as they are wanted: nothing is written beside
-it. A Qwen pack from v0.18.0 on keeps each routed expert as a record of its own, laid out as the engine holds it, so an
-expert is one read; one downloaded before stacks a layer's experts by tensor and reads an expert in four — it works, and
-on our NVMe array the 122B answered at 8.0-8.3 tokens a second that way against 9.3-9.4 (download it again for the new
-layout). A GLM 5.3 Flash pack from v0.18.1 on keeps an expert's gate and up as one record beside its down, its slot's
-layout, so an expert is one read too; one downloaded before reads an expert in six. Where they do not lie in the pack as
-the CPU reads them — a GLM pack downloaded before 19 October 2026, which keeps an expert's records in the order of their
-names, a model under a LoRA that holds experts of its own, or a model split over two CPU sockets — they are written
-once, at the first start, to `models/<name>/experts/` in that layout (about 150 GB for GLM 5.3 Flash), and later starts read the file. Before v0.12.0 a Qwen model's were written so too: its `experts/` folder (55 GB for the 122B, 16 GB for the 35B)
-is not read any more on one socket, and can be deleted. The disk should be an NVMe drive: RAM keeps the experts that are used, and every other one is read from the disk
+it. A pack keeps each routed expert as a record of its own, laid out as the engine holds it, so an expert is one read
+(a Qwen MoE pack's since v0.18.0, GLM 5.3 Flash's since v0.18.1: one downloaded before is not supported — download it
+again).
+Where they do not lie in the pack as the CPU reads them — a model under a LoRA that holds experts of its own, or a model
+split over two CPU sockets — they are written once, at the first start, to `models/<name>/experts/` in that layout
+(about 150 GB for GLM 5.3 Flash), and later starts read the file. The disk should be an NVMe drive: RAM keeps the experts that are used, and every other one is read from the disk
 when a token picks it, so the disk's speed is the answer's speed. On our test machine GLM 5.3 Flash answered at
 5.7 tokens a second with 128 GB of RAM from a disk that reads 5 GB/s. Keep the disk cool: a hot NVMe drive slows itself down. Every measurement: [`results.md`](results.md). The engine keeps as many experts
 as the memory there is allows — the process's own limit when it has one — less a quarter of it for everything else,
 at least 3 GB and at most 8 GB.
 
 DeepSeek-V4.1-Flash has no `disk`: the layers RAM does not hold are read through the system's page cache
-(`experts_from: "mapped"`, chosen at boot). From v0.18.1 its pack lays each layer's experts out as the engine holds
-them, and those layers are mapped from the pack itself, nothing written; a pack downloaded before has them written once
-to `models/<name>/experts/` (6.8 GB a layer), so leave that much room beside it — or download it again
-([`config.md`](config.md#deepseek-v41-flashs-options)).
+(`experts_from: "mapped"`, chosen at boot). Its pack lays each layer's experts out as the engine holds them, and those
+layers are mapped from the pack itself, nothing written; a pack downloaded before v0.18.1 is refused, and is downloaded
+again ([`config.md`](config.md#deepseek-v41-flashs-options)).
 
 ## 6. A model over several machines
 

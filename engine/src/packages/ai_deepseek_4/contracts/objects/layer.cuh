@@ -60,8 +60,8 @@
  *   of `ratio` rows (the latents, then their gates) — and the layers after it read its cache. A latent is normed, its
  *   tail turned at the group's first position, and written at row `position / ratio`. The rows a query attends — the
  *   window's, then the compressed — are gathered into one buffer for the scores and the mix.
- *   ⛳ EVERY COMPRESSED ROW SO FAR IS ATTENDED: the model's indexer keeps the best `index_topk` of them, which is every
- *   one up to `index_topk` rows — so a layer refuses a position past that until the indexer is here. */
+ *   ⛳ UP TO `index_topk` COMPRESSED ROWS EVERY ONE IS ATTENDED; past it the model's indexer keeps the best `index_topk`
+ *   (▶ the indexer's cells below), and a layer without them refuses the position. */
 #define AI_DEEPSEEK_4__CMP__CACHE     41u     /* the source's latents, halves, a row of head_dim a group */
 #define AI_DEEPSEEK_4__CMP__WKV       42u     /* the source's: the latent's map (pair) */
 #define AI_DEEPSEEK_4__CMP__WGATE     44u     /* its gate's map (pair) — read where ratio > 1 */

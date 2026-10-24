@@ -343,10 +343,10 @@ static sys__heap_node ai_qwen_3__attention_tiered_rows__zzabi_apply(const sys__h
     doors->rope_rows((uint16_t*)(uintptr_t)kk, (const uint16_t*)(uintptr_t)kk, (const float*)(uintptr_t)cs, T, kvh, hd, kvw, rot, over);
     doors->hadamard_blocks((uint16_t*)(uintptr_t)qr, (const uint16_t*)(uintptr_t)qn, (const uint16_t*)(uintptr_t)signs, T * qw, hd, 0u, over);
 
-    /* ② the chunk in: each row's key and value rotated into the sink or its hot slot, what it displaces cooled first */
+    /* ② the chunk in: what each row's hot slot holds cooled first — into the warm tier, and what that displaces into the
+     *   cold — */
     for (uint64_t r = 0u; r < T; ++r) {
         const uint64_t q = first + r;
-        uint64_t kdst = at[AI_QWEN_3__AT__K_CACHE] + 2u * q * kvw, vdst = at[AI_QWEN_3__AT__V_CACHE] + 2u * q * kvw;
         if (q >= SINK) {
             const uint64_t j = q - SINK, slot = j % HOT;
             const uint64_t hk = at[AI_QWEN_3__AT__HOT_K] + 2u * slot * kvw, hv = at[AI_QWEN_3__AT__HOT_V] + 2u * slot * kvw;
@@ -372,12 +372,23 @@ static sys__heap_node ai_qwen_3__attention_tiered_rows__zzabi_apply(const sys__h
                                               (uint16_t*)(uintptr_t)(at[AI_QWEN_3__AT__WARM_VS] + 2u * w * kvh), (const uint16_t*)(uintptr_t)hv,
                                               kvh, hd, 8u, over);
             }
-            kdst = hk; vdst = hv;
         }
+    }
+    /* ...then the rows rotated in, a run of rows whose slots follow each other one call — the sink's, the hot ring's up
+     *   to its end, the rest from its start: a chunk (refused past HOT rows) meets no slot twice, so every slot's cooling above
+     *   came first; a row's blocks rotate on their own, so a run's are each row's (NN-114: two calls a row a layer were
+     *   65,632 launches of the 27B's 2,000-position prompt) */
+    for (uint64_t r = 0u, n = 0u; r < T; r += n) {
+        const uint64_t q = first + r;
+        const uint64_t room = q < SINK ? SINK - q : HOT - (q - SINK) % HOT;
+        n = T - r < room ? T - r : room;
+        const uint64_t slot = q < SINK ? q : (q - SINK) % HOT;
+        const uint64_t kdst = (q < SINK ? at[AI_QWEN_3__AT__K_CACHE] : at[AI_QWEN_3__AT__HOT_K]) + 2u * slot * kvw;
+        const uint64_t vdst = (q < SINK ? at[AI_QWEN_3__AT__V_CACHE] : at[AI_QWEN_3__AT__HOT_V]) + 2u * slot * kvw;
         doors->hadamard_blocks((uint16_t*)(uintptr_t)kdst, (const uint16_t*)(uintptr_t)(kk + 2u * r * kvw), (const uint16_t*)(uintptr_t)signs,
-                               kvw, hd, 0u, over);
+                               n * kvw, hd, 0u, over);
         doors->hadamard_blocks((uint16_t*)(uintptr_t)vdst, (const uint16_t*)(uintptr_t)(vt + 2u * r * kvw), (const uint16_t*)(uintptr_t)signs,
-                               kvw, hd, 0u, over);
+                               n * kvw, hd, 0u, over);
     }
 
     /* ③ the window: the sink's rows, then the hot ring's in position order */

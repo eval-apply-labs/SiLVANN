@@ -12,7 +12,10 @@ begin-of-sentence token's 307,505 after the 40 layers in the model's own code (`
 which DeepSeek's bf16 holds. Everything a sublayer reads and writes is halves, as in every other model.
 
 The layout it is written for: the matrices every token uses on a card, or split over a tensor-parallel group of cards;
-the routed experts on the CPU, in RAM or mapped from a file, a fixed share of them on the cards (`card_experts`).
+the routed experts on the CPU, in RAM or mapped from a file, and a tier of them on the cards — the experts picked most,
+promoted from RAM as they are picked (`card_experts_gb`), kept on the card alone with `card_exclusive` — or a fixed share
+(`card_experts`). A conversation reaches the model's whole length, 1,048,576 positions: past 16,384, the candidate
+blocks of layer 20 choose where the later layers' indexers look.
 
 A verb takes its weights and buffers as a **table**, a node array whose cells are named in
 `contracts/objects/layer.cuh`. The runtime that builds the tables and the programs is `silvann_runtime/deepseek4.py`.
@@ -29,16 +32,18 @@ shared verbs add to the matrix's answer.
 | `ai_deepseek_4__route` · `ai_deepseek_4__shared` · `ai_deepseek_4__close` | the MoE site on the card: the √softplus router's picks and the rotated input into a hand-off buffer, the shared expert, the routed sum added and the streams mixed again |
 | `ai_deepseek_4__experts` | on a CPU worker: its picked experts, gate-and-up, the clamped swiglu, the rotation, the weighted down — nn's routed experts |
 | `ai_deepseek_4__engram` | the n-gram memory: a position's looked-up rows through their map into a key a stream and a value, each stream gated by its key |
+| `ai_deepseek_4__attention_rows` · `…__route_rows` · `…__close_rows` · `…__experts_rows` | the same sites over a prompt's rows, a chunk at a time (`chunk`, 128 by default) — the CPU's experts over every row a pick names, those a card's tier holds on the card |
+| `ai_deepseek_4__vision_embed` · `…__vision_block` · `…__vision_tail` | a picture through the vision tower: the patches embedded, a block over every patch, the last norm and the aligner, a row a 3 × 3 block of patches (`contracts/objects/vision.cuh`) |
 
 ## What it does not do yet
 
-The indexer's first level, the candidate blocks, so the context stops at 16,384 positions; a prompt as rows — it is
-read a position at a time; the routed experts over two sockets; a card's tier of experts kept as a cache, where
-`card_experts` is a fixed share.
+The routed experts over two sockets: their inner width (2304) is not a whole number of rotation blocks in two equal
+parts, so each socket would need parts of its own width — they are one socket's RAM, run by the whole machine's
+threads, or one socket's alone as a stage of a pipeline (`socket`).
 
 ## Where to start reading
 
-- `cpu/opcodes/layer__abi.cuh` — every verb
-- `contracts/objects/layer.cuh` — the tables
+- `cpu/opcodes/layer__abi.cuh` — every layer verb · `cpu/opcodes/vision__abi.cuh` — the tower's
+- `contracts/objects/layer.cuh` · `contracts/objects/vision.cuh` — the tables
 - `python/silvann_runtime/deepseek4.py` — the placement, the tables, the program
 - `python/silvann_runtime/engram_ds4.py` — the n-gram memory's hashing and rows, on the host

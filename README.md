@@ -1,6 +1,6 @@
 # SiLVANN
 
-> **Developer preview, v0.18.1.** It runs the models below well on the hardware it was tested on, and it is shared
+> **Developer preview, v0.19.0.** It runs the models below well on the hardware it was tested on, and it is shared
 > for people who can find their way around a build and a stack trace. NVIDIA cards are tested on two, a GeForce
 > RTX 5060 Ti and an RTX 5070 Ti; Windows natively on one PC; macOS is not supported.
 
@@ -20,7 +20,7 @@ One model a kind of machine — the one that suits it best — and the machine i
 
 | Your machine | Model | Answer | Measured on |
 |---|---|---|---|
-| No graphics card, 12 GB of RAM, an NVMe disk | [Qwen 3.6 35B-A3B](https://huggingface.co/eval-apply/silvann_tq_D8E4_qwen3.6_35b_a3b) (`D8E4`†) on the CPU alone, its experts read from the disk | 11.7 tokens/s | the R730's two Xeons, v0.3 |
+| No graphics card, 12 GB of RAM, an NVMe disk | [Qwen 3.6 35B-A3B](https://huggingface.co/eval-apply/silvann_tq_D8E4_qwen3.6_35b_a3b) (`D8E4`) on the CPU alone, its experts read from the disk | 11.9 tokens/s | the R730's two Xeons, v0.18.1 |
 | An 8 GB card | [Ministral 3 14B](https://huggingface.co/eval-apply/silvann_tq_D4_ministral_3_14b) (`D4`) on the card, at a 4,096-token context | 47 tokens/s | an RTX 5060 Ti with 7.8 GB of it free, in the chat, v0.11.1 (an MI50 after a prompt: 42) |
 | An 8 GB card, 32 GB of RAM | [Qwen 3.6 35B-A3B](https://huggingface.co/eval-apply/silvann_tq_D8E4_qwen3.6_35b_a3b) (`D8E4`) — the dense part on the card, the experts on the CPU in RAM, and 3.5 GB of the card the tier of experts used most | 56 tokens/s | an RTX 5060 Ti with 7.8 GB of it free, in the chat, v0.11.1 |
 | An 8 GB card, 32 GB of RAM, an NVMe disk | [Qwen 3.5 122B-A10B](https://huggingface.co/eval-apply/silvann_tq_D8E4_qwen3.5_122b_a10b) (`D8E4`†) — the dense part on the card, the experts on the CPU | 8.6 tokens/s | an RTX 5060 Ti with 7.3 GB of it free, in the chat, v0.11.1 |
@@ -30,15 +30,16 @@ One model a kind of machine — the one that suits it best — and the machine i
 | A 16 GB card, 28 GB of RAM | [Qwen 3.6 35B-A3B](https://huggingface.co/eval-apply/silvann_tq_D8E4_qwen3.6_35b_a3b) (`D8E4`) — the dense part on the card, the experts on the CPU in RAM, and 11 GB of the card the tier of experts used most | 68 tokens/s | an RTX 5060 Ti, in the chat, v0.11.1 (an RTX 5070 Ti with 32 GB after a prompt: 68.3) |
 | A 16 GB card, 28 GB of RAM, an NVMe disk | [GLM 5.3 Flash](https://huggingface.co/eval-apply/silvann_tq_D8E4_glm_5.3_flash) (`D8E4`) — the dense part on the card, the experts on the CPU, read from the disk | 2.3 tokens/s | an RTX 5060 Ti, in the chat, v0.11.1 |
 | A 16 GB card, 62 GB of RAM | [Qwen 3.5 122B-A10B](https://huggingface.co/eval-apply/silvann_tq_D8E4_qwen3.5_122b_a10b) (`D8E4`†) — the dense part on the card, the experts on the CPU in RAM, and 9.5 GB of the card the tier of experts used most | 20 tokens/s | an RTX 5060 Ti, in the chat, v0.11.1 |
-| A 16 GB card, 150 GB of RAM | [GLM 5.3 Flash](https://huggingface.co/eval-apply/silvann_tq_D8E4_glm_5.3_flash) (`D8E4`†), its experts in RAM, a 300,000-token context and 6 GB of the card the tier | 8.0 tokens/s | an MI50, 15.0 GB of it, v0.8.0 |
+| A 16 GB card, 150 GB of RAM | [GLM 5.3 Flash](https://huggingface.co/eval-apply/silvann_tq_D8E4_glm_5.3_flash) (`D8E4`), its experts in RAM, a 300,000-token context and 2.25 GB of the card the tier, lent 3.1 GB more of the cache's unreached rows | 8.8 tokens/s | an MI50 with 16 GiB of it held, v0.18.1 |
 | A 24 GB card | [Qwen 3.6 35B-A3B](https://huggingface.co/eval-apply/silvann_tq_D8E4_qwen3.6_35b_a3b) on the card | 87 tokens/s | an MI50, v0.8.0 |
-| A 32 GB card, 80 GB of RAM | Qwen 3.5 122B-A10B, its experts in RAM and 24 GB of them on the card | 24.5 tokens/s | an MI50, v0.8.0 |
+| A 32 GB card, 80 GB of RAM | [Qwen 3.5 122B-A10B](https://huggingface.co/eval-apply/silvann_tq_D8E4_qwen3.5_122b_a10b) (`D8E4`), its experts in RAM and 24 GB of them on the card | 24.1 tokens/s | an MI50, v0.18.1 |
 
 The MI50s are in a Dell R730 with two Xeon E5-2680 v4; the RTX 5060 Ti in a desktop with a four-core Xeon W-2123 and
 two DDR4-2400 sticks; the RTX 5070 Ti beside a Ryzen 7 5800X. Each process was held to the memory its row names, and a
 smaller card's room was a larger card with the rest of it held. † Measured with the model's `D4E4` pack, retired in
 v0.18.0: the `D8E4` linked holds the same 4-bit experts and its dense part at 8 bits — the 122B's layer matrices 4.66 GB
-on the card against 2.37, the 35B's 1.45 against 0.75 — and its rate on that machine is to be measured again. "In the chat" is the server with the model's own config, as the chat's meter reads a short
+on the card against 2.37 — and its rate on that machine is to be measured again; the R730's rows of a retired pack were
+measured again on `D8E4` with v0.18.1. "In the chat" is the server with the model's own config, as the chat's meter reads a short
 conversation, measured with v0.11.1; every other row takes the most likely token after a prompt
 ([`docs/results.md`](docs/results.md)). A row of v0.3 was measured with its card kernels, and where a card does part of the work it is
 a floor. A model whose config names no setup — the default's — chooses its own when the server starts, by trying it on
@@ -67,18 +68,37 @@ v0.11.1, the RTX 5070 Ti's with v0.11.0. v0.11.0's server drew each token with n
 card, through OpenCL and on the CPU alone: the 35B answered in the chat at 32-35 tokens a second on the RTX 5060 Ti,
 and answers at 67 now ([`docs/results.md`](docs/results.md)).
 
-**New in v0.18.1:** GLM 5.3 Flash and DeepSeek-V4.1-Flash read an expert from the disk in one read too, and DeepSeek
-maps the experts RAM does not hold from its pack instead of writing them beside it.
+**New in v0.19.0:** an MI50 reads a prompt nearly twice as fast, DeepSeek-V4.1-Flash keeps a tier of experts on its
+cards alone, the system prompt is the server's, and packs from before v0.18.1 are not supported.
 
-**One read an expert, for GLM and DeepSeek.** Their packs, uploaded again, keep each routed expert's gate and up as one
-record beside its down — the layout the engine holds — so an expert read from the disk is one read where it was five.
-GLM on one socket held to 55 GB, its experts read from the disk, answers at 3.06 tokens a second where the pack
-before gave 2.56-2.79. DeepSeek's layers that RAM does not hold are mapped from the pack itself: nothing is written beside it,
-where a pack before wrote 6.3 GB a layer (89 GB on our test machine). The new packs need v0.18.1; a pack downloaded
-before keeps working as it did ([`docs/users.md`](docs/users.md#5-the-experts-on-the-disk)).
+**An MI50 reads a prompt nearly twice as fast.** On an AMD card a prompt's matrix products stage each tile once and
+four elements a load, and over long rows sum 8 rows by 4 pairs a thread: on one MI50 Qwen 3.8 27B reads a 2,000-position
+prompt at 199 positions a second where v0.18.1 read 107, and Qwen 3.6 35B-A3B at 337 where it read 226, the answers the
+same words ([`docs/results.md`](docs/results.md)). Over rows of 4,096 columns or more the sums are taken in a new order;
+the same config still gives the same answer every run.
 
-v0.18.0 brought the same layout to the Qwen packs, the server answering while a model generates, AMD's prompt mixing as
-its tokens do, and retired the `D4E4` packs.
+**DeepSeek's experts on its cards, and less of the card for its cache.** With `card_exclusive`, the experts DeepSeek-V4.1-Flash's
+tier holds stay on the card alone and RAM gives them back: with a 16 GB tier on each of two MI50s its whole model
+keeps 36 of its 40 layers' experts in RAM where it kept 32. Its cache at the full 1,048,576 positions takes 3.4 GB of the card where it took 5.4.
+GLM 5.3 Flash over a group with `card_exclusive` moves the slice of experts every card shares as the conversation goes
+([`docs/config.md`](docs/config.md)).
+
+**The vision tower off the card.** A Qwen model's vision tower (0.6 GB) now stays in RAM by default and is written to
+the card a block at a time as a picture is read: the 35B's card keeps 0.55 GB more for its tier of experts, and a
+picture takes 4% longer. `picture_weights: "card"` keeps it on the card.
+
+**The system prompt is the server's.** The config's `system` is every conversation's system prompt; with
+`user_system_prompt: "yes"` whoever creates a conversation can give it its own — in the UI's new-conversation box,
+with `silvann_cli --system`, or through the API. By default a conversation's own is not used.
+
+**`silvann data <folder>`** replaces `silvann models <folder>`: it moves the models, the conversations and everything
+else SiLVANN keeps for you to another folder.
+
+**Packs from before v0.18.1 are not supported.** Download them again: DeepSeek-V4.1-Flash refuses its old pack, and
+the old Qwen and GLM layouts are no longer kept working.
+
+v0.18.1 brought one read an expert to GLM's and DeepSeek's packs, and DeepSeek mapping the experts RAM does not hold from
+its pack.
 
 Every release before this one, and this one's notes again: [`release_logs/v0.md`](release_logs/v0.md).
 
@@ -103,7 +123,7 @@ One line in a terminal fetches SiLVANN into `./silvann` and builds it for this m
 an NVIDIA card with CUDA 12's `nvcc`, an AMD card with ROCm 6's `hipcc`, each for that card alone (where the compiler is
 missing it says where to get it, and the CPU runs the models meanwhile). It installs nothing system-wide and asks for no
 password, and it leaves a `silvann` command (`silvann help` lists what it does). Run it again — or `silvann update` —
-to update: the models, the conversations and their settings stay. `silvann models <folder>` keeps the models, the
+to update: the models, the conversations and their settings stay. `silvann data <folder>` keeps the models, the
 conversations and the rest it keeps for you in another folder from then on — SiLVANN on a USB drive, say, and its models
 on the machine's own disk ([`docs/users.md`](docs/users.md)).
 
@@ -137,7 +157,7 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1      # into .\silvann, an
 Then, in a new PowerShell — the one the installer ran in does not have `silvann` on its PATH yet:
 
 ```powershell
-silvann models E:\silvann_data                 # if you like: the models and the conversations on another drive
+silvann data E:\silvann_data                   # if you like: the models and the conversations on another drive
 silvann download silvann_tq_D4_ministral_3_14b
 silvann serve silvann_tq_D4_ministral_3_14b     # on port 8765
 silvann ui                                     # a chat in the browser, at http://localhost:8090

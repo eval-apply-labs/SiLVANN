@@ -914,11 +914,12 @@ static sys__heap_node ai_deepseek_4__close_rows__zzabi_apply(const sys__heap_nod
     return nn__doors_answer(&argv[0]);
 }
 
-/* `(ai_deepseek_4__experts_rows hands table routed n)` -> `routed`: for each of `n` hand rows, Σ w_j · down_j(swiglu(
- * gate_up_j(x))) over its picks this worker holds, a row of `routed` each — as nn runs a chunk's routed experts (▶ nn's
- * `nn__routed__rows`): expert-major, each pick's down in a sum of its own and the rows added in pick order. */
+/* `(ai_deepseek_4__experts_rows hands table routed n [nn__expert_tier])` -> `routed`: for each of `n` hand rows, Σ w_j ·
+ * down_j(swiglu(gate_up_j(x))) over its picks this worker holds, a row of `routed` each — as nn runs a chunk's routed
+ * experts (▶ nn's `nn__routed__rows`): expert-major, each pick's down in a sum of its own and the rows added in pick order.
+ * With a card's tier, the picks its chunk's note marked this card's (▶ `nn__expert_tier__note`), as GLM's. */
 static sys__heap_node ai_deepseek_4__experts_rows__zzabi_apply(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx) {
-    if (argc != 4u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
+    if (argc != 4u && argc != 5u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
     uint64_t hands = 0, h_room = 0, routed = 0, r_room = 0;
     if (!nn__primitives__room(&argv[0], &hands, &h_room) || !nn__primitives__room(&argv[2], &routed, &r_room)
      || !sys__heap_node__carries_reference(argv[1].dtype) || !sys__node_array__is(argv[1].args[0]) || argv[3].dtype != SYS__KIND__VALUE_INT)
@@ -935,9 +936,13 @@ static sys__heap_node ai_deepseek_4__experts_rows__zzabi_apply(const sys__heap_n
         return sys__engine__abi__error(AI_DEEPSEEK_4__LAYER__FAULT_TABLE);
     nn__routed rt;
     ai_deepseek_4__experts__zzprivate_routed(at, room, v, r, &rt);
+    nn__expert_tier tier;
+    const bool holds = argc == 5u;
+    if (holds && (!sys__heap_node__carries_reference(argv[4].dtype) || !nn__expert_tier__of(argv[4].args[0], rt.layer, &tier)))
+        return sys__engine__abi__error(AI_DEEPSEEK_4__LAYER__FAULT_TABLE);
     const nn__doors* doors = nn__doors_for(ctx);
     if (doors == 0) return sys__engine__abi__error(NN__PRIMITIVES__FAULT_NO_DEVICE);
-    const uint64_t f = nn__routed__rows(ctx, doors, &rt, hands, n, 0, routed, 0, 0);
+    const uint64_t f = nn__routed__rows(ctx, doors, &rt, hands, n, holds ? &tier : 0, routed, 0, 0);
     return f != 0u ? sys__engine__abi__error(f) : nn__doors_answer(&argv[2]);
 }
 

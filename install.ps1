@@ -8,7 +8,7 @@ from this folder's engine and build.py, else built here as build.ps1 builds them
 
 It installs nothing system-wide and asks for no administrator: a tool it needs and does not find is named, with the line
 that installs it, and the installer stops. Run it again to update; models, user_sessions, the venv and the folder
-`silvann models` named stay. What it needs:
+`silvann data` named stay. What it needs:
   Python 3.10 to 3.14       python.org, or: winget install -e --id Python.Python.3.12
   Git                       winget install -e --id Git.Git
   a card's own driver       NVIDIA's for an NVIDIA card; AMD's or Intel's, whose OpenCL.dll the OpenCL families use
@@ -306,7 +306,7 @@ set "HERE=%~dp0"
 set "HERE=%HERE:~0,-1%"
 set "PY=%HERE%\venv\Scripts\python.exe"
 set "PYTHONUTF8=1"
-rem the models and the conversations: the folder `silvann models` named, kept in data_folder, else this one
+rem the data - the models, the conversations and the rest: the folder `silvann data` named, kept in data_folder, else this one
 if not defined SILVANN_DATA (
     if exist "%HERE%\data_folder" (set /p SILVANN_DATA=<"%HERE%\data_folder") else (set "SILVANN_DATA=%HERE%")
 )
@@ -317,7 +317,7 @@ if /i "%WHAT%"=="download" goto download
 if /i "%WHAT%"=="token"    goto token
 if /i "%WHAT%"=="serve"    goto serve
 if /i "%WHAT%"=="ui"       goto ui
-if /i "%WHAT%"=="models"   goto models
+if /i "%WHAT%"=="data"     goto data
 if /i "%WHAT%"=="build"    goto build
 if /i "%WHAT%"=="update"   goto update
 if /i "%WHAT%"=="where"    goto where
@@ -342,13 +342,13 @@ exit /b %errorlevel%
 :ui
 cd /d "%HERE%" && "%PY%" silvann_ui.py --port 8090 %2 %3 %4 %5 %6 %7 %8 %9
 exit /b %errorlevel%
-:models
-if "%~2"=="" (echo the models and the conversations are in %SILVANN_DATA% & exit /b 0)
+:data
+if "%~2"=="" (echo the models, the conversations and the rest are kept in %SILVANN_DATA% & exit /b 0)
 if not exist "%~2\models" mkdir "%~2\models"
 if not exist "%~2\user_sessions" mkdir "%~2\user_sessions"
 for %%I in ("%~2") do set "TO=%%~fI"
 if /i "%TO%"=="%HERE%" (del "%HERE%\data_folder" 2>nul) else (>"%HERE%\data_folder" echo %TO%)
-echo the models and the conversations are in %TO% from now on - what was in %SILVANN_DATA% stays there
+echo the models, the conversations and the rest are kept in %TO% from now on - what was in %SILVANN_DATA% stays there
 exit /b 0
 :build
 set "SILVANN_DIR=%HERE%"
@@ -368,7 +368,7 @@ echo silvann token [--set ^| --forget]    the Hugging Face token the downloads u
 echo silvann serve ^<model^> [config]      the server, on port 8765 (--port to change it)
 echo silvann ui                          the chat in a browser, on port 8090, talking to the server
 echo silvann_cli                         the chat in this terminal (--notools, --nothink), talking to the server
-echo silvann models [folder]             where the models and the conversations are - another folder from now on
+echo silvann data [folder]               where the models, the conversations and the rest are kept - another folder
 echo silvann build                       build the libraries here, from source - after installing CUDA, say
 echo silvann update                      the newest release and its libraries - stop the server first
 echo silvann where                       the folder it is installed in

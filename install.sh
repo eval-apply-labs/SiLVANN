@@ -6,7 +6,7 @@
 #
 # It installs nothing system-wide and asks for no password: a tool it needs and does not find is named, with the line
 # that installs it, and the installer stops. Run it again to update; models/, user_sessions/, the venv and the folder
-# `silvann models` named stay.
+# `silvann data` named stay.
 #
 #   SILVANN_DIR      where it installs                         default ./silvann (SILVANN_DIR=. for the current folder)
 #   SILVANN_SOURCE   the repository it fetches                 default https://github.com/eval-apply-labs/SiLVANN
@@ -186,8 +186,8 @@ set -e
 HERE="$DIR"
 BIN="$BIN"
 PY="\$HERE/venv/bin/python"
-# the models and the conversations: the folder \`silvann models\` named, kept in data_folder (an update leaves it), else
-# this one — SILVANN_DATA in the environment before either
+# the data — the models, the conversations and the rest kept for the user: the folder \`silvann data\` named, kept in
+# data_folder (an update leaves it), else this one — SILVANN_DATA in the environment before either
 DATA="\$HERE"
 [ -s "\$HERE/data_folder" ] && DATA=\$(cat "\$HERE/data_folder")
 export SILVANN_DATA="\${SILVANN_DATA:-\$DATA}"
@@ -199,7 +199,7 @@ silvann token [--set | --forget]    the Hugging Face token the downloads use (fa
 silvann serve <model> [config]      the server, on port 8765 (--port to change it)
 silvann ui                          the chat in a browser, on port 8090, talking to the server
 silvann_cli                         the chat in this terminal (--notools, --nothink), talking to the server
-silvann models [folder]             where the models and the conversations are — another folder, a drive's, from now on
+silvann data [folder]               where the models, the conversations and the rest are kept — another folder, a drive's
 silvann build                       build again — after installing CUDA or ROCm, say
 silvann update                      the newest release, then build — stop the server first
 silvann where                       the folder it is installed in
@@ -216,16 +216,16 @@ case "\$cmd" in
         model=\$1; shift
         [ -d "\$model" ] || model="\$SILVANN_DATA/models/\$model"
         cd "\$HERE" && exec "\$PY" start_silvann_server.py --model "\$model" "\$@" ;;
-    models)
+    data)
         if [ \$# -eq 0 ]; then
-            echo "the models and the conversations are in \$SILVANN_DATA"
-            [ "\$SILVANN_DATA" = "\$DATA" ] || echo "   (SILVANN_DATA in the environment; silvann models set \$DATA)"
+            echo "the models, the conversations and the rest are kept in \$SILVANN_DATA"
+            [ "\$SILVANN_DATA" = "\$DATA" ] || echo "   (SILVANN_DATA in the environment; silvann data set \$DATA)"
             exit 0
         fi
         mkdir -p "\$1/models" "\$1/user_sessions" || { echo "silvann: \$1 cannot be written" >&2; exit 1; }
         to=\$(cd "\$1" && pwd)
         if [ "\$to" = "\$HERE" ]; then rm -f "\$HERE/data_folder"; else echo "\$to" > "\$HERE/data_folder"; fi
-        echo "the models and the conversations are in \$to from now on"
+        echo "the models, the conversations and the rest are kept in \$to from now on"
         if [ "\$to" != "\$DATA" ]; then
             # what is the user's in the folder left behind, by name: a model's folder, a skill's, the conversations — not
             # the release's own files in models/ and skills/ when that folder is this one (an update needs them here)

@@ -222,12 +222,15 @@ class Qwen35(Generates):
             raise Refused("experts on the CPU: this model has no routed experts")
         if self.CPU_EXPERTS:
             self.FUSED = False          # the split words: the router on the card, the experts on the CPU
-        # ⭐ THE TOWER'S WEIGHTS (~0.6 GB packed) ON THE CARD OR IN RAM — `REASONED`: with the experts on the CPU the RAM is
-        #   theirs and the card has room, so the card; with the model on the card the card is the scarce memory (the 27B
-        #   at 32,768 positions leaves a 16 GB card 1 GB), so RAM, a word's planes written to the card before it runs; a
-        #   machine whose worker is a CPU has the one memory, so its slot
-        self.VIS_RAM = self.VIS and (picture_weights == "ram" or (picture_weights == "auto" and not self.CPU_EXPERTS
-                                                                  and machine.silicon not in ("host", "x86_avx2")))
+        # ⭐ THE TOWER'S WEIGHTS (~0.6 GB packed) IN RAM ON A CARD, written to the card a word's planes at a time as a picture
+        #   is read — ⚖ 2026-10-23 *"remove the vision tower and load it on demand"* (NN-112 ①): the tower is on the card only
+        #   while it reads a picture, through a room a block's size, so the card keeps the rest for the model and its tier
+        #   (an 8 GB card holding the 122B's 5.4 GB misses it most), and the tier is never put down for it. `MEASURED` (the
+        #   27B's tower, a picture of 280 patches, test/src_runtime_vision_card.py): 113.0 ms in RAM against 60.7 on the
+        #   card, its rows the same to the bit. `picture_weights` "card" keeps it there; a machine whose worker is a CPU has
+        #   the one memory, so its slot
+        self.VIS_RAM = self.VIS and (picture_weights == "ram"
+                                     or (picture_weights == "auto" and machine.silicon not in ("host", "x86_avx2")))
         # ⭐ THE CARD'S TIER OF ROUTED EXPERTS (NN-48) — the experts on the CPU, and `card_experts_gb` of them on the card as
         #   well: the card computes the picks it holds, the CPU the rest; an expert the CPU computed earns a slot by nn's
         #   qualifier and is copied whole from the CPU's memory while the card computes (`card_landing` a visit at most, "auto"

@@ -181,26 +181,37 @@ typedef struct amd_rocm6_wave64__tile_job {
     uint64_t d[NN__EXPERT__GROUPS_MAX], out_at[NN__EXPERT__GROUPS_MAX], pairs_at[NN__EXPERT__GROUPS_MAX];
     uint64_t pairs[NN__EXPERT__GROUPS_MAX], first[NN__EXPERT__GROUPS_MAX + 1];
     uint64_t count, cols;
+    uint64_t lined;                      /* 1: `x` on 16 bytes and every matrix's codes on 8 — the staging's wide loads (▶ the tile) */
     uint16_t* out; float* acc; const uint16_t* x; const uint32_t* rows; const uint16_t* w; unsigned int* over;
 } amd_rocm6_wave64__tile_job;
 
 /* One tile body, the shape its arguments — inlined into each kernel below, so the shape is a constant there and
- * the loops and the sums' registers come out as if written for it. */
+ * the loops and the sums' registers come out as if written for it. `KS` the block's lanes split into that many groups
+ * over a slice's columns: 1, every lane every column, a slice's sums on their own before the row's; 2, each half of
+ * the block half the columns, summed straight into the row's, the halves added at the tile's end — twice the sums a
+ * lane (`LONG_RT` rows) in the registers a slice's own sums took, a third fewer reads of shared memory a product.
+ * ⛳ KS 1'S SOURCE IS THE SHORT ROWS' AND THE FEW PAIRS' AS IT WAS, LINE FOR LINE: its kernels compile to the same
+ *   code (NN-114: with KS 2's unrolled loops shared, the 35B's prompt was 0.5% slower, the products the same) */
 #define AMD_ROCM6_WAVE64__ZZPRIVATE_RT_MAX 4u
 #define AMD_ROCM6_WAVE64__ZZPRIVATE_PT_MAX 4u
-template <bool HALVES>
+#define AMD_ROCM6_WAVE64__ZZPRIVATE_LONG_RT 8u
+template <bool HALVES, uint32_t KS>
 static __device__ __forceinline__ void amd_rocm6_wave64__zzprivate_tile(const amd_rocm6_wave64__tile_job* jp, const uint32_t TR,
                                                                           const uint32_t TP, const uint32_t RT, const uint32_t PT) {
     const amd_rocm6_wave64__tile_job& j = *jp;
-    __shared__ uint32_t ws[64][AMD_ROCM6_WAVE64__ZZPRIVATE_KT / 2u + 1u];
-    __shared__ uint32_t xs[64][AMD_ROCM6_WAVE64__ZZPRIVATE_KT / 2u + 1u];
+    __shared__ uint32_t ws[64][AMD_ROCM6_WAVE64__ZZPRIVATE_KT / 2u + (KS == 2u ? 2u : 1u)];
+    __shared__ uint32_t xs[64][AMD_ROCM6_WAVE64__ZZPRIVATE_KT / 2u + (KS == 2u ? 2u : 1u)];
     const uint32_t HK = AMD_ROCM6_WAVE64__ZZPRIVATE_KT / 2u;
     const uint32_t t = (uint32_t)nn__silicon__lane(), n = (uint32_t)nn__silicon__lanes();
     /* nn's levels at 4 and 8 bits, read from here as a slice is staged rather than gathered a code at a time */
     __shared__ uint16_t lev4[16], lev8[256];
     for (uint32_t e = t; e < 256u; e += n) { lev8[e] = nn__turboquant__zzabi_levels(8u)[e]; if (e < 16u) lev4[e] = nn__turboquant__zzabi_levels(4u)[e]; }
     __syncthreads();
-    const uint32_t tr = (t / (TP / PT)) * RT, tp = (t % (TP / PT)) * PT;
+    /* a lane's sums: `RT` rows from `tr`, and `PT` pairs from `tp` a sixteenth of the tile apart — so the sixteen lanes
+     *   reading a column read sixteen rows of `x` one after another, sixteen banks of shared memory (NN-114: four
+     *   apart, they met in eight); with KS 2 `g` the lane's half of the block, `tl` its place in it, its rows `rs` apart */
+    const uint32_t g = KS == 2u ? t / (n / 2u) : 0u, tl = KS == 2u ? t % (n / 2u) : t;
+    const uint32_t tr = KS == 2u ? tl / (TP / PT) : (tl / (TP / PT)) * RT, rs = TR / RT, tp = tl % (TP / PT);
     for (uint64_t b = nn__silicon__block(); b < j.first[j.count]; b += nn__silicon__blocks()) {
         uint64_t i = 0u;
         while (b >= j.first[i + 1u]) ++i;
@@ -210,16 +221,70 @@ static __device__ __forceinline__ void amd_rocm6_wave64__zzprivate_tile(const am
         const uint8_t* codes = (const uint8_t*)(uintptr_t)j.codes[i];
         const uint16_t* lev = d == 4u ? lev4 : lev8;
         const uint32_t* pr = j.rows + 2u * j.pairs_at[i];
-        float sum[AMD_ROCM6_WAVE64__ZZPRIVATE_RT_MAX][AMD_ROCM6_WAVE64__ZZPRIVATE_PT_MAX];
-        for (uint32_t a = 0u; a < RT; ++a)
-            for (uint32_t q = 0u; q < PT; ++q) sum[a][q] = 0.0f;
+        float sum[KS == 2u ? AMD_ROCM6_WAVE64__ZZPRIVATE_LONG_RT : AMD_ROCM6_WAVE64__ZZPRIVATE_RT_MAX][AMD_ROCM6_WAVE64__ZZPRIVATE_PT_MAX];
+        /* ⛳ EVERY LOOP OVER KS 2'S SUMS UNROLLED: an 8 × 4 lane's left rolled indexed its sums, which then lived in memory */
+        if (KS == 2u) {
+#pragma unroll
+            for (uint32_t a = 0u; a < RT; ++a)
+#pragma unroll
+                for (uint32_t q = 0u; q < PT; ++q) sum[a][q] = 0.0f;
+        } else {
+            for (uint32_t a = 0u; a < RT; ++a)
+                for (uint32_t q = 0u; q < PT; ++q) sum[a][q] = 0.0f;
+        }
+        /* ⭐ THE STAGING'S OWN WORK ONCE A TILE (NN-114): a lane stages the same two rows of the matrix and the same two
+         *   pairs' rows at every slice, four columns' halves of each — a row of the slice's 32 a lane's group of eight —
+         *   so where each row starts, which row of `x` a pair reads and whether it is in the tile are worked out here,
+         *   and a slice is one load of codes (4 bytes at 4 bits, 8 at 8) and one of `x` (16 bytes) an item. The halves
+         *   staged are the ones the element-wise staging below stages, so the sums are its sums to the bit. */
+        const bool lined = !HALVES && j.lined != 0u;
+        /* each item's row as a byte offset from its matrix's codes and from `x` — under 4 GB each, as the fit check holds
+         *   them (▶ `…_tiles`) — the bases the block's own: a register an item rather than a pointer's two */
+        uint32_t wofs[2] = {0u, 0u}, xofs[2] = {0u, 0u};
+        bool wok[2] = {false, false}, xok[2] = {false, false};
+        if (lined)
+            for (uint32_t h = 0u; h < 2u; ++h) {
+                const uint32_t g = t + n * h, r = g / 8u;
+                wok[h] = g < TR * 8u && r0 + r < j.out_rows[i];
+                xok[h] = g < TP * 8u && p0 + r < j.pairs[i];
+                if (wok[h]) wofs[h] = (uint32_t)((r0 + r) * row_bytes);
+                if (xok[h]) xofs[h] = (uint32_t)((uint64_t)pr[2u * (p0 + r)] * j.cols * 2u);
+            }
         for (uint64_t k0 = 0u; k0 < j.cols; k0 += AMD_ROCM6_WAVE64__ZZPRIVATE_KT) {
-            for (uint32_t e = t; e < TP * HK; e += n) {
+            if (lined) {
+                for (uint32_t h = 0u; h < 2u; ++h) {
+                    const uint32_t g = t + n * h, r = g / 8u, c = (g % 8u) * 4u;
+                    if (g < TP * 8u) {
+                        uint4 v = make_uint4(0u, 0u, 0u, 0u);
+                        if (xok[h]) v = *(const uint4*)(const void*)((const uint8_t*)j.x + xofs[h] + 2u * (k0 + 2u * c));
+                        xs[r][c] = v.x; xs[r][c + 1u] = v.y; xs[r][c + 2u] = v.z; xs[r][c + 3u] = v.w;
+                    }
+                    if (g < TR * 8u) {
+                        uint32_t v[4] = {0u, 0u, 0u, 0u};
+                        if (wok[h] && d == 4u) {             /* a byte two codes: the lower column's in its low nibble */
+                            const uint32_t u = *(const uint32_t*)(const void*)(codes + wofs[h] + (k0 + 2u * c) / 2u);
+                            for (uint32_t e = 0u; e < 4u; ++e) {
+                                const uint32_t b = (u >> (8u * e)) & 0xFFu;
+                                v[e] = (uint32_t)lev4[b & 0xFu] | ((uint32_t)lev4[b >> 4] << 16);
+                            }
+                        } else if (wok[h]) {                 /* a byte a code */
+                            const uint2 u = *(const uint2*)(const void*)(codes + wofs[h] + k0 + 2u * c);
+                            for (uint32_t e = 0u; e < 4u; ++e) {
+                                const uint32_t two = ((e < 2u ? u.x : u.y) >> (16u * (e % 2u))) & 0xFFFFu;
+                                v[e] = (uint32_t)lev8[two & 0xFFu] | ((uint32_t)lev8[two >> 8] << 16);
+                            }
+                        }
+                        ws[r][c] = v[0]; ws[r][c + 1u] = v[1]; ws[r][c + 2u] = v[2]; ws[r][c + 3u] = v[3];
+                    }
+                }
+                __syncthreads();
+            }
+            for (uint32_t e = t; !lined && e < TP * HK; e += n) {
                 const uint32_t p = e / HK, c = e % HK;
                 xs[p][c] = p0 + p < j.pairs[i] && (!HALVES || k0 + 2u * c < j.cols)
                     ? ((const uint32_t*)(const void*)(j.x + (uint64_t)pr[2u * (p0 + p)] * j.cols + k0))[c] : 0u;
             }
-            for (uint32_t e = t; e < TR * HK; e += n) {
+            for (uint32_t e = t; !lined && e < TR * HK; e += n) {
                 const uint32_t r = e / HK, c = e % HK;
                 uint32_t v = 0u;
                 if (HALVES) {                                             /* the halves themselves, the tail as zeros */
@@ -234,30 +299,94 @@ static __device__ __forceinline__ void amd_rocm6_wave64__zzprivate_tile(const am
                 }
                 ws[r][c] = v;
             }
-            __syncthreads();
-            /* a slice's sums on their own, then onto the row's: a chain of 64 additions, not of the row's whole width */
-            float part[AMD_ROCM6_WAVE64__ZZPRIVATE_RT_MAX][AMD_ROCM6_WAVE64__ZZPRIVATE_PT_MAX];
-            for (uint32_t a = 0u; a < RT; ++a)
-                for (uint32_t q = 0u; q < PT; ++q) part[a][q] = 0.0f;
-            for (uint32_t c = 0u; c < HK; ++c) {
-                uint32_t wv[AMD_ROCM6_WAVE64__ZZPRIVATE_RT_MAX], xv[AMD_ROCM6_WAVE64__ZZPRIVATE_PT_MAX];
-                for (uint32_t a = 0u; a < RT; ++a) wv[a] = ws[tr + a][c];
-                for (uint32_t q = 0u; q < PT; ++q) xv[q] = xs[tp + q][c];
+            if (!lined) __syncthreads();
+            if (KS == 1u) {
+                /* a slice's sums on their own, then onto the row's: a chain of 64 additions, not of the row's whole width */
+                float part[AMD_ROCM6_WAVE64__ZZPRIVATE_RT_MAX][AMD_ROCM6_WAVE64__ZZPRIVATE_PT_MAX];
                 for (uint32_t a = 0u; a < RT; ++a)
-                    for (uint32_t q = 0u; q < PT; ++q) part[a][q] = nn__silicon__dot2(wv[a], xv[q], part[a][q]);
+                    for (uint32_t q = 0u; q < PT; ++q) part[a][q] = 0.0f;
+                /* two columns a step: the compiler's four held the shared reads' registers past three waves (▶ the bound) */
+#pragma unroll 2
+                for (uint32_t c = 0u; c < HK; ++c) {
+                    uint32_t wv[AMD_ROCM6_WAVE64__ZZPRIVATE_RT_MAX], xv[AMD_ROCM6_WAVE64__ZZPRIVATE_PT_MAX];
+                    for (uint32_t a = 0u; a < RT; ++a) wv[a] = ws[tr + a][c];
+                    for (uint32_t q = 0u; q < PT; ++q) xv[q] = xs[tp + q * (TP / PT)][c];
+                    for (uint32_t a = 0u; a < RT; ++a)
+                        for (uint32_t q = 0u; q < PT; ++q) part[a][q] = nn__silicon__dot2(wv[a], xv[q], part[a][q]);
+                }
+                for (uint32_t a = 0u; a < RT; ++a)
+                    for (uint32_t q = 0u; q < PT; ++q) sum[a][q] += part[a][q];
+            } else {
+                /* this group's columns of the slice, straight onto the row's sums, two columns a read (rows of 34
+                 *   words: a lane's eight rows 8 apart and its pairs 16 apart meet no bank twice) — a step at a time,
+                 *   which keeps the shape within three waves' registers with its spills outside the loop (NN-114) */
+#pragma unroll 1
+                for (uint32_t c = g * (HK / KS); c < (g + 1u) * (HK / KS); c += 2u) {
+                    uint2 wv[AMD_ROCM6_WAVE64__ZZPRIVATE_LONG_RT], xv[AMD_ROCM6_WAVE64__ZZPRIVATE_PT_MAX];
+#pragma unroll
+                    for (uint32_t a = 0u; a < RT; ++a) wv[a] = *(const uint2*)(const void*)&ws[tr + a * rs][c];
+#pragma unroll
+                    for (uint32_t q = 0u; q < PT; ++q) xv[q] = *(const uint2*)(const void*)&xs[tp + q * (TP / PT)][c];
+#pragma unroll
+                    for (uint32_t a = 0u; a < RT; ++a)
+#pragma unroll
+                        for (uint32_t q = 0u; q < PT; ++q) sum[a][q] = nn__silicon__dot2(wv[a].x, xv[q].x, sum[a][q]);
+#pragma unroll
+                    for (uint32_t a = 0u; a < RT; ++a)
+#pragma unroll
+                        for (uint32_t q = 0u; q < PT; ++q) sum[a][q] = nn__silicon__dot2(wv[a].y, xv[q].y, sum[a][q]);
+                }
             }
+            __syncthreads();
+        }
+        /* the two halves' sums added, each half finishing half the rows: it leaves the rows it does not finish in the
+         *   shared memory the slices used, lane by lane, and adds the other half's — a sum of two, the same whichever is
+         *   first */
+        if (KS == 2u) {
+            float* mine = (float*)(void*)(g == 0u ? &ws[0][0] : &xs[0][0]);
+            const float* theirs = (const float*)(const void*)(g == 0u ? &xs[0][0] : &ws[0][0]);
+            const uint32_t L = n / 2u;
+#pragma unroll
             for (uint32_t a = 0u; a < RT; ++a)
-                for (uint32_t q = 0u; q < PT; ++q) sum[a][q] += part[a][q];
+#pragma unroll
+                for (uint32_t q = 0u; q < PT; ++q)
+                    if ((a < RT / 2u) != (g == 0u)) mine[((a % (RT / 2u)) * PT + q) * L + tl] = sum[a][q];
+            __syncthreads();
+#pragma unroll
+            for (uint32_t a = 0u; a < RT; ++a)
+#pragma unroll
+                for (uint32_t q = 0u; q < PT; ++q)
+                    if ((a < RT / 2u) == (g == 0u)) sum[a][q] += theirs[((a % (RT / 2u)) * PT + q) * L + tl];
             __syncthreads();
         }
         const uint8_t* lut = (const uint8_t*)(uintptr_t)j.luts[i];
+        if (KS == 2u) {
+#pragma unroll
+            for (uint32_t a = 0u; a < RT; ++a) {
+                if ((a < RT / 2u) != (g == 0u)) continue;
+                const uint64_t r = r0 + tr + a * rs;
+                if (r >= j.out_rows[i]) continue;
+                const float scale = HALVES ? 1.0f
+                    : nn__silicon__half_to_float((uint16_t)((uint32_t)lut[r * 2u] | ((uint32_t)lut[r * 2u + 1u] << 8)));
+#pragma unroll
+                for (uint32_t q = 0u; q < PT; ++q) {
+                    const uint64_t p = p0 + tp + q * (TP / PT);
+                    if (p >= j.pairs[i]) continue;
+                    const uint64_t at = (uint64_t)pr[2u * p + 1u] * j.out_rows[i] + r;
+                    const float v = sum[a][q] * scale;
+                    if (j.out) (j.out + j.out_at[i])[at] = nn__kernels__zzabi_to_half(v, j.over);
+                    else j.acc[at] += v * nn__silicon__half_to_float(j.w[pr[2u * p]]);
+                }
+            }
+            continue;
+        }
         for (uint32_t a = 0u; a < RT; ++a) {
             const uint64_t r = r0 + tr + a;
             if (r >= j.out_rows[i]) continue;
             const float scale = HALVES ? 1.0f                        /* a 16-bit row carries no scale */
                 : nn__silicon__half_to_float((uint16_t)((uint32_t)lut[r * 2u] | ((uint32_t)lut[r * 2u + 1u] << 8)));
             for (uint32_t q = 0u; q < PT; ++q) {
-                const uint64_t p = p0 + tp + q;
+                const uint64_t p = p0 + tp + q * (TP / PT);
                 if (p >= j.pairs[i]) continue;
                 const uint64_t at = (uint64_t)pr[2u * p + 1u] * j.out_rows[i] + r;
                 const float v = sum[a][q] * scale;
@@ -269,15 +398,28 @@ static __device__ __forceinline__ void amd_rocm6_wave64__zzprivate_tile(const am
 }
 /* The two shapes: 64 matrix rows by 64 pairs for a matrix many rows read, 64 by 16 for a routed expert's few — and the
  * first again for matrices of 16 bits (nn's width of halves, no scale, any even number of columns: a vision tower's
- * 4,304-wide MLP), a kernel of its own so the codes' are compiled as they were. */
-static __global__ AMD_ROCM6_WAVE64__ZZPRIVATE_BOUNDS void amd_rocm6_wave64__zzprivate_tile_wide(amd_rocm6_wave64__tile_job j) {
-    amd_rocm6_wave64__zzprivate_tile<false>(&j, 64u, 64u, 4u, 4u);
+ * 4,304-wide MLP), a kernel of its own so the codes' are compiled as they were. The first sums 4 rows by 4 pairs a
+ * lane, every lane every column; over rows of `LONG_COLS` columns or more, 8 rows by 4 pairs a lane, the block's halves
+ * each half a slice's columns — its sums a third fewer reads of shared memory a product, its tile's end a sum of the
+ * halves and its spills, which a short row's few slices do not repay (NN-114, the AMD bench over 512 to 17,408 columns:
+ * 9-15% slower at 512, 3% at 1,024, 2% faster at 2,048, 7-11% from 3,072 on; from 2,048 the 35B's prompt was no faster
+ * than from 4,096). */
+#define AMD_ROCM6_WAVE64__ZZPRIVATE_LONG_COLS 4096u
+/* ⛳ THREE WAVES A SIMD, as a block's 17 KB of shared memory allows (three blocks a CU): the bound holds the long rows'
+ *   shape to 84 registers — 24 spilled, around a tile's start and its end, none in the products' loop (NN-114: two
+ *   waves without spills were 13-15% slower) */
+#define AMD_ROCM6_WAVE64__ZZPRIVATE_TILE_BOUNDS __launch_bounds__(256, 3)
+static __global__ AMD_ROCM6_WAVE64__ZZPRIVATE_TILE_BOUNDS void amd_rocm6_wave64__zzprivate_tile_wide(amd_rocm6_wave64__tile_job j) {
+    amd_rocm6_wave64__zzprivate_tile<false, 1u>(&j, 64u, 64u, 4u, 4u);
+}
+static __global__ AMD_ROCM6_WAVE64__ZZPRIVATE_TILE_BOUNDS void amd_rocm6_wave64__zzprivate_tile_wide_long(amd_rocm6_wave64__tile_job j) {
+    amd_rocm6_wave64__zzprivate_tile<false, 2u>(&j, 64u, 64u, 8u, 4u);
 }
 static __global__ AMD_ROCM6_WAVE64__ZZPRIVATE_BOUNDS void amd_rocm6_wave64__zzprivate_tile_few(amd_rocm6_wave64__tile_job j) {
-    amd_rocm6_wave64__zzprivate_tile<false>(&j, 64u, 16u, 4u, 1u);
+    amd_rocm6_wave64__zzprivate_tile<false, 1u>(&j, 64u, 16u, 4u, 1u);
 }
 static __global__ AMD_ROCM6_WAVE64__ZZPRIVATE_BOUNDS void amd_rocm6_wave64__zzprivate_tile_wide_halves(amd_rocm6_wave64__tile_job j) {
-    amd_rocm6_wave64__zzprivate_tile<true>(&j, 64u, 64u, 4u, 4u);
+    amd_rocm6_wave64__zzprivate_tile<true, 1u>(&j, 64u, 64u, 4u, 4u);
 }
 
 /* A tile job for `count` matrices, each checked as the generic body would — every one 4 or 8 bits over whole slices of
@@ -295,6 +437,16 @@ static inline bool amd_rocm6_wave64__zzprivate_tiles(amd_rocm6_wave64__tile_job*
         if (j->out_rows[i] == 0u) return false;
         if (j->pairs[i] > most) most = j->pairs[i];
     }
+    /* the staging's wide loads (▶ the tile): `x` on 16 bytes, every matrix's codes on 8 — the codes' rows and slices fall
+     *   on those widths from there, the columns being whole slices of 64 */
+    /*   — and their rows' offsets in 32 bits: every matrix under 4 GB, and `x` 65,536 rows of `cols` at most (ASSUMED:
+     *   nn's chunks are 4,096 rows at most; a longer one would need its rows' count here) */
+    j->lined = 0u;
+    if (!halves && ((uint64_t)(uintptr_t)j->x) % 16u == 0u && j->cols * 2u * 65536u <= (1ull << 32)) {
+        j->lined = 1u;
+        for (uint64_t i = 0u; i < j->count; ++i)
+            if (((uint64_t)(uintptr_t)j->codes[i]) % 8u != 0u || j->out_rows[i] * (j->cols * j->d[i] / 8u) >= (1ull << 32)) j->lined = 0u;
+    }
     const bool few = most <= 16u;
     /* a token's few rows of 16 bits stay where they were: through a tile the 35B's answer was 1.1% slower (`MEASURED`
      * on the MI50, four rounds, test/src_runtime_bench.py), where a prompt's many rows were 7% faster */
@@ -309,11 +461,14 @@ static inline bool amd_rocm6_wave64__zzprivate_tiles(amd_rocm6_wave64__tile_job*
     const size_t sizes[] = { sizeof *j };
     const void* kernel = few ? (const void*)amd_rocm6_wave64__zzprivate_tile_few
                              : (halves ? (const void*)amd_rocm6_wave64__zzprivate_tile_wide_halves
-                                       : (const void*)amd_rocm6_wave64__zzprivate_tile_wide);
+                                       : (j->cols >= AMD_ROCM6_WAVE64__ZZPRIVATE_LONG_COLS
+                                              ? (const void*)amd_rocm6_wave64__zzprivate_tile_wide_long
+                                              : (const void*)amd_rocm6_wave64__zzprivate_tile_wide));
     nn__silicon__launch(kernel, few ? "amd_rocm6_wave64__zzprivate_tile_few" : "amd_rocm6_wave64__zzprivate_tile_wide", blocks,
                         AMD_ROCM6_WAVE64__ZZPRIVATE_ROWS * AMD_ROCM6_WAVE64__ZZPRIVATE_WAVE, args, sizes, 1u);
     return true;
 }
+
 /* One matrix's call as a tile job. */
 static inline bool amd_rocm6_wave64__zzprivate_tiles_one(uint16_t* out, float* acc, const uint8_t* weights, uint64_t w_room,
                                                         const uint8_t* luts, uint64_t l_room, const uint16_t* x, const uint32_t* rows,

@@ -2,7 +2,8 @@
 
 Every number on this page was measured on one of these machines, and every row names the version it was measured with.
 The README's table of machines is drawn from this page. The `D4E4` packs named below were retired in v0.18.0, and the
-397B's pack is no longer published: their rows stay as they were measured.
+397B's pack is no longer published: the R730's rows of a retired pack were measured again on `D8E4` with v0.18.1, and the
+others stay as they were measured.
 
 | | The R730 (the test server) | The Precision 5820 (a desktop) | A Ryzen desktop |
 |---|---|---|---|
@@ -79,22 +80,22 @@ two-socket machine 1.5-3%, and the 35B's prompt with its experts on the CPU 5%.
 
 | Where it runs | Prompt | Answer | Version |
 |---|---|---|---|
-| one MI50 | 212 positions/s | 87 tokens/s | v0.8.0 |
+| one MI50 | 337 positions/s | 88 tokens/s | v0.19.0 |
 | one MI50 for the dense part, the experts on the CPU, all in RAM | 88 positions/s | 28.4 tokens/s | v0.7.0 |
 | the same, the experts read from the disk, 8 GB of RAM | 32 positions/s† | 11.9 tokens/s — 90% of expert reads from memory | v0.3 |
 | the same, 6 GB of RAM | 31 positions/s† | 10.2 tokens/s — 83% from memory | v0.3 |
-| `D4E4`, the CPU alone, no card, all in RAM | — | 15.4 tokens/s on a short prompt | v0.3 |
-| `D4E4`, the CPU alone, the experts read from the disk, 12 GB of RAM (8 GB of it the experts' cache) | 21 positions/s† | 11.7 tokens/s — 95% from memory, 24 MB read a token | v0.3 |
+| the CPU alone, no card, all in RAM | 61-67 positions/s | 14.3-15.9 tokens/s | v0.18.1 |
+| the CPU alone, the experts on the CPU read from the disk, 12 GB of RAM (8 GB of it the experts' cache) | 35.3 positions/s† | 11.9 tokens/s — 94% from memory, 28 MB read a token | v0.18.1 |
 
-v0.7.0's 16-bit tiles read the 35B's prompt on one MI50 7% faster (212 positions a second against 199), and its answer
-reads 3% slower (87 tokens a second against 90): not its kernels, which take the same time call for call, but where its
-buffers land on the card, which a larger family library moves.
+v0.19.0's prompt GEMM on an MI50 stages a tile's slice once and four elements a load, and sums a long row's tile 8 rows
+by 4 pairs a lane: the 35B reads a 2,000-position prompt at 337 positions a second where v0.18.1 read 226, the 27B at
+199 where it read 107 — the answers the same words.
 
 ### Qwen 3.8 27B
 
 | Where it runs | Prompt | Answer | Version |
 |---|---|---|---|
-| one MI50 | 102 positions/s | 31.3 tokens/s (34 on a short prompt) | v0.8.0 |
+| one MI50 | 199 positions/s | 31.8 tokens/s | v0.19.0 |
 | one MI50 through OpenCL | 52.5 positions/s | 10.4 tokens/s (13.1 on a short prompt) | v0.5.1 |
 | three stages over machines (pipeline parallel) | — | 6.8 tokens/s, the same tokens | v0.3 |
 
@@ -113,17 +114,17 @@ prompt about 620.
 
 | Pack | Where it runs | Prompt | Answer | Version |
 |---|---|---|---|---|
-| `D4E4` | one MI50 for the dense part, the experts on the CPU, all in RAM | 43 positions/s | 14.4 tokens/s | v0.7.0 |
-| `D4E4` | the same, 24 GB of the card the tier of experts, held to 80 GB of RAM | 56 positions/s | 24.5 tokens/s | v0.8.0 |
-| `D4E4` | the same, the experts read from the disk, 32 GB of RAM | 11 positions/s† | 4.7 tokens/s — 87% from memory | v0.3 |
-| `D4E4` | the same, 16 GB of RAM | 10 positions/s† | 3.2 tokens/s — 73% from memory | v0.3 |
-| `D8E4` | one MI50 for the dense part, the experts on the CPU, all in RAM | 25 positions/s | 6.1 tokens/s | v0.3 |
-| `D8E4` | the same, the experts read from the disk, 32 GB of RAM | 11 positions/s† | 3.9 tokens/s — 85% from memory | v0.3 |
-| `D4E4` | one MI50 through OpenCL, the experts on the CPU, all in RAM | 28 positions/s | 9.7 tokens/s | v0.3 |
-| `D4E4` | the same, 18 GB of the card the tier of experts (OpenCL allocates at most 85% of the card at once) | 32 positions/s | 11.7 tokens/s | v0.3 |
+| `D8E4` | one MI50 for the dense part, the experts on the CPU, all in RAM | 41 positions/s | 12.9-15.6 tokens/s | v0.18.1 |
+| `D8E4` | the same, 24 GB of the card the tier of experts, held to 80 GB of RAM | 62-64 positions/s | 24.1 tokens/s | v0.18.1 |
+| `D8E4` | the same, the experts read from the disk, 32 GB of RAM | 29.6 positions/s† | 8.2 tokens/s — 85% from memory, 257 MB read a token | v0.18.1 |
+| `D8E4` | the same, 16 GB of RAM | 28.0 positions/s† | 5.9 tokens/s — 71% from memory, 503 MB read a token | v0.18.1 |
+| `D8E4` | one MI50 through OpenCL 2.0, the experts on the CPU, all in RAM | 27 positions/s | 10.3 tokens/s | v0.18.1 |
+| `D8E4` | the same, 18 GB of the card the tier of experts (OpenCL allocates at most 85% of the card at once) | 30.7 positions/s | 13.8 tokens/s | v0.18.1 |
 
-With v0.3.0, which brought the tier, the 122B `D4E4` answered at 10.9 tokens a second without it and 19.9 with 24 GB
-of it, measured side by side.
+The `D8E4` rows were measured again with v0.18.1 when the `D4E4` pack was retired, two runs each
+(`measurements/2026-10-23_nn111_d8e4_rows_node03.md`); the two runs without a tier answered at 12.9 and 15.6. With
+v0.3.0, which brought the tier, the 122B `D4E4` answered at 10.9 tokens a second without it and 19.9 with 24 GB of it,
+measured side by side.
 
 ### GLM 5.3 Flash
 
@@ -131,8 +132,9 @@ One MI50 for the dense part, the experts on the CPU.
 
 | Experts | Disk | Prompt | Answer | Version |
 |---|---|---|---|---|
-| all in RAM, a 300,000-position cache and 21 GB of the card the tier of experts — the setup chosen at boot | — | 31.7 positions/s | 9.3 tokens/s | v0.8.0 |
-| all in RAM, a 300,000-position cache and 6 GB of tier — 15.0 GB of the card in all | — | 30.4 positions/s | 8.0 tokens/s | v0.8.0 |
+| `D8E4`: all in RAM, a 300,000-position cache and 18.5 GB of the card the tier of experts — the setup chosen at boot | — | 31.6 positions/s | 10.5 tokens/s | v0.18.1 |
+| `D8E4`: all in RAM, a 300,000-position cache and 6 GB of tier, lent 3.1 GB of the cache's unreached rows — 19.4 GiB of the card in all | — | 30.0 positions/s | 9.3 tokens/s | v0.18.1 |
+| `D8E4`: the same RAM and cache on a 16 GB card's room (16 GiB of the MI50 held) — a 2.25 GB tier, lent 3.1 GB, the setup chosen at boot | — | 29.8 positions/s | 8.8 tokens/s | v0.18.1 |
 | all in RAM | — | 23.9 positions/s | 6.7 tokens/s | v0.3 |
 | all in RAM, 18 GB of the card the tier of experts | — | 25.0 positions/s | 8.1 tokens/s (6.8 without, side by side) | v0.3.0 |
 | all in RAM, 24 GB of the card the tier of experts, from token 224 | — | — | 10.7 tokens/s | v0.3.1 |

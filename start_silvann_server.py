@@ -16,7 +16,8 @@ Conversations are CARTRIDGES, one on the card at a time: a turn keeps the card u
 asked for meanwhile is answered 503 with `Retry-After: 5` — ⚖ *"retry in 5 s is what the silvann ui will do (or the
 requestor in general), it is the convention and it is the caller that will do it"*. On disk each lives in
 `user_sessions/<model>/<id>/`: `cartridge.npz` (its tokens, and its state when it was put away), `meta.json` (what
-model it belongs to) and `server_meta.json` (its name, history, system prompt and password).
+model it belongs to), `server_meta.json` (its name, history and password) and `conversation_config.json` (its own
+settings: a system prompt, where the config's `user_system_prompt` lets its creator give one).
 """
 import argparse
 import asyncio
@@ -77,13 +78,6 @@ class CreateConvReq(BaseModel):
     lora: Optional[str] = None
     tools_allowed: Optional[list[str]] = None   # a subagent's REPL: the commands its launch allows (▶ agents.py)
     agent: bool = False                     # a subagent's conversation: its REPL launches no agents of its own
-    cooling: Optional[dict] = None          # the old engine's cache knobs: accepted, and the runtime's cache used
-    kv_cache_size: Optional[int] = None
-
-
-class EstimateReq(BaseModel):
-    cooling: Optional[dict] = None
-    kv_cache_size: Optional[int] = None
 
 
 class MessageReq(BaseModel):
@@ -185,6 +179,28 @@ def _sidecar(cid):
 def _write_sidecar(cid, meta):
     (S.dir / cid).mkdir(parents=True, exist_ok=True)
     json.dump(meta, open(S.dir / cid / "server_meta.json", "w"), indent=2)
+
+
+def _user_system():
+    """Whether a conversation's creator may give its own system prompt: the config's `user_system_prompt`, `"no"` by
+    default — the system prompt is the server's."""
+    return S.config.get("user_system_prompt", "no") in ("yes", True)
+
+
+def _conversation_config(cid):
+    """A conversation's own settings, `conversation_config.json` in its folder — exported and imported with it."""
+    p = S.dir / cid / "conversation_config.json"
+    try:
+        return json.load(open(p)) if p.exists() else {}
+    except Exception:
+        return {}
+
+
+def _system(cid):
+    """A conversation's system prompt: its own where the config lets its creator give one, else the config's `system`,
+    else None, the model's own (▶ Chat.turn)."""
+    own = _conversation_config(cid).get("system") if _user_system() else None
+    return own or S.config.get("system")
 
 
 def _check_password(cid, provided):
@@ -850,7 +866,7 @@ def health():
             "model_dir": m.folder.path if m else None, "pp_slice": "all", "num_gpus": _cards(m),
             "max_context": m.max_context if m else 0,
             "adapter": "silvann_runtime", "images": _reads_pictures(), "files": not S.image, "pictures": S.image,
-            "picture_settings": S.model.settings if S.image else None}
+            "picture_settings": S.model.settings if S.image else None, "user_system_prompt": _user_system()}
 
 
 def _reads_pictures():
@@ -909,9 +925,11 @@ async def create_cartridge(req: CreateConvReq, x_web_user_id: Optional[str] = He
             raise HTTPException(409, str(ex))
         name = req.name or "chat-%s" % time.strftime("%H%M%S")
         _write_sidecar(c.id, {"id": c.id, "name": name, "created": time.time(),
-                              "extra": {"history": [], "system_prompt": req.system,
+                              "extra": {"history": [],
                                         "enable_thinking": S.config.get("thinking", True),
                                         "tools_allowed": req.tools_allowed, "agent": req.agent}})
+        if _user_system() and req.system:
+            json.dump({"system": req.system}, open(S.dir / c.id / "conversation_config.json", "w"), indent=2)
         await asyncio.to_thread(_persist, c, False)
         if x_web_user_id:
             S.owner[c.id] = x_web_user_id
@@ -920,17 +938,15 @@ async def create_cartridge(req: CreateConvReq, x_web_user_id: Optional[str] = He
 
 
 @app.post("/cartridges/estimate")
-async def estimate_cartridge(req: EstimateReq):
+async def estimate_cartridge():
     """What a conversation costs. ⛳ The card's share is allocated once at boot for the whole context and shared by
     every conversation — only the one being served is on it — so a new conversation costs the card nothing; put away,
     it costs its state in RAM, up to the figure here. Under tensor parallelism each card holds its share of that state,
     `per_card`."""
     m = S.model
     total, cards = state_bytes(m, m.max_context), _cards(m)
-    return {"mode": "flat", "bytes": int(total), "gb": total / 2 ** 30, "breakdown": {"state": int(total)},
-            "num_gpus": cards, "per_card": {"bytes": int(total // cards), "gb": total / cards / 2 ** 30},
-            "defaults": dict(chunk_tokens=m.max_context, hot_chunks=1, warm_chunks=0, cold_chunks=0, system_chunks=0),
-            "max_tokens": int(m.max_context), "page_size": 1}
+    return {"bytes": int(total), "gb": total / 2 ** 30, "num_gpus": cards,
+            "per_card": {"bytes": int(total // cards), "gb": total / cards / 2 ** 30}, "max_tokens": int(m.max_context)}
 
 
 @app.post("/cartridges/{cid}/activate")
@@ -1053,7 +1069,8 @@ async def import_cartridge(file: UploadFile = File(...)):
     try:
         with tarfile.open(fileobj=io.BytesIO(blob), mode="r") as tar:
             for member in tar.getmembers():
-                if member.isfile() and "/" not in member.name and member.name in ("cartridge.npz", "meta.json", "server_meta.json"):
+                if member.isfile() and "/" not in member.name and member.name in ("cartridge.npz", "meta.json", "server_meta.json",
+                                                                                   "conversation_config.json"):
                     open(d / member.name, "wb").write(tar.extractfile(member).read())
         c = Cartridge.load(str(d / "cartridge.npz"))
         if not c.matches(S.runtime.identity):
@@ -1190,7 +1207,7 @@ async def post_message(cid: str, req: MessageReq, x_cart_password: Optional[str]
         extra["tools_declared"] = _tools_on(extra)
         _write_sidecar(cid, side)
     try:
-        new = S.chat.turn(c.tokens, text, extra.get("system_prompt"),
+        new = S.chat.turn(c.tokens, text, _system(cid),
                           extra.get("enable_thinking", S.config.get("thinking", True)), images=[im.tokens for im in pics],
                           videos=[[(im.tokens, t) for im, t in v.pairs] for v in vids],
                           tools=first and extra["tools_declared"])

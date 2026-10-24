@@ -17,9 +17,10 @@ machine; this page has the rest.
 | Qwen-Image 2.1 (pictures from a prompt: a 7B diffusion transformer, Qwen3-VL 8B's text model as its encoder) | `D8` | 18 GB — the transformer and the encoder 8 bits, the picture decoder 16 | [eval-apply/silvann_tq_D8_qwen_image_2.1](https://huggingface.co/eval-apply/silvann_tq_D8_qwen_image_2.1) |
 
 Qwen 3.5 397B-A17B runs too, but its pack is not published: GLM 5.3 Flash and DeepSeek-V4.1-Flash do more at its size.
-The `D4E4` packs of the 35B, the 122B and GLM were retired in v0.18.0 — their `D8E4` hold the same 4-bit experts. Since
-v0.18.0 a Qwen MoE pack keeps each routed expert as a record of its own, one read from the disk; one downloaded before
-keeps working ([`users.md`](users.md#5-the-experts-on-the-disk)).
+The `D4E4` packs of the 35B, the 122B and GLM were retired in v0.18.0 — their `D8E4` hold the same 4-bit experts. A
+pack keeps each routed expert as a record of its own, one read from the disk
+([`users.md`](users.md#5-the-experts-on-the-disk)); a pack downloaded before v0.18.1 is not supported:
+download it again.
 
 The name says the bits: `D8E4` is the dense matrices at 8 and the experts at 4; `D4` a dense model at 4. The 8-bit dense
 part is the one that pays — ▶ [`compression.md`](compression.md), and how close each pack comes to the original weights
@@ -37,13 +38,13 @@ From a machine with no graphics card to a model near the frontier on salvaged se
 
 | Your machine | Model, and how it runs | Answer |
 |---|---|---|
-| No graphics card, 12 GB of RAM, an NVMe disk (2.5 GB/s) | Qwen 3.6 35B-A3B (`D8E4`†) on the CPU alone, its experts read from the disk, 8 GB of them kept in memory | 11.7 tokens/s |
+| No graphics card, 12 GB of RAM, an NVMe disk | Qwen 3.6 35B-A3B (`D8E4`) on the CPU alone, its experts read from the disk, 8 GB of them kept in memory | 11.9 tokens/s |
 | An 8 GB card | Ministral 3 14B (`D4`) entirely on the card, at a 4,096-token context | 42 tokens/s (56 on a short prompt) ◦ |
 | A 16 GB card | Qwen 3.8 27B entirely on the card, at a 32,000-token context (14 GB) | 30.5 tokens/s (34 on a short prompt) |
 | A 16 GB card | Ministral 3 14B (`D8`) entirely on the card, at an 8,192-token context | 30 tokens/s (37 on a short prompt) ◦ |
 | A 24 GB card | Qwen 3.6 35B-A3B entirely on the card (17 GB at a 32,000-token context) | 87 tokens/s (102 on a short prompt) |
 | A 4 GB card, 8 GB of RAM, an NVMe disk | Qwen 3.6 35B-A3B — the dense part on the card, the experts on the CPU, read from the disk as they are needed | 11.9 tokens/s ◦ |
-| An 8 GB card, 32 GB of RAM, an NVMe disk | Qwen 3.5 122B-A10B (`D8E4`†) — the same split | 4.7 tokens/s ◦ |
+| An 8 GB card, 32 GB of RAM, an NVMe disk | Qwen 3.5 122B-A10B (`D8E4`) — the same split | 8.2 tokens/s ◦ |
 | An 8 GB card (an RTX 5060 Ti with 7.5 GB of it held), 32 GB of RAM | Qwen 3.6 35B-A3B (`D8E4`) — the dense part on the card, the experts on the CPU in RAM, and 3.5 GB of the card the tier of experts used most | 56 tokens/s ‡ |
 | An 8 GB card (the same), 32 GB of RAM | Ministral 3 14B (`D4`) entirely on the card, at a 4,096-token context | 47 tokens/s ‡ |
 | A 12 GB card (an RTX 5060 Ti with 4 GB of it held), 62 GB of RAM | Qwen 3.6 35B-A3B (`D8E4`) — the same split, and 7 GB of the card the tier | 65 tokens/s ‡ |
@@ -54,16 +55,16 @@ From a machine with no graphics card to a model near the frontier on salvaged se
 | A 16 GB card (an RTX 5060 Ti), 60 GB of RAM, an NVMe disk reading 5 GB/s | GLM 5.3 Flash — the same split | 3.2 tokens/s ‡ |
 | A 16 GB card (an RTX 5060 Ti), 62 GB of RAM | Qwen 3.5 122B-A10B (`D8E4`†) — the dense part on the card, the experts on the CPU in RAM (54 GB), and 9.5 GB of the card the tier of experts used most | 20 tokens/s ‡ |
 | A 16 GB card, 128 GB of RAM, an NVMe disk reading 5 GB/s | GLM 5.3 Flash — the same split | 5.7 tokens/s |
-| A 16 GB card, 150 GB of RAM | GLM 5.3 Flash with all of its experts (142 GB) in RAM, a 300,000-token context, and 6 GB of the card the tier of experts used most | 8.0 tokens/s |
-| A 32 GB card, 80 GB of RAM | Qwen 3.5 122B-A10B (`D8E4`†), its experts in RAM and 24 GB of them on the card | 24.5 tokens/s |
+| A 16 GB card (an MI50 with 16 GiB of it held), 150 GB of RAM | GLM 5.3 Flash with all of its experts (142 GB) in RAM, a 300,000-token context, and 2.25 GB of the card the tier of experts used most — lent 3.1 GB more of the cache's unreached rows | 8.8 tokens/s |
+| A 32 GB card, 80 GB of RAM | Qwen 3.5 122B-A10B (`D8E4`), its experts in RAM and 24 GB of them on the card | 24.1 tokens/s |
 | A 32 GB card, 160 GB of RAM | GLM 5.3 Flash, its experts in RAM and 24 GB of them on the card | 10.7 tokens/s |
 
 Measured on a Dell R730 (two Xeon E5-2680 v4, AMD Instinct MI50 cards; disk speed 5 GB/s, RAM speed 126 GB/s), each row
 with its process held to the memory it names — leave room beside it for the operating system — and from a cold start
 where the experts come from the disk. ◦ Ran on a 32 GB MI50: the model fits the smaller card, but a card that size has
-not been measured. The rows with a model entirely on the card, the 122B's with 24 GB of tier and GLM's with 6 GB are
-v0.7.0's and v0.8.0's; the others were measured with v0.3's card kernels, and where a card does part of the work they
-are a floor ([`results.md`](results.md) names each row's version). ‡ The RTX 5060 Ti rows are another machine's, a
+not been measured. The rows with a model entirely on the card are v0.7.0's and v0.8.0's; the CPU alone's, the 122B's
+from the disk and with 24 GB of tier, and GLM's with 150 GB are v0.18.1's; the others were measured with v0.3's card
+kernels, and where a card does part of the work they are a floor ([`results.md`](results.md) names each row's version). ‡ The RTX 5060 Ti rows are another machine's, a
 four-core Xeon with two channels of DDR4: the answer in the chat — the server with the model's own config, held to the
 RAM its row names, as the chat's meter reads a short conversation — measured with v0.11.1
 (2026-10-18), a smaller card's room the rest of the card held (7.5 GB held leaves what a headless 8 GB card does); from
@@ -78,13 +79,9 @@ Every measurement, the prompt rates, and what limits a model reading its experts
 ## DeepSeek-V4.1-Flash
 
 DeepSeek's model reads text and pictures: its vision tower (32 blocks and the aligner, 464 MB in the pack's
-`vision.pkl`) runs on the card in about 620 MB of it, a picture at most 1,024 tokens. A pack downloaded before v0.17.0
-has no `vision.pkl` — it reads text, and a picture is refused — and this fetches the file alone:
-`venv/bin/hf download eval-apply/silvann_tq_D8E4_deepseek_v4.1_flash_1017 vision.pkl --local-dir
-models/silvann_tq_D8E4_deepseek_v4.1_flash_1017`. Its routed experts are 272 GB (6.8 GB a layer,
+`vision.pkl`) runs on the card in about 620 MB of it, a picture at most 1,024 tokens. Its routed experts are 272 GB (6.8 GB a layer,
 40 layers) and run on the CPU: as many layers in RAM as fit beside the server, a spare and a tenth of the memory for the
-system and the files it reads in place; the rest are mapped from the pack and read through the system's page cache
-(a pack downloaded before v0.18.1 writes them once beside it, in `models/<name>/experts/`). Its n-gram memory's tables (203 GB) stay on the disk and are read a row at a time as
+system and the files it reads in place; the rest are mapped from the pack and read through the system's page cache. Its n-gram memory's tables (203 GB) stay on the disk and are read a row at a time as
 each token asks for them, so the disk should be an NVMe drive. A conversation reaches the model's own length,
 1,048,576 positions: past 16,384, layer 20's candidate blocks choose where the later layers look, as DeepSeek's own
 code does. Its rates come with a later release;

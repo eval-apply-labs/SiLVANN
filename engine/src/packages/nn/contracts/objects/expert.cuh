@@ -297,7 +297,9 @@ typedef struct nn__expert__backing {
 #define NN__EXPERT__COUNT_BUSIEST         (NN__EXPERT__COUNT_CARD_HITS + NN__EXPERT_TIER__RANKS_MAX)
                                                 /* a group's visits: the most picks one card computed, summed      */
 #define NN__EXPERT__COUNT_GROUP_VISITS    (NN__EXPERT__COUNT_BUSIEST + 1u)   /* ...over how many visits       */
-#define NN__EXPERT__COUNTS               (NN__EXPERT__COUNT_GROUP_VISITS + 1u)
+#define NN__EXPERT__COUNT_SLICE_CHANGED   (NN__EXPERT__COUNT_GROUP_VISITS + 1u)
+                                                /* an exclusive group's slice: experts that joined it, card 0's count */
+#define NN__EXPERT__COUNTS               (NN__EXPERT__COUNT_SLICE_CHANGED + 1u)
 
 /* ⭐ AN EXPERT PROMOTED FROM RAM TO A CARD (NN-48). Its bytes are in memory already, so a promotion is a GATHER: a few runs
  * copied into the card's slot in the slot's own layout — through a staging buffer of pinned memory and one write on the
@@ -368,11 +370,11 @@ typedef struct nn__expert__gather { nn__expert__run run[NN__EXPERT__GATHER_RUNS]
  * and every card makes the same assignment from it: a pick one card holds is that card's, a pick several hold the one of
  * them with the fewest so far, a pick none holds the CPUs' — and the card with the fewest is the one that may promote it.
  * Each card computes its own; every pick a card computes is marked held for the CPUs.
- * A group's tiers may be EXCLUSIVE, with no slice: every expert on one card or in RAM, each card's promotions swaps of its
- * own (a share of the evacuation channels each), its swaps committed before it trades. Over a prompt's chunk every card
- * says which of the layer's experts it holds and computes the picks it holds; a pick another card holds is numbered
- * `2 · experts` past itself, which neither this card's experts nor the CPUs compute (▶ `nn__routed__rows`), and a chunk's
- * promotions go to the CPUs until their commit. */
+ * A group's tiers may be EXCLUSIVE: every expert outside the slice on one card or in RAM, each card's promotions swaps of
+ * its own (a share of the evacuation channels each), its swaps committed before it trades. Over a prompt's chunk every
+ * card says which of the layer's experts it holds and computes the picks it holds — a pick of the slice the card its
+ * number modulo the group names; a pick another card computes is numbered `2 · experts` past itself, which neither this
+ * card's experts nor the CPUs compute (▶ `nn__routed__rows`), and a chunk's promotions go to the CPUs until their commit. */
 #define NN__EXPERT_TIER__RANKS        21u
 #define NN__EXPERT_TIER__LENGTH_GROUP 22u
 /*   SHARED      the experts of a layer every card keeps (NN-99 ③, ⚖ *"we can keep 10% of the l1 cache into the top shared
@@ -383,10 +385,22 @@ typedef struct nn__expert__gather { nn__expert__run run[NN__EXPERT__GATHER_RUNS]
  *               the picks' node array has a cell past them: 1 there on the card that adds it, 0 on the others. An expert
  *               that leaves the slice stays the card's with the fewest picks so far: the others no longer touch theirs,
  *               so it ages out of them (⚖ *"when we demote an expert from the shared l1 it becomes property of the card
- *               with the least amount of picks"*). Absent or 0: no slice. */
+ *               with the least amount of picks"*). Absent or 0: no slice.
+ *               ⭐ AN EXCLUSIVE GROUP'S SLICE (NN-106, ⚖ 2026-10-22 *"the download phase takes X from A and E from D, and
+ *               the upload sends X to b c d and E to a ... all clean and aligned"*): its experts are on every card and in
+ *               no RAM slot, so a card never promotes one, never sends one back, and the slice changes only by a swap
+ *               between the cards. At a choice every card says which of the layer's experts it holds outside any swap,
+ *               and every card makes the same change from it: X, held by card a alone, joins; S leaves and stays on d,
+ *               the card with the fewest picks so far; where d is not a, d gives a its least picked expert E for the
+ *               room. X is read off a and E off d into pinned stages, written into a free slot of each card that takes
+ *               them, and every card switches at the layer's next visit — no RAM slot changes hands. Its choices come
+ *               a layer's own number of visits apart, so the layers change on different visits. */
 #define NN__EXPERT_TIER__SHARED       22u
 #define NN__EXPERT_TIER__LENGTH_SHARED 23u
 #define NN__EXPERT_TIER__SLICE_EVERY  64u    /* a layer's visits between two choices of its slice */
+#define NN__EXPERT_TIER__SLICE_PAIRS   2u    /* an exclusive group's slice: the changes at one choice at most */
+#define NN__EXPERT_TIER__STAGES        8u    /* ...the pinned stages its changes' experts wait in between the cards */
+#define NN__EXPERT_TIER__STAGE_JOBS   64u    /* ...and the copies into and out of them, queued or in flight */
 #define NN__EXPERT_TIER__RANKS_MAX     8u    /* a tensor-parallel group's cards at most (▶ nn's partials) */
 #define NN__EXPERT_TIER__PATIENCE     60u    /* seconds a card waits for the others' share: a card that never comes is an error */
 /* A tier as one layer reads it: `sources` that layer's addresses, or 0. */

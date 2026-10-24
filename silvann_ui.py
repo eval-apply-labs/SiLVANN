@@ -140,28 +140,15 @@ class Client:
         r.raise_for_status()
         return r.json().get("cartridges", [])
 
-    async def create(self, name: str, system: Optional[str] = None,
-                     cooling: Optional[dict] = None,
-                     kv_cache_size: Optional[int] = None) -> dict:
-        body: dict = {"name": name, "system": system}
-        if cooling is not None:
-            body["cooling"] = cooling
-        if kv_cache_size is not None:
-            body["kv_cache_size"] = kv_cache_size
-        r = await self.http.post(f"{self.endpoint}/cartridges", json=body)
+    async def create(self, name: str, system: Optional[str] = None) -> dict:
+        r = await self.http.post(f"{self.endpoint}/cartridges", json={"name": name, "system": system})
         r.raise_for_status()
         return r.json()
 
-    async def estimate_vram(self, cooling: Optional[dict] = None,
-                            kv_cache_size: Optional[int] = None) -> dict:
-        """Ask the server how much VRAM a new conversation would cost under these cache
-        settings (no body = the server's configured defaults). Used by the new-chat dialog."""
-        body: dict = {}
-        if cooling is not None:
-            body["cooling"] = cooling
-        if kv_cache_size is not None:
-            body["kv_cache_size"] = kv_cache_size
-        r = await self.http.post(f"{self.endpoint}/cartridges/estimate", json=body)
+    async def estimate_vram(self) -> dict:
+        """What a new conversation costs: the model's context, and what it takes in RAM put away. Used by the new-chat
+        dialog."""
+        r = await self.http.post(f"{self.endpoint}/cartridges/estimate")
         r.raise_for_status()
         return r.json()
 
@@ -2179,15 +2166,6 @@ async def page():
         try:
             est0 = await client.estimate_vram()
         except httpx.HTTPStatusError as ex:
-            if ex.response.status_code in (404, 405):
-                # Older server without the estimate endpoint — degrade to a plain create so a
-                # new UI still works against a server that predates the cache-size dialog.
-                try:
-                    resp = await client.create(name=f"chat {len(existing) + 1}")
-                    await activate_cart(resp["id"])
-                except Exception as e:
-                    safe_notify(f"create failed: {e}", type="negative")
-                return
             safe_notify(f"estimate failed: {ex.response.text}", type="negative")
             return
         except Exception as e:
@@ -2198,11 +2176,18 @@ async def page():
         #   shows is that window and what the conversation takes in RAM once it is put away, at its fullest.
         max_tokens = int(est0.get("max_tokens", 0))
         gb = float(est0.get("gb", 0.0))
+        # the system prompt is the server's; its config's `user_system_prompt` lets a conversation's creator give one
+        try:
+            own_system = bool((await client.health()).get("user_system_prompt"))
+        except Exception:
+            own_system = False
 
         dlg = ui.dialog()
         with dlg, ui.card().classes("min-w-[420px] gap-2"):
             ui.label("New conversation").classes("text-lg font-bold")
             name_in = ui.input("Name", value=f"chat {len(existing) + 1}").classes("w-full")
+            system_in = ui.textarea("System prompt", placeholder="empty: the server's own").props("autogrow") \
+                .classes("w-full") if own_system else None
             if max_tokens:
                 ui.label(f"Context window: {max_tokens:,} tokens — the model's, set in its config").classes("text-sm")
                 ui.label(f"Saved, it takes up to {gb:.2f} GB of RAM").classes("text-xs opacity-70")
@@ -2218,7 +2203,8 @@ async def page():
             async def do_create():
                 create_btn.disable()
                 try:
-                    resp = await client.create(name=name_in.value or None)
+                    resp = await client.create(name=name_in.value or None,
+                                               system=(system_in.value or None) if system_in else None)
                     dlg.close()
                     await activate_cart(resp["id"])
                 except httpx.HTTPStatusError as ex:

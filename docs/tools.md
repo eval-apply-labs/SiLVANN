@@ -60,7 +60,8 @@ answers its answer to the task:
 - **`'model`** is a model folder's name, or `'self` for the model's own.
 - **`"config"`** is the name of one of that model's LoRAs, such as `"research"` (the model under it, the rest by
   default); the name of a config in that model's `configs/`; or a JSON object written as text, such as
-  `"{\"lora\": \"research\"}"`. A config sets the LoRA, a `system` prompt, and `tools_allowed`, the commands the
+  `"{\"lora\": \"research\"}"`. A config sets the LoRA, a `system` prompt (where the subagent's server lets a
+  conversation have its own: its config's `user_system_prompt`), and `tools_allowed`, the commands the
   subagent's REPL has. By default it gets the read-only commands: `help`, `ls`, `read`, `pwd`, `cd`, `library`,
   `import`, `skills`, `guide` and `find`. A config's name comes before a LoRA's of the same name.
 - **`"task"`** is its first message. The subagent starts with nothing of the caller's conversation, so a task that

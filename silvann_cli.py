@@ -218,6 +218,9 @@ def main():
         h = chat.http.get("/health").json()
         print("%s[silvann] %s at %s, a context of %s — /new · /sys <prompt> · /mode ask|chill|full-auto · /quit%s"
               % (DIM, h.get("model_id"), a.endpoint, h.get("max_context"), RESET))
+        if system and not h.get("user_system_prompt"):
+            print("%s[silvann] the server keeps its own system prompt: --system is not used (its config's "
+                  "user_system_prompt)%s" % (DIM, RESET))
         chat.new(system)
     except httpx.HTTPError as ex:
         sys.exit("[silvann] %s: %s" % (a.endpoint, ex))
@@ -236,6 +239,8 @@ def main():
                 chat.new(system)
             elif line.startswith("/sys "):
                 system = line[5:].strip()
+                if not h.get("user_system_prompt"):
+                    print("%s[silvann] the server keeps its own system prompt: a new conversation with it%s" % (DIM, RESET))
                 chat.new(system)
             elif line.split()[0] == "/mode":
                 m = line.split()[1:2]

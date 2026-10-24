@@ -157,8 +157,8 @@ class Glm5(Generates):
         #   its tokens, read again when it comes back (▶ session's PARKS, as a ring's)
         self.PARKS = self.P == 1
         self.CARD_SHARED = None if card_shared in (None, "auto") else float(card_shared)
-        if card_exclusive and self.P > 1:
-            self.CARD_SHARED = 0.0             # ▶ the refusal below: an exclusive group's slice is none, not measured
+        if card_exclusive and self.P > 1 and self.CARD_SHARED is None:
+            self.CARD_SHARED = 0.0             # an exclusive group's slice is dealt at boot, before the speeds are timed
         self.CARD_SPEEDS, self._TIER = None, {}
         # `card_visit_first`: the tier's picks marked and the sockets started before the card's experts are queued (▶
         #   glm5.lisp `tier_and_sockets`) — off, as it was slower on the MI50 box (NN-99 ④); a switch to measure it elsewhere
@@ -170,10 +170,8 @@ class Glm5(Generates):
             if mtp:
                 raise Refused("the MTP layer does not run in a tensor-parallel group yet — mtp 'no'")
             # ⚖ 2026-10-22 the exclusive tier in a group: "a landing slot for each card, so each card can swap experts
-            #   independently from the others" — every expert on one card or in RAM; the shared slice, an expert on every
-            #   card, not yet
-            if card_exclusive and card_shared not in (None, "auto") and float(card_shared) > 0.0:
-                raise Refused("an exclusive tier in a group keeps no shared slice yet — card_shared 0")
+            #   independently from the others" — every expert outside the slice on one card or in RAM, the slice's on every
+            #   card and in no RAM slot (NN-106: ▶ nn's SHARED)
             if card_hot:
                 raise Refused("a tensor-parallel group's tiers start empty — no card_hot")
             if layers is not None:
@@ -414,12 +412,16 @@ class Glm5(Generates):
                 raise Refused("%.1f GB holds %d experts, fewer than one a MoE layer" % (self.CARD_GB, self.CARD_SLOTS))
             self.collections.append((self.T_CEXP, self.CPLAN, self.CARD_SLOTS))
             # exclusive: each MoE layer's even share of all but the landing slots held on the card, and not in RAM
-            self.CARD_PER = 0
+            self.CARD_PER, self.CARD_SLICE, self.RAM_PER = 0, 0, self.EXPERTS
             if self.CARD_EXCLUSIVE:
-                # in a group every card its own share, none of them the same expert: what the cards hold together is RAM
-                #   given back
-                self.CARD_PER = min((self.EXPERTS - self.TOPK) // self.P, max(0, self.CARD_SLOTS - self.CARD_FREE) // len(moe))
-                self.cpu_arena = self.EPLAN.slot_bytes * (self.EXPERTS - self.P * self.CARD_PER) * len(moe) * self.PARTS
+                # in a group every card its own share, none of them the same expert, and the slice — `card_shared` of a
+                #   card's slots a layer — on every card: what the cards hold together is RAM given back
+                each = max(0, self.CARD_SLOTS - self.CARD_FREE) // len(moe)
+                if self.P > 1:
+                    self.CARD_SLICE = min(each, int(round((self.CARD_SHARED or 0.0) * self.CARD_SLOTS / len(moe))))
+                self.CARD_PER = min((self.EXPERTS - self.TOPK - self.CARD_SLICE) // self.P, each - self.CARD_SLICE)
+                self.RAM_PER = self.EXPERTS - self.CARD_SLICE - self.P * self.CARD_PER
+                self.cpu_arena = self.EPLAN.slot_bytes * self.RAM_PER * len(moe) * self.PARTS
             self.arena += self.CPLAN.slot_bytes * self.CARD_SLOTS
             self.GATE_ROW, self.DOWN_ROW = g.row_bytes, dn.row_bytes
             if self.EPLAN.at_up_data != 0 or self.CPLAN.at_up_data != 0:
@@ -498,7 +500,7 @@ class Glm5(Generates):
             out[k] = card.replace("nn__ram_buffer_table__size_bytes:%d\n" % self.TABLE_BYTES, "nn__ram_buffer_table__size_bytes:256\n")
         moe = sum(self.moe[l] for l in self.run_layers)
         for c in self.CPUS:
-            slots = self.SLOTS if self.SLOTS is not None else (self.EXPERTS - getattr(self, "CARD_PER", 0)) * moe
+            slots = self.SLOTS if self.SLOTS is not None else getattr(self, "RAM_PER", self.EXPERTS) * moe
             experts = [(0, self.EPLAN, slots)] if self.EPLAN else [(0, NL.SlotPlan(4096, 0, 0, 4096), 1)]
             cbig, cbigs = 1 << 20, 3
             if self.CH and self.EPLAN:
@@ -718,7 +720,8 @@ class Glm5(Generates):
     def _card_experts(self, loader, card=0):
         """Card `card`'s tier, stood at boot: each MoE layer's band of every expert — and, given a router log, its most
         picked ones written whole into the card's slots, an even share of them a layer. `CARD_HELD` every card's together:
-        in a group each exclusive tier starts with its own share, card k the k-th."""
+        in a group each exclusive tier starts with the slice — the layer's `CARD_SLICE` most picked, or its first ones
+        without a log, on every card — and its own share of the rest, card k the k-th."""
         m, b = self.m, self.b
         moe = [l for l in self.run_layers if self.moe[l]]
         for l in moe:
@@ -730,23 +733,25 @@ class Glm5(Generates):
         log = np.load(self.CARD_HOT) if self.CARD_HOT else None
         logged = [int(l) for l in log["layers"]] if log is not None else []
         per = self.CARD_PER if self.CARD_EXCLUSIVE else self.CARD_SLOTS // len(moe)
+        s = self.CARD_SLICE if self.CARD_EXCLUSIVE else 0
         for l in moe:
             if log is None:
-                hot = list(range(card * per, (card + 1) * per))   # exclusive, no router log: the card's share, until it learns
+                # exclusive, no router log: the slice and the card's share, until it learns
+                hot = list(range(s)) + list(range(s + card * per, s + (card + 1) * per))
             else:
                 if l not in logged:
                     raise Refused("the router log has no picks for layer %d" % l)
                 counts = np.bincount(log["picks"][:, logged.index(l), :].reshape(-1).astype(np.int64), minlength=self.EXPERTS)
                 order = [int(x) for x in np.argsort(-counts, kind="stable")]
-                # an exclusive group's cards dealt the most picked in turn, so none holds another's
-                hot = order[card::self.P][:per] if self.CARD_EXCLUSIVE else order[:per]
+                # an exclusive group's cards dealt the most picked in turn past the slice, so none holds another's
+                hot = order[:s] + order[s:][card::self.P][:per] if self.CARD_EXCLUSIVE else order[:per]
             view = np.frombuffer(b.blob(l), dtype=np.uint8)
             for x in hot:
                 at = loader.reserve(self.T_CEXP)
                 for into, piece in self._slot_pieces(view, l, x, 0, whole=True):
                     m.write_from(at + into, piece.ctypes.data, piece.nbytes)
                 loader.assign(l, self.T_CEXP, x, at)
-            self.CARD_HELD[l] = self.CARD_HELD.get(l, []) + hot
+            self.CARD_HELD[l] = self.CARD_HELD.get(l, []) + (hot[s:] if card else hot)   # the slice named once
 
     def _load_experts(self, progress):
         """Every MoE layer's routed experts into the CPU workers' memory, each its part of every expert, straight from the
@@ -1155,10 +1160,12 @@ class Glm5(Generates):
 
     def _tier(self, k):
         """Card `k`'s tier table (▶ `expert_tier.tier`), with the share of its slots a layer every card keeps in a group —
-        none until it is known (`_from_speeds`)."""
+        none until it is known (`_from_speeds`); an exclusive group's, the slice dealt at boot."""
         moe = sum(1 for l in self.run_layers if self.moe[l])
         part = self.CARD_SHARED or 0.0
         shared = int(round(part * self.CARD_SLOTS / moe)) if self.P > 1 and moe else 0
+        if self.CARD_EXCLUSIVE:
+            shared = self.CARD_SLICE
         t = self._TIER[k]
         expert_tier.tier(self.m, self.sfx("tier_card", k), self.T_CEXP, self.EXPERTS, self.TOPK, self.H, self.MINTER, self.CPLAN,
                          self.LAYERS, t["fed"], self.PARTS, self.EPLAN, self.GATE_ROW, self.DOWN_ROW, self.CARD_LANDING or 1,

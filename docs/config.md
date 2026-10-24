@@ -43,6 +43,8 @@ and every option is explained here.
 | `max_context` | `"auto"` | The longest conversation, in positions. Its cache is on the card from boot, sized for it. `"auto"` (or `"max"`) means as many as the card holds beside the model, up to the model's own length — 262,144 for the Qwen models and Ministral, 1,048,576 for GLM and DeepSeek-V4.1-Flash — found when the server starts and kept for the conversations after. A number holds it there instead. A Qwen MoE model's or GLM's tier of experts holds experts in the part of that cache a conversation has not reached, and gives it back as the conversation grows ([below](#the-context-and-the-tier-share-the-card)). How many positions 100 MB of the card holds is [below](#how-many-positions-100-mb-of-the-card-holds). |
 | `max_tokens_per_video` | `8192` | The most tokens a video attached to a message becomes. Its frames share them. Reading a video holds 57–74 KB of RAM a token, which the server counts when it chooses whether the experts fit in RAM. |
 | `thinking` | `true` | Whether the model reasons before it answers, in a new conversation. A conversation's own switch (the UI's **thinking mode**, `silvann_cli --nothink`) turns it off for that conversation. |
+| `system` | the model's own | The system prompt every conversation starts with. Left out, the model's own: Qwen's "You are a helpful AI assistant.", the `SYSTEM_PROMPT.txt` in Ministral's pack, none for GLM and DeepSeek. |
+| `user_system_prompt` | `"no"` | `"yes"` lets whoever creates a conversation give it a system prompt of its own instead of `system`: the UI's **New conversation** box shows a field for it, and `silvann_cli --system` and the API's `"system"` set it. `"no"`: every conversation has the server's, and one a conversation is created with is not used — a subagent's config's `system` too ([`tools.md`](tools.md#subagents)). |
 | `sampler` | `"generation"` | How the next token is chosen. `"generation"` uses the model's own `generation_config.json`. `null` takes the most likely token (greedy). A dict sets its own: `{"temperature", "top_k", "top_p", "repetition_penalty", "seed"}`; what it leaves out is temperature 1.0, top_k 20, top_p 0.95, no penalty, a new seed each time. A `seed` gives the same answer to the same conversation. |
 | `tools` | `"chill"` | What the model's tool, a Lisp REPL on the server's machine, may do without asking in a new conversation. `"ask"`: read in the workspace and allowed folders. `"chill"`: read anywhere. `"full-auto"`: everything. `"no"`: no conversation has the tool. |
 | `tools_folder` | `workspace/` | Where the REPL starts, and where it reads without asking. By default it is `workspace/` beside the conversations. |
@@ -176,7 +178,7 @@ These options apply to Qwen 3.6 35B-A3B, Qwen 3.8 27B, and Qwen 3.5 122B-A10B an
 | `experts_lock` | `false` by default, or `true` | With the experts copied into RAM (`experts_from: "ram"`), lock them there, so the system never swaps them out to keep files cached (Linux's `mlock`). The boot refuses where the experts are more than the process may lock (`ulimit -l`): raise `memlock` for the user in `/etc/security/limits.conf` and log in again. The system setting `vm.swappiness` 1 makes the system unwilling to swap any process out, though it does not forbid it. |
 | `experts_dir` | a folder | With the experts read from the disk, where they are written when they cannot be read in place ([`users.md` §5](users.md#5-the-experts-on-the-disk)): `experts/` in the model's folder by default — another drive, say. |
 | `picture_pixels` | default `4194304` (2048 × 2048) | The largest picture the boot makes room for on the card, about 23 KB a 16 × 16 patch. A larger picture is made smaller. `0` keeps no room and reads pictures on the CPU. |
-| `picture_weights` | `"auto"` by default, or `"card"`, `"ram"` | Where the vision tower's 0.6 GB of weights sit. In RAM, they are written to the card a block at a time as a picture is read. `auto` puts them on the card when the experts are on the CPU, and in RAM otherwise. |
+| `picture_weights` | `"auto"` by default, or `"card"`, `"ram"` | Where the vision tower's 0.6 GB of weights sit. In RAM, they are written to the card a block at a time as a picture is read, so the card holds them only while it reads one. `auto` keeps them in RAM on a card — the 0.6 GB left to the model and its tier of experts, a picture about 50 ms slower (4% at 1,024 × 1,024) — and in the one memory where the worker is a CPU; `card` keeps them on the card. |
 | `tensor_parallel` | set by `num_cards` | Every layer split over this many cards, each card with its share of the heads and of the MLP: the server's `num_cards` sets it ([below](#tensor-parallelism)). Still read here from a config written before `num_cards`. |
 | `mtp` | `"no"` by default, or `"yes"` | The model's multi-token prediction layer, in the Qwen 3.6 packs: it drafts the token after the next one, and the model checks the draft and the next token together, as GLM's `mtp` below. A greedy answer is the same tokens either way. On the 35B-A3B, 90–92% of the drafts were kept and a 128-token answer ran at 1.12× with the experts on the CPU, but 0.91× with them on an MI50, where a check of two positions still costs about 1.8 tokens' time. One machine's every layer on one card, without a card tier of experts. It adds the MTP layer's weights (about 0.45 GB of the card for the 35B), and a sampled answer runs without it. |
 
@@ -194,10 +196,15 @@ machine's first cards — the runtime's `tensor_parallel`. It runs three kinds o
   the CPU is less than four times slower, none where it is more (two MI50s beside two Xeon E5-2680 v4: 12–15 times,
   none), or a number says the share. A mask runs over the group, each card with its share of it, and the tier is lent
   the cache's rows a conversation has not reached, as on one card. `MEASURED` on four MI50s: 109 ms a token on one
-  card, 100.7 on two, 80.9–86.5 on four. With `card_exclusive: true` every expert is on one card or in RAM: each card's
-  tier holds experts no other card holds, swaps its own, and keeps no shared slice — so the group gives back every
-  card's tier of RAM. `MEASURED` on two MI50s: its answers one card's within the group's rounding, every expert in one
-  place after 4,884 promotions, the same logits from boot to boot.
+  card, 100.7 on two, 80.9–86.5 on four. With `card_exclusive: true` every expert outside the slice is on one card or in
+  RAM: each card's tier holds experts no other card holds and swaps its own, so the group gives back every card's tier
+  of RAM. Its slice is `card_shared` as a number (`"auto"` keeps none): that share of a card's slots a layer holds the
+  layer's most picked experts on every card and in no RAM slot. As the picks change, an expert joins the slice from the
+  card holding it, the one leaving stays with the card that has computed the fewest picks, and where those are two
+  cards the second gives the first one of its own for the room — the cards trade among themselves, and no RAM slot
+  changes hands. `MEASURED` on two MI50s: its answers one card's within the group's rounding, every expert in one place
+  after 4,884 promotions, the same logits from boot to boot; with a quarter of the slots the slice, 168 experts joined
+  it over 128 tokens, every expert still in one place, the same logits from boot to boot.
 
 The server refuses it at boot when:
 
@@ -206,7 +213,7 @@ The server refuses it at boot when:
 - two cards cannot reach each other's memory (peer access);
 - the cards do not split the model's heads evenly;
 - a LoRA is loaded (a GLM mask runs), or the model is a ring's stage;
-- for GLM: `mtp` is on, `fused` is off, or `card_exclusive` is `true` with a `card_shared` above 0.
+- for GLM: `mtp` is on, or `fused` is off.
 
 Pictures are not read under tensor parallelism yet: the model boots, and a message's picture is refused. A GLM group
 reads a prompt as rows, a chunk at a time, as one card does. A conversation's state is not saved, so a conversation
@@ -246,7 +253,7 @@ four.
 | `lend_cache` | `true` by default, or `false` | As the Qwen models': an inclusive tier also holds experts in the latent cache's rows a conversation has not reached. |
 | `card_landing` | `"auto"` by default, or a number | As the Qwen models'. |
 | `tensor_parallel` | set by `num_cards` | Every layer split over this many cards, a tier of experts on each ([below](#tensor-parallelism)): the server's `num_cards` sets it. |
-| `card_shared` | `"auto"` by default, or a share such as `0.1` | As the Qwen models'. An exclusive tier keeps none. |
+| `card_shared` | `"auto"` by default, or a share such as `0.1` | As the Qwen models'. With `card_exclusive` in a group, a number deals that share as the slice at boot, changed between the cards as the picks go ([below](#tensor-parallelism)); `"auto"` keeps none. |
 | `card_exclusive` | chosen at boot; `false`, `true` | With `experts_from: "ram"`, an expert the card's tier holds is not also kept in RAM ([`users.md`](users.md#the-cards-tier-of-experts)). Chosen where the tier is a quarter of the experts or more and the card copies both ways at once. `true` needs `card_experts_gb`. |
 | `picture_pixels` | default `4194304` | As the Qwen models'. |
 | `mtp` | `"no"` by default, or `"yes"` | The model's multi-token prediction layer, which is in every GLM pack: it drafts the token after the next one, and the model checks the draft and the next token together, keeping the draft when it is the token the model would have picked. A greedy answer is the same tokens either way; whether it is faster depends on the machine and the context. Through the server, a 33-token chat prompt and 159 tokens of answer: 1.18× on two Xeon sockets with the experts in RAM, 0.99× on one socket with the experts from the disk. On a 1,600-token prompt it was slower, 0.92–0.94×, though 81% of the drafts were kept: a check reads both positions over the whole context. A sampled answer runs without it, for now. It adds the MTP layer's weights (about 127 MB of the card) and its experts beside the others, about 141 MB of the card for the check, and to the prompt about 8–12 ms a position (about +10%). |
@@ -274,13 +281,14 @@ These are for measuring the engine rather than for use: their defaults are the o
 
 | option | values | what it sets |
 |---|---|---|
-| `experts_from` | chosen at boot; `"ram"`, `"mapped"` | Where its routed experts (272 GB, 6.8 GB a layer) are. `ram` copies every layer's into RAM. `mapped` copies the first `experts_in_ram` layers into RAM and maps the others from the pack, which the system's page cache reads (a pack from before v0.18.1 has them written once, a file a layer in `experts_dir`). At boot: `ram` where every layer fits beside the server's own memory, a spare and a tenth of what the process may hold (for the system and the files read in place), otherwise `mapped` with as many layers in RAM as fit. |
+| `experts_from` | chosen at boot; `"ram"`, `"mapped"` | Where its routed experts (272 GB, 6.8 GB a layer) are. `ram` copies every layer's into RAM. `mapped` copies the first `experts_in_ram` layers into RAM and maps the others from the pack, which the system's page cache reads (a pack from before v0.18.1 is refused: download it again). At boot: `ram` where every layer fits beside the server's own memory, a spare and a tenth of what the process may hold (for the system and the files read in place), otherwise `mapped` with as many layers in RAM as fit. |
 | `experts_in_ram` | layers | With `experts_from: "mapped"`, how many of the first layers are in RAM. |
-| `experts_dir` | a folder | Where `mapped` writes its files for a pack from before v0.18.1: by default the model's `experts/`. |
 | `engram_from` | a folder | Where the n-gram memory's tables (203 GB) are read from, a row at a time: by default the pack's `engram/`. Another folder — on a faster drive — holds the same two files and their index. |
 | `experts_int8` | `true` by default, or `false` | The experts are multiplied in integers on the CPU. |
 | `experts_lock` | `false` by default, or `true` | As GLM's: the layers copied into RAM are locked there. |
 | `card_experts_gb` | gigabytes, `0` by default | A tier of the experts used most on the card, promoted from RAM as they are picked, which the card computes while the CPU computes the rest. Off by default; a layer mapped from its file feeds none. |
+| `card_exclusive` | `false` by default, or `true` | With `card_experts_gb`, an expert a card's tier holds is not also kept in RAM — the cards' tiers are RAM given back, which can bring a layer mapped from its file into RAM. Each card starts with its share of every layer in RAM; a promotion sends one back. A prompt's chunk gives each card the picks it holds. Not chosen at boot. |
+| `card_line` | default `8` | With `card_exclusive`, how many of a prompt chunk's rows an expert must have to be copied onto a card. |
 | `chunk` | positions, default 128 | How many positions of a prompt go through a layer at once. |
 | `picture_pixels` | default `4194304` | Room on the card for its vision tower: its planes and the scratch of the largest picture, about 620 MB. A picture is at most 1,024 tokens (about 1.8 megapixels, a token a 3 × 3 block of 14-pixel patches) whatever the value; a smaller one makes room for fewer, and a picture is then made smaller to fit. `0` keeps none, and a message's picture is refused. |
 
@@ -291,7 +299,7 @@ It reads pictures, not videos. Its options for measuring, whose defaults are the
 | `cards` | The machine's cards that split every layer, as a list: the server's `num_cards` sets it, its first cards. On two MI50s no faster, the CPU's experts being its time. |
 | `card` | `0` by default: the card it runs on, without `cards`. |
 | `card_experts` | `0` by default: experts 0 to n − 1 of every layer kept on the cards, a fixed share rather than a tier, each card its part of their width. Not with `card_experts_gb`. |
-| `card_shared`, `card_landing`, `card_landing_line` | As GLM's. |
+| `card_shared`, `card_landing`, `card_landing_line`, `card_duplex` | As GLM's — `card_shared` with `card_exclusive` a slice dealt at boot and changed between the cards. |
 | `socket` | One CPU socket for the routed experts — its threads and its memory — rather than the whole machine, as a stage of a pipeline a socket. |
 | `layers` | As the others'. |
 

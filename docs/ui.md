@@ -115,7 +115,7 @@ and in the editor — opens [`config.md`](config.md), which says what every key 
 ## Where things are
 
 - **The data folder** holds the models and the conversations: `models/<name>/` and `user_sessions/<model>/<id>/`, on
-  the server's machine. It is the release's folder, or the one `silvann models <folder>` named (for `silvann ui` and
+  the server's machine. It is the release's folder, or the one `silvann data <folder>` named (for `silvann ui` and
   `silvann serve`), or `SILVANN_DATA`. In a container built from `docker/` it is the volume, `/data`.
 - **A model's folder**: its configs, and the programs it runs as written at its last start
   (`models/<name>/programs.lisp`). The setup the server chose is kept there too (`autotune.json`).

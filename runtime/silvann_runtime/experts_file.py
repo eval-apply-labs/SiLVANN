@@ -281,7 +281,7 @@ def _open(m, path, what):
     """`path` opened by the worker's family (`sys__file__open`), its handle."""
     if _UNSPELLED & set(path):
         raise Refused("%s %r holds a space or a bracket, which a program cannot name: move the models to a folder "
-                      "without one (`silvann models <folder>`)" % (what, path))
+                      "without one (`silvann data <folder>`)" % (what, path))
     kind, handle = m.run("(sys__file__open '%s)" % path)
     if kind != m.K["sys__value_int"] or handle == 0:
         raise Refused("%s %s could not be opened" % (what, path))
