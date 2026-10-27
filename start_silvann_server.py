@@ -432,7 +432,11 @@ def _boot(args):
     #   model's commands find them read-only from the start
     for place in (DATA / "skills", DATA / "skills_added"):
         place.mkdir(parents=True, exist_ok=True)
-    S.toolbox = tools_config.Toolbox(_tools_file(cfg), S.skills, added=DATA / "skills_added")
+    # the Python the image's server imports as it starts (`python/`, docker/install_nonfree.sh's), made now in a
+    #   container, so the model's commands find it read-only before anything is there and never make it themselves
+    if tools._jail.in_container():
+        (DATA / "python").mkdir(parents=True, exist_ok=True)
+    S.toolbox = tools_config.Toolbox(_tools_file(cfg), S.skills, added=DATA / "skills_added", code=[DATA / "python"])
     S.classifier = tools.Classifier(str(DATA / "tools.json"), "ask" if S.tools == "no" else S.tools,
                                     allowed=[str(S.workspace)], sealed=[S.toolbox.file.folder()])
     S.web = tools.Web()

@@ -139,7 +139,7 @@ and does not take the whole machine with it.
 The browser can keep apps apart too. Put each app's container behind one small proxy that gives it a name under
 localhost, such as `silvann.localhost` or `searxng.localhost`, instead of a port each. The ports stop colliding, the
 address says what you are opening, and the browser keeps each app's cookies and stored data to its own name, which
-ports never did ([`docker/README.md`](../docker/README.md#each-app-a-name-under-localhost)). The same suits most desktop
+ports never did ([`docker/advanced.md`](../docker/advanced.md#each-app-a-name-under-localhost)). The same suits most desktop
 apps built on Electron, which are a web page and a backend: the backend in a container with only the folders it is
 given, the page a name in the browser you already have.
 

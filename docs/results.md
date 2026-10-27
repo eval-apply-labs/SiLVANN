@@ -94,6 +94,8 @@ by 4 pairs a lane: the 35B reads a 2,000-position prompt at 337 positions a seco
 199 where it read 107 — the answers the same words. v0.20.0 takes the grouped causal scores in tiles too: the 27B 206,
 the 35B 379 — the 35B's on the v0.20.0 tree in its container and on the host, interleaved, the same words
 (`measurements/2026-10-26_nn119_v0200_image_node03.md`; the 27B's `measurements/2026-10-24_nn114_tile_staging_node03.md`).
+The 32,033-position row, v0.21.0's TurboQuant passes over the cache's 8-bit tier in slices against v0.20.0's, each
+installed: `measurements/2026-10-27_v0210_mi50_rows_node03.md`.
 Streamed, a layer's experts cross to the card once for the whole prompt, and the card computes them all
 (`measurements/2026-10-25_nn115_qwen_router_rows_node03.md`).
 

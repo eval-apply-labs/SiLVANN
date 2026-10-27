@@ -1,10 +1,8 @@
 # Running SiLVANN
 
-This is a **developer preview (v0.15.1)**. It is tested on Linux with AMD Instinct MI50 cards (gfx906, ROCm 6), with an
-NVIDIA GeForce RTX 5060 Ti (sm_120, CUDA 12.9), and on the CPU alone with AVX2 and with AVX-512 — on Ubuntu 22.04 — and
-natively on Windows on one PC, with an RTX 5070 Ti ([below](#on-windows)). Other NVIDIA generations are untested; macOS is
-not supported. If something does not build or does not run on your
-machine, you are expected to be able to read the error and the source.
+This is a **developer preview**: what it is tested on is in the [README](../README.md#platforms). If something does not
+build or run on your machine, you are expected to be able to read the error and the source. On Linux the recommended way
+to run it is a container ([`docker/README.md`](../docker/README.md)); this guide is for installing it.
 
 ## 1. Build
 
@@ -14,22 +12,27 @@ machine, you are expected to be able to read the error and the source.
 curl -fsSL https://raw.githubusercontent.com/eval-apply-labs/SiLVANN/HEAD/install.sh | bash
 ```
 
-It fetches the release into `./silvann`, makes its Python environment, finds the card and its compiler, builds the
-engine and the families this machine needs (the whole build's output in `silvann/build.log`), and puts a `silvann`
-command in `~/.local/bin`: `silvann list`, `silvann download <model>`, `silvann serve <model>`, `silvann ui`, and
-`silvann update` for the next release (stop the server first); `silvann help` lists the rest.
+It fetches the release into `./silvann`, makes its Python environment, finds the card and its compiler, builds what this
+machine needs (the build's output in `silvann/build.log`), and puts a `silvann` command in `~/.local/bin`:
+`silvann list`, `silvann download <model>`, `silvann serve <model>`, `silvann ui`, and `silvann update` for the next
+release (stop the server first); `silvann help` lists the rest.
 
-`silvann data <folder>` keeps what SiLVANN keeps for you in that folder from then on: SiLVANN on a USB drive, say, with
-its models on the machine's own disk. That is the models (`models/`), the conversations (`user_sessions/`), and beside
-them your skills (`skills/`), the tools file (`tools/`), the tool's workspace, the folders it was allowed and the
-definitions it kept (`workspace/`, `tools.json`, `tools_library.json`), the Hugging Face token (`.huggingface_token`) and the UI's last start
-(`ui_last_start.json`). What the old folder holds stays there; the command names what to move across. The `silvann`
-command's `serve`, `ui` and `download` read the folder; the server and the UI started by hand read `SILVANN_DATA`, which
-also comes before it. It installs nothing system-wide and asks for no
-password: a tool it needs and does not find — Python's `venv` and its headers (`python3-dev`), `g++`, `git` — it names, with the `apt` line that installs
-it. A card whose compiler is missing (CUDA's `nvcc`, ROCm's `hipcc`) is named too; install it, then `silvann build`.
-An NVIDIA card older than CUDA's family takes (compute capability below 7.5: a GTX 10x0) is built for through OpenCL 1.2
-instead, with nothing to install but the card's driver — a developer preview, not yet checked on such a card.
+It installs nothing system-wide and asks for no password. A tool it needs and does not find — Python's `venv` and its
+headers (`python3-dev`), `g++`, `git` — it names, with the `apt` line that installs it. A card whose compiler is missing
+(CUDA's `nvcc`, ROCm's `hipcc`) is named too: install the compiler, then run `silvann build`; the CPU runs the models
+meanwhile. An NVIDIA card older than the CUDA family takes (compute capability below 7.5: a GTX 10x0) is built for
+through OpenCL 1.2 instead, with nothing to install but the card's driver — not yet checked on such a card.
+
+**Keeping the data on another drive.** `silvann data <folder>` keeps everything SiLVANN keeps for you in that folder
+from then on — SiLVANN on a USB drive, say, and its models on the machine's own disk. That is:
+
+- the models (`models/`) and the conversations (`user_sessions/`);
+- your skills (`skills/`), the tools file (`tools/`), the model's workspace (`workspace/`), the folders it was allowed
+  and the definitions it kept (`tools.json`, `tools_library.json`);
+- the Hugging Face token (`.huggingface_token`) and the UI's last start (`ui_last_start.json`).
+
+What the old folder holds stays there, and the command names what to move across. A server or a UI started by hand,
+not through `silvann`, reads the folder from `SILVANN_DATA` — which, when it is set, also wins over `silvann data`.
 
 **By hand:** you need Python 3.10 or newer with its headers (`python3-dev` on Debian and Ubuntu), `g++`, for AMD cards ROCm's `hipcc` (`/opt/rocm/bin/hipcc`), and for NVIDIA cards CUDA
 12's `nvcc` — found on the `PATH`, or named by `SILVANN_NVCC=/usr/local/cuda-12.9/bin/nvcc`.
@@ -103,10 +106,10 @@ of them on the card that leaves Task Manager's shared GPU memory near 0 —
 
 ### On Windows: a container
 
-SiLVANN publishes no image: it runs natively ([above](#on-windows)). Under Docker Desktop
-on WSL 2 it ran well below what the PC gives — on one PC (an RTX 5070 Ti, a Ryzen 7 5800X, 32 GB of RAM) 37 tokens a
-second with Ministral 3 14B `D4` and 22 with the Qwen 3.6 35B-A3B `D8E4`, where the same version installed on Linux gave
-46 and 40. [`docker/README.md`](../docker/README.md) has the Dockerfile, for a container of your own.
+On Windows, install SiLVANN natively ([above](#on-windows)). The Linux images do run under Docker Desktop on WSL 2, but
+well below what the PC gives: on one PC (an RTX 5070 Ti, a Ryzen 7 5800X, 32 GB of RAM) 37 tokens a second with
+Ministral 3 14B `D4` and 22 with the Qwen 3.6 35B-A3B `D8E4`, where the same version installed on Linux gave 46 and 40
+([`docker/README.md`](../docker/README.md)).
 
 ### On Windows: Linux on a USB SSD
 
@@ -133,16 +136,19 @@ tried it yet: tell us in Discussions if you do. ROCm inside WSL supports recent 
 ## 2. Get a model
 
 ```bash
-venv/bin/python silvann_core.py list-models
-venv/bin/python silvann_core.py download-model silvann_tq_D8E4_qwen3.6_35b_a3b
+silvann list                                          # the models this release can fetch
+silvann download silvann_tq_D8E4_qwen3.6_35b_a3b
 ```
+
+(Installed by hand: `venv/bin/python silvann_core.py list-models` and `… download-model <model>`.) The UI's Options
+download a model too, with its progress.
 
 A model lands in `models/<name>/` with a `configs/default.json` and its program in `lisp/` — the Lisp the evaluator
 runs it with, yours to read and change. `silvann download <model>` on a model that is there fetches its pack's `lisp/`
 afresh, whole — the program its pack carries now, over any change of yours. A server started on a model that is not there asks, on a terminal, whether to
 download it; started without one (a service, the UI), it refuses and names this command.
 
-The UI's Options download a model too, with its progress. Hugging Face serves a client that is not signed in more slowly:
+Hugging Face serves a client that is not signed in more slowly:
 a token with read access (huggingface.co/settings/tokens) saved with `venv/bin/python silvann_core.py hf-token --set`
 (`silvann token --set`), or in the UI's Options, is used by every download after; `HF_TOKEN` in the environment comes
 first.
@@ -150,10 +156,13 @@ first.
 ## 3. Serve it, and chat
 
 ```bash
-venv/bin/python start_silvann_server.py --model models/silvann_tq_D8E4_qwen3.6_35b_a3b [--port 8765]
-venv/bin/python silvann_ui.py --port 8090
-venv/bin/python silvann_cli.py [--notools] [--nothink]     # or the chat in this terminal
+silvann serve silvann_tq_D8E4_qwen3.6_35b_a3b       # the server, on port 8765; it keeps running
+silvann ui                                          # in another terminal: the chat, at http://localhost:8090
 ```
+
+Or `silvann ui` alone, and start the model from its Options. Installed by hand, the same from the release's folder:
+`venv/bin/python start_silvann_server.py --model models/<model> [--port 8765]`, `venv/bin/python silvann_ui.py --port
+8090`, and `venv/bin/python silvann_cli.py [--notools] [--nothink]` for the chat in the terminal.
 
 **In a terminal**, `silvann_cli` (`silvann_cli.py`) talks to the server as the UI does — over ssh, say: the answer
 written as it comes, its thinking dimmed, the model's tool calls and their values shown. A new conversation takes the

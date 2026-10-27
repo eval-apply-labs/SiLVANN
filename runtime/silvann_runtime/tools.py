@@ -537,8 +537,8 @@ class Classifier:
                         "to %s" % (target, touches))
         if touches == "write" and any(target == a or target.startswith(a.rstrip(os.sep) + os.sep)
                                       for a in self.read_only):
-            raise Fault("%s is in the tools' folders, which the model reads and does not write: (add_tool \"path\" "
-                        "\"name\") adds a tool of its own" % target)
+            raise Fault("%s is in the tools' folders, the code the server runs, which the model reads and does not write: "
+                        "(add_tool \"path\" \"name\") adds a tool of its own" % target)
         if touches == "run" and any(a in str(target) for a in self.sealed):
             raise Fault("the command names what is closed to the model — the machine's tools file or the server's own "
                         "process: not the model's to run")

@@ -253,10 +253,14 @@ class Toolbox:
     in every conversation at once, and a skill installed is in each conversation's (help) at its next call. With no file,
     every tool is on with its own settings."""
 
-    def __init__(self, tools_file=None, skill_folders=(), added=None):
+    def __init__(self, tools_file=None, skill_folders=(), added=None, code=()):
         self.file = tools_file
         self.skill_folders = [str(f) for f in skill_folders or ()]
         self.added_folder = str(added) if added else None   # where (add_tool …) puts what the model adds, read last
+        # the Python the server imports as it starts, kept in the data folder (the image's `python/`: what
+        #   requirements-nonfree.txt installs) — a module the model's commands wrote there would run in the server's own
+        #   process, beside the tools file, so they read it and never write it, as the skill folders
+        self.code_folders = [str(f) for f in code or ()]
         self.lock = threading.Lock()
         self.skills, self.tools, self.held, self.unavailable = [], {}, {}, {}
         self.generation = 0           # changes when the skills or a tool's switch or settings do
@@ -292,10 +296,10 @@ class Toolbox:
         return os.path.realpath(skill.folder).startswith(root.rstrip(os.sep) + os.sep)
 
     def writable_folders(self):
-        """The skill folders the server's user can write — the ones a model's command must not (▶ tools' classifier,
-        jail.py): only (add_tool …) writes there."""
+        """The skill folders and the server's own Python (`code_folders`) the server's user can write — the ones a model's
+        command must not (▶ tools' classifier, jail.py): only (add_tool …) writes a skill folder."""
         return [os.path.realpath(f) for f in self.skill_folders + ([self.added_folder] if self.added_folder else [])
-                if os.path.isdir(f) and os.access(f, os.W_OK)]
+                + self.code_folders if os.path.isdir(f) and os.access(f, os.W_OK)]
 
     def checked(self, unavailable):
         """What the startup check found nothing to answer: {command: why}."""

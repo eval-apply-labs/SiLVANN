@@ -47,14 +47,16 @@ restart starts every REPL afresh.
 
 ### Searching the web
 
-Search engines turn away a program that reads their results pages, so the model searches through an engine of the
-machine's own, with the `search` skill the release ships. `(search …)` asks a **SearXNG** instance's JSON API — a
-metasearch engine that asks many engines and answers in JSON. A **Brave Search API key** is the other way, used when
-there is no SearXNG or it does not answer. Both are settings of [the tools file](#the-tools-file)'s `search` entry:
+Search engines turn away a program that reads their results pages, so the model searches through a search API, with
+the `search` skill the release ships. The simplest is a **Brave Search API key** (a free plan at
+https://brave.com/search/api/) — the container's `setup.sh` asks for one. The other way is a **SearXNG** of your own: a
+separate program, in a container of its own beside SiLVANN, a metasearch engine that asks many engines and answers in
+JSON; where one answers, `(search …)` asks it first. Both are settings of [the tools file](#the-tools-file)'s `search`
+entry:
 
 | setting | default | what it is |
 |---|---|---|
-| `searxng` | `"auto"` | The SearXNG to ask, `"http://host:port"`, its JSON format turned on. `"auto"` looks, as the server starts, at `http://127.0.0.1:8888` — a SearXNG container on this machine, as below, or one in the pod SiLVANN's container runs in ([`docker/README.md`](../docker/README.md#searching-the-web-a-searxng-beside-it)) — and at `http://searxng:8080`, a container called `searxng` on the server's own container network. `null`: none. |
+| `searxng` | `"auto"` | The SearXNG to ask, `"http://host:port"`, its JSON format turned on. `"auto"` looks, as the server starts, at `http://127.0.0.1:8888` — a SearXNG container on this machine, as below, or one in the pod SiLVANN's container runs in ([`docker/README.md`](../docker/advanced.md#searxng-a-search-engine-of-your-own)) — and at `http://searxng:8080`, a container called `searxng` on the server's own container network. `null`: none. |
 | `brave_key` | `null` | A Brave Search API key, asked when there is no SearXNG or it does not answer. The model never sees it. |
 
 With neither, `(search …)` answers that none is set up, so the model can say so.
@@ -268,7 +270,7 @@ suits the task.
 
 The SiLVANN servers of a network can find each other through a registry, a small program that comes with SiLVANN:
 `silvann registry` listens on port 8770 (`--port` to change it), and in a container it is the same image with another
-command ([`docker/README.md`](../docker/README.md#servers-that-find-each-other)). Each server whose tools file names
+command ([`docker/advanced.md`](../docker/advanced.md#servers-that-find-each-other)). Each server whose tools file names
 the registry offers itself as it starts: its address, its model, the model's LoRAs and context, and whether it is busy.
 It renews the offer every 30 seconds and withdraws it as it stops. A server that stops without withdrawing, because it
 crashed or lost its network, leaves the listing 90 seconds after its last renewal.
@@ -410,7 +412,9 @@ A **skill** is a folder that gives the REPL new commands. It holds:
   a name from yours or the release's.
 
 **The model reads the skills folders and never writes them**: its `(write …)` there is refused, and in a container its
-commands read them and cannot change them. What it adds, it adds with `(add_tool …)`.
+commands read them and cannot change them. What it adds, it adds with `(add_tool …)`. The same holds for the data
+folder's `python/` in a container — the Python the server imports as it starts, which `docker/install_nonfree.sh`
+fills: a module the model wrote there would run in the server's own process, beside the tools file.
 
 **When they are read:** at the start of a conversation's REPL, and again at its `(reset)`. A skill added while the
 server runs is there after a `(reset)`, without a restart. Editing a skill's Python takes effect the same way.

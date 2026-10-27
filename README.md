@@ -1,6 +1,6 @@
 # SiLVANN
 
-> **Developer preview, v0.21.0.** It runs the models below well on the hardware it was tested on, and it is shared
+> **Developer preview, v0.21.1.** It runs the models below well on the hardware it was tested on, and it is shared
 > for people who can find their way around a build and a stack trace. NVIDIA cards are tested on two, a GeForce
 > RTX 5060 Ti and an RTX 5070 Ti; Windows natively on one PC; macOS is not supported.
 
@@ -59,37 +59,31 @@ room for ([`docs/config.md`](docs/config.md)). **Every model and pack, the other
 its experts from the disk), and how long a conversation fits: [`docs/models.md`](docs/models.md)**; every measurement,
 the machines, and each row's version: [`docs/results.md`](docs/results.md).
 
-**New in v0.21.0:** SiLVANN servers find each other through a registry for the model's subagents, a long conversation
-on an MI50 reads and answers two to three times as fast, `experts_register` no longer pins the experts' RAM by itself,
-and the container docs give each app a name under localhost.
+**New in v0.21.1:** SiLVANN in a container sets itself up in one line, the container's docs are split into one page for getting
+started and one for the rest, and in a container the model's commands can no longer write the Python the server
+imports as it starts.
 
-**Servers that find each other.** `silvann registry` is a small registry that the SiLVANN servers of a network offer
-themselves to — each its address, its model, the model's LoRAs and context — and that a server's `(whoami)` and
-`(agent …)` read: the model sees each other server's model as the call that starts it, and its subagent runs there. A
-server renews its offer while it runs and withdraws it as it stops; one that stops without withdrawing leaves the
-listing 90 seconds later. The tools file's `agent` entry names the registry and its key, which the model never sees
-([`docs/tools.md`](docs/tools.md#servers-found-through-a-registry),
-[`docker/README.md`](docker/README.md#servers-that-find-each-other)).
+**The container in one line.** `docker/setup.sh` finds Podman or Docker and the card — AMD, NVIDIA or none — says
+what the machine is missing and the command that fixes it, asks for a Brave Search API key for the model's web search,
+and starts SiLVANN at `http://silvann.localhost:8080`, or on the first free port after 8080; `update`, `stop` and
+`start` after. `docker/install_nonfree.sh` adds PyAV, for MP4 and other video files, which the image does not
+redistribute. `docker/README.md` is the getting started; `docker/advanced.md` the rest — SearXNG, a separate container
+beside SiLVANN's, names under localhost, several cards and machines, building an image. The README's quick start
+leads with the one line, and ends with a prompt to paste into an AI assistant when something does not work
+([`docker/README.md`](docker/README.md)).
 
-**A long conversation on an MI50.** Past the 4,352 positions a Qwen model's cache keeps at full precision, an MI50 now
-reads the rest a slice at a time across the whole card: Qwen 3.8 27B reads a 32,098-position prompt at 69 positions a
-second where it read 25, and answers after it at 21 tokens a second where it answered at 10; after 100,081 positions, at
-35 and 13. Qwen 3.6 35B-A3B, on the card whole, reads a 32,033-position prompt at 132 where it read 42, and answers after
-it at 55 where it answered at 18 ([`docs/results.md`](docs/results.md)).
+**The server's own Python, out of the model's reach.** The image puts the data folder's `python/` — where
+`install_nonfree.sh` puts PyAV — on the server's import path. In a container the model's commands could write there,
+and a module written there would have run in the server's own process at its next start, outside the fence that keeps
+the tools file's keys from the model. It is now read-only to them, as the skill folders are; `setup.sh update` brings
+the image that holds it ([`docs/tools.md`](docs/tools.md)).
 
-**A tier's prompt, faster on NVIDIA.** With a tier of experts on the card fed from the experts in RAM, `"auto"`
-registered that RAM with an NVIDIA card so the card copied each expert from where it lies. Measured again on an RTX
-5060 Ti it made the prompt slower — Qwen 3.5 122B-A10B's by 25%, Qwen 3.6 35B-A3B's by 9%, the answers the same — and on
-AMD's cards it bought nothing. `"auto"` now registers nowhere, and `"experts_register": true` still does
-([`docs/config.md`](docs/config.md)). On the 5060 Ti the 35B with an 11.75 GB tier reads a 2,035-position prompt at
-194-203 positions a second where it read 181; as v0.21.0 installs, 194, and the answer after it 59.4 tokens a second
-against 60.9 — in the chat the same 72.
+**One table of models.** The README's models and what they run on are one table, with DeepSeek-V4.1-Flash and GLM 5.3
+Flash over two MI50s with every expert in RAM among its rows: DeepSeek at 10.5-13.7 tokens a second in the chat, GLM
+at 12.7-14.5 ([`docs/results.md`](docs/results.md)).
 
-**Each app a name.** The apps in a pod — the chat, SearXNG, any other — can each have a name under localhost behind one
-small proxy on one port: `silvann.localhost:8000` the chat, `searxng.localhost:8000` the search, `localhost:8000` the
-list of them. Their ports stop colliding, the address says what it opens, and the browser keeps each app's cookies and
-stored data apart ([`docker/README.md`](docker/README.md#each-app-a-name-under-localhost)).
-
+v0.21.0 brought the servers' registry for the model's subagents, long conversations on an MI50 two to three times as
+fast, and `experts_register` pinning the experts' RAM only where a config asks.
 v0.20.0 brought SiLVANN container-first, the model's tools set up in one file a container keeps from the model, the
 web searched, tools of the model's own and from repositories of them, and a prompt's experts streamed onto the card.
 
@@ -110,106 +104,84 @@ A model's tool draws with the picture model, opens subagents and keeps skills of
 
 ## Quick start
 
-### On Linux: a container (recommended)
+Three ways in; each ends with the chat in your browser.
 
-The images hold the release built for a card — AMD's (gfx906: the Instinct MI50 and MI60) or NVIDIA's — and the CPU's
-family, run rootless under Podman: the model's tool reaches the container and the folder you give it, and nothing else
-of the machine ([`docs/local_ai.md`](docs/local_ai.md#container-first)). That folder, `~/SiLVANN` below, is yours on
-both sides: the models, the conversations, and the model's workspace, where you put what it is to read and find what it
-made. The chat is at http://localhost:8080, and its Options download a model and start it:
+### Linux: a container (recommended)
 
 ```bash
-mkdir -p ~/SiLVANN ~/.config/containers
-python3 -c "import json, sys; p = json.load(open('/usr/share/containers/seccomp.json')); p['syscalls'].append({'names': \
-  ['landlock_create_ruleset', 'landlock_add_rule', 'landlock_restrict_self'], 'action': 'SCMP_ACT_ALLOW'}); \
-  json.dump(p, open(sys.argv[1], 'w'))" ~/.config/containers/silvann-seccomp.json   # Podman's, with Landlock's calls
-podman run -d --name silvann --userns=keep-id --security-opt seccomp=$HOME/.config/containers/silvann-seccomp.json \
-       --group-add keep-groups --device /dev/kfd --device /dev/dri \
-       -p 127.0.0.1:8080:8080 -v ~/SiLVANN:/data ghcr.io/eval-apply-labs/silvann:0-amd      # an AMD card
-podman run -d --name silvann --userns=keep-id --security-opt seccomp=$HOME/.config/containers/silvann-seccomp.json \
-       --device nvidia.com/gpu=all \
-       -p 127.0.0.1:8080:8080 -v ~/SiLVANN:/data ghcr.io/eval-apply-labs/silvann:0-nvidia   # an NVIDIA card
+curl -fsSL https://raw.githubusercontent.com/eval-apply-labs/SiLVANN/HEAD/docker/setup.sh | bash
 ```
 
-The profile lets the model's commands be closed off from the machine's tools file — its keys — inside the container
-([`docs/tools.md`](docs/tools.md#where-the-models-commands-reach)); without it, Ubuntu 22.04's Podman refuses the calls
-that do it, and the model has no shell. For the model's web search, a SearXNG in a container beside it:
-[`docker/README.md`](docker/README.md#searching-the-web-a-searxng-beside-it).
+It sets SiLVANN up in a rootless container for your card — AMD, NVIDIA, or none — says what the machine is missing if
+anything is, asks for a Brave Search API key so the model can search the web (Enter skips it), and starts it. Then open
+the address it prints — http://silvann.localhost:8080, or the next free port where 8080 is taken: in **Options**,
+**Download models** fetches a model and **start** runs it ([`docs/ui.md`](docs/ui.md)). To read MP4 and other video
+files, run [`docker/install_nonfree.sh`](docker/README.md#set-it-up) once after it. In the container the model's tool reaches one folder of yours, `~/SiLVANN` — the models,
+the conversations, and the workspace where you put what it should read — and nothing else of the machine
+([why](docs/local_ai.md#container-first)). Updating, stopping, and the commands by hand:
+[`docker/README.md`](docker/README.md).
 
-What the host needs (the card's driver, Podman with `crun`, your groups), Docker instead of Podman, and updating:
-[`docker/README.md`](docker/README.md). A container under Docker Desktop on Windows runs the models well below what the
-PC gives: on Windows, install it.
+### Windows: the installer
 
-### On Windows: `install.ps1`, with the libraries GitHub built
-
-Python 3.10 to 3.14, Git and the card's own driver (`winget install -e --id Python.Python.3.12`, `winget install -e --id
-Git.Git`). In PowerShell, in the folder SiLVANN should go under:
+You need Python 3.10 to 3.14, Git and your card's driver; if Python or Git is missing, `winget install -e --id
+Python.Python.3.12` and `winget install -e --id Git.Git`, then open a new PowerShell. In PowerShell, in the folder
+SiLVANN should go under:
 
 ```powershell
 curl.exe -fsSLO https://raw.githubusercontent.com/eval-apply-labs/SiLVANN/HEAD/install.ps1
-powershell -ExecutionPolicy Bypass -File .\install.ps1      # into .\silvann, and a `silvann` command
+powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
-Then, in a new PowerShell — the one the installer ran in does not have `silvann` on its PATH yet:
+Then open a new PowerShell (the `silvann` command is on the path from there) and start a model:
 
 ```powershell
-silvann data E:\silvann_data                   # if you like: the models and the conversations on another drive
 silvann download silvann_tq_D4_ministral_3_14b
-silvann serve silvann_tq_D4_ministral_3_14b     # on port 8765
-silvann ui                                     # a chat in the browser, at http://localhost:8090
+silvann serve silvann_tq_D4_ministral_3_14b      # keeps running: open another PowerShell for the chat
 ```
 
-The installer takes the libraries GitHub built for the release when they were built from the folder's engine, and builds
-them otherwise. `build.ps1`, in the folder, builds them on the PC: it needs Visual Studio's Build Tools with their C++
-Clang tools, and CUDA's toolkit (12 or 13) for an NVIDIA card. Run `install.ps1` again — or `silvann update` — to
-update: the models, the conversations and their settings stay ([`docs/users.md`](docs/users.md#on-windows)).
+and in another PowerShell, `silvann ui`: the chat opens at http://localhost:8090. To update, `silvann update`; the
+models and the conversations stay. On Windows the model's shell starts switched off
+([`docs/tools.md`](docs/tools.md#where-the-models-commands-reach)); the rest: [`docs/users.md`](docs/users.md#on-windows).
 
-On Windows the model's shell — `(powershell …)`, and Git's `(bash …)` — and its adding tools of its own start switched
-off: nothing holds them there, so they are yours to switch on, in the data folder's `tools\default.json`
-([`docs/tools.md`](docs/tools.md#where-the-models-commands-reach)).
+### Linux, from source
 
-### From source: the installers
-
-On Linux one line in a terminal fetches SiLVANN into `./silvann` and builds it for this machine — the CPU, and the card
-it finds: an NVIDIA card with CUDA 12's `nvcc`, an AMD card with ROCm 6's `hipcc`, each for that card alone (where the
-compiler is missing it says where to get it, and the CPU runs the models meanwhile). On Windows, `build.ps1` builds the
-libraries on the PC (above). `install.sh` installs nothing system-wide and asks for no password, and it leaves a `silvann` command (`silvann help` lists what it does). Run it again — or `silvann update` —
-to update: the models, the conversations and their settings stay. `silvann data <folder>` keeps the models, the
-conversations and the rest it keeps for you in another folder from then on — SiLVANN on a USB drive, say, and its models
-on the machine's own disk ([`docs/users.md`](docs/users.md)).
+One line builds SiLVANN in `./silvann` for this machine's CPU and card, installs nothing system-wide, asks for no
+password, and leaves a `silvann` command:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/eval-apply-labs/SiLVANN/HEAD/install.sh | bash   # into ./silvann, and a `silvann` command
+curl -fsSL https://raw.githubusercontent.com/eval-apply-labs/SiLVANN/HEAD/install.sh | bash
 silvann download silvann_tq_D8E4_qwen3.6_35b_a3b
-silvann serve silvann_tq_D8E4_qwen3.6_35b_a3b                       # on port 8765
-silvann ui                                                          # a chat in the browser, at http://localhost:8090
+silvann serve silvann_tq_D8E4_qwen3.6_35b_a3b    # keeps running: open another terminal for the chat
 ```
 
-Or by hand, from this folder:
+and in another terminal, `silvann ui`: the chat opens at http://localhost:8090. `silvann help` lists the rest;
+`silvann update` updates, and the models and the conversations stay. The compilers a card needs, building by hand,
+and keeping the models on another drive: [`docs/users.md`](docs/users.md).
 
-```bash
-python3 -m venv venv && venv/bin/pip install -r requirements.txt
-SILVANN_PYTHON=venv/bin/python ./build.sh                        # needs g++; ROCm's hipcc for AMD cards, CUDA's nvcc for NVIDIA
-venv/bin/python silvann_core.py download-model silvann_tq_D8E4_qwen3.6_35b_a3b
-venv/bin/python start_silvann_server.py --model models/silvann_tq_D8E4_qwen3.6_35b_a3b   # on port 8765
-venv/bin/python silvann_ui.py --port 8090                          # a chat in the browser, on the server above (docs/ui.md)
+### If you get stuck
+
+An AI assistant can walk you through it. Paste this into one:
+
+```text
+Help me install SiLVANN, a program that runs large language models on my own machine. Read its instructions first:
+https://raw.githubusercontent.com/eval-apply-labs/SiLVANN/HEAD/README.md and, on Linux,
+https://raw.githubusercontent.com/eval-apply-labs/SiLVANN/HEAD/docker/README.md. Then ask me to run these commands one
+at a time and paste what they print, and from what they show tell me what to do next, using only the commands in those
+instructions and saying what each one does before I run it:
+uname -a; cat /etc/os-release; podman --version; docker --version; nvidia-smi -L; ls /dev/kfd; id -nG; free -g
 ```
 
-### More info
+### Where to read on
 
-A model that is not downloaded is offered for download when the server starts on a terminal, and otherwise refused
-with the command that fetches it. Every setting a model boots with, and its
-options: [`docs/config.md`](docs/config.md). The model's tool, and adding your own commands to it in Python:
-[`docs/tools.md`](docs/tools.md). The experts on the disk, and a model split over machines:
-[`docs/users.md`](docs/users.md). Every measurement:
-[`docs/results.md`](docs/results.md). How it is built and how a model or a silicon is added:
-[`docs/developers.md`](docs/developers.md). The ideas behind the design, the Lisp lineage and the model as a collapse of meaning:
-[`docs/concepts.md`](docs/concepts.md); how the weights are packed: [`docs/compression.md`](docs/compression.md).
-Where the design could go next — a
-model whose output is a program the engine runs, sizing the experts after they answer, choosing an adapter at the
-end of a sentence, layers replaced by simpler programs, multi-token prediction as a program: [`docs/directions.md`](docs/directions.md).
-Why a model on your own machine matters — for the work that cannot leave the room, and against the bad actors who could
-run one too: [`docs/local_ai.md`](docs/local_ai.md).
+- Every setting a model boots with, and each model's options: [`docs/config.md`](docs/config.md).
+- The model's tool, and adding your own commands to it: [`docs/tools.md`](docs/tools.md).
+- The experts read from the disk, and a model split over several machines: [`docs/users.md`](docs/users.md).
+- Every measurement: [`docs/results.md`](docs/results.md).
+- How it is built, and how a model or a silicon is added: [`docs/developers.md`](docs/developers.md).
+- The ideas behind the design, the Lisp lineage and the model as a collapse of meaning:
+  [`docs/concepts.md`](docs/concepts.md); how the weights are packed: [`docs/compression.md`](docs/compression.md).
+- Where the design could go next: [`docs/directions.md`](docs/directions.md).
+- Why a model on your own machine matters: [`docs/local_ai.md`](docs/local_ai.md).
 
 ## What is here
 
