@@ -126,6 +126,61 @@ Under Docker: `docker network create silvann`, SearXNG started with `--name sear
 A Brave Search API key is the other way, with no SearXNG: the `search` entry's `brave_key` in
 `~/SiLVANN/tools/default.json`, then Rebuild the tools.
 
+## Each app a name under localhost
+
+A browser sends every name ending in `.localhost` to this machine by itself, with nothing to set up, so the apps in a
+pod can each have a name instead of a port. One small proxy in the pod holds the pod's only published port and passes
+each name to its app. The apps publish nothing and keep their own ports inside the pod, so they never collide with each
+other's or the machine's:
+
+```bash
+mkdir -p ~/.config/silvann/caddy
+cat > ~/.config/silvann/caddy/Caddyfile <<'END'
+{
+	auto_https off
+}
+http://silvann.localhost:8000 {
+	reverse_proxy 127.0.0.1:8080
+}
+http://searxng.localhost:8000 {
+	reverse_proxy 127.0.0.1:8888
+}
+http://localhost:8000 {
+	respond <<LIST
+	silvann.localhost:8000    SiLVANN's chat
+	searxng.localhost:8000    SearXNG, the search SiLVANN's model asks
+	LIST 200
+}
+http://:8000 {
+	respond "no app is named so here: localhost:8000 lists them" 404
+}
+END
+podman pod create --name silvann --userns=keep-id -p 127.0.0.1:8000:8000
+podman run -d --pod silvann --name searxng -e SEARXNG_PORT=8888 -v ~/.config/silvann/searxng:/etc/searxng \
+       docker.io/searxng/searxng
+podman run -d --pod silvann --name silvann --security-opt seccomp=$HOME/.config/containers/silvann-seccomp.json \
+       --group-add keep-groups --device /dev/kfd --device /dev/dri -v ~/SiLVANN:/data ghcr.io/eval-apply-labs/silvann:0-amd
+podman run -d --pod silvann --name caddy -v ~/.config/silvann/caddy/Caddyfile:/etc/caddy/Caddyfile:ro \
+       docker.io/library/caddy:2.8.4
+```
+
+with SearXNG's settings as [above](#searching-the-web-a-searxng-beside-it). The chat is then at
+`http://silvann.localhost:8000`, SearXNG at `http://searxng.localhost:8000`, and `http://localhost:8000` lists what the
+pod serves. Another app joins as a container in the pod and three lines in the file, then `podman restart caddy`. On
+node03, under Ubuntu 22.04's Podman 3.4 (`MEASURED` with curl, which sends `*.localhost` to the loopback as the browsers
+do): the chat's page and its websocket through `silvann.localhost`, SearXNG's search through `searxng.localhost`, the
+list at `localhost`, a 404 for any other name, and the host holding port 8000 alone
+(measurements/2026-10-27_localhost_names_node03_artifacts/pod.log).
+
+**A name is also a wall.** A browser keeps cookies and stored data by name, not by port, so two apps at
+`localhost:8080` and `localhost:8090` share them; at `silvann.localhost` and `searxng.localhost` each keeps its own, and
+one app's page cannot read another's session.
+
+**Without the port in the address**, the pod publishes port 80. Rootless Podman binds no port below 1024 unless the
+system allows it: `sudo sysctl net.ipv4.ip_unprivileged_port_start=80` (a line in `/etc/sysctl.d/` keeps it), then
+`-p 127.0.0.1:80:8000` on the pod, and the chat is at `http://silvann.localhost` (`ASSUMED`: not tried here). Under
+Docker, which has no pods, the containers share one network with `--network container:caddy` (`ASSUMED`).
+
 ## One card a container, and a model across containers
 
 **A card of its own.** Each container can be given its own card, so two models — or two stages of one — never share
@@ -164,6 +219,45 @@ too (`ASSUMED`: not yet tried). On node03 the Qwen 3.6 35B-A3B ran so, its first
 container with no card, at 21.7 tokens a second (`MEASURED`, measurements/2026-10-26_nn119_v0200_image_node03.md). An
 NVIDIA card's stage is the NVIDIA image in the same pod: the ring is the model's, whatever runs each run of layers
 (`ASSUMED`: an AMD and an NVIDIA image in one ring not yet tried). `"card": 0` is the one card the container sees.
+
+## Servers that find each other
+
+The registry of servers, through which the servers of a network find each other for the subagents
+([`docs/tools.md`](../docs/tools.md#servers-found-through-a-registry)), is in the same image under another command. On
+the machine that keeps it:
+
+```bash
+mkdir -p ~/SiLVANN-registry
+podman pod create --name silvann-registry --userns=keep-id -p 8770:8770
+podman run -d --pod silvann-registry --name registry -v ~/SiLVANN-registry:/data \
+       ghcr.io/eval-apply-labs/silvann:0-amd silvann registry
+```
+
+It writes its key into `~/SiLVANN-registry/registry/key` at its first start. A server offered to it is one that other
+machines reach: started on its own with `--host 0.0.0.0` and its port published, the chat's UI pointed at it (Options
+→ Send conversations to → remote), as a ring's first machine is above. The UI's own server, which the image starts by
+default, listens inside its container alone. On each machine, with that machine's address:
+
+```bash
+podman pod create --name silvann-server --userns=keep-id -p 8765:8765
+podman run -d --pod silvann-server --name server -v ~/SiLVANN:/data \
+       --security-opt seccomp=$HOME/.config/containers/silvann-seccomp.json --group-add keep-groups \
+       --device /dev/kfd --device /dev/dri \
+       -e SILVANN_TOOL_AGENT_REGISTRY=http://192.0.2.10:8770 -e SILVANN_TOOL_AGENT_KEY="$(cat key)" \
+       -e SILVANN_TOOL_AGENT_ADDRESS=http://192.0.2.20:8765 \
+       ghcr.io/eval-apply-labs/silvann:0-amd silvann serve <model> --host 0.0.0.0
+```
+
+where `key` is a copy of the registry's key file. Inside a container the server's own address is the container's,
+which other machines do not reach, so `SILVANN_TOOL_AGENT_ADDRESS` names the machine's address and the published port.
+The server's log says `offered to the registry … as …` as it starts, and the registry's `offered: …`; stopped, the
+server withdraws its offer. A pod keeps the published port where Ubuntu 22.04's Podman (3.4) loses it for a container
+run as you on a network of its own (`MEASURED` on node03, as above).
+
+On node03 the registry and two servers each ran so in a pod of their own, from the v0.21.0 image — Qwen 3.8 27B on one
+MI50, Qwen 3.6 35B-A3B on the other, each reaching the others only at the machine's address and published port, as
+another machine would: both offered themselves, the 35B ran the 27B as a subagent from `(whoami)`'s listing alone, and
+the 27B's pod stopped left the listing (`MEASURED`, measurements/2026-10-27_v0210_two_servers_node03.md).
 
 ## What the image leaves out
 

@@ -59,7 +59,7 @@ RUNTIME = Path(os.environ.get("SILVANN_RUNTIME", ROOT / "runtime" if (ROOT / "ru
 from silvann_core import default_config                                   # noqa: E402
 sys.path.insert(0, str(RUNTIME))
 import silvann_runtime as SR                                              # noqa: E402
-from silvann_runtime import autotune, experts_file, skills, tools, tools_config     # noqa: E402
+from silvann_runtime import autotune, experts_file, registry, skills, tools, tools_config     # noqa: E402
 from silvann_runtime.chat import Chat, ToolMarkup                         # noqa: E402
 from silvann_runtime.fetch import ensure_model                            # noqa: E402
 from silvann_runtime.session import Busy, Cartridge, Runtime, _state_read, sampler, state_bytes     # noqa: E402
@@ -167,6 +167,8 @@ class State:
         self.toolbox = None                 # what the REPL reaches on this machine, as the tools file sets it up and
                                             #   the startup check found it (▶ tools_config.Toolbox), every session's
         self.web = None                     # how the REPL's fetch goes onto the web (▶ tools.Web)
+        self.listen = ("127.0.0.1", 8765)   # the address and port the server listens on
+        self.offer = None                   # this server offered to the agent entry's registry (▶ registry.Offer)
 
 
 S = State()
@@ -484,6 +486,13 @@ def _tools_ready(cfg):
         said.append("the REPL's (image …): draws with %s%s" % (p["name"], where))
     else:
         said.append("the REPL's (image …): %s" % _not_ready(switch, S.no_picture))
+    reg = box.config("agent").get("registry")
+    if box.enabled("agent") == "no":
+        said.append("the REPL's (agent …): switched off in the tools file")
+    elif reg:
+        said.append("the REPL's (agent …): the servers the registry %s lists too" % reg)
+    if S.offer is not None:
+        S.offer.wake()                                # the offer follows the agent entry now, not at its next renewal
     if box.enabled("bash") == "no":
         said.append("the REPL's (bash …): switched off in the tools file")
     else:                                             # where the model's commands reach (▶ tools.confinement)
@@ -719,8 +728,10 @@ def _tool_agent(cid, model, config, task):
         folder = Path(S.setup["folder"]) if model == S.model_id else Path(model) if os.path.isabs(model) \
             else DATA / "models" / model
         if not (folder / "pack.json").exists() or image_pack(str(folder)):
-            raise SR.Refused("%s is not a text model on this machine, and no worker serves it (the config's workers: "
-                             "%s)" % (model, ", ".join(S.config.get("workers") or []) or "none"))
+            if model in _reachable():
+                raise SR.Refused("%s is another server's model, and that server is busy: ask again later, or name "
+                                 "another model" % model)
+            raise SR.Refused(_unknown(model))
         if S.setup["ring"]:
             raise SR.Refused("a model run over several machines does not lend its card: a worker must serve %s" % model)
         if say:
@@ -811,10 +822,18 @@ def _whoami(cid):
             url = w if "://" in w else "http://" + w
             try:
                 h = httpx.get(url + "/health", timeout=5).json()
-                lines.append("worker %s serves %s%s" % (w, h.get("model_id"),
-                                                        " (LoRAs %s)" % ", ".join(h["loras"]) if h.get("loras") else ""))
+                lines.append("(agent '%s \"\" \"…\") starts at once on the worker %s%s" % (
+                    h.get("model_id"), w, ", its LoRAs %s" % ", ".join(h["loras"]) if h.get("loras") else ""))
             except (httpx.HTTPError, ValueError):
                 lines.append("worker %s does not answer" % w)
+        servers, why = _registry_servers()
+        if why:
+            lines.append("the registry of servers: %s" % why)
+        for e in servers:
+            lines.append("(agent '%s \"\" \"…\") starts at once on the server %s, the registry's%s, its context %d%s"
+                         % (e.get("model_id"), e["address"],
+                            ", its LoRAs %s" % ", ".join(e["loras"]) if e.get("loras") else "",
+                            e.get("max_context") or 0, " — busy now" if e.get("busy") else ""))
         lines.append("pictures: %s" % ("(image …) draws with %s" % S.picture["name"] if S.picture else S.no_picture))
     return "\n".join(lines)
 
@@ -846,8 +865,10 @@ def _agent_config(model, config):
     if not text:
         return {}
     if not folder.is_dir():
-        raise SR.Refused("%s is not a model on this machine: 'self is your own, and (whoami) lists the others; a "
-                         "worker's model takes its config as JSON text" % model)
+        if model in _reachable():
+            raise SR.Refused("%s is another server's model: its config is JSON text, or \"\" for its own — (agent '%s "
+                             "\"\" \"the task\")" % (model, model))
+        raise SR.Refused(_unknown(model))
     path = folder / "configs" / (text if text.endswith(".json") else text + ".json")
     try:
         return json.load(open(path))
@@ -862,10 +883,12 @@ def _agent_config(model, config):
 
 
 def _worker_for(model):
-    """The first of the config's `workers` (host:port) whose server runs `model` and is not busy, as http://…; or None."""
+    """The first server that runs `model` and is not busy, as http://…: of the config's `workers` (host:port), then of
+    the servers the registry lists (▶ `_registry_servers`) — each asked as it is chosen; or None."""
     import httpx
-    for w in S.config.get("workers") or []:
-        url = w if "://" in w else "http://" + w
+    urls = [w if "://" in w else "http://" + w for w in S.config.get("workers") or []]
+    urls += [e["address"] for e in _registry_servers()[0] if e.get("model_id") == model]
+    for url in urls:
         try:
             h = httpx.get(url + "/health", timeout=5).json()
             if h.get("model_id") == model and not httpx.get(url + "/busy", timeout=5).json().get("busy"):
@@ -873,6 +896,60 @@ def _worker_for(model):
         except (httpx.HTTPError, ValueError):
             continue
     return None
+
+
+def _reachable():
+    """The models (agent …) names besides 'self, for a refusal that says them: this machine's other text models, the
+    config's workers' and the registry's servers'."""
+    import httpx
+    names = sorted(d.name for d in (DATA / "models").glob("*")
+                   if d.is_dir() and d.name != S.model_id and (d / "pack.json").exists() and not image_pack(str(d)))
+    for w in S.config.get("workers") or []:
+        try:
+            names.append(httpx.get((w if "://" in w else "http://" + w) + "/health", timeout=5).json()["model_id"])
+        except (httpx.HTTPError, ValueError, KeyError):
+            continue
+    names += [e.get("model_id") for e in _registry_servers()[0]]
+    return list(dict.fromkeys(n for n in names if n))
+
+
+def _unknown(model):
+    """The refusal of a model (agent …) does not reach: what its first argument names, and the call."""
+    names = _reachable()
+    return ("%s is no model (agent …) reaches: its first argument is the model's name — 'self, or %s — as (agent '%s "
+            "\"\" \"the task\")" % (model, ", ".join(names) or "no other here or on another server",
+                                    names[0] if names else "self"))
+
+
+def _offer_settings():
+    """The tools file's `agent` entry — the registry, its key, the offer and this server's address — as the offer and
+    the listing read it at each use; a picture model's server, with no REPL, reads the file itself."""
+    if S.toolbox is not None:
+        return S.toolbox.config("agent")
+    try:
+        return tools_config.config_of(_tools_file(S.config), "agent")
+    except SR.Refused:
+        return {}
+
+
+def _serving():
+    """What this server's offer to the registry says it serves (▶ registry.Offer)."""
+    m = S.model
+    return {"model_id": S.model_id, "architecture": m.folder.architecture if m else "",
+            "lora": getattr(m, "active_lora", None) or "", "loras": m.folder.loras() if m else [],
+            "max_context": getattr(m, "max_context", 0) or 0, "cards": _cards(m), "pictures": bool(S.image),
+            "busy": bool(S.runtime.busy()) if S.runtime else False}
+
+
+def _registry_servers():
+    """The text models' servers the registry of the agent entry lists, this one left out: (servers, None); ([], why)
+    where it does not answer or refuses; ([], None) where the entry names none."""
+    try:
+        got = registry.listing(_offer_settings())
+    except registry.Unreached as ex:
+        return [], str(ex)
+    mine = S.offer.address if S.offer is not None else None
+    return [e for e in got if e.get("address") != mine and not e.get("pictures")], None
 
 
 def _put_down():
@@ -1008,10 +1085,14 @@ async def _eviction_loop():
 @asynccontextmanager
 async def lifespan(app):
     sweep = asyncio.create_task(_eviction_loop())
+    S.offer = registry.Offer(_offer_settings, _serving, *S.listen,
+                             said=lambda line: print("[silvann_server] %s" % line, flush=True))
+    S.offer.start()
     try:
         yield
     finally:
         sweep.cancel()
+        await asyncio.to_thread(S.offer.stop)         # out of the listing before the conversations are saved
         if S.runtime is not None:
             S.runtime.close()
             for cid in list(S.runtime.cartridges):
@@ -1790,6 +1871,7 @@ def main():
                          "\"auto\", as long as the card holds" % getattr(S, "why", ""))
     import uvicorn
     S.endpoint = "http://127.0.0.1:%d" % args.port   # the server itself, where a subagent of its own model talks to it
+    S.listen = (args.host, args.port)
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
 
 

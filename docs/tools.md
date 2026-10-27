@@ -32,7 +32,7 @@ beside each conversation ([`users.md`](users.md#the-models-tool)).
 | `(remove_tool "name")` | Takes away a tool the model added, its settings kept in the tools file should it be added again. Never a built-in or one of yours. |
 | `(list_repo)`, `(list_package "name")`, `(get_tool "package/tool")`, `(add_repo "address")` | Tools from repositories: their packages listed, a tool put in the working folder to read before `(add_tool …)`, a repository added ([below](#tools-from-a-repository)). |
 | `(image "prompt")` | A picture drawn by the picture model and shown to the user. Settings go in the prompt: `--size 768x1024`, `--steps 20`, `--seed 7`, `--count 4` (four pictures, seeds 7, 8, 9 and 10). It draws with a picture model on this machine or on another SiLVANN server, as [the tools file](#the-tools-file)'s `image` entry says. Without one `(help)` lists it as a comment saying why, and it answers at once that none is installed, so the model can say so ([`config.md`](config.md#a-picture-from-the-text-model)). |
-| `(whoami)` | Which model this is and under which LoRA, its cards, its context and how much this conversation used, its tool's mode, and what `(agent …)` can reach: its LoRAs, the other models here, the workers. |
+| `(whoami)` | Which model this is and under which LoRA, its cards, its context and how much this conversation used, its tool's mode, and what `(agent …)` can reach: its LoRAs, the other models here, the other servers (the workers and the registry's). |
 | `(agent 'model "config" "task")` | A subagent's session: another model, or this one under a LoRA, given a task ([below](#subagents)). |
 | `(guide)` | This page's part on [adding a command](#adding-a-command), headed by how the model adds a tool on this machine, or that adding is switched off. |
 
@@ -150,6 +150,7 @@ file.
 | `bash` | `confined` | `"auto"` | Where `(bash …)` — and `(powershell …)` on Windows — reaches ([below](#where-the-models-commands-reach)). Switched `"no"`, the model has no shell. On Windows the entry starts switched `"no"`: the shell is yours to switch on. |
 | `repos` | `sources` | the project's repository | The repositories of tools the REPL reads, each an `https://` git address the server clones — git's credentials answer for a private one — or a folder ([below](#tools-from-a-repository)). `(add_repo …)` adds one here. |
 | `add_tool` | `ask` | `"mode"` | Whether the model may add tools of its own, and take them away ([below](#a-tool-in-one-file-added-from-the-repl)). Good on a machine of your own; switch it `"no"` where the server serves several people. On Windows it starts `"no"`. `ask`: `"mode"` — adding, replacing and removing are asked of a person as the conversation's mode asks a write, so not in full auto; `"always"` — a person is asked in every mode, full auto too. |
+| `agent` | `registry`, `key`, `offer`, `address` | `null`, `null`, `"yes"`, `"auto"` | The registry of servers this server offers itself to and `(agent …)` reads ([Servers found through a registry](#servers-found-through-a-registry)). Switched `"no"`, the model starts no subagents. |
 | `search` | `searxng`, `brave_key` | | [Searching the web](#searching-the-web). |
 
 **The startup check.** As it starts, and on Rebuild the tools, the server checks what each tool needs: the picture
@@ -248,9 +249,10 @@ command would be. A subagent cannot start subagents.
 
 1. **`'self`, with no LoRA or one the model switches to:** a new conversation on the same model. It starts at once. An
    adapter switches: its matrices are written into the model's between conversations.
-2. **Another model a worker serves:** the config's `workers` ([`config.md`](config.md)), other SiLVANN servers. The
-   subagent runs there, and its REPL reads the worker's files.
-3. **Another model with no worker free, or `'self` under a LoRA it does not switch to:** this machine lends its card
+2. **Another model another server serves:** one of the config's `workers` ([`config.md`](config.md)), or a server
+   the registry of servers lists ([below](#servers-found-through-a-registry)). The subagent runs there, and its REPL
+   reads that server's files.
+3. **Another model with no other server free, or `'self` under a LoRA it does not switch to:** this machine lends its card
    for each exchange. For every message, the model is put down, the subagent's model is loaded (the same model, under
    the LoRA, as it was set up) and answers, and the model is loaded back from the disk. Each way can take minutes.
 
@@ -261,6 +263,43 @@ suits the task.
 
 **A LoRA's description** is what `(whoami)` says it is for: the `description` in its `pack.json` (an adapter) or its
 `mask.json` (a mask), in the model's `loras/NAME/`. The model chooses a LoRA by it, so write what the LoRA is good at.
+
+### Servers found through a registry
+
+The SiLVANN servers of a network can find each other through a registry, a small program that comes with SiLVANN:
+`silvann registry` listens on port 8770 (`--port` to change it), and in a container it is the same image with another
+command ([`docker/README.md`](../docker/README.md#servers-that-find-each-other)). Each server whose tools file names
+the registry offers itself as it starts: its address, its model, the model's LoRAs and context, and whether it is busy.
+It renews the offer every 30 seconds and withdraws it as it stops. A server that stops without withdrawing, because it
+crashed or lost its network, leaves the listing 90 seconds after its last renewal.
+
+`(whoami)` lists the registry's servers beside the config's `workers`, and `(agent 'model …)` runs on the first of
+them that serves that model and is not busy. The model only reads the listing. It cannot offer anything to the
+registry, and it never sees the key.
+
+The tools file's `agent` entry sets it up on each server, and Rebuild the tools applies a change:
+
+```json
+"agent": {"enabled": "yes", "config": {"registry": "http://192.0.2.10:8770", "key": "…", "offer": "yes", "address": "auto"}}
+```
+
+- **`registry`**: the registry's address, or `null` for none.
+- **`key`**: the registry's key. The registry writes one into `registry/key` in its data folder at its first start,
+  readable by its user alone; copy it into each server's entry. `SILVANN_REGISTRY_KEY` in the registry's environment
+  sets it instead.
+- **`offer`**: `"yes"`, the server offers itself while it runs; `"no"`, it only reads the listing.
+- **`address`**: where the other servers reach this one. `"auto"` works it out from the address the server listens
+  on: started with `--host 0.0.0.0`, it offers the address its route to the registry leaves from; on 127.0.0.1, the
+  default, it is offered only to a registry on the same machine, and its log says why not to any other. In a
+  container, give the machine's own address and the port published, such as `"http://192.0.2.20:8765"`.
+- **`enabled`**: `"no"` switches `(agent …)` off on this machine.
+
+In a container's environment, `SILVANN_TOOL_AGENT_REGISTRY` and `SILVANN_TOOL_AGENT_KEY` set the same.
+
+⚠ **The key decides who may offer a server.** A server in the listing receives the subagents' tasks, and a task carries
+whatever the conversation puts in it. Keep the key as you would a password, and run the registry on a network of your
+own: the servers talk plain HTTP to it and to each other, and a server's API answers whoever reaches its port, as the
+config's `workers` already do.
 
 ## Adding a command
 

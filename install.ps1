@@ -317,6 +317,7 @@ if /i "%WHAT%"=="download" goto download
 if /i "%WHAT%"=="token"    goto token
 if /i "%WHAT%"=="serve"    goto serve
 if /i "%WHAT%"=="ui"       goto ui
+if /i "%WHAT%"=="registry" goto registry
 if /i "%WHAT%"=="data"     goto data
 if /i "%WHAT%"=="build"    goto build
 if /i "%WHAT%"=="update"   goto update
@@ -341,6 +342,9 @@ cd /d "%HERE%" && "%PY%" start_silvann_server.py --model "%MODEL%" %3 %4 %5 %6 %
 exit /b %errorlevel%
 :ui
 cd /d "%HERE%" && "%PY%" silvann_ui.py --port 8090 %2 %3 %4 %5 %6 %7 %8 %9
+exit /b %errorlevel%
+:registry
+cd /d "%HERE%" && "%PY%" silvann_registry.py %2 %3 %4 %5 %6 %7 %8 %9
 exit /b %errorlevel%
 :data
 if "%~2"=="" (echo the models, the conversations and the rest are kept in %SILVANN_DATA% & exit /b 0)
@@ -368,6 +372,7 @@ echo silvann token [--set ^| --forget]    the Hugging Face token the downloads u
 echo silvann serve ^<model^> [config]      the server, on port 8765 (--port to change it)
 echo silvann ui                          the chat in a browser, on port 8090, talking to the server
 echo silvann_cli                         the chat in this terminal (--notools, --nothink), talking to the server
+echo silvann registry                    the registry of a network's servers, on port 8770 (--port), for the subagents
 echo silvann data [folder]               where the models, the conversations and the rest are kept - another folder
 echo silvann build                       build the libraries here, from source - after installing CUDA, say
 echo silvann update                      the newest release and its libraries - stop the server first

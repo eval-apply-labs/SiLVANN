@@ -136,6 +136,13 @@ The same safeguards suit any app that might be compromised, not only one with a 
 game, a library with a flaw nobody has found yet. Firewalled by default, an exploit stays in one separate environment
 and does not take the whole machine with it.
 
+The browser can keep apps apart too. Put each app's container behind one small proxy that gives it a name under
+localhost, such as `silvann.localhost` or `searxng.localhost`, instead of a port each. The ports stop colliding, the
+address says what you are opening, and the browser keeps each app's cookies and stored data to its own name, which
+ports never did ([`docker/README.md`](../docker/README.md#each-app-a-name-under-localhost)). The same suits most desktop
+apps built on Electron, which are a web page and a backend: the backend in a container with only the folders it is
+given, the page a name in the browser you already have.
+
 Each of these is a flag on the command that starts the container, not a project: a volume, a `:ro`, a `--network`, a
 rootless runtime. The risk that is left is the one you chose to give the app, and you can see it in one line. SiLVANN's
 own images run this way ([`docker/README.md`](../docker/README.md)): rootless under Podman, the models and the

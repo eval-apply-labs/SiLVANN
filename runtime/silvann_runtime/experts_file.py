@@ -350,13 +350,13 @@ def lock_experts(on, addresses, size):
 #   no loader thread copies it through a staging buffer first — `MEASURED` (measurements/2026-10-24_nn115_link_node03.md):
 #   four threads staging copies cost the CPUs' experts 10% of a prompt and 15% of an answer, copies read in place 2% and
 #   5%. ⚖ 2026-10-24 Linux's alone: *"no pinning on windows"*.
-# "auto" registers for the families in REGISTERS only: NVIDIA's, whose tier rows were measured registered
-#   (measurements/2026-10-26_v0200_precision_map.md). On an MI50 it bought no rate — the 35B's prompt 125.0 against
-#   125.6 staged (2026-10-24_nn115_in_place_node03.md), the 122B's 116.7 against 118.6 — and after autotune's trials in
-#   the same process its copies in place cost the 122B's prompt five times its time: 20.9 positions/s against 116.7,
-#   125.1 unregistered (`MEASURED` node03, measurements/2026-10-26_v0200_r730_rows_node03.md); `true` registers there
-#   still.
-REGISTERS = ("nvidia_cuda12",)
+# "auto" registers for the families in REGISTERS only, and none is: no card measured has gained by it. On an MI50 it
+#   bought no rate — the 35B's prompt 125.0 against 125.6 staged (2026-10-24_nn115_in_place_node03.md), the 122B's 116.7
+#   against 118.6 — and with the card filled to its last 91 MB the first read-back after the boot waited 15 s
+#   (measurements/2026-10-27_nn131_trials_node03.md); on an RTX 5060 Ti it cost the prompt: the 122B 55.7-60.8 positions/s
+#   registered against 73.3-86.2, the 35B 181 against 194-203, the answers the same (`MEASURED` the precision,
+#   measurements/2026-10-27_nn131_122b_register_precision.md). `true` registers.
+REGISTERS = ()
 
 
 def register_of(setting, where, tier, silicon=None):

@@ -199,6 +199,7 @@ silvann token [--set | --forget]    the Hugging Face token the downloads use (fa
 silvann serve <model> [config]      the server, on port 8765 (--port to change it)
 silvann ui                          the chat in a browser, on port 8090, talking to the server
 silvann_cli                         the chat in this terminal (--notools, --nothink), talking to the server
+silvann registry                    the registry of a network's servers, on port 8770 (--port), for the subagents
 silvann data [folder]               where the models, the conversations and the rest are kept — another folder, a drive's
 silvann build                       build again — after installing CUDA or ROCm, say
 silvann update                      the newest release, then build — stop the server first
@@ -245,6 +246,7 @@ case "\$cmd" in
     ui)
         case " \$* " in *" --port "*) ;; *) set -- --port 8090 "\$@" ;; esac
         cd "\$HERE" && exec "\$PY" silvann_ui.py "\$@" ;;
+    registry)  cd "\$HERE" && exec "\$PY" silvann_registry.py "\$@" ;;
     build)   exec env SILVANN_DIR="\$HERE" SILVANN_BIN="\$BIN" bash "\$HERE/install.sh" --build ;;
     update)  exec env SILVANN_DIR="\$HERE" SILVANN_BIN="\$BIN" bash "\$HERE/install.sh" ;;
     where)   echo "\$HERE" ;;

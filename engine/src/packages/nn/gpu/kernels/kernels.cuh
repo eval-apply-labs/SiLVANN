@@ -2871,7 +2871,9 @@ static __device__ inline void nn__attention__zzabi_body_weights_tq(float* p, flo
     }
 }
 
-/* Its second pass: `acc`, the weights times the TurboQuant values. */
+/* Its second pass: `acc`, the weights times the TurboQuant values. ⛳ THE WEIGHTS ARE THE PASS'S ONCE IT HAS READ THEM:
+ *   a family may keep its own sums in them (AMD's mix over a long tier's slices, NN-118), so no caller reads `p` after
+ *   it — the tiers' verbs and the prompt's rows take the residual alone. */
 static __device__ inline void nn__attention__zzabi_body_residual_mix_tq(float* res, const float* p, const uint8_t* codes,
                                                                          const uint16_t* scales, uint64_t q_heads,
                                                                          uint64_t kv_heads, uint64_t head_dim,

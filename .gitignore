@@ -17,3 +17,5 @@ __pycache__/
 /ui_last_start.json
 /workspace/
 /tools.json
+# the key of the servers' registry (silvann registry)
+/registry/

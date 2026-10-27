@@ -1002,11 +1002,14 @@ def _commands(session):
                              "(whoami) answers which model you are and under which LoRA, the cards you run on, your "
                              "context and how much of it this conversation has used, your tool's mode — and the models "
                              "(agent …) can start: your own LoRAs ('self), each with what it is for and whether it "
-                             "starts at once, the other models on this machine, and the workers'."))
+                             "starts at once, the other models on this machine, and the other servers' — the "
+                             "config's workers and the servers the registry of servers lists."))
     if session.agent is not None:                     # the server launches subagents
         table.append(Command("agent", agent, "a subagent's session: (agent 'model \"config\" \"task\")",
                              "(agent 'model \"config\" \"task\") starts a conversation with another model — or this "
-                             "one under a LoRA — and answers its answer to the task. config is the name of one of the "
+                             "one under a LoRA — and answers its answer to the task. model is the model's name as "
+                             "(whoami) lists it — another server's model too: its server is chosen for you — or 'self. "
+                             "config is the name of one of the "
                              "model's LoRAs ((whoami) lists yours), as (agent 'self \"its-name\" \"task\"); or a "
                              "config's name in that model's configs/ (its LoRA, "
                              "and tools_allowed: the commands its REPL has; read-only ones by default); or a JSON "
@@ -1014,8 +1017,9 @@ def _commands(session):
                              "is a message to it, (answer 'once) or (answer 'refuse) answers what it asks, and (exit) "
                              "ends the session and brings you back. You can allow only what you could do unasked "
                              "yourself; anything more is asked of the user. Choose the model with its cost in mind: "
-                             "'self — your own model, or under a LoRA it switches to — starts at once, while another "
-                             "model that no worker serves, or your own under a LoRA it is loaded again for (a rank-1 "
+                             "'self — your own model, or under a LoRA it switches to — starts at once, and so does a "
+                             "model another server serves ((whoami) lists them), while another model that no other "
+                             "server serves, or your own under a LoRA it is loaded again for (a rank-1 "
                              "mask), is loaded on this machine in your place for each exchange, and you are loaded "
                              "back from the disk after: that can take several minutes each way. (whoami) lists your "
                              "LoRAs, what each is for and which start at once: prefer one of those when it suits the "

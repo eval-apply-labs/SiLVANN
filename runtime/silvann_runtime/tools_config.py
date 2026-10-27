@@ -78,6 +78,16 @@ def built_in():
                            "its workspace to read, and adds it with (add_tool …). sources: the repositories read, each "
                            "an https:// git address (the server clones it; git's credentials answer for a private one) "
                            "or a folder; (add_repo …) adds one here (▶ docs/tools.md)"},
+        "agent": {"enabled": "yes", "config": {"registry": None, "key": None, "offer": "yes", "address": "auto"},
+                  "about": "(agent 'model \"config\" \"task\"): a subagent — this model, another on this machine, or "
+                           "one another SiLVANN server serves; \"no\" switches it off. registry: a registry of SiLVANN "
+                           "servers (silvann registry), \"http://host:8770\", or null none — (agent …) and (whoami) "
+                           "reach the servers it lists, beside the config's workers; key: the registry's key, never "
+                           "shown to the model; offer: \"yes\", this server offers itself there while it runs, or "
+                           "\"no\", it only reads the listing; address: where the others reach this server — \"auto\" "
+                           "from the address it listens on (with --host 0.0.0.0, the one its route to the registry "
+                           "leaves from), or \"http://host:port\", a container's: its machine's address and the port "
+                           "published (▶ docs/tools.md)"},
         "fetch": {"enabled": "yes", "config": {"contact": None},
                   "about": "(fetch \"url\"): a web page's words. contact: who a site writes to about the fetches, in "
                            "their User-Agent — an e-mail address or a page; null the project's page"},
@@ -221,6 +231,13 @@ def _settings(name, defaults, mine):
         if said is not None:
             got[key] = _env_value(said)
     return got
+
+
+def config_of(tools_file, name):
+    """A built-in's settings from the file and the environment, with no `Toolbox` — a picture model's server, which has
+    no REPL, reads its `agent` entry so."""
+    entry = tools_file.entries().get(name, {}) if tools_file is not None else {}
+    return _settings(name, built_in()[name]["config"], entry.get("config"))
 
 
 def _signature(skills):
