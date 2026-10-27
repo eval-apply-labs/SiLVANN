@@ -36,6 +36,7 @@ import numpy as np
 
 from . import experts_file, expert_tier, sampling
 from .generate import Generates
+from .machine import own_memory
 from .model_folder import NL, Refused
 
 ARCHITECTURES = ("deepseek_v41_text",)
@@ -75,7 +76,7 @@ class DeepSeek4(Generates):
     GENERATES = False
 
     def __init__(self, folder, machine, max_context=512, layers=None, experts_int8=True, engram_from=None,
-                 experts_from="ram", experts_in_ram=0, experts_lock=False, experts_register="auto", socket=None, card=0, cards=None,
+                 experts_from="ram", experts_in_ram=0, experts_ram_gb=None, experts_dir=None, experts_lock=False, experts_register="auto", socket=None, card=0, cards=None,
                  card_experts=0, chunk=128, card_experts_gb=0, card_shared="auto", card_landing="auto", card_landing_line=3,
                  card_exclusive=False, card_free=16, card_duplex_line=1200, card_duplex=None, card_line=8,
                  picture_pixels=1 << 22, embed_on="auto"):
@@ -170,13 +171,21 @@ class DeepSeek4(Generates):
         if embed_on == "cpu" and self.P > 1:
             raise Refused("embed_on 'cpu' is one card's: a group's card 0 reads the table in place")
         self.EMBED_CPU = embed_on == "cpu" or (embed_on == "auto" and self.P == 1 and machine.silicon == "khronos_opencl1_igpu")
-        # ⭐ THE ROUTED EXPERTS IN RAM, OR MAPPED FROM THE PACK (▶ `experts_file`) — the 40 layers' are 272 GB and node-01
-        #   has 251 GB of RAM. `"mapped"`: the first `experts_in_ram` layers this machine runs copied into RAM as `"ram"`
-        #   copies them all, the rest mapped from the pack over their slots — the page cache holds the ones in use, the
-        #   drive the rest
-        if experts_from not in ("ram", "mapped"):
-            raise Refused("experts_from is 'ram' or 'mapped', not %r" % (experts_from,))
+        # ⭐ THE ROUTED EXPERTS IN RAM, MAPPED FROM THE PACK, OR A CACHE READ FROM THE DISK (▶ `experts_file`) — the 40 layers'
+        #   are 272 GB and node-01 has 251 GB of RAM. `"mapped"`: the first `experts_in_ram` layers this machine runs copied
+        #   into RAM as `"ram"` copies them all, the rest mapped from the pack over their slots — the page cache holds the
+        #   ones in use, the drive the rest. `"disk"` (NN-133), as GLM's: every layer's experts a cache in the CPU worker's
+        #   own memory, `experts_ram_gb` of it (else what the process may hold, less what it keeps for the rest), an expert
+        #   a token picks and the cache does not hold read from the pack straight into a slot (`O_DIRECT`), the least
+        #   recently used given up for it (▶ nn's loader)
+        if experts_from not in ("ram", "mapped", "disk"):
+            raise Refused("experts_from is 'ram', 'mapped' or 'disk', not %r" % (experts_from,))
+        if experts_from == "disk" and experts_in_ram:
+            raise Refused("experts_in_ram is how many layers 'mapped' copies into RAM; from the disk every layer's experts "
+                          "are a cache, experts_ram_gb its size")
         self.EXPERTS_FROM, self.EXPERTS_IN_RAM = experts_from, int(experts_in_ram)
+        self.EXPERTS_RAM_GB = experts_ram_gb
+        self.experts_dir = experts_dir or os.path.join(folder.path, "experts")
         self.EXPERTS_LOCK, self.LOCKED_GB = bool(experts_lock), 0.0      # ▶ `_plan`
         self.EXPERTS_REGISTER, self.REGISTERED_GB = experts_register, 0.0  # ▶ `_plan`
         self.REGISTER_REQUIRED = experts_register is True
@@ -203,6 +212,10 @@ class DeepSeek4(Generates):
             raise Refused("card_experts (a fixed share on the cards) or card_experts_gb (a tier a card), not both")
         if self.CARD_GB and self.TOPK > 12:
             raise Refused("a tier takes at most 12 picks a position, not %d" % self.TOPK)
+        # a tier copies an expert from its place in RAM, which a cache read from the disk gives up as it fills (GLM's rule)
+        if experts_from == "disk" and (self.CARD_GB or self.NK):
+            raise Refused("a card's share of the experts is copied from the experts in RAM, and from the disk they are a "
+                          "cache — experts_from 'ram' or 'mapped', or no card_experts%s" % ("_gb" if self.CARD_GB else ""))
         # ⭐ AN EXCLUSIVE TIER (NN-106 ④), as GLM's: each expert of a layer in RAM on a card OR in the CPU's memory, never
         #   both, so the cards' share is RAM given back — node03's case, 253 GiB of experts beside 251 GB of RAM. Each card
         #   starts with its share of every layer copied into RAM (and in a group the slice, `card_shared` of a card's slots
@@ -377,8 +390,9 @@ class DeepSeek4(Generates):
         gr, dn = r("gate"), r("down")
         self.EPLAN = NL.SlotPlan(2 * self.MINTER * gr.row_bytes, 2 * self.MINTER * 2, dn.rows * dn.row_bytes, dn.rows * 2)
         self.E_D = gr.d
-        # the CPU's slots: a layer copied into RAM leaves out the cards' experts; a mapped layer is its file, every expert
-        ram = run if self.EXPERTS_FROM == "ram" else run[:self.EXPERTS_IN_RAM]
+        # the CPU's slots: a layer copied into RAM leaves out the cards' experts; a mapped layer is its file, every expert;
+        #   from the disk none is copied in, and the slots are the cache's
+        ram = run if self.EXPERTS_FROM == "ram" else run[:self.EXPERTS_IN_RAM] if self.EXPERTS_FROM == "mapped" else []
         self.RAM_LAYERS = list(ram)
         # an exclusive tier: each layer in RAM its even share of all but the landing slots on every card — the slice on all
         #   of them — and not in RAM (▶ `_card_experts`)
@@ -394,6 +408,23 @@ class DeepSeek4(Generates):
                               % (self.CARD_GB, len(ram)))
             self.RAM_PER = self.EXPERTS - self.CARD_SLICE - self.P * self.CARD_PER
         self.cpu_slots = sum(self.RAM_PER if l in ram else self.EXPERTS for l in run)
+        self.SLOTS = None
+        if self.EXPERTS_FROM == "disk":
+            # ⛳ THE CACHE HOLDS TWO OF A PROMPT'S BATCHES BESIDE WHAT IT KEEPS: nn reads the next batch of a chunk's experts
+            #   while one computes (AI_DEEPSEEK_4__EXP__BATCH, 16), and a position's picks stay while they run
+            whole = self.EPLAN.slot_bytes * self.cpu_slots
+            budget = experts_file.cache_bytes(whole, self.EXPERTS_RAM_GB)
+            # ⛳ WITH NO CARD OF ITS OWN, THE DENSE PART IS IN THE SAME RAM — its pool (7.4 GiB at 32,768 positions) and two
+            #   gigabytes for its buffers and the pictures' room come out of what the cache may take: `MEASURED` on node03 held to 60 GB, the CPU
+            #   alone with the cache at the process's limit less 8 GB was killed for memory in its prompt (62.8 GB
+            #   resident, measurements/2026-10-27_nn133_deepseek_disk_node03.md)
+            if self.EXPERTS_RAM_GB is None and (self.m.silicon in ("x86_avx2", "host") or (
+                    self.m.silicon == "khronos_opencl1_igpu" and not own_memory(self.m))):
+                budget -= sum(self.ARENAS) + (2 << 30)
+            self.SLOTS = self.cpu_slots = min(self.cpu_slots, max(0, budget) // self.EPLAN.slot_bytes)
+            if self.SLOTS < 3 * 16 + self.TOPK:
+                raise Refused("%d experts is too few for a cache of them — a prompt reads two batches of 16 at once"
+                              % self.SLOTS)
         self.cpu_arena = self.EPLAN.slot_bytes * self.cpu_slots
         # `experts_lock`: the layers copied into RAM locked there, so the system cannot swap them out — a mapped layer is
         #   its file's (▶ `experts_file.lock_check`)
@@ -635,8 +666,12 @@ class DeepSeek4(Generates):
 
     def _load_experts(self, progress):
         """Every layer's routed experts into the CPU worker's slots: copied in from the mapped bundle, or — `"mapped"`, past
-        the first `experts_in_ram` layers — their file mapped over them."""
+        the first `experts_in_ram` layers — their file mapped over them; from the disk, none, the slots a cache."""
         m, b, p = self.m, self.b, self.EPLAN
+        if self.EXPERTS_FROM == "disk":
+            self.SRC = {}
+            self._cache_experts(progress)
+            return
         ram = self.run_layers if self.EXPERTS_FROM == "ram" else self.run_layers[:self.EXPERTS_IN_RAM]
         mapped = [l for l in self.run_layers if l not in ram]
         # ⭐ A LAYER MAPPED FROM THE PACK, where its experts lie as its slots do (NN-109: an expert one record, its gate and
@@ -686,6 +721,18 @@ class DeepSeek4(Generates):
         self.REGISTERED_GB = experts_file.register_experts(m, self.EXPERTS_REGISTER, range(self.P), held, p.slot_bytes,
                                                            self.REGISTER_REQUIRED)
         m.act_as(CARD)
+
+    def _cache_experts(self, progress):
+        """Every layer's routed experts as a cache in the CPU worker's memory, read from the pack where they lie (▶
+        `experts_file.cache_experts`): the backing tables the experts tables name, {(worker, layer): name}."""
+        self.BACKING = experts_file.cache_experts(self.m, self.b, [(self.CPU, 0, 1)], self.EPLAN, self.run_layers, self.EXPERTS,
+                                                  self.experts_dir, self._expert_pieces, list(range(self.LAYERS)),
+                                                  progress=progress)
+        self.m.act_as(CARD)
+
+    def _backing(self, l):
+        """The CPU's experts table's last cell where the experts are a cache: its backing of layer `l`."""
+        return [self.BACKING[(self.CPU, l)]] if self.SLOTS is not None else []
 
     def _card_buffers(self, k):
         """Card `k`'s buffers, by its own names (▶ `sfx`): card 0's are the names themselves, and only card 0 has the head's,
@@ -984,9 +1031,9 @@ class DeepSeek4(Generates):
         for l in self.run_layers:
             cells = [l, 0, p.at_up_lut - p.at_up_data, p.at_down_data - p.at_up_data, p.at_down_lut - p.at_up_data, H, self.MINTER,
                      self.EXPERTS, self.TOPK, self.E_D, self.NK, self.EXPERTS - self.NK, 1 if self.EXPERTS_INT8 else 0, self.LIMIT]
-            m.table("ex%d_0" % l, [c("signs"), c("zero"), c("scratch")] + cells)
+            m.table("ex%d_0" % l, [c("signs"), c("zero"), c("scratch")] + cells + self._backing(l))
             if self.CHUNK:                    # a chunk's: the same experts, `experts_rows`' scratch
-                m.table("exr%d_0" % l, [c("signs"), c("zero"), c("rscratch")] + cells)
+                m.table("exr%d_0" % l, [c("signs"), c("zero"), c("rscratch")] + cells + self._backing(l))
         m.act_as(k)
 
     def _tier(self, k):

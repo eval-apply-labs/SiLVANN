@@ -39,6 +39,7 @@ from . import experts_file, expert_tier, sampling
 from .vision import video_ram
 from .generate import GENERATE_MOST, Generates
 from .autotune import card_memory
+from .machine import own_memory
 from .model_folder import NL, Refused
 
 ARCHITECTURES = ("glm5_next_text",)
@@ -295,7 +296,15 @@ class Glm5(Generates):
                           "fused=True, or experts_from 'ram' or 'mapped'")
         if self.EXPERTS_FROM == "disk" and self.EPLAN is not None:
             n_moe = sum(self.moe[l] for l in self.run_layers)
-            per = experts_file.cache_bytes(self.cpu_arena, experts_ram_gb) // self.PARTS // self.EPLAN.slot_bytes
+            budget = experts_file.cache_bytes(self.cpu_arena, experts_ram_gb)
+            # ⛳ WITH NO CARD OF ITS OWN, THE DENSE PART IS IN THE SAME RAM — its pool and two gigabytes for its buffers and
+            #   the pictures' room come out of what the cache may take: `MEASURED` on node03 held to 60 GB, the CPU alone
+            #   with the cache at the process's limit less 8 GB was killed for memory in its prompt (62.4 GB resident,
+            #   measurements/2026-10-27_nn133_deepseek_disk_node03.md)
+            if experts_ram_gb is None and (machine.silicon in ("x86_avx2", "host") or (
+                    machine.silicon == "khronos_opencl1_igpu" and not own_memory(machine))):
+                budget -= self.arena * self.P + (2 << 30)
+            per = max(0, budget) // self.PARTS // self.EPLAN.slot_bytes
             self.SLOTS = min(self.EXPERTS * n_moe, per)
             if self.SLOTS < 3 * 16 + self.TOPK:
                 raise Refused("%d experts a worker is too few for a cache of them — a prompt reads two batches of 16 at once"

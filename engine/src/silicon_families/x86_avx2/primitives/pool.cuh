@@ -54,6 +54,7 @@ typedef struct x86_avx2__pool {
     sys__os__thread   thread[X86_AVX2__THREADS_MAX];
     sys__os__lock     lock;
     sys__os__condition wake;
+    sys__os__lock     caller;                  /* held from a launch's job written to its last block done (▶ run_body) */
     /* the launch in flight */
     void            (*fn)(void*);
     void*             arg;
@@ -272,6 +273,7 @@ static inline x86_avx2__pool* x86_avx2__zzpackage_start(void) {
     sys__os__lock_take(&x86_avx2__zzprivate_pools_lock);
     if (!p->started) {
         sys__os__lock_init(&p->lock);
+        sys__os__lock_init(&p->caller);
         sys__os__condition_init(&p->wake);
         p->node = x86_avx2__zzpackage_node_of(device);
         p->workers = x86_avx2__zzprivate_size(p->cpu, p->node, &p->own, &p->worked);
@@ -325,13 +327,24 @@ static inline bool x86_avx2__zzprivate_caller_to_own(const x86_avx2__pool* p, sy
     if (cpu < 0 || cpu >= SYS__OS__CPUS_MOST || !sys__os__cpus_has(&p->worked, cpu)) return false;
     return sys__os__cpus_of_thread(saved) && sys__os__cpus_to_thread(&p->own);
 }
+/* ⛔⛔ ONE CALLER A POOL AT A TIME. A launch writes the pool's job and counters and waits for its blocks; two threads that
+ *   bound the same device — two workers of one model on the CPU family's one device, DeepSeek's dense part and its experts
+ *   on the CPU alone — launched at once, and the second's job overwrote the first's: the first's blocks ran the second's
+ *   function, or its call ran on after its caller had returned and its arguments were gone. `MEASURED` on node03:
+ *   DeepSeek on the CPU alone segfaulted in its prompt, a write to address 4 in the rotation's blocks, a read in the
+ *   grouped products' (measurements/2026-10-27_nn133_deepseek_disk_node03.md). So a launch holds its pool's `caller`
+ *   from its job written to its last block done, and a second caller waits its turn; a launch run on the caller's thread
+ *   alone (no workers, one block) shares nothing and takes none. */
 static inline void x86_avx2__zzprivate_run_body(uint32_t blocks, void (*fn)(void*), void* arg) {
     x86_avx2__pool* p = x86_avx2__zzpackage_start();
     if (blocks == 0u) return;
+    const bool shared = p->workers != 0u && blocks > 1u;
+    if (shared) sys__os__lock_take(&p->caller);
     sys__os__cpus saved;
-    const bool moved = p->workers != 0u && blocks > 1u && x86_avx2__zzprivate_caller_to_own(p, &saved);
+    const bool moved = shared && x86_avx2__zzprivate_caller_to_own(p, &saved);
     x86_avx2__zzprivate_launch(p, blocks, fn, arg);
     if (moved) (void)sys__os__cpus_to_thread(&saved);
+    if (shared) sys__os__lock_give(&p->caller);
 }
 static inline void x86_avx2__zzprivate_launch(x86_avx2__pool* p, uint32_t blocks, void (*fn)(void*), void* arg) {
     if (p->workers == 0u || blocks == 1u) {

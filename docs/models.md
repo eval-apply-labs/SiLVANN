@@ -82,8 +82,9 @@ Every measurement, the prompt rates, and what limits a model reading its experts
 
 DeepSeek's model reads text and pictures: its vision tower (32 blocks and the aligner, 464 MB in the pack's
 `vision.pkl`) runs on the card in about 620 MB of it, a picture at most 1,024 tokens. Its routed experts are 272 GB (6.8 GB a layer,
-40 layers) and run on the CPU: as many layers in RAM as fit beside the server, a spare and a tenth of the memory for the
-system and the files it reads in place; the rest are mapped from the pack and read through the system's page cache. Its n-gram memory's tables (203 GB) stay on the disk and are read a row at a time as
+40 layers) and run on the CPU: in RAM where they all fit beside the server, a spare and a tenth of the memory for the
+system and the files it reads in place; otherwise read from the disk into a cache in RAM, an expert at a time straight
+from the pack, the ones used most kept. Its n-gram memory's tables (203 GB) stay on the disk and are read a row at a time as
 each token asks for them, so the disk should be an NVMe drive. A conversation reaches the model's own length,
 1,048,576 positions: past 16,384, layer 20's candidate blocks choose where the later layers look, as DeepSeek's own
 code does. On the R730's two MI50s, with every expert in RAM — 22.5 GB of each card an exclusive tier of them, so

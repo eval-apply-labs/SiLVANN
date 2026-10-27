@@ -183,6 +183,10 @@
 #define AI_DEEPSEEK_4__EXP__INT8      15u     /* 1: the products in integers (nn's int8 gemvs), 0: exact */
 #define AI_DEEPSEEK_4__EXP__LIMIT     16u
 #define AI_DEEPSEEK_4__EXP__TABLE     17u
+/* ⭐ optional: WHERE THE EXPERTS ARE ON DISK — nn's backing (`nn/contracts/objects/expert.cuh`), or 0. With one, the
+ * worker's slots are a cache in its own memory: an expert that is not in it is read from the file straight into a slot
+ * (nn's loader), the least recently used one given up for it. Without, every expert has its slot. */
+#define AI_DEEPSEEK_4__EXP__BACKING   17u
 #define AI_DEEPSEEK_4__EXP__BATCH     16u     /* nn's: a prompt's experts a batch, where the slots are a cache */
 
 #define AI_DEEPSEEK_4__TOP_K_MAX      12u     /* nn's grouped launch takes twelve matrices */

@@ -79,7 +79,7 @@ NOT_A_CARD = ("x86_avx2", "host", "khronos_opencl1_igpu")   # silicon whose pool
 TIER_MAX_GB = 128        # the binary search's ceiling, past any card's memory
 DISK_CHUNK = 1024        # GLM's prompt rows a step with its experts on the disk (Qwen's chunk is at most 256)
 FREED_GB = 1             # a card this much emptier than when a kept choice was made chooses again (`_freed`)
-RULES = 7                # the rules' version, in what a kept choice was made for: a change to them chooses again
+RULES = 8                # the rules' version, in what a kept choice was made for: a change to them chooses again
 REGISTER_TABLES = 512    # registered RAM over the card memory that maps it: an 8-byte page-table entry a 4 KiB page.
                          # MEASURED node03 2026-10-26: GLM's 142 GiB registered took 281 MiB more of the MI50 at its peak
                          # (measurements/2026-10-26_v0200_r730_rows_node03.md, vram_register.sh); held beside the margin,
@@ -435,19 +435,27 @@ def _setup(p, ctx, options, takes, grow=False):
             return _most(p, opts, ctx)
         return ctx if p.boots(ctx, opts) else None
 
-    # DeepSeek's experts: on the CPU, the first layers' in RAM and the rest mapped (from the pack, or their files) — as
-    #   many layers in RAM as fit beside the server's own memory, the spare and FILES_SHARE (`experts_file.in_ram`'s rule,
-    #   a layer at a time, less the share the files it reads in place need)
+    # DeepSeek's experts: on the CPU — in RAM where every layer's fit beside the server's own memory, the spare and
+    #   FILES_SHARE (`experts_file.in_ram`'s rule, a layer at a time, less the share the files it reads in place need);
+    #   else read from the disk into a cache of what the process may hold (NN-133). ⛳ `MEASURED` (measurements/
+    #   2026-10-27_nn133_deepseek_disk_node03.md): on a 16 GB card's room the disk read the prompt 6.7 times as fast as
+    #   "mapped" with the same 80 GB and answered 7.0 times as fast; on one MI50 with 251 GB, against 34 layers in RAM and
+    #   6 mapped, the prompt 17% faster and the answer 12% slower by its 300th token, the boot 20 s against 6 minutes.
+    #   A card's share of the experts (a tier, a fixed share) is copied from RAM, so it keeps "mapped" as before.
     if "experts_in_ram" in takes and "experts_from" not in options:
         whole = p.model(MIN_CONTEXT, dict(options, experts_from="ram"))
         layers, held = len(whole.run_layers), experts_file.limit()
         a_layer = whole.cpu_arena // layers
         room = held * (1 - FILES_SHARE) - experts_file.OWN - experts_file.SPARE - video_ram(p.folder.config, p.video_tokens)
         n = int(max(0, min(layers, room // a_layer)))
+        carded = float(options.get("card_experts_gb") or 0) or int(options.get("card_experts") or 0)
         placed = (dict(options, experts_from="ram") if n == layers else
-                  dict(options, experts_from="mapped", experts_in_ram=n))
+                  dict(options, experts_from="mapped", experts_in_ram=n) if carded else
+                  dict(options, experts_from="disk"))
         why = ("the experts on the CPU, in RAM" if n == layers else
-               "the experts on the CPU, %d of %d layers' in RAM and the rest mapped from the pack (or their files)" % (n, layers))
+               "the experts on the CPU, %d of %d layers' in RAM and the rest mapped from the pack (or their files)" % (n, layers)
+               if carded else
+               "the experts on the CPU, read from the disk into a cache in RAM (%d of %d layers' would fit in it)" % (n, layers))
         got = sized(placed)
         return None if got is None else (placed, got, why + " (%.1f GB a layer, %.0f GB this process may hold)"
                                          % (a_layer / 2**30, held / 2**30))

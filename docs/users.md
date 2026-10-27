@@ -79,12 +79,14 @@ with clang-cl, NVIDIA's family with nvcc over MSVC for the compute capability `n
 GPU's OpenCL families against its driver's `OpenCL.dll`; the build's output goes to `build.log`, each library's to its
 `.log` under `lib\`.
 
-**Smart App Control.** SiLVANN's libraries — the release's and those built on the PC — are not signed yet. Where
-Windows 11's Smart App Control is on, Windows refuses to load them (*"An Application Control policy has blocked this
-file"*), and the installer says so: turn it off — Windows Security → App & browser control → Smart App Control
-settings → Off; on most PCs it cannot be turned on again without resetting Windows — or run SiLVANN on Linux
-([below](#on-windows-linux-on-a-usb-ssd)). Signed libraries are planned.
-A PC upgraded from Windows 10, or one where it is off, is not affected.
+**Smart App Control.** SiLVANN's libraries are not signed yet; a proper code signature is underway. Where Windows 11's
+Smart App Control is on, Windows refuses to load the ones GitHub built, downloaded with the release (*"An Application
+Control policy has blocked this file"*), and the installer says so. Libraries built on the PC are subject to Smart App
+Control's lottery: some PCs let them load — one did — and others may not. Anyone who wants to play it meanwhile can:
+`.\install.ps1 -FromSource` (or `build.ps1` in a clone) builds them on the PC. Where they are refused too: turn Smart
+App Control off — Windows Security → App & browser control → Smart App Control settings → Off; on most PCs it cannot be
+turned on again without resetting Windows — or run SiLVANN on Linux ([below](#on-windows-linux-on-a-usb-ssd)). A PC
+upgraded from Windows 10, or one where it is off, is not affected.
 
 **What differs from Linux:** a model's experts are never mapped from their file — `experts_from` `"mapped"` is refused,
 and `"disk"` reads them as they are wanted; the processors count as one NUMA node; the model's tool has `(powershell …)`
@@ -379,10 +381,12 @@ when a token picks it, so the disk's speed is the answer's speed. On our test ma
 as the memory there is allows — the process's own limit when it has one — less a quarter of it for everything else,
 at least 3 GB and at most 8 GB.
 
-DeepSeek-V4.1-Flash has no `disk`: the layers RAM does not hold are read through the system's page cache
-(`experts_from: "mapped"`, chosen at boot). Its pack lays each layer's experts out as the engine holds them, and those
-layers are mapped from the pack itself, nothing written; a pack downloaded before v0.18.1 is refused, and is downloaded
-again ([`config.md`](config.md#deepseek-v41-flashs-options)).
+DeepSeek-V4.1-Flash reads its experts from the disk the same way, where RAM does not hold all 272 GB of them (chosen at
+boot from v0.21.2): straight from its pack, which lays each expert out as the engine holds it, nothing written beside it.
+On a 16 GB card's machine it reads a prompt and answers about 7 times as fast as with the layers it cannot hold mapped
+through the system's page cache with the same RAM (`experts_from: "mapped"`, which a config can still name), and the
+server starts in seconds; a pack downloaded before v0.18.1 is refused, and is downloaded again
+([`config.md`](config.md#deepseek-v41-flashs-options)).
 
 ## 6. A model over several machines
 

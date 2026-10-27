@@ -152,6 +152,8 @@ One MI50 for the dense part, the experts on the CPU.
 | `D8E4`: over two MI50s (`"num_cards": 2`), all in RAM, 14 GB of each card a tier, the model's whole 1,048,576-position context — the setup chosen at boot; in the chat 12.7-14.5 tokens/s | — | 54.6-56.4 positions/s | 11.2-11.3 tokens/s | v0.21.0 |
 | `D8E4`: the same with the tier exclusive (`card_exclusive`); in the chat 11.3-11.9 | — | 40.9-41.1 positions/s | 10.1-10.3 tokens/s | v0.21.0 |
 | `D8E4`: the same, held to 120 GiB — a 128 GB machine's room: 114 GB of the experts in RAM, the cards' 28 GB not; in the chat 11.4-11.8 | — | 36.3 positions/s | 10.1 tokens/s | v0.21.0 |
+| `D8E4`: the CPU alone, no card, the experts read from the disk, 64 GB of RAM (held to 60 GB); the answer from token 200 of 300 | 6.6 GB/s array | 6.4 positions/s | 1.4 tokens/s — 74% from memory, 1.1 GB read a token | v0.21.2 |
+| `D8E4`: the same, 32 GB of RAM (held to 30 GB) | 6.6 GB/s array | 6.8 positions/s | 1.2 tokens/s — 49% from memory, 2.1 GB read a token | v0.21.2 |
 | all in RAM | — | 23.9 positions/s | 6.7 tokens/s | v0.3 |
 | all in RAM, 18 GB of the card the tier of experts | — | 25.0 positions/s | 8.1 tokens/s (6.8 without, side by side) | v0.3.0 |
 | all in RAM, 24 GB of the card the tier of experts, from token 224 | — | — | 10.7 tokens/s | v0.3.1 |
@@ -162,7 +164,9 @@ One MI50 for the dense part, the experts on the CPU.
 | 32 GB of RAM, before grouped attention | 2.6 GB/s | 11 positions/s† | 1.1 tokens/s — 61% from memory ◦ | v0.2.0 |
 
 The first two rows were held to 150 GB of RAM, a prompt of 1,000 positions, then 128 tokens. The two-card rows: the machine's 251 GB, a
-prompt of 2,037 positions, then 64 tokens, the chat's meter over three answers of 256, two rounds each (`measurements/2026-10-27_v0210_glm_two_cards_node03.md`). The streamed rows: each
+prompt of 2,037 positions, then 64 tokens, the chat's meter over three answers of 256, two rounds each (`measurements/2026-10-27_v0210_glm_two_cards_node03.md`). The CPU-alone rows: a 1,020-position prompt, then 300 tokens, the
+array's drives slowing themselves when hot as DeepSeek's below; GLM's dense part takes 9.6 GB of the RAM there, so 30 GB
+is its least (`measurements/2026-10-27_nn133_deepseek_disk_node03.md`). The streamed rows: each
 layer's experts cross to the cards once for the whole prompt (`measurements/2026-10-25_nn115_group_stream_node03.md`; a
 chunk at a time `measurements/2026-10-25_nn115_glm_prompt_kernels_node03.md`).
 With its experts on the CPU, a model reads a prompt a chunk of positions at a time through each layer — 256 for the
@@ -200,6 +204,32 @@ Two rounds, interleaved: the server on that config, the chat's meter over three 
 the tiers learn which experts are picked; the answer after the long prompt is slower than the chat's, its tiers having
 seen the prompt's picks alone. The server boots it in about 6.5 minutes
 (`measurements/2026-10-27_v0210_deepseek_rates_node03.md`).
+
+**One card, the experts from the disk** (v0.21.2). Where RAM does not hold its 272 GB of experts, the server reads them
+from the disk into a cache in RAM, an expert at a time straight from the pack (`experts_from: "disk"`, chosen at boot).
+A 16 or 12 GB card's room is an MI50 with the rest of it held, and the CPU alone no card at all — its dense part in the
+same RAM; the process held to the RAM a row names (14, 30 or 60
+GB: about what a machine of 16, 32 or 64 GB leaves it); a prompt of 1,012 positions, then 300 tokens, the answer from
+token 200; the range of two or three runs:
+
+| Card | RAM | Prompt | Answer | Version |
+|---|---|---|---|---|
+| 16 GB | 64 GB | 9.8-11.0 positions/s | 2.3-2.8 tokens/s | v0.21.2 |
+| 16 GB | 32 GB | 7.4-7.6 positions/s | 2.4-2.6 tokens/s | v0.21.2 |
+| 16 GB | 16 GB | 7.1-7.7 positions/s | 1.4-1.8 tokens/s | v0.21.2 |
+| 12 GB | 64 GB | 8.2 positions/s | 2.7 tokens/s | v0.21.2 |
+| 12 GB | 32 GB | 7.7 positions/s | 2.4 tokens/s | v0.21.2 |
+| none: the CPU alone | 64 GB | 3.4 positions/s | 1.2 tokens/s | v0.21.2 |
+| none: the CPU alone | 32 GB | 3.1 positions/s | 0.7 tokens/s | v0.21.2 |
+| 32 GB (one MI50) | 251 GB, the cache all of it | 14.3-14.5 positions/s | 4.7-5.0 tokens/s | v0.21.2 |
+| 32 GB (one MI50) | 251 GB as v0.21.1 placed it: 34 layers in RAM, 6 mapped | 11.0-13.5 positions/s | 5.3-5.8 tokens/s | v0.21.1 |
+
+The drives — the R730's six NVMe drives in one array — slow themselves when they are hot, and reached 79-81 °C in
+every run: the spread between a row's lowest and highest figure is that. With the same RAM the disk reads a prompt and
+answers about 7 times as fast as the layers mapped through the system's page cache (v0.21.1's way); the server starts
+in about 20 seconds, where copying 34 layers into RAM took 6 minutes. A 16 GB card's answer waits about a quarter of a
+second a token on the disk, a layer's reads after another's — the next lever is reading a layer's experts while the
+one before it computes (`measurements/2026-10-27_nn133_deepseek_disk_node03.md`).
 
 ### Over several cards: tensor parallelism
 

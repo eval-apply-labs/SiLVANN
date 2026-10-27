@@ -137,8 +137,12 @@ the PC gives.
 started the container with the chat answering, kept a search key in the tools file (which the server's own reading
 of the file keeps), and was run again, stopped, started and updated, the key kept; with 8080 taken it took 8081, a
 `--port` named busy was refused, and the chat answered at `silvann.localhost` on both; `install_nonfree.sh` put PyAV
-17.1 in the folder, restarted SiLVANN, and the container imported it, after an update too (`MEASURED`). Its NVIDIA and Docker
-paths, and the newer distributions: `ASSUMED`, not yet run. In the container, on an MI50, the Qwen 3.6 35B-A3B `D8E4`
+17.1 in the folder, restarted SiLVANN, and the container imported it, after an update too (`MEASURED`). On the Dell
+Precision (Ubuntu 22.04, an RTX 5060 Ti) under rootless Docker: the NVIDIA card found and handed in, a search key kept,
+the Qwen 3.8 27B started from Options and answering at 24.3 tokens a second, `update`, `stop` and `start` with the model
+started again by itself, the model's shell on under Docker's own profile (`MEASURED`,
+measurements/2026-10-27_nn134_setup_precision.md). Podman 4.1 or later with an NVIDIA card, and a distribution whose
+own profile lets Landlock through: `ASSUMED`, not yet run. In the container, on an MI50, the Qwen 3.6 35B-A3B `D8E4`
 read a prompt at 378.7-379.0 positions a second and answered at 86.5-88.6 tokens a second, where the same release
 installed on the host gave 378.7-379.3 and 87.6-88.4, with the same words (`MEASURED`, v0.20.0,
 measurements/2026-10-26_nn119_v0200_image_node03.md). Ubuntu 22.04 refusing Landlock without the profile: `MEASURED`

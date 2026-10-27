@@ -549,10 +549,21 @@ static sys__heap_node ai_deepseek_4__close__zzabi_apply(const sys__heap_node* ar
     return nn__doors_answer(&argv[0]);
 }
 
+/* The experts table's backing, when it has one: none is `file` zero. False when the cell is there and not a backing. */
+static bool ai_deepseek_4__experts__zzprivate_backing(uint64_t table, nn__expert__backing* backing) {
+    const nn__expert__backing none = {};
+    *backing = none;
+    if (sys__node_array__length(table) <= AI_DEEPSEEK_4__EXP__BACKING) return true;
+    const sys__heap_node n = sys__node_array__borrow(table, AI_DEEPSEEK_4__EXP__BACKING);
+    if (n.dtype == SYS__KIND__VALUE_INT && n.args[0] == 0ull) return true;
+    return sys__heap_node__carries_reference(n.dtype) && nn__expert__backing_of(n.args[0], backing);
+}
+
 /* The routed experts as nn runs them (▶ nn's `nn__routed`), out of an experts table: its shape, its planes' places in a
- * slot, the experts this worker holds, its arithmetic, the clamped SwiGLU's limit and its scratch. */
-static void ai_deepseek_4__experts__zzprivate_routed(const uint64_t* at, const uint64_t* room, const uint64_t* v, const float* r,
-                                                     nn__routed* out) {
+ * slot, the experts this worker holds, its arithmetic, the clamped SwiGLU's limit, its scratch and its backing. False when
+ * the backing cell is not one. */
+static bool ai_deepseek_4__experts__zzprivate_routed(uint64_t table, const uint64_t* at, const uint64_t* room, const uint64_t* v,
+                                                     const float* r, nn__routed* out) {
     const nn__routed none = {};
     *out = none;
     const uint64_t H = v[AI_DEEPSEEK_4__EXP__HIDDEN], K = v[AI_DEEPSEEK_4__EXP__TOP_K];
@@ -565,6 +576,7 @@ static void ai_deepseek_4__experts__zzprivate_routed(const uint64_t* at, const u
     out->signs = at[AI_DEEPSEEK_4__EXP__SIGNS]; out->zero = at[AI_DEEPSEEK_4__EXP__ZERO];
     out->scratch = at[AI_DEEPSEEK_4__EXP__SCRATCH]; out->scratch_room = room[AI_DEEPSEEK_4__EXP__SCRATCH];
     out->hand_bytes = AI_DEEPSEEK_4__HAND(H, K); out->picks_at = AI_DEEPSEEK_4__HAND_PICKS(H, K); out->batch = AI_DEEPSEEK_4__EXP__BATCH;
+    return ai_deepseek_4__experts__zzprivate_backing(table, &out->backing);
 }
 
 /* `(ai_deepseek_4__experts hand picks table routed [nn__expert_tier])` -> `routed`: Σ w_j · down_j(swiglu(gate_up_j(x)))
@@ -588,7 +600,8 @@ static sys__heap_node ai_deepseek_4__experts__zzabi_apply(const sys__heap_node* 
      || !nn__primitives__fits(H, r_room) || !nn__primitives__fits(H, room[AI_DEEPSEEK_4__EXP__ZERO]))
         return sys__engine__abi__error(AI_DEEPSEEK_4__LAYER__FAULT_TABLE);
     nn__routed rt;
-    ai_deepseek_4__experts__zzprivate_routed(at, room, v, r, &rt);
+    if (!ai_deepseek_4__experts__zzprivate_routed(argv[2].args[0], at, room, v, r, &rt))
+        return sys__engine__abi__error(AI_DEEPSEEK_4__LAYER__FAULT_TABLE);
     nn__expert_tier tier;
     const bool holds = argc == 5u;
     if (holds && (!sys__heap_node__carries_reference(argv[4].dtype) || !nn__expert_tier__of(argv[4].args[0], rt.layer, &tier)))
@@ -929,7 +942,8 @@ static sys__heap_node ai_deepseek_4__experts_rows__zzabi_apply(const sys__heap_n
      || h_room / AI_DEEPSEEK_4__HAND(H, K) < n || !nn__primitives__fits(n * H, r_room))
         return sys__engine__abi__error(AI_DEEPSEEK_4__LAYER__FAULT_TABLE);
     nn__routed rt;
-    ai_deepseek_4__experts__zzprivate_routed(at, room, v, r, &rt);
+    if (!ai_deepseek_4__experts__zzprivate_routed(argv[1].args[0], at, room, v, r, &rt))
+        return sys__engine__abi__error(AI_DEEPSEEK_4__LAYER__FAULT_TABLE);
     nn__expert_tier tier;
     const bool holds = argc == 5u;
     if (holds && (!sys__heap_node__carries_reference(argv[4].dtype) || !nn__expert_tier__of(argv[4].args[0], rt.layer, &tier)))
