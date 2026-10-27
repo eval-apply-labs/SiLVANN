@@ -16,59 +16,48 @@ weights are packed with TurboQuant: rotated rows at 4 or 8 bits, so a 35-billion
 
 ## Models, and what they run on
 
-One model a kind of machine — the one that suits it best — and the machine it was measured on:
+A row a kind of machine: the model that suits it, how it runs there, its answer in the chat and its prompt and answer
+after a prompt, and the machine it was measured on:
 
-| Your machine | Model | Answer | Measured on |
-|---|---|---|---|
-| No graphics card, 12 GB of RAM, an NVMe disk | [Qwen 3.6 35B-A3B](https://huggingface.co/eval-apply/silvann_tq_D8E4_qwen3.6_35b_a3b) (`D8E4`) on the CPU alone, its experts read from the disk | 12.2 tokens/s | the R730's two Xeons, v0.20.0 |
-| An 8 GB card | [Ministral 3 14B](https://huggingface.co/eval-apply/silvann_tq_D4_ministral_3_14b) (`D4`) on the card, at a 4,096-token context | 45 tokens/s | an RTX 5060 Ti with 7.8 GB of it free, in the chat, v0.20.0 (an MI50 after a prompt: 42) |
-| An 8 GB card, 32 GB of RAM | [Qwen 3.6 35B-A3B](https://huggingface.co/eval-apply/silvann_tq_D8E4_qwen3.6_35b_a3b) (`D8E4`) — the dense part on the card, the experts on the CPU in RAM, and 4 GB of the card the tier of experts used most | 62 tokens/s | an RTX 5060 Ti with 7.8 GB of it free, in the chat, v0.21.0 |
-| An 8 GB card, 32 GB of RAM, an NVMe disk | [Qwen 3.5 122B-A10B](https://huggingface.co/eval-apply/silvann_tq_D8E4_qwen3.5_122b_a10b) (`D8E4`) — the dense part on the card, the experts on the CPU | 8.3 tokens/s | an RTX 5060 Ti with 7.5 GB of it free, in the chat, v0.19.0 |
-| A 12 GB card | [Qwen 3.6 35B-A3B](https://huggingface.co/eval-apply/silvann_tq_D8E4_qwen3.6_35b_a3b) (`D8E4`) — the dense part on the card, the experts on the CPU in RAM, and 7.5 GB of the card the tier | 70 tokens/s | an RTX 5060 Ti with 11.6 GB of it free and 62 GB of RAM, in the chat, v0.21.0 |
-| A 16 GB card | [Qwen 3.8 27B](https://huggingface.co/eval-apply/silvann_tq_D4_qwen3.8_27b) on the card | 24.5 tokens/s | an RTX 5060 Ti, in the chat, v0.20.0 (an MI50 after a prompt: 31.3) |
-| A 16 GB card — alt | [Ministral 3 14B](https://huggingface.co/eval-apply/silvann_tq_D8_ministral_3_14b) (`D8`) on the card, at an 8,192-token context | 28 tokens/s | an RTX 5060 Ti, in the chat, v0.20.0 (an MI50 after a prompt: 30.6) |
-| A 16 GB card, 28 GB of RAM | [Qwen 3.6 35B-A3B](https://huggingface.co/eval-apply/silvann_tq_D8E4_qwen3.6_35b_a3b) (`D8E4`) — the dense part on the card, the experts on the CPU in RAM, and 11.75 GB of the card the tier of experts used most | 72 tokens/s | an RTX 5060 Ti, in the chat, v0.21.0 (an RTX 5070 Ti with 32 GB after a prompt: 68.3) |
-| A 16 GB card, 28 GB of RAM, an NVMe disk | [GLM 5.3 Flash](https://huggingface.co/eval-apply/silvann_tq_D8E4_glm_5.3_flash) (`D8E4`) — the dense part on the card, the experts on the CPU, read from the disk | 2.4 tokens/s | an RTX 5060 Ti, in the chat, v0.20.0 |
-| A 16 GB card, 62 GB of RAM | [Qwen 3.5 122B-A10B](https://huggingface.co/eval-apply/silvann_tq_D8E4_qwen3.5_122b_a10b) (`D8E4`) — the dense part on the card, the experts on the CPU in RAM (its config's `"experts_from": "ram"`‖), and 7.75 GB of the card the tier of experts used most | 17.5 tokens/s | an RTX 5060 Ti, in the chat, v0.21.0 |
-| A 16 GB card, 150 GB of RAM | [GLM 5.3 Flash](https://huggingface.co/eval-apply/silvann_tq_D8E4_glm_5.3_flash) (`D8E4`), its experts in RAM, a 300,000-token context and 1.5 GB of the card the tier, lent 3.1 GB more of the cache's unreached rows | 9.2 tokens/s | an MI50 with 16 GiB of it held, v0.20.0 |
-| A 24 GB card | [Qwen 3.6 35B-A3B](https://huggingface.co/eval-apply/silvann_tq_D8E4_qwen3.6_35b_a3b) on the card | 88 tokens/s | an MI50 after a prompt, v0.21.0 (after 32,000 positions: 55) |
-| A 32 GB card, 80 GB of RAM | [Qwen 3.5 122B-A10B](https://huggingface.co/eval-apply/silvann_tq_D8E4_qwen3.5_122b_a10b) (`D8E4`), its experts in RAM and 24 GB of them on the card | 25.0 tokens/s | an MI50, v0.20.0 |
-
-The MI50s are in a Dell R730 with two Xeon E5-2680 v4; the RTX 5060 Ti in a desktop with a four-core Xeon W-2123 and
-two DDR4-2400 sticks; the RTX 5070 Ti beside a Ryzen 7 5800X. Each process was held to the memory its row names, and a
-smaller card's room was a larger card with the rest of it held. The rows of the `D4E4` packs retired in v0.18.0 were
-measured again on `D8E4` — the R730's with v0.18.1 and v0.20.0, the RTX 5060 Ti's with v0.19.0 and v0.20.0. ‖ With 62 GB the server reads the
-122B's experts from the disk unless its config says `"experts_from": "ram"` (they and the server beside them miss what
-the system has free by under a gigabyte): 9.7 tokens/s. `D8E4`'s dense part takes 4.66 GB of the card against the retired
-`D4E4`'s 2.37, so its tier is smaller, and it answers at 17 where `D4E4` answered at 20. "In the chat" is the server with the model's own config, as the chat's meter reads a short
-conversation, measured with v0.20.0; every other row takes the most likely token after a prompt
-([`docs/results.md`](docs/results.md)). A row of v0.3 was measured with its card kernels, and where a card does part of the work it is
-a floor. A model whose config names no setup — the default's — chooses its own when the server starts, by trying it on
-the card: where its experts go, how much of the card holds the ones used most, the context the card has room for
-([`docs/config.md`](docs/config.md)). **Every model and pack, the other machines (down to a 4 GB card reading its
-experts from the disk), and how long a conversation fits: [`docs/models.md`](docs/models.md)**; every measurement, the
-machines, and each row's version: [`docs/results.md`](docs/results.md).
-
-On NVIDIA cards — a GeForce RTX 5060 Ti 16 GB in the desktop above, about what a local-model enthusiast's machine has,
-and an RTX 5070 Ti 16 GB — in the chat, and after a prompt of about 2,000 positions:
-
-| Model | How it runs | RTX 5060 Ti: in the chat | RTX 5060 Ti: prompt · answer | RTX 5070 Ti: prompt · answer |
+| Your machine | Model, and how it runs | In the chat | After a prompt: prompt · answer | Measured on |
 |---|---|---|---|---|
-| [Ministral 3 14B](https://huggingface.co/eval-apply/silvann_tq_D4_ministral_3_14b) (`D4`) | on the card | 45 tokens/s | 952 positions/s · 40 tokens/s | 1,682 positions/s · 59 tokens/s |
-| [Ministral 3 14B](https://huggingface.co/eval-apply/silvann_tq_D8_ministral_3_14b) (`D8`) | on the card | 28 tokens/s | 868 positions/s · 26 tokens/s | — |
-| [Qwen 3.8 27B](https://huggingface.co/eval-apply/silvann_tq_D4_qwen3.8_27b) | on the card | 24.5 tokens/s | 562 positions/s · 24 tokens/s | — |
-| [Qwen 3.6 35B-A3B](https://huggingface.co/eval-apply/silvann_tq_D8E4_qwen3.6_35b_a3b) (`D8E4`) | the dense part on the card, the experts on the CPU, and the tier of experts the setup chooses at boot | 72 tokens/s | 194 positions/s · 59 tokens/s | 155 positions/s · 68 tokens/s |
-| the same | without the tier | 30 tokens/s | 61 positions/s · 29 tokens/s | — |
-| the same | on the CPU alone | 9.2 tokens/s | 28 positions/s · 8.7 tokens/s | — |
-| the same | the card through OpenCL 1.2, the experts on the CPU, no tier | — | 37 positions/s · 23 tokens/s | — |
-| [Qwen 3.5 122B-A10B](https://huggingface.co/eval-apply/silvann_tq_D8E4_qwen3.5_122b_a10b) (`D8E4`) | the dense part on the card, the experts on the CPU in RAM (54 GB of the desktop's 62, its config's `"experts_from": "ram"`), and the tier the setup chooses at boot | 17.5 tokens/s | 56 positions/s · 15.9 tokens/s | — |
+| No graphics card, 12 GB of RAM, an NVMe disk | [Qwen 3.6 35B-A3B](https://huggingface.co/eval-apply/silvann_tq_D8E4_qwen3.6_35b_a3b) (`D8E4`) on the CPU alone, its experts read from the disk | — | 45 positions/s · 12.2 tokens/s | the R730's two Xeons, v0.20.0 |
+| No graphics card, 28 GB of RAM | [Qwen 3.6 35B-A3B](https://huggingface.co/eval-apply/silvann_tq_D8E4_qwen3.6_35b_a3b) (`D8E4`) on the CPU alone, in RAM | 9.2 tokens/s | 28 positions/s · 8.7 tokens/s | the desktop's four-core Xeon, v0.20.0 (the R730's 28 cores: 65 · 16.1) |
+| An 8 GB card | [Ministral 3 14B](https://huggingface.co/eval-apply/silvann_tq_D4_ministral_3_14b) (`D4`) on the card, at a 4,096-token context | 45 tokens/s | 948 positions/s · 40 tokens/s | an RTX 5060 Ti with 7.8 GB of it free, v0.20.0 (an RTX 5070 Ti: 1,682 · 59, v0.11.0; an MI50: 162 · 42, v0.7.0) |
+| An 8 GB card, 32 GB of RAM | [Qwen 3.6 35B-A3B](https://huggingface.co/eval-apply/silvann_tq_D8E4_qwen3.6_35b_a3b) (`D8E4`) — the dense part on the card, the experts on the CPU in RAM, and 4 GB of the card the tier of experts used most | 62 tokens/s | 164 positions/s · 52.2 tokens/s | an RTX 5060 Ti with 7.8 GB of it free, v0.21.0 |
+| An 8 GB card, 32 GB of RAM, an NVMe disk | [Qwen 3.5 122B-A10B](https://huggingface.co/eval-apply/silvann_tq_D8E4_qwen3.5_122b_a10b) (`D8E4`) — the dense part on the card, the experts on the CPU, read from the disk | 8.3 tokens/s | 19.0 positions/s · 7.8 tokens/s | an RTX 5060 Ti with 7.5 GB of it free, v0.19.0 |
+| A 12 GB card, 62 GB of RAM | [Qwen 3.6 35B-A3B](https://huggingface.co/eval-apply/silvann_tq_D8E4_qwen3.6_35b_a3b) (`D8E4`) — the same split, and 7.5 GB of the card the tier | 70 tokens/s | — | an RTX 5060 Ti with 11.6 GB of it free, v0.21.0 |
+| A 16 GB card | [Qwen 3.8 27B](https://huggingface.co/eval-apply/silvann_tq_D4_qwen3.8_27b) on the card | 24.5 tokens/s | 562 positions/s · 24 tokens/s | an RTX 5060 Ti, v0.20.0 (an MI50: 206 · 31.8) |
+| A 16 GB card — alt | [Ministral 3 14B](https://huggingface.co/eval-apply/silvann_tq_D8_ministral_3_14b) (`D8`) on the card, at an 8,192-token context | 28 tokens/s | 868 positions/s · 26 tokens/s | an RTX 5060 Ti, v0.20.0 (an MI50: 158 · 30.6, v0.7.0) |
+| A 16 GB card, 28 GB of RAM | [Qwen 3.6 35B-A3B](https://huggingface.co/eval-apply/silvann_tq_D8E4_qwen3.6_35b_a3b) (`D8E4`) — the dense part on the card, the experts on the CPU in RAM, and 11.75 GB of the card the tier of experts used most | 72 tokens/s | 174 positions/s · 59 tokens/s | an RTX 5060 Ti, v0.21.0 (with 62 GB: 194 · 59; an RTX 5070 Ti with 32 GB: 155 · 68, v0.11.0) |
+| the same | the same, without the tier | 30 tokens/s | 61 positions/s · 29 tokens/s | an RTX 5060 Ti, v0.20.0 |
+| A 16 GB card, 28 GB of RAM, an NVMe disk | [GLM 5.3 Flash](https://huggingface.co/eval-apply/silvann_tq_D8E4_glm_5.3_flash) (`D8E4`) — the dense part on the card, the experts on the CPU, read from the disk | 2.4 tokens/s | 11.1 positions/s · 2.2 tokens/s | an RTX 5060 Ti, v0.20.0 |
+| A 16 GB card, 62 GB of RAM | [Qwen 3.5 122B-A10B](https://huggingface.co/eval-apply/silvann_tq_D8E4_qwen3.5_122b_a10b) (`D8E4`) — the dense part on the card, the experts on the CPU in RAM (its config's `"experts_from": "ram"`‖), and 7.75 GB of the card the tier of experts used most | 17.5 tokens/s | 56 positions/s · 15.9 tokens/s | an RTX 5060 Ti, v0.21.0 |
+| A 16 GB card, 150 GB of RAM | [GLM 5.3 Flash](https://huggingface.co/eval-apply/silvann_tq_D8E4_glm_5.3_flash) (`D8E4`), its experts in RAM, a 300,000-token context and 1.5 GB of the card the tier, lent 3.1 GB more of the cache's unreached rows | — | 50 positions/s · 9.2 tokens/s | an MI50 with 16 GiB of it held, v0.20.0 |
+| A 24 GB card | [Qwen 3.6 35B-A3B](https://huggingface.co/eval-apply/silvann_tq_D8E4_qwen3.6_35b_a3b) (`D8E4`) on the card | — | 379 positions/s · 88 tokens/s | an MI50, v0.21.0 (after 32,000 positions: 132 · 55) |
+| A 32 GB card, 80 GB of RAM | [Qwen 3.5 122B-A10B](https://huggingface.co/eval-apply/silvann_tq_D8E4_qwen3.5_122b_a10b) (`D8E4`), its experts in RAM and 24 GB of them on the card | — | 92 positions/s · 25.0 tokens/s | an MI50, v0.20.0 |
+| Two 32 GB cards, 251 GB of RAM | [GLM 5.3 Flash](https://huggingface.co/eval-apply/silvann_tq_D8E4_glm_5.3_flash) (`D8E4`) — every layer split over both cards (its config's `"num_cards": 2`), the experts on the CPU in RAM, 14 GB of each card the tier of experts used most, the model's whole 1,048,576-token context — the setup chosen at boot | 12.7-14.5 tokens/s | 55-56 positions/s · 11.2-11.3 tokens/s | two MI50s, v0.21.0 |
+| Two 32 GB cards, 128 GB of RAM | [GLM 5.3 Flash](https://huggingface.co/eval-apply/silvann_tq_D8E4_glm_5.3_flash) (`D8E4`) — the same, the tier exclusive (its config's `"card_experts_gb": 14`, `"card_exclusive": true`‡): an expert on a card is not also in RAM, so 114 GB of the 142 are | 11.4-11.8 tokens/s | 36 positions/s · 10.1 tokens/s | two MI50s, the process held to 120 GiB, v0.21.0 (with 251 GB: 11.3-11.9; 41 · 10.1-10.3) |
+| Two 32 GB cards, 251 GB of RAM | [DeepSeek-V4.1-Flash](https://huggingface.co/eval-apply/silvann_tq_D8E4_deepseek_v4.1_flash_1017) (`D8E4`) — every layer split over both cards, the experts on the CPU, all in RAM, and 22.5 GB of each card an exclusive tier of them (its config's `"num_cards": 2`, `"card_experts_gb": 22.5`, `"card_exclusive": true`‡), the model's whole 1,048,576-token context | 10.5-13.7 tokens/s (6.8-9.6 the first answer after a boot) | 21.8-23.7 positions/s · 6.5-7.9 tokens/s | two MI50s, v0.21.0 |
+| An older card or an integrated GPU, through OpenCL 1.2 | [Qwen 3.6 35B-A3B](https://huggingface.co/eval-apply/silvann_tq_D8E4_qwen3.6_35b_a3b) (`D8E4`) — the dense part on the card, the experts on the CPU in RAM, no tier | — | 37 positions/s · 23 tokens/s | the RTX 5060 Ti through OpenCL 1.2, v0.20.0 |
 
-"In the chat" is the server with the model's own config — its sampler, the setup it chooses — as the chat's meter reads
-a short conversation (from 54 positions; Ministral's from 583, its own system prompt), measured with v0.20.0
-(2026-10-26), the 35B's and the 122B's with a tier with v0.21.0 (2026-10-27). The prompt and the answer after it take
-the most likely token; the RTX 5060 Ti's measured again with v0.20.0 (the tiers' with v0.21.0), the RTX 5070 Ti's with v0.11.0. v0.11.0's server drew each token with nn's generic top k on an NVIDIA
-card, through OpenCL and on the CPU alone: the 35B answered in the chat at 32-35 tokens a second on the RTX 5060 Ti,
-and answers at 72 now ([`docs/results.md`](docs/results.md)).
+**In the chat** is the server with the model's own config — its sampler, the setup it chooses, or the setup its row
+names — as the chat's meter reads a short conversation (from 54 positions; Ministral's from 583, its own system prompt). **After a prompt** is the
+most likely token after a prompt of about 2,000 positions (2,568 for Ministral; about 1,000 where the experts are read
+from the disk), the answer from its 10th token. A row's version is the release it was last measured with. The MI50s are
+in a Dell R730 with two Xeon E5-2680 v4; the RTX 5060 Ti in a desktop with a four-core Xeon W-2123 and two DDR4-2400
+sticks; the RTX 5070 Ti beside a Ryzen 7 5800X. Each process was held to the memory its row names, and a smaller card's
+room was a larger card with the rest of it held. ‡ An exclusive tier keeps each expert on a card or in RAM, never both, so the
+cards' tiers are RAM given back: GLM's needs 28 GB less of it, and answers a little slower than with its tier inclusive. DeepSeek's routed experts are
+272 GB: on one MI50 34 of its 40 layers' fit in RAM and the rest are read from the disk; with 22.5 GB of each of two
+cards exclusive its experts all fit beside the R730's 251 GB, and it answers about twice as fast. The server does not
+choose an exclusive tier by itself: the config names it ([`docs/config.md`](docs/config.md)). ‖ With 62 GB the server reads the 122B's experts from the disk unless
+its config says `"experts_from": "ram"` (they and the server beside them miss what the system has free by under a
+gigabyte): 9.7 tokens/s. A model whose config names no setup — the default's — chooses its own when the server starts,
+by trying it on the card: where its experts go, how much of the card holds the ones used most, the context the card has
+room for ([`docs/config.md`](docs/config.md)). **Every model and pack, the other machines (down to a 4 GB card reading
+its experts from the disk), and how long a conversation fits: [`docs/models.md`](docs/models.md)**; every measurement,
+the machines, and each row's version: [`docs/results.md`](docs/results.md).
 
 **New in v0.21.0:** SiLVANN servers find each other through a registry for the model's subagents, a long conversation
 on an MI50 reads and answers two to three times as fast, `experts_register` no longer pins the experts' RAM by itself,
@@ -110,8 +99,8 @@ Every release before this one, and this one's notes again: [`release_logs/v0.md`
 
 | | |
 |---|---|
-| **Tested** | Linux with AMD Instinct MI50 (gfx906), ROCm 6 — a model on one card, and the 27B's layers over two and four (tensor parallelism); DeepSeek-V4.1-Flash on one card with its experts on the CPU, checked against DeepSeek's own code; Linux with an NVIDIA GeForce RTX 5060 Ti (sm_120), CUDA 12.9, driver 595 — every pack but GLM's checked against Hugging Face, the 35B's tier of experts included; the CPU alone with AVX2 (Xeon E5-2680 v4) and with AVX-512 (Xeon W-2123); OpenCL 2.0 with sub-groups, on the MI50 — the 27B and the 35B checked against Hugging Face, the 27B answering at 9-11 tokens a second and reading a prompt at 49 positions a second; the 122B's tier of experts, 11.7 tokens a second with 18 GB of the card (9.7 without); OpenCL 1.2 through NVIDIA's OpenCL on the RTX 5060 Ti — the 27B checked against Hugging Face, at 1.6 tokens a second (the family is for integrated GPUs); Windows with an NVIDIA card (an RTX 5070 Ti, a Ryzen 7 5800X), natively: built from source with CUDA 13.4, Ministral 3 14B `D4` on the card ([`docs/users.md`](docs/users.md#on-windows)) |
-| **Untested** | on Windows: the prebuilt libraries on a PC (GitHub's runners, which build them, have no card), the CPU alone, a model's experts on the CPU or read from the disk, AMD's and Intel's GPUs through OpenCL; Linux booted from a USB SSD; tensor parallelism on NVIDIA cards; other NVIDIA generations (the CUDA family is built for sm_75 to sm_120: Turing to Blackwell; an older card — Kepler, Maxwell, Pascal, Volta — goes to OpenCL 1.2, the GTX 1080 first); GLM 5.3 Flash on an NVIDIA card; other AMD generations; OpenCL on other devices, the integrated GPUs `khronos_opencl1_igpu` is for among them (on one, the model's memory is read where it is, not copied to the GPU: checked only through PoCL, a CPU's OpenCL) — which card goes to OpenCL 1.2 and which to 2 is a best guess from the vendors' published versions (OpenCL 1.2: every NVIDIA card CUDA does not take, Intel's iGPUs before Gen9, AMD's TeraScale and GCN 1; OpenCL 2: the rest), and a card on the wrong one is an issue to open, with its `clinfo`; AVX-512 on processors other than Skylake (AMD's Zen 4 and 5, later Xeons) |
+| **Tested** | Linux with AMD Instinct MI50 (gfx906), ROCm 6 — a model on one card, and the 27B's layers over two and four (tensor parallelism); DeepSeek-V4.1-Flash on one card with its experts on the CPU, checked against DeepSeek's own code, and over both MI50s with an exclusive tier; Linux with an NVIDIA GeForce RTX 5060 Ti (sm_120), CUDA 12.9, driver 595 — every pack but GLM's checked against Hugging Face, the 35B's tier of experts included; the CPU alone with AVX2 (Xeon E5-2680 v4) and with AVX-512 (Xeon W-2123); OpenCL 2.0 with sub-groups, on the MI50 — the 27B and the 35B checked against Hugging Face, the 27B answering at 9-11 tokens a second and reading a prompt at 49 positions a second; the 122B's tier of experts, 11.7 tokens a second with 18 GB of the card (9.7 without); OpenCL 1.2 through NVIDIA's OpenCL on the RTX 5060 Ti — the 27B checked against Hugging Face, at 1.6 tokens a second (the family is for integrated GPUs); Windows with an NVIDIA card (an RTX 5070 Ti, a Ryzen 7 5800X), natively: built from source with CUDA 13.4, Ministral 3 14B `D4` on the card ([`docs/users.md`](docs/users.md#on-windows)) |
+| **Untested** | on Windows: the prebuilt libraries on a PC (GitHub's runners, which build them, have no card), the CPU alone, a model's experts on the CPU or read from the disk, AMD's and Intel's GPUs through OpenCL; Linux booted from a USB SSD; tensor parallelism on NVIDIA cards; DeepSeek-V4.1-Flash on an NVIDIA card; other NVIDIA generations (the CUDA family is built for sm_75 to sm_120: Turing to Blackwell; an older card — Kepler, Maxwell, Pascal, Volta — goes to OpenCL 1.2, the GTX 1080 first); GLM 5.3 Flash on an NVIDIA card; other AMD generations; OpenCL on other devices, the integrated GPUs `khronos_opencl1_igpu` is for among them (on one, the model's memory is read where it is, not copied to the GPU: checked only through PoCL, a CPU's OpenCL) — which card goes to OpenCL 1.2 and which to 2 is a best guess from the vendors' published versions (OpenCL 1.2: every NVIDIA card CUDA does not take, Intel's iGPUs before Gen9, AMD's TeraScale and GCN 1; OpenCL 2: the rest), and a card on the wrong one is an issue to open, with its `clinfo`; AVX-512 on processors other than Skylake (AMD's Zen 4 and 5, later Xeons) |
 | **Not supported** | macOS |
 
 Pictures and videos are read by the Qwen models and GLM 5.3 Flash (v0.7.0: [`release_logs/v0.md`](release_logs/v0.md#v070)), pictures by DeepSeek-V4.1-Flash (v0.17.0: [`docs/users.md`](docs/users.md#3-serve-it-and-chat)); Ministral 3 reads neither.

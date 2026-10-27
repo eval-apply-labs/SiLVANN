@@ -147,6 +147,9 @@ One MI50 for the dense part, the experts on the CPU.
 | `D8E4`: the same RAM and cache on a 16 GB card's room (16 GiB of the MI50 held) — a 1.5 GB tier, lent 3.1 GB, the setup chosen at boot | — | 49.6 positions/s | 9.2 tokens/s | v0.20.0 |
 | `D8E4`: all in RAM, a 10,020-position prompt streamed onto the card (`stream`) | — | 138 positions/s (45 a chunk at a time) | — | v0.20.0 |
 | `D8E4`: the same over two MI50s' tiers | — | 152 positions/s | — | v0.20.0 |
+| `D8E4`: over two MI50s (`"num_cards": 2`), all in RAM, 14 GB of each card a tier, the model's whole 1,048,576-position context — the setup chosen at boot; in the chat 12.7-14.5 tokens/s | — | 54.6-56.4 positions/s | 11.2-11.3 tokens/s | v0.21.0 |
+| `D8E4`: the same with the tier exclusive (`card_exclusive`); in the chat 11.3-11.9 | — | 40.9-41.1 positions/s | 10.1-10.3 tokens/s | v0.21.0 |
+| `D8E4`: the same, held to 120 GiB — a 128 GB machine's room: 114 GB of the experts in RAM, the cards' 28 GB not; in the chat 11.4-11.8 | — | 36.3 positions/s | 10.1 tokens/s | v0.21.0 |
 | all in RAM | — | 23.9 positions/s | 6.7 tokens/s | v0.3 |
 | all in RAM, 18 GB of the card the tier of experts | — | 25.0 positions/s | 8.1 tokens/s (6.8 without, side by side) | v0.3.0 |
 | all in RAM, 24 GB of the card the tier of experts, from token 224 | — | — | 10.7 tokens/s | v0.3.1 |
@@ -156,7 +159,8 @@ One MI50 for the dense part, the experts on the CPU.
 | 64 GB of RAM | 5 GB/s, overheating‡ | 4.9 positions/s† | 1.55 tokens/s — 80% from memory, 804 MB read a token ◦ | before v0.3 |
 | 32 GB of RAM, before grouped attention | 2.6 GB/s | 11 positions/s† | 1.1 tokens/s — 61% from memory ◦ | v0.2.0 |
 
-The first two rows were held to 150 GB of RAM, a prompt of 1,000 positions, then 128 tokens. The streamed rows: each
+The first two rows were held to 150 GB of RAM, a prompt of 1,000 positions, then 128 tokens. The two-card rows: the machine's 251 GB, a
+prompt of 2,037 positions, then 64 tokens, the chat's meter over three answers of 256, two rounds each (`measurements/2026-10-27_v0210_glm_two_cards_node03.md`). The streamed rows: each
 layer's experts cross to the cards once for the whole prompt (`measurements/2026-10-25_nn115_group_stream_node03.md`; a
 chunk at a time `measurements/2026-10-25_nn115_glm_prompt_kernels_node03.md`).
 With its experts on the CPU, a model reads a prompt a chunk of positions at a time through each layer — 256 for the
@@ -171,6 +175,29 @@ The tier of experts starts empty in each of these runs; the prompt fills most of
 rest fills — GLM's reaches about 9 tokens a second by its 240th token with 18 GB. Each tier run answers with the same
 words as its run without, until a near-tie in the 122B's ~20 words in: the card sums its experts in another order than
 the CPU does.
+
+### DeepSeek-V4.1-Flash
+
+Both MI50s, every layer split over them (`"num_cards": 2`), the experts on the CPU and every one of them in RAM. Its
+routed experts are 272 GB, more than the R730's RAM: 22.5 GB of each card is an exclusive tier of them — an expert on a
+card or in RAM, never both — the most a card holds beside the model's whole 1,048,576-position context, so each card's
+share is RAM given back and all 40 layers' experts fit (on one card the server's setup keeps 34 layers' in RAM and maps
+6 from the disk). The config:
+
+```json
+{"max_context": 1048576, "num_cards": 2,
+ "options": {"experts_from": "ram", "card_experts_gb": 22.5, "card_exclusive": true}}
+```
+
+| Where it runs | In the chat | Prompt | Answer | Version |
+|---|---|---|---|---|
+| two MI50s, every expert in RAM, 22.5 GB of each card an exclusive tier, a 1,048,576-position context | 10.5-13.7 tokens/s (6.8-9.6 the first answer after a boot) | 21.8-23.7 positions/s | 6.5-7.9 tokens/s | v0.21.0 |
+
+Two rounds, interleaved: the server on that config, the chat's meter over three answers of 256 tokens; then a prompt of
+2,029 positions and the most likely token after it, from the 10th. The first answer after a boot is the slowest while
+the tiers learn which experts are picked; the answer after the long prompt is slower than the chat's, its tiers having
+seen the prompt's picks alone. The server boots it in about 6.5 minutes
+(`measurements/2026-10-27_v0210_deepseek_rates_node03.md`).
 
 ### Over several cards: tensor parallelism
 
@@ -245,7 +272,7 @@ check against Hugging Face's answer; two rounds, their mean.
 | Qwen 3.5 122B-A10B `D8E4` | the same, the setup chosen at 32,768 as it is: the experts read from the disk; 128 tokens | 20.5 positions/s | 10.0 tokens/s — 99% from memory | v0.19.0 |
 
 Against one MI50 the 27B reads a prompt 5.5 times as fast here (562 positions a second against 102) — the card's tensor
-cores run the prompt's matrix products — and answers more slowly (24.0 tokens a second against 31.3): a token reads every
+cores run the prompt's matrix products — and answers more slowly (24.0 tokens a second against 31.8): a token reads every
 weight once, so the answer follows the memory's speed, 448 GB/s here against the MI50's 1,024. With the experts on the
 CPU the four cores are what limits the 35B (61 positions a second against the R730's 88, whose 28 cores read the
 experts). With a tier the 35B reads a prompt 1.7 times as fast as v0.11.1 did (194 positions a second against 115).

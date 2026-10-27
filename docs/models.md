@@ -86,8 +86,10 @@ DeepSeek's model reads text and pictures: its vision tower (32 blocks and the al
 system and the files it reads in place; the rest are mapped from the pack and read through the system's page cache. Its n-gram memory's tables (203 GB) stay on the disk and are read a row at a time as
 each token asks for them, so the disk should be an NVMe drive. A conversation reaches the model's own length,
 1,048,576 positions: past 16,384, layer 20's candidate blocks choose where the later layers look, as DeepSeek's own
-code does. Its rates come with a later release;
-its options are in [`config.md`](config.md#deepseek-v41-flashs-options).
+code does. On the R730's two MI50s, with every expert in RAM — 22.5 GB of each card an exclusive tier of them, so
+the rest fit beside 251 GB — it answers in the chat at 10.5-13.7 tokens a second and reads a prompt at 22-24 positions
+a second ([`results.md`](results.md#deepseek-v41-flash)); its options are in
+[`config.md`](config.md#deepseek-v41-flashs-options).
 
 ## The card's tier of experts
 
