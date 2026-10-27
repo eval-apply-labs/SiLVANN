@@ -161,6 +161,16 @@ static inline bool nvidia_cuda12__mark_open(void** mark) {
 static inline void nvidia_cuda12__mark_close(void* mark) { if (mark) (void)cudaEventDestroy((cudaEvent_t)mark); }
 static inline bool nvidia_cuda12__mark_record(void* mark) { return cudaEventRecord((cudaEvent_t)mark, 0) == cudaSuccess; }
 static inline bool nvidia_cuda12__mark_wait(void* mark) { return cudaStreamWaitEvent(0, (cudaEvent_t)mark, 0) == cudaSuccess; }
+static inline bool nvidia_cuda12__side_memory_write_queued(void* to, const void* from, size_t bytes, void* channel) {
+    return cudaMemcpyAsync(to, from, bytes, cudaMemcpyHostToDevice, (cudaStream_t)channel) == cudaSuccess;
+}
+static inline bool nvidia_cuda12__side_memory_read_queued(void* to, const void* from, size_t bytes, void* channel) {
+    return cudaMemcpyAsync(to, from, bytes, cudaMemcpyDeviceToHost, (cudaStream_t)channel) == cudaSuccess;
+}
+static inline bool nvidia_cuda12__side_mark_record(void* mark, void* channel) {
+    return cudaEventRecord((cudaEvent_t)mark, (cudaStream_t)channel) == cudaSuccess;
+}
+static inline bool nvidia_cuda12__mark_reached(void* mark) { return cudaEventSynchronize((cudaEvent_t)mark) == cudaSuccess; }
 
 /* ⛳ THE FUNCTIONS ABOVE ARE THIS FAMILY'S OWN, prefixed with its name; `sys`'s door list names them
  * (`contracts/abi/gpu.cuh`), and the published `sys__gpu__*` names in `cpu/silicon/silicon_family.cuh`

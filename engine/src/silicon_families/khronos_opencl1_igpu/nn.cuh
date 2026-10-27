@@ -16,7 +16,8 @@
  *   in `kernels/kernels.cuh` and the helpers before them — works out the space of every pointer in it, and
  *   writes one `__kernel` per row of nn's door list, running the body its `__RUNS` line names. The source
  *   rides inside this binary as a string and the runtime compiles it for the card the first time a kernel is
- *   launched. Every door runs nn's own body: the family has no overrides.
+ *   launched. Every door runs nn's own body but the overrides', whose kernels the build writes into the same program
+ *   from `overrides/kernels.cuh`.
  * ⛳ EVERY POINTER ARGUMENT IS PASSED AS ITS ADDRESS, A 64-BIT NUMBER — an arena and an offset (`sys.cuh`) —
  *   and the door already hands the launch each argument's width, so the launch sets each argument by its
  *   bytes and never needs to know which were pointers.
@@ -89,6 +90,7 @@ static inline khronos_opencl1_igpu__kernel* khronos_opencl1_igpu__zzprivate_kern
     return k ? &ks[(*count)++] : (++*count, (khronos_opencl1_igpu__kernel*)0);
 }
 
+
 /* Start the kernel called `name` on `blocks` blocks of `threads` threads. `kernel` is null: this family
  * compiles no kernel of its own, so there is no address to take.
  * ⛳ UNDER THE LOCK, because a kernel's arguments belong to the kernel object and not to the launch: two
@@ -112,7 +114,8 @@ static inline void nn__silicon__launch(const void* kernel, const char* name, uin
     if (ok) ok = khronos_opencl1_igpu__zzpackage_launching(s, q, args, sizes, count);
     if (ok) {
         const size_t global = (size_t)blocks * (size_t)threads, local = (size_t)threads;
-        ok = clEnqueueNDRangeKernel(q, k->kernel, 1u, 0, &global, &local, 0u, 0, 0) == CL_SUCCESS;
+        cl_event* ev = 0;
+        ok = clEnqueueNDRangeKernel(q, k->kernel, 1u, 0, &global, &local, 0u, 0, ev) == CL_SUCCESS;
     }
     sys__os__lock_give(&khronos_opencl1_igpu__zzpackage_lock);
     if (!ok) fprintf(stderr, "khronos_opencl1_igpu: %s did not launch\n", name);
@@ -136,6 +139,8 @@ static __device__ inline uint32_t nn__silicon__block(void)  { return 0u; }
 static __device__ inline uint32_t nn__silicon__blocks(void) { return 1u; }
 static __device__ inline float nn__silicon__lanes_sum(float part) { return part; }
 static __device__ inline void nn__silicon__lanes_sums(float* parts, uint32_t n) { (void)parts; (void)n; }
+static __device__ inline float khronos_opencl1_igpu__zzpackage_lanes_sum_each(float part, uint32_t width) { (void)width; return part; }
+static __device__ inline float khronos_opencl1_igpu__zzpackage_lanes_hadamard(float v, uint32_t width) { (void)width; return v; }
 static __device__ inline float nn__silicon__lanes_max(float part) { return part; }
 static __device__ inline nn__gemm__tile nn__silicon__gemm_tile(void) { nn__gemm__tile t = {1u, 4u}; return t; }
 static __device__ inline float nn__silicon__half_to_float(uint16_t h) {

@@ -179,7 +179,12 @@
     X(PKG, 36, "sys__unquote",        sys__opcodes__zzabi_adapter_unquote,           SYS__UNQUOTE) \
     /* ⭐ A LOOP IN ONE FORM — the verb rewrites its own form each turn, so a loop of any length holds what  */ \
     /* one turn holds. As a defun each turn nested inside the last and the heap ran out in ~1600 turns.   */ \
-    X(PKG, 37, "sys__while",          sys__opcodes__zzpackage_apply_while,           SYS__WHILE)
+    X(PKG, 37, "sys__while",          sys__opcodes__zzpackage_apply_while,           SYS__WHILE) \
+    /* ⭐ A CARD'S LANDING PAD — pinned RAM between the card and the rest of the machine, its chunks up and down, ▶   */ \
+    /* `cpu/silicon/pad.cuh` (NN-115).                                                                            */ \
+    X(PKG, 41, "sys__pad__open",      sys__opcodes__zzabi_adapter_pad_open,          SYS__PAD__OPEN) \
+    X(PKG, 42, "sys__pad__move",      sys__opcodes__zzabi_adapter_pad_move,          SYS__PAD__MOVE) \
+    X(PKG, 43, "sys__pad__close",     sys__opcodes__zzabi_adapter_pad_close,         SYS__PAD__CLOSE)
 
 /* ── AND THE OPCODES, NAMED ──────────────────────────────────────────────────────────────────────────
  * ⚖ ARCHITECT: *"the enum addition on the opcodes."* A published verb had a number and no name, so every

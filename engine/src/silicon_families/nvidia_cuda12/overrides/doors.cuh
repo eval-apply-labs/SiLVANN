@@ -12,6 +12,8 @@
 #include "expert.cuh"
 #include "conv.cuh"
 #include "vector.cuh"
+#include "index.cuh"
+#include "kda.cuh"
 
 /* Into nn's table, once, when the family is first asked for it. */
 static inline void nvidia_cuda12__override_doors(nn__doors* doors) {
@@ -44,6 +46,18 @@ static inline void nvidia_cuda12__override_doors(nn__doors* doors) {
     doors->expert_groups        = nvidia_cuda12__override_expert_groups;
     doors->unfold_rows          = nvidia_cuda12__override_unfold_rows;
     doors->vector_top_k         = nvidia_cuda12__override_vector_top_k;
+    doors->kda_steps_decayed             = nvidia_cuda12__override_kda_steps_decayed;
+    doors->index_scores                  = nvidia_cuda12__override_index_scores;
+    doors->index_scores_rows             = nvidia_cuda12__override_index_scores_rows;
+    doors->index_select                  = nvidia_cuda12__override_index_select;
+    doors->index_select_rows             = nvidia_cuda12__override_index_select_rows;
+    doors->attention_scores_grouped      = nvidia_cuda12__override_attention_scores_grouped;
+    doors->attention_scores_grouped_rows = nvidia_cuda12__override_attention_scores_grouped_rows;
+    doors->attention_mix_rows            = nvidia_cuda12__override_attention_mix_rows;
+    doors->attention_absorb              = nvidia_cuda12__override_attention_absorb;
+    doors->attention_absorb_rows         = nvidia_cuda12__override_attention_absorb_rows;
+    doors->attention_expand              = nvidia_cuda12__override_attention_expand;
+    doors->attention_expand_rows         = nvidia_cuda12__override_attention_expand_rows;
 }
 
 #endif /* SILVANN__SILICON_FAMILIES_NVIDIA_CUDA12_OVERRIDES_DOORS_CUH */

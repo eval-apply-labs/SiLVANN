@@ -42,6 +42,26 @@ the defenders without. A model on the defender's own machine can read the code, 
 they would never send anywhere else, and find the weak points first. Local models make those systems more resistant,
 because the people who run them get the same help in private.
 
+### Backdoors
+
+A backdoor is a weakness put into a product on purpose: a hidden account, a key that opens every copy, a way in that
+only its makers are meant to know. It was always a bet that nobody else would find it. That bet is lost once large
+models, and the state actors who run them, can reverse engineer compiled binaries: a backdoor shipped in a product is
+then a backdoor your enemies can find and use.
+
+So besides the ethics of mishandling the trust its users put in it, a company that plants a backdoor weakens its own
+country's security and hands its enemies an easy target. A local actor cannot exploit such a weakness at scale. A state
+actor can, and will keep it as leverage until the day it is useful.
+
+The defence starts with the user. A single person with a local model has an expert beside them to understand the
+threat: to read what a product does and what it reaches, and to work out how best to isolate it from attackers and to
+mitigate a weakness until it is fixed. Containers and a "need to use" permission model — every app given what it needs
+and nothing more ([below](#container-first)) — remove most of the attack surface.
+
+That is not enough on its own. The industry has to acknowledge that the threat model is radically different now, and
+patching vulnerabilities and offering mitigations should be of paramount importance to everyone who considers
+themselves an IT professional.
+
 ### Biological risk
 
 The worry is that a model could help someone cause harm with biology. That risk is real, but it does not sit with a
@@ -75,6 +95,15 @@ public key. A message signed with the private key can only have come from its ho
 the public key. Logging in becomes signing a challenge instead of typing a password, and a payment, a contract or a
 message from your bank carries a signature you can check, the way a website already carries a certificate.
 
+It would also end the ever-growing pile of passwords. You can keep one key for everything, or a key for each service you
+want kept apart (work and home, a bank and a forum), so that one cannot be linked to the other. Either way, no site
+receives or stores a secret. The private key stays with you, and the one password left is the one that unlocks it on
+your own device. Because you type it in one place and no server ever sees it, it can be long and hardened. A site
+keeps only your public key and checks your signature on a challenge it chose, so a stolen copy of its database logs
+nobody in. A careless implementation has no passwords to leak, and the system's owner has no password to hash, salt and
+guard: nothing it stores can be turned into access. Logging in becomes safer and less painful at once. Passkeys already
+work this way on many sites.
+
 An electronic signature can then be the normal way to identify someone, without identifying anyone more than a task
 needs. Proving you are over 18 does not need your name. An anonymous account, bought at a shop that checks your ID once
 at the counter, the way a phone top-up card is sold today, can carry that one fact, signed by whoever issued it, and
@@ -85,6 +114,34 @@ rather than one company, can hold that register: which public key belongs to whi
 which name points where. [go-ledger](https://github.com/eval-apply-labs/go-ledger), another Eval Apply Labs project, is
 a small ledger of this kind. It binds names to accounts in a registry its validators agree on, and every entry is signed,
 so a name can be checked without trusting a single company's database.
+
+## Container first
+
+A model that only answers can say something wrong. A model with tools can do something wrong: SiLVANN's REPL reads
+files, runs commands and fetches from the network when it is allowed to, and an agent built on any model is the same.
+Most of the harm such an app can do is decided before the model says a word, by what the process it runs in can reach.
+
+So build and run AI apps container-first, and ask of each one what it can reach and what that would cost:
+
+- **Its files.** A container sees only the folders it is given. A volume mounted read-only cannot be changed, and the
+  rest of the machine is not there at all.
+- **Its credentials.** Keys, tokens and logged-in sessions in its environment are the app's to use, and the model's to
+  misuse. Keep them out of the image and out of the tool's reach, and give the app its own, limited to what it does.
+- **Its network.** A container can have no network, or only the one service it needs. A model that cannot reach the
+  internet cannot send anything to it.
+- **The machine.** Run it rootless, as Podman does by default: root inside the container is an ordinary user outside
+  it, so even an app that is fully taken over holds no more than that user does.
+
+The same safeguards suit any app that might be compromised, not only one with a model in it: a browser, a mail client, a
+game, a library with a flaw nobody has found yet. Firewalled by default, an exploit stays in one separate environment
+and does not take the whole machine with it.
+
+Each of these is a flag on the command that starts the container, not a project: a volume, a `:ro`, a `--network`, a
+rootless runtime. The risk that is left is the one you chose to give the app, and you can see it in one line. SiLVANN's
+own images run this way ([`docker/README.md`](../docker/README.md)): rootless under Podman, the models and the
+conversations in one folder of yours, the chat on this machine's address alone — and inside the container, the model's
+own commands closed off from its tools file, where the keys are, and from the server's process
+([`tools.md`](tools.md#where-the-models-commands-reach)).
 
 ## A change of habits, not for the worse
 

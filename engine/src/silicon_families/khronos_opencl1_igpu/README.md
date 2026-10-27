@@ -34,8 +34,9 @@ has run on, an RTX 5060 Ti through NVIDIA's OpenCL, the 27B D4 decodes 1.61 toke
 `nvidia_cuda12`, and the CPU alone (`x86_avx2`) does 2.12. A token takes 627 ms:
 
 - **363 ms are copies.** OpenCL 1.2 has no memory that the host and the card both see, so host RAM a kernel reads is
-  kept twice, once in the program's memory and once on the card. nn's RAM span holds the embedding table (1.27 GB) and
-  a 64-byte result written every token, and that one write sends the whole span over PCIe in both directions.
+  kept twice, once in the program's memory and once on the card. nn's RAM span holds the embedding table (1.27 GB), and
+  the one kernel a token that reads a row of it sends the whole span over PCIe in both directions: a launch cannot tell
+  a read from a write, so the card's copy is taken as the newer and read back whole when the card is waited for.
 - **258 ms are the kernels:** nn's generic bodies, with no overrides. As OpenCL C 1.2 they run about 1.9× slower than
   CUDA's compile of the same bodies, which takes 135 ms for the whole token.
 
@@ -53,6 +54,12 @@ host-pointer buffers only with it; the 35B-A3B against HF 6/0 either way, the sa
 mapped and still not be one memory: Apple's (an M4, 2026-10-20, before macOS was dropped) faulted at the first heap
 object with it and booted without it.
 
+**The embedding on the CPU (NN-96, 2026-10-26).** With the experts on the CPU, the Qwen models keep the embedding table
+in the CPU worker's RAM on this family and the CPU decodes a token's row, which is copied to the card (`embed_on`,
+`docs/config.md`): the table takes no room on the card and nothing of it crosses. `MEASURED`
+on the RTX 5060 Ti, the 35B D8E4 against HF: a generated token 83 ms against 231 with the table on the card, the same
+checks and continuation (▶ `measurements/2026-10-26_nn96_embedding_cpu_precision.md`).
+
 ## How it works
 
 - **The kernels:** `scripts/opencl1_kernel_source.py` turns nn's card side into one OpenCL C 1.2 program. It parses the
@@ -62,6 +69,36 @@ object with it and booted without it.
   address carries its arena and offset, and every kernel is handed the arenas after its own arguments (`sys.cuh`).
 - **Mapped host RAM** is two copies, except on a device with unified memory (above). The family writes the host copy to the card before a launch that names it, and
   reads it back when the card is waited for (`khronos_opencl1_igpu__zzpackage_launching`, `compute_completed`).
+
+## Its overrides (NN-124)
+
+Most doors run nn's own body; a few run the family's own kernels (`overrides/`), each nn's card body to the bit and
+falling back to nn's for what it does not cover. Their kernels are written in nn's card dialect (`overrides/kernels.cuh`)
+and the build writes them into the same OpenCL C 1.2 program, from the file's `KHRONOS_OPENCL1_IGPU__OVERRIDE_ROWS`; the
+doors (`overrides/doors.cuh`) launch them by name. They are KDA's steps over a prompt's rows (a lane's column of the state
+kept in its private memory for every row), MLA's absorb and expand (a weight loaded once for several rows), the indexer's
+pool scores (several pools a block) and the mix over rows of their own (a value loaded once for several heads). What
+OpenCL C 1.2 lacks — shuffles, and block-shared memory but the folds' — keeps the latent's scores in tiles and the
+indexer's top `k` by ballots on nn's bodies here; the CUDA and AMD families have both.
+
+**The GEMVs and the rotation (NN-96, 2026-10-26).** nn's generic GEMV makes a block one row and folds its 256 lanes for
+it; here a block is sixteen runs of 16 lanes, a run a row, each lane reading sixteen bytes of codes a step, the levels as
+floats from the card's memory rather than the program's constants (which a card serves one lane at a time when the
+lanes ask for different ones), the runs folded at once (`khronos_opencl1_igpu__zzpackage_lanes_sum_each`, a fold the generator writes for the
+overrides alone). The weighted sum onto the residual (the MoE's downs) is the same shape; the two-input GEMV runs the
+one-input kernel an input at a time. nn's Hadamard rotation applies each output's row of the matrix directly, a lane an
+output and 512 terms a lane; here it is the butterfly, a block of the ladder a block of 256 lanes, its stages through the
+fold's scratch (`khronos_opencl1_igpu__zzpackage_lanes_hadamard`). These outputs are within the bench's bound of nn's, not its bytes, as
+CUDA's and AMD's are. `MEASURED` on the RTX 5060 Ti: the 35B's head 1.32 ms (385 GB/s), its MoE down onto the residual
+310 µs → 29, a rotation 27-58 µs → 4.1 at every width; the 35B D8E4 against HF 6/0 at 37.7 ms a token, against 83.0 with
+nn's bodies (▶ `measurements/2026-10-26_nn96_opencl1_gemv_precision.md`).
+
+**Two shapes, an integrated GPU's and a discrete card's.** An integrated GPU shares the host's memory and its bandwidth,
+so there each load serves twice as many outputs (sixteen rows, pools or heads against eight). The doors take the
+integrated shape where the device says `CL_DEVICE_HOST_UNIFIED_MEMORY`; `SILVANN_OPENCL1_SHAPE=igpu` or `=discrete`
+asks for either. `REASONED` from that premise. Both shapes are checked on the RTX 5060 Ti through NVIDIA's OpenCL,
+each forced, against nn's bodies byte for byte (▶ `measurements/2026-10-25_nn124_precision.md`); neither has run on an
+integrated GPU.
 
 ## Taking a device
 

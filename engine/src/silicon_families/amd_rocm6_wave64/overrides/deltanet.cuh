@@ -23,41 +23,6 @@
  *   back to back, 94 -> 15.5 with the L2 cold as a model meets it; the 35B's 32 97 -> 12.9 (cold 90 -> 13.6); the 122B's
  *   64 113 -> 18.4-18.7 (cold 105 -> 18.9). Output and state byte-identical to nn's card body, and to the rows kernel
  *   below, at one row and over many positions with `conved` rewritten between them. */
-/* Half `i` of `at`, read through the constant address space, which the compiler reads with the scalar unit when the
- * address is the same for the whole wave. `REASONED`, on the premise that the scalar cache is invalidated at every
- * dispatch (the LLVM AMDGPU memory model for gfx6-9) and does not see this launch's own stores: nothing this launch
- * writes is read here — `conved` was written by the launch before, and the door refuses an `out` or a state that
- * overlaps it. `MEASURED`: positions decoded with `conved` rewritten by a kernel between steps are byte-identical to the
- * rows kernel over the same positions (test/src_gemv_27b_bench.cpp's positions case). */
-static __device__ inline float amd_rocm6_wave64__zzprivate_scalar_half(const uint16_t* at, uint32_t i) {
-    const uint32_t word = ((const __attribute__((address_space(4))) uint32_t*)(const void*)at)[i / 2u];
-    return nn__silicon__half_to_float((uint16_t)(i % 2u != 0u ? word >> 16 : word & 0xFFFFu));
-}
-/* `at` again, at an offset of zero the compiler cannot see through: reads through it are its own, so the compiler does
- * not keep an earlier pass's values of the same memory alive until a later one needs them — 128 registers a lane for
- * `k`, beside the column's 128, and the kernel spilled. */
-static __device__ inline const uint16_t* amd_rocm6_wave64__zzprivate_afresh(const uint16_t* at) {
-    uint32_t none = 0u;
-    __asm__ volatile("" : "+s"(none));
-    return at + none;
-}
-/* The sum of the squares of 128 halves, in the order the family's fold adds them when a lane holds one each: pairs,
- *   then pairs of pairs. A wave's lane holds the squares of halves `lane` and `lane + 64`; exchanging partners one lane,
- *   then two, ... then 32 apart builds the two 64-wide trees exactly as the fold does — a lane's partial and its partner's
- *   added in either order are the same float — and the fold's last step adds the two. No wait for the block. Each square
- *   is rounded on its own, as each lane's is before the fold, hence the pragma: a fused multiply-add of a square onto a
- *   partial would be a different sum. */
-static __device__ inline float amd_rocm6_wave64__zzprivate_squares128(const uint16_t* x) {
-#pragma clang fp contract(off)
-    const uint32_t lane = (uint32_t)(nn__silicon__lane() % AMD_ROCM6_WAVE64__ZZPRIVATE_WAVE);
-    const float a = nn__silicon__half_to_float(x[lane]), b = nn__silicon__half_to_float(x[lane + AMD_ROCM6_WAVE64__ZZPRIVATE_WAVE]);
-    float lo = a * a, hi = b * b;
-    for (uint32_t m = 1u; m < AMD_ROCM6_WAVE64__ZZPRIVATE_WAVE; m <<= 1) {
-        lo = lo + __shfl_xor(lo, (int)m);
-        hi = hi + __shfl_xor(hi, (int)m);
-    }
-    return lo + hi;
-}
 #define AMD_ROCM6_WAVE64__ZZPRIVATE_STEP_LANES  128u     /* a lane a column of a head of 128 */
 #define AMD_ROCM6_WAVE64__ZZPRIVATE_STEP_BOUNDS __launch_bounds__(AMD_ROCM6_WAVE64__ZZPRIVATE_STEP_LANES)
 static __global__ AMD_ROCM6_WAVE64__ZZPRIVATE_STEP_BOUNDS void amd_rocm6_wave64__zzprivate_deltanet_step128(
@@ -79,20 +44,20 @@ static __global__ AMD_ROCM6_WAVE64__ZZPRIVATE_STEP_BOUNDS void amd_rocm6_wave64_
 #pragma unroll
         for (uint32_t i = 0u; i < D; ++i) col[i] = *(const float*)((const char*)(Sh + i * D) + at);
         const float b = nn__silicon__half_to_float(beta[h]), g_h = nn__silicon__half_to_float(g[h]);
-        const float inv_q = 1.0f / nn__silicon__sqrtf(amd_rocm6_wave64__zzprivate_squares128(q) + 1e-6f) / nn__silicon__sqrtf((float)D);
-        const float inv_k = 1.0f / nn__silicon__sqrtf(amd_rocm6_wave64__zzprivate_squares128(k) + 1e-6f);
+        const float inv_q = 1.0f / nn__silicon__sqrtf(amd_rocm6_wave64__zzpackage_squares128(q) + 1e-6f) / nn__silicon__sqrtf((float)D);
+        const float inv_k = 1.0f / nn__silicon__sqrtf(amd_rocm6_wave64__zzpackage_squares128(k) + 1e-6f);
         const float decay = nn__silicon__expf(g_h);
         float kv = 0.0f;
 #pragma unroll
-        for (uint32_t i = 0u; i < D; ++i) kv += col[i] * amd_rocm6_wave64__zzprivate_scalar_half(k, i);
+        for (uint32_t i = 0u; i < D; ++i) kv += col[i] * amd_rocm6_wave64__zzpackage_scalar_half(k, i);
         const float delta = (nn__silicon__half_to_float(v[j]) - decay * kv * inv_k) * b;
-        const uint16_t* k2 = amd_rocm6_wave64__zzprivate_afresh(k);
+        const uint16_t* k2 = amd_rocm6_wave64__zzpackage_afresh(k);
         float o = 0.0f;
 #pragma unroll
         for (uint32_t i = 0u; i < D; ++i) {
-            const float sn = decay * col[i] + amd_rocm6_wave64__zzprivate_scalar_half(k2, i) * inv_k * delta;
+            const float sn = decay * col[i] + amd_rocm6_wave64__zzpackage_scalar_half(k2, i) * inv_k * delta;
             *(float*)((char*)(Sh + i * D) + at) = sn;
-            o += sn * amd_rocm6_wave64__zzprivate_scalar_half(q, i);
+            o += sn * amd_rocm6_wave64__zzpackage_scalar_half(q, i);
         }
         const uint16_t first = nn__kernels__zzabi_to_half(o * inv_q, over);   /* rounded to a half, as nn's readout is */
         const float oj = nn__silicon__half_to_float(first);
@@ -148,23 +113,23 @@ static __global__ AMD_ROCM6_WAVE64__ZZPRIVATE_STEP_BOUNDS void amd_rocm6_wave64_
             const uint16_t* k = c + k_heads * D + (h / rep) * D;
             const uint16_t* v = c + 2ull * k_heads * D + h * D;
             const float b = nn__silicon__half_to_float(beta[t * v_heads + h]), g_h = nn__silicon__half_to_float(g[t * v_heads + h]);
-            const float inv_q = 1.0f / nn__silicon__sqrtf(amd_rocm6_wave64__zzprivate_squares128(q) + 1e-6f) / nn__silicon__sqrtf((float)D);
-            const float inv_k = 1.0f / nn__silicon__sqrtf(amd_rocm6_wave64__zzprivate_squares128(k) + 1e-6f);
+            const float inv_q = 1.0f / nn__silicon__sqrtf(amd_rocm6_wave64__zzpackage_squares128(q) + 1e-6f) / nn__silicon__sqrtf((float)D);
+            const float inv_k = 1.0f / nn__silicon__sqrtf(amd_rocm6_wave64__zzpackage_squares128(k) + 1e-6f);
             const float decay = nn__silicon__expf(g_h);
             float kv = 0.0f;
 #pragma unroll
-            for (uint32_t i = 0u; i < D; ++i) kv += col[i] * amd_rocm6_wave64__zzprivate_scalar_half(k, i);
+            for (uint32_t i = 0u; i < D; ++i) kv += col[i] * amd_rocm6_wave64__zzpackage_scalar_half(k, i);
             const float delta = (nn__silicon__half_to_float(v[j]) - decay * kv * inv_k) * b;
             float o = 0.0f;
 #pragma unroll
             for (uint32_t c0 = 0u; c0 < D; c0 += 32u) {
-                const uint16_t* k2 = amd_rocm6_wave64__zzprivate_afresh(k);
-                const uint16_t* q2 = amd_rocm6_wave64__zzprivate_afresh(q);
+                const uint16_t* k2 = amd_rocm6_wave64__zzpackage_afresh(k);
+                const uint16_t* q2 = amd_rocm6_wave64__zzpackage_afresh(q);
 #pragma unroll
                 for (uint32_t i = c0; i < c0 + 32u; ++i) {
-                    const float sn = decay * col[i] + amd_rocm6_wave64__zzprivate_scalar_half(k2, i) * inv_k * delta;
+                    const float sn = decay * col[i] + amd_rocm6_wave64__zzpackage_scalar_half(k2, i) * inv_k * delta;
                     col[i] = sn;
-                    o += sn * amd_rocm6_wave64__zzprivate_scalar_half(q2, i);
+                    o += sn * amd_rocm6_wave64__zzpackage_scalar_half(q2, i);
                 }
             }
             const uint16_t first = nn__kernels__zzabi_to_half(o * inv_q, over);

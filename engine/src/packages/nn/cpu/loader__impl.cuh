@@ -7,6 +7,8 @@
 #include <string.h>                             /* the slice's copies: memcpy, memset */
 #include "expert__header.cuh"                           /* the index this reads into, and what it publishes */
 #include "../../sys/cpu/silicon/silicon__header.cuh"   /* the family's file_read */
+#include "../../sys/cpu/silicon/pad.cuh"                /* a card's landing pad, what a promotion is moved through */
+#include "../contracts/objects/routed.cuh"               /* a streamed prompt's batch, at the most */
 
 /* ══ ⭐⭐ THE LOADER — AN EXPERT'S DISK READ, OFF THE EVALUATOR'S THREAD ════════════════════════════════════
  * ⚖ *"go ahead with the loader pool and prefetch"*. A few host threads do nothing but read: each takes a queued
@@ -43,6 +45,10 @@ typedef struct nn__loader__read {
     unsigned channel;              /* an EVACUATE's or a WRITE's evacuation channel */
     uint64_t by;                   /* a WRITE: the worker whose commit queued it, the one whose program releases it */
     uint64_t queued_ns;            /* a GATHER: when it was queued, for the time it takes to land */
+    unsigned device;               /* a GATHER's or a stage's: its card, whose pad it is moved through */
+    bool     in_place;             /* a GATHER: every piece in RAM registered with the card, copied from where it lies */
+    sys__pad__ticket ticket;       /* a GATHER: its last copy queued — on the card once the card's queue reaches it */
+    sys__pad__ticket after;        /* an EVACUATE in half duplex: its swap's gather, landed before it is fetched */
     /* a READ's slices, each a thread's (NN-97): every slice with bytes, those a thread has taken, those landed, and
      *   whether any failed — the read DONE or FAILED when the last lands. Set when its first slice is taken. */
     uint32_t slices_all, slices_taken, slices_landed;
@@ -81,51 +87,144 @@ static sys__os__thread  nn__loader__zzprivate_threads[NN__EXPERT__LOADERS_MAX];
 static unsigned         nn__loader__zzprivate_started = 0u;
 static bool             nn__loader__zzprivate_stopping = false;
 static uint64_t         nn__loader__zzprivate_count[NN__EXPERT__COUNTS];
-static uint64_t         nn__loader__zzprivate_seq = 0ull;             /* the queue's clock, under the lock */
+static uint64_t         nn__loader__zzprivate_seq = 1ull << 62;       /* the queue's clock, under the lock */
+static uint64_t         nn__loader__zzprivate_front = 0ull;           /* the clock of the jobs taken ahead (▶ `nn__expert__ahead`),
+                                                                       * below every other job's */
 /* writes to RAM queued or in flight — an exclusive tier's demotions — so a wait for one costs nothing where there are none */
 static uint64_t         nn__loader__zzprivate_writes_out = 0ull;
-/* The evacuation channels (▶ the exclusive tier, below): pinned memory an expert's bytes wait in, between the card and the
- * RAM slots they are written into. `held` from the evacuation until the commit hands the bytes on; `pending` the writes
- * still reading it — a channel is reused only when both are clear, and its next user waits while it is pending. */
-typedef struct nn__loader__channel { void* host; uint64_t bytes; bool held; unsigned pending; } nn__loader__channel;
+/* The evacuation channels (▶ the exclusive tier, below): a region of its card's pad's down way an expert's bytes wait in,
+ * between the card and the RAM slots they are written into — the pad's parking (▶ sys's `pad.cuh`). `held` from the
+ * evacuation until the commit hands the bytes on; `pending` the writes still reading it — the region is given back to the
+ * pad when both are clear, and a channel's next user waits while it is pending. */
+typedef struct nn__loader__channel { sys__pad* pad; sys__pad__hold hold; bool held; unsigned pending; } nn__loader__channel;
 static nn__loader__channel nn__loader__zzprivate_channels[NN__EXPERT_TIER__CHANNELS];
 
-/* A promotion's bytes, on a loader thread: the runs copied into this thread's pinned staging buffer in the slot's layout,
- * then written to the card's slot on this thread's side channel — which overlaps the kernels on the card's own stream. */
-static bool nn__loader__zzprivate_gather(const nn__loader__read* r) {
-    static __thread void* stage = 0;
-    static __thread void* stage_card = 0;
-    static __thread uint64_t stage_bytes = 0ull;
-    static __thread void* channel = 0;
-    if (stage_bytes < r->bytes) {
-        if (stage != 0) sys__gpu__memory_free_host_ram(r->family, stage);
-        stage = 0; stage_bytes = 0ull;
-        if (!sys__gpu__memory_allocate_host_ram_mapped(r->family, &stage, &stage_card, (size_t)r->bytes)) return false;
-        stage_bytes = r->bytes;
+/* A channel whose evacuation is no longer held and whose writes have all landed gives its region back to the pad. Lock
+ * held. */
+static void nn__loader__zzprivate_channel_settle(nn__loader__channel* ch) {
+    if (ch->held || ch->pending != 0u || ch->pad == 0) return;
+    sys__pad__release(ch->pad, &ch->hold);
+    ch->pad = 0;
+}
+
+/* ⭐ THE CPUS' EXPERTS REGISTERED WITH A CARD (NN-115, ▶ `contracts/objects/expert.cuh`): each span RAM this process holds,
+ * page-locked and mapped for one family's copy engine. Written on the evaluator's thread when a model loads, read by the
+ * loader threads under the loader's lock. */
+typedef struct nn__loader__span { uint64_t lo, hi; sys__silicon_family__id family; } nn__loader__span;
+static nn__loader__span nn__loader__zzprivate_spans[NN__EXPERT__SPANS_MAX];
+static unsigned nn__loader__zzprivate_n_spans = 0u;
+
+/* `bytes` from `at` registered with `family` (the calling thread's card bound): true when it was, or already is. */
+static bool nn__loader__register(sys__silicon_family__id family, uint64_t at, uint64_t bytes) {
+    if (bytes == 0ull) return true;
+    sys__os__lock_take(&nn__loader__zzprivate_lock);
+    for (unsigned i = 0u; i < nn__loader__zzprivate_n_spans; ++i) {
+        const nn__loader__span* s = &nn__loader__zzprivate_spans[i];
+        if (s->family == family && s->lo <= at && at + bytes <= s->hi) { sys__os__lock_give(&nn__loader__zzprivate_lock); return true; }
     }
-    if (channel == 0 && !sys__gpu__side_open(r->family, &channel)) return false;
+    bool ok = nn__loader__zzprivate_n_spans < NN__EXPERT__SPANS_MAX;
+    void* card_at = 0;
+    ok = ok && sys__gpu__memory_register_host(family, (void*)(uintptr_t)at, (size_t)bytes, &card_at);
+    if (ok) {
+        const nn__loader__span s = { at, at + bytes, family };
+        nn__loader__zzprivate_spans[nn__loader__zzprivate_n_spans++] = s;
+    }
+    sys__os__lock_give(&nn__loader__zzprivate_lock);
+    return ok;
+}
+
+/* Whether every piece of a promotion's runs lies in RAM registered with `family`, in few enough pieces to copy each
+ * straight from where it lies (▶ NN__EXPERT__IN_PLACE_PIECES). Lock not held. */
+static bool nn__loader__zzprivate_in_place(sys__silicon_family__id family, const nn__expert__gather* runs) {
+    uint64_t pieces = 0ull;
+    bool ok = runs->runs != 0u;
+    sys__os__lock_take(&nn__loader__zzprivate_lock);
+    for (unsigned i = 0u; i < runs->runs && ok; ++i) {
+        const nn__expert__run* u = &runs->run[i];
+        pieces += u->count;
+        if (u->count == 0ull) continue;
+        const uint64_t lo = u->from, hi = u->from + (u->count - 1ull) * u->from_stride + u->bytes;
+        bool inside = false;
+        for (unsigned s = 0u; s < nn__loader__zzprivate_n_spans && !inside; ++s) {
+            const nn__loader__span* p = &nn__loader__zzprivate_spans[s];
+            inside = p->family == family && p->lo <= lo && hi <= p->hi;
+        }
+        ok = inside && pieces <= NN__EXPERT__IN_PLACE_PIECES;
+    }
+    sys__os__lock_give(&nn__loader__zzprivate_lock);
+    return ok;
+}
+
+/* How many threads fill a promotion: two halves of its slot through the pad — one thread's memcpy is ~9 GB/s and the link
+ * 13.6, so two keep it full (`MEASURED` measurements/2026-10-24_nn115_pad_node03.md: 13.3 GB/s for GLM's expert, 12.4 for
+ * the 35B's) — and one where it is copied from where it lies, or is smaller than two pages. */
+static inline uint32_t nn__loader__zzprivate_halves(const nn__loader__read* r) {
+    return (r->in_place || r->bytes < 8192ull) ? 1u : 2u;
+}
+
+/* ⭐ A PROMOTION'S BYTES, ON A LOADER THREAD, THROUGH ITS CARD'S PAD (▶ sys's `pad.cuh`): from registered RAM, each piece
+ * queued to the card's slot from where it lies; else this thread's half of the slot (`half`, ▶ `…_halves`) copied from the
+ * runs into a region of the pad's open chunk in the slot's layout, and sent. Answered once its copies are QUEUED, with the
+ * last one's ticket in `t`: the card's own queue waits for it where the expert is admitted (▶ `…_card_waits`), so neither
+ * this thread nor the card's waits for the copy on the host. The copies run on the card's own channel, beside the kernels
+ * on its compute queue. */
+static bool nn__loader__zzprivate_gather(const nn__loader__read* r, unsigned half, sys__pad__ticket* t) {
+    sys__pad* p = sys__pad__of(r->family, r->device);
+    if (p == 0) return false;
+    if (r->in_place) {
+        for (unsigned i = 0u; i < r->runs.runs; ++i) {
+            const nn__expert__run* u = &r->runs.run[i];
+            for (uint64_t c = 0ull; c < u->count; ++c) {
+                if (u->into + c * u->into_stride + u->bytes > r->bytes) return false;
+                if (!sys__pad__send_from(p, (const void*)(uintptr_t)(u->from + c * u->from_stride),
+                                         (void*)(uintptr_t)(r->room + u->into + c * u->into_stride), u->bytes, t))
+                    return false;
+            }
+        }
+        return true;
+    }
+    const uint64_t split = (r->bytes / 2ull) & ~4095ull;
+    const uint64_t lo = nn__loader__zzprivate_halves(r) == 1u || half == 0u ? 0ull : split;
+    const uint64_t hi = nn__loader__zzprivate_halves(r) == 1u || half == 1u ? r->bytes : split;
+    sys__pad__hold h;
+    uint8_t* at = sys__pad__claim(p, SYS__PAD__UP, hi - lo, &h);
+    if (at == 0) return false;
     /* the runs are this process's own memory — a CPU worker's slots — so they are read through the host family's door */
     static __thread sys__silicon_family__id host = SYS__SILICON_FAMILY__NONE;
     if (host == SYS__SILICON_FAMILY__NONE) host = sys__silicon_family__named("host");
-    for (unsigned i = 0u; i < r->runs.runs; ++i) {
+    bool ok = true;
+    for (unsigned i = 0u; i < r->runs.runs && ok; ++i) {
         const nn__expert__run* u = &r->runs.run[i];
-        for (uint64_t c = 0ull; c < u->count; ++c) {
-            if (u->into + c * u->into_stride + u->bytes > r->bytes) return false;
-            if (!sys__gpu__memory_read(host, (uint8_t*)stage + u->into + c * u->into_stride,
-                                       (const void*)(uintptr_t)(u->from + c * u->from_stride), (size_t)u->bytes))
-                return false;
+        for (uint64_t c = 0ull; c < u->count && ok; ++c) {
+            const uint64_t into = u->into + c * u->into_stride;
+            ok = into + u->bytes <= r->bytes;
+            const uint64_t a = into > lo ? into : lo, b = into + u->bytes < hi ? into + u->bytes : hi;
+            if (ok && a < b)
+                ok = sys__gpu__memory_read(host, at + (a - lo), (const void*)(uintptr_t)(u->from + c * u->from_stride + (a - into)),
+                                           (size_t)(b - a));
         }
     }
-    return sys__gpu__side_memory_write(r->family, (void*)(uintptr_t)r->room, stage, (size_t)r->bytes, channel);
+    if (!ok) { sys__pad__release(p, &h); return false; }
+    return sys__pad__send(p, &h, (void*)(uintptr_t)(r->room + lo), t);
 }
 
-/* An EVACUATE: the card slot at `room` read into its channel, on this thread's side channel — beside the kernels. */
+/* A gather about to be admitted: the card's own queue waits until its copies have landed — what the card computes after
+ * reads the expert, and the host does not wait (`sys__pad__card_waits`). On the card's own thread. */
+static inline bool nn__loader__zzprivate_card_waits(const nn__loader__read* r) {
+    if (r->job != NN__LOADER__JOB_GATHER || r->ticket.number == 0ull) return true;
+    return sys__pad__card_waits(sys__pad__of(r->family, r->device), r->ticket);
+}
+
+/* An EVACUATE: the card slot at `room` fetched into its channel's region of the pad, on the pad's down channel — beside
+ * the kernels, and beside the promotions going up. Answered once it has landed. */
 static bool nn__loader__zzprivate_evacuate(const nn__loader__read* r) {
-    static __thread void* side = 0;
-    if (side == 0 && !sys__gpu__side_open(r->family, &side)) return false;
+    if (r->channel >= NN__EXPERT_TIER__CHANNELS) return false;
     const nn__loader__channel* c = &nn__loader__zzprivate_channels[r->channel];
-    if (r->channel >= NN__EXPERT_TIER__CHANNELS || c->host == 0 || c->bytes < r->bytes) return false;
-    return sys__gpu__side_memory_read(r->family, c->host, (const void*)(uintptr_t)r->room, (size_t)r->bytes, side);
+    if (c->pad == 0 || c->hold.bytes < r->bytes) return false;
+    /* half duplex: the swap's other copy on the link first, landed (▶ `nn__expert_tier__zzprivate_gathered`) */
+    if (r->after.number != 0ull && !sys__pad__landed(c->pad, r->after)) return false;
+    sys__pad__ticket t;
+    return sys__pad__fetch(c->pad, &c->hold, (const void*)(uintptr_t)r->room, &t) && sys__pad__landed(c->pad, t);
 }
 /* A WRITE: the runs copied out of the channel into an expert's RAM slot — both this process's memory, `from` and `into`
  *   absolute addresses. */
@@ -141,17 +240,18 @@ static bool nn__loader__zzprivate_write(const nn__loader__read* r) {
     }
     return true;
 }
-/* A STAGE_DOWN or a STAGE_UP: a card slot read into its stage, or its stage written into a card slot — on this thread's
- *   side channel, beside the kernels. */
+/* A STAGE_DOWN or a STAGE_UP: a card slot read into its stage, or its stage written into a card slot — on the card's pad's
+ *   channels, beside the kernels. Answered once it has landed. */
 static bool nn__loader__zzprivate_stage_copy(const nn__loader__read* r) {
-    static __thread void* side = 0;
-    if (side == 0 && !sys__gpu__side_open(r->family, &side)) return false;
     if (r->channel >= NN__EXPERT_TIER__STAGES) return false;
     const nn__loader__stage* s = &nn__loader__zzprivate_stages[r->channel];
-    if (s->host == 0 || s->bytes < r->bytes) return false;
-    return r->job == NN__LOADER__JOB_STAGE_DOWN
-         ? sys__gpu__side_memory_read(r->family, s->host, (const void*)(uintptr_t)r->room, (size_t)r->bytes, side)
-         : sys__gpu__side_memory_write(r->family, (void*)(uintptr_t)r->room, s->host, (size_t)r->bytes, side);
+    sys__pad* p = sys__pad__of(r->family, r->device);
+    if (p == 0 || s->host == 0 || s->bytes < r->bytes) return false;
+    sys__pad__ticket t;
+    const bool queued = r->job == NN__LOADER__JOB_STAGE_DOWN
+                      ? sys__pad__fetch_to(p, s->host, (const void*)(uintptr_t)r->room, r->bytes, &t)
+                      : sys__pad__send_from(p, s->host, (void*)(uintptr_t)r->room, r->bytes, &t);
+    return queued && sys__pad__landed(p, t);
 }
 
 /* A stage's read landed (or failed) for change `gen`: every card's write of it that waits goes, or fails with it. Lock
@@ -174,15 +274,17 @@ static void* nn__loader__zzprivate_run(void* unused) {
     sys__os__lock_take(&nn__loader__zzprivate_lock);
     for (;;) {
         /* the oldest first — so a layer's promotions land in the order its verb will compute them: a job queued, or a
-         *   READ another thread is reading whose slices are not all taken (NN-97: an expert's slices read side by side,
-         *   where the pack lays them apart — the file's one run was one read) */
+         *   READ or a GATHER another thread is moving whose slices are not all taken (NN-97: an expert's slices read side
+         *   by side, where the pack lays them apart — the file's one run was one read; NN-115: a promotion's two halves
+         *   filled side by side through the pad). The jobs taken ahead (`nn__expert__ahead`) are older than any other:
+         *   their clock runs below the queue's */
         nn__loader__read* job = 0;
         for (unsigned i = 0u; i < NN__EXPERT__FLIGHT_MAX + NN__EXPERT_TIER__STAGE_JOBS; ++i) {
             nn__loader__read* c = i < NN__EXPERT__FLIGHT_MAX ? &nn__loader__zzprivate_reads[i]
                                                               : &nn__loader__zzprivate_stage_jobs[i - NN__EXPERT__FLIGHT_MAX];
+            const bool sliced = (c->job == NN__LOADER__JOB_READ && !c->gather) || c->job == NN__LOADER__JOB_GATHER;
             const bool open = c->state == NN__LOADER__QUEUED
-                           || (c->state == NN__LOADER__READING && c->job == NN__LOADER__JOB_READ && !c->gather
-                               && (c->slices_all & ~c->slices_taken) != 0u);
+                           || (c->state == NN__LOADER__READING && sliced && (c->slices_all & ~c->slices_taken) != 0u);
             if (open && (job == 0 || c->seq < job->seq)) job = c;
         }
         if (job == 0) {
@@ -190,15 +292,20 @@ static void* nn__loader__zzprivate_run(void* unused) {
             sys__os__condition_wait(&nn__loader__zzprivate_work, &nn__loader__zzprivate_lock);
             continue;
         }
-        const bool slices = job->job == NN__LOADER__JOB_READ && !job->gather;
+        const bool gather = job->job == NN__LOADER__JOB_GATHER;
+        const bool slices = (job->job == NN__LOADER__JOB_READ && !job->gather) || gather;
         if (job->state == NN__LOADER__QUEUED) {
             job->state = NN__LOADER__READING;
             if (slices) {
                 job->slices_all = 0u; job->slices_taken = 0u; job->slices_landed = 0u; job->slices_failed = false;
-                for (unsigned i = 0u; i < NN__EXPERT__SLICES; ++i) if (job->backing.bytes[i] != 0ull) job->slices_all |= 1u << i;
+                if (gather) {
+                    job->slices_all = (1u << nn__loader__zzprivate_halves(job)) - 1u;
+                    job->ticket.way = SYS__PAD__UP; job->ticket.number = 0ull;
+                }
+                else for (unsigned i = 0u; i < NN__EXPERT__SLICES; ++i) if (job->backing.bytes[i] != 0ull) job->slices_all |= 1u << i;
             }
         }
-        /* a READ: this thread's slice, the lowest not taken — and the others woken, to take the rest */
+        /* a READ's or a GATHER's: this thread's slice, the lowest not taken — and the others woken, to take the rest */
         unsigned slice = NN__EXPERT__SLICES;
         if (slices) {
             const uint32_t open = job->slices_all & ~job->slices_taken;
@@ -211,10 +318,11 @@ static void* nn__loader__zzprivate_run(void* unused) {
         const nn__loader__read r = *job;
         sys__os__lock_give(&nn__loader__zzprivate_lock);
         bool ok = true;
+        sys__pad__ticket queued = { SYS__PAD__UP, 0ull };
         if (r.job == NN__LOADER__JOB_STAGE_DOWN || r.job == NN__LOADER__JOB_STAGE_UP) ok = nn__loader__zzprivate_stage_copy(&r);
         else if (r.job == NN__LOADER__JOB_EVACUATE) ok = nn__loader__zzprivate_evacuate(&r);
         else if (r.job == NN__LOADER__JOB_WRITE) ok = nn__loader__zzprivate_write(&r);
-        else if (r.gather) ok = nn__loader__zzprivate_gather(&r);
+        else if (r.gather) ok = slice < NN__EXPERT__SLICES && nn__loader__zzprivate_gather(&r, slice, &queued);
         else if (slice < NN__EXPERT__SLICES) {
             const uint64_t step = r.backing.stride[slice] != 0ull ? r.backing.stride[slice] : r.backing.bytes[slice];
             ok = sys__gpu__file_read(r.family, r.backing.file, r.backing.from[slice] + r.expert * step, r.backing.bytes[slice],
@@ -224,9 +332,14 @@ static void* nn__loader__zzprivate_run(void* unused) {
             sys__os__lock_take(&nn__loader__zzprivate_lock);
             if (slice < NN__EXPERT__SLICES) job->slices_landed |= 1u << slice;
             if (!ok) job->slices_failed = true;
+            if (gather && queued.number > job->ticket.number) job->ticket = queued;   /* the channel's order: the last covers all */
             const bool last = job->slices_landed == job->slices_all;
             if (last) {
                 job->state = job->slices_failed ? NN__LOADER__FAILED : NN__LOADER__DONE;
+                if (gather && !job->slices_failed) {
+                    if (job->in_place) ++nn__loader__zzprivate_count[NN__EXPERT__COUNT_IN_PLACE];
+                    nn__expert_tier__zzprivate_gathered(job);
+                }
                 sys__os__condition_wake_all(&nn__loader__zzprivate_done);
             }
             continue;                                   /* the lock held, as the loop's top wants it */
@@ -235,8 +348,10 @@ static void* nn__loader__zzprivate_run(void* unused) {
         if (r.job == NN__LOADER__JOB_WRITE) {
             /* a write frees itself: its expert is in RAM now, its channel one reader fewer. ⛔ A FAILED WRITE IS LOUD — the
              *   expert's RAM slot holds the wrong bytes, and nothing could tell — so it is counted, and the run stops */
-            if (r.channel < NN__EXPERT_TIER__CHANNELS && nn__loader__zzprivate_channels[r.channel].pending > 0u)
+            if (r.channel < NN__EXPERT_TIER__CHANNELS && nn__loader__zzprivate_channels[r.channel].pending > 0u) {
                 --nn__loader__zzprivate_channels[r.channel].pending;
+                nn__loader__zzprivate_channel_settle(&nn__loader__zzprivate_channels[r.channel]);
+            }
             if (!ok) ++nn__loader__zzprivate_count[NN__EXPERT__COUNT_WRITE_FAILED];
             job->state = NN__LOADER__FREE;
             __atomic_sub_fetch(&nn__loader__zzprivate_writes_out, 1ull, __ATOMIC_RELEASE);
@@ -246,7 +361,6 @@ static void* nn__loader__zzprivate_run(void* unused) {
             nn__loader__zzprivate_stage_filled(r.channel, r.by, ok);
         } else {
             job->state = ok ? NN__LOADER__DONE : NN__LOADER__FAILED;
-            if (ok && r.job == NN__LOADER__JOB_GATHER) nn__expert_tier__zzprivate_gathered(job);
         }
         sys__os__condition_wake_all(&nn__loader__zzprivate_done);
     }
@@ -285,19 +399,21 @@ static void nn__loader__zzpackage_stop(void) {
      *   the old machine's copies into its own tier, experts named resident in slots nothing was copied to, computed from
      *   whatever the card held there. `MEASURED` 2026-10-17 on the precision: the 35B with an 11 GB tier, booted a second
      *   time in a process, answered ".\n" over and over (measurements/2026-10-17_v0110rc1_on_precision.md). The table is
-     *   emptied here, and the evacuation channels — pinned memory of the machine that is going — forgotten. */
+     *   emptied here, and the evacuation channels — regions of the pads of the machine that is going — forgotten. */
     for (unsigned i = 0u; i < NN__EXPERT__FLIGHT_MAX; ++i) nn__loader__zzprivate_reads[i].state = NN__LOADER__FREE;
     for (unsigned c = 0u; c < NN__EXPERT_TIER__CHANNELS; ++c) {
-        nn__loader__zzprivate_channels[c].host = 0;
-        nn__loader__zzprivate_channels[c].bytes = 0ull;
-        nn__loader__zzprivate_channels[c].held = false;
-        nn__loader__zzprivate_channels[c].pending = 0u;
+        const nn__loader__channel none = {};
+        nn__loader__zzprivate_channels[c] = none;
     }
     for (unsigned i = 0u; i < NN__EXPERT_TIER__STAGE_JOBS; ++i) nn__loader__zzprivate_stage_jobs[i].state = NN__LOADER__FREE;
     for (unsigned s = 0u; s < NN__EXPERT_TIER__STAGES; ++s) {
         const nn__loader__stage none = {};
         nn__loader__zzprivate_stages[s] = none;
     }
+    /* the registered RAM given back to its families, before the memory under it goes with the machine */
+    for (unsigned i = 0u; i < nn__loader__zzprivate_n_spans; ++i)
+        sys__gpu__memory_unregister_host(nn__loader__zzprivate_spans[i].family, (void*)(uintptr_t)nn__loader__zzprivate_spans[i].lo);
+    nn__loader__zzprivate_n_spans = 0u;
     nn__expert_tier__zzprivate_forget();
     nn__loader__zzprivate_writes_out = 0ull;
     sys__os__lock_give(&nn__loader__zzprivate_lock);
@@ -353,7 +469,13 @@ static bool nn__loader__zzprivate_room(uint64_t layer, uint64_t type, const uint
         if (n > held) { held = n; most = l; }
     }
     if (most < layers && nn__loader__zzprivate_evict_oldest(most, type, layer, pinned, npinned, slot, room)) return true;
-    return nn__loader__zzprivate_evict_oldest(layer, type, layer, pinned, npinned, slot, room);
+    if (nn__loader__zzprivate_evict_oldest(layer, type, layer, pinned, npinned, slot, room)) return true;
+    /* ⛳ AND ANY OTHER LAYER HOLDING SOME: a streamed prompt's ring is a few slots spread over the layers, so the layer
+     *   holding the most can be the asking one with all of its own pinned while the rest lie in others (▶ nn's STREAM) */
+    for (uint64_t l = 0ull; l < layers; ++l)
+        if (l != layer && l != most && nn__expert__layer_resident(l, type) != 0ull
+         && nn__loader__zzprivate_evict_oldest(l, type, layer, pinned, npinned, slot, room)) return true;
+    return false;
 }
 
 
@@ -467,7 +589,7 @@ static __device__ inline bool nn__expert__settle(uint64_t layer, uint64_t type) 
         if (next == 0) break;
         if (next->state == NN__LOADER__QUEUED || next->state == NN__LOADER__READING) { nn__loader__zzprivate_wait(); continue; }
         /* done or failed: the index learns of it here, on this thread */
-        const bool read = next->state == NN__LOADER__DONE;
+        const bool read = next->state == NN__LOADER__DONE && nn__loader__zzprivate_card_waits(next);
         const uint64_t slot = next->slot, room = next->room, expert = next->expert;
         if (read) nn__loader__zzprivate_landed(next);
         next->state = NN__LOADER__FREE;
@@ -487,6 +609,7 @@ static __device__ inline int nn__expert__promote(sys__silicon_family__id family,
         return NN__EXPERT__REFUSED;
     if (me.args[NN__EXPERT__SLOT_AT] != 0ull) return NN__EXPERT__RESIDENT;
     const uint64_t owner = nn__expert__zzpackage_owner(), bytes = nn__expert__type_bytes(type);
+    const bool in_place = nn__loader__zzprivate_in_place(family, gather);
     sys__os__lock_take(&nn__loader__zzprivate_lock);
     nn__loader__read* free_read = 0;
     for (unsigned i = 0u; i < NN__EXPERT__FLIGHT_MAX; ++i) {
@@ -522,12 +645,35 @@ static __device__ inline int nn__expert__promote(sys__silicon_family__id family,
     free_read->slot = slot; free_read->room = room;
     free_read->gather = true; free_read->bytes = bytes; free_read->runs = *gather;
     free_read->job = NN__LOADER__JOB_GATHER;
+    free_read->device = sys__silicon__bound_device(family); free_read->in_place = in_place;
     free_read->made = free_read->seq = ++nn__loader__zzprivate_seq;
     free_read->queued_ns = nn__loader__zzprivate_now_ns();
     ++nn__loader__zzprivate_count[NN__EXPERT__COUNT_PROMOTED];
     if (!hold) sys__os__condition_wake_one(&nn__loader__zzprivate_work);
     sys__os__lock_give(&nn__loader__zzprivate_lock);
     return NN__EXPERT__ARRIVING;
+}
+
+static __device__ inline bool nn__expert__ahead(uint64_t layer, uint64_t type, uint64_t expert) {
+    const uint64_t owner = nn__expert__zzpackage_owner();
+    sys__os__lock_take(&nn__loader__zzprivate_lock);
+    nn__loader__read* r = nn__loader__zzprivate_find(owner, layer, type, expert);
+    const bool queued = r != 0 && r->state == NN__LOADER__QUEUED;
+    if (queued) r->seq = ++nn__loader__zzprivate_front;
+    sys__os__lock_give(&nn__loader__zzprivate_lock);
+    return queued;
+}
+
+static __device__ inline unsigned nn__expert__flight_mine(void) {
+    const uint64_t owner = nn__expert__zzpackage_owner();
+    unsigned n = 0u;
+    sys__os__lock_take(&nn__loader__zzprivate_lock);
+    for (unsigned i = 0u; i < NN__EXPERT__FLIGHT_MAX; ++i) {
+        const nn__loader__read* r = &nn__loader__zzprivate_reads[i];
+        n += r->state != NN__LOADER__FREE && r->owner == owner;
+    }
+    sys__os__lock_give(&nn__loader__zzprivate_lock);
+    return n;
 }
 
 static __device__ inline unsigned nn__expert__flight_free(void) {
@@ -555,7 +701,7 @@ static __device__ inline bool nn__expert__settle_one(uint64_t layer, uint64_t ty
             nn__loader__zzprivate_wait();
             continue;
         }
-        const bool read = r->state == NN__LOADER__DONE;
+        const bool read = r->state == NN__LOADER__DONE && nn__loader__zzprivate_card_waits(r);
         const uint64_t slot = r->slot, room = r->room;
         r->state = NN__LOADER__FREE;
         if (!read || !nn__expert__admit(layer, expert, room, type)) {
@@ -646,7 +792,7 @@ static __device__ inline bool nn__expert_tier__of(uint64_t binding, uint64_t lay
         v[NN__EXPERT_TIER__HIDDEN], v[NN__EXPERT_TIER__INTER], v[NN__EXPERT_TIER__UP_LUT], v[NN__EXPERT_TIER__DOWN],
         v[NN__EXPERT_TIER__DOWN_LUT], v[NN__EXPERT_TIER__PARTS], v[NN__EXPERT_TIER__P_UP_LUT], v[NN__EXPERT_TIER__P_DOWN],
         v[NN__EXPERT_TIER__P_DOWN_LUT], v[NN__EXPERT_TIER__GATE_ROW], v[NN__EXPERT_TIER__DOWN_ROW], v[NN__EXPERT_TIER__LANDING],
-        ex[0], ex[1], ex[2], ex[3], v[NN__EXPERT_TIER__SOURCES], v[NN__EXPERT_TIER__TOP_K], 1u, 0u };
+        ex[0], ex[1], ex[2], ex[3], v[NN__EXPERT_TIER__SOURCES], v[NN__EXPERT_TIER__TOP_K], 1u, 0u, 0u, 0u };
     if (t.exclusive > 1u || t.duplex > 1u || (t.exclusive == 1u && t.layers == 0u)) return false;   /* exclusive needs its sources to move */
     if (t.experts == 0u || t.top_k == 0u || t.top_k > t.experts || t.top_k > NN__EXPERT__TIER_K_MAX || t.parts == 0u
      || 5u * t.parts + 1u > NN__EXPERT__GATHER_RUNS || t.inter % t.parts != 0u || t.down_row % t.parts != 0u
@@ -667,6 +813,13 @@ static __device__ inline bool nn__expert_tier__of(uint64_t binding, uint64_t lay
         const sys__heap_node n = sys__node_array__borrow(entry.args[0], NN__EXPERT_TIER__SHARED);
         if (n.dtype != SYS__KIND__VALUE_INT || n.args[0] > t.experts) return false;
         t.shared = n.args[0];
+    }
+    if (sys__node_array__length(entry.args[0]) >= NN__EXPERT_TIER__LENGTH_STREAM) {
+        const sys__heap_node s = sys__node_array__borrow(entry.args[0], NN__EXPERT_TIER__STREAM);
+        const sys__heap_node b = sys__node_array__borrow(entry.args[0], NN__EXPERT_TIER__STREAM_BATCH);
+        if (s.dtype != SYS__KIND__VALUE_INT || b.dtype != SYS__KIND__VALUE_INT
+         || (s.args[0] != 0u && (b.args[0] == 0u || b.args[0] > NN__ROUTED__BATCH_MAX))) return false;
+        t.stream = s.args[0]; t.stream_batch = b.args[0];
     }
     *tier = t;
     return true;
@@ -735,14 +888,15 @@ typedef struct nn__expert_tier__out {
 } nn__expert_tier__out;
 static nn__expert_tier__out nn__expert_tier__zzprivate_out[NN__EXPERT_TIER__OUTGOING];
 
-/* A gather landed, on a loader thread: the swap it is the arriving half of sends its outgoing expert at once where half
- * duplex held it — the link free of this swap's other copy now — so it is on its way well before the commit waits for it.
- * Lock held. */
+/* A gather queued, on a loader thread: the swap it is the arriving half of sends its outgoing expert where half duplex held
+ * it — once the gather has landed (its `after`), the link free of this swap's other copy then — so it is on its way well
+ * before the commit waits for it. Lock held. */
 static void nn__expert_tier__zzprivate_gathered(const nn__loader__read* gather) {
     for (unsigned i = 0u; i < NN__EXPERT_TIER__OUTGOING; ++i) {
         nn__expert_tier__out* o = &nn__expert_tier__zzprivate_out[i];
         if (!o->used || o->owner != gather->owner || o->lx != gather->layer || o->x != gather->expert
          || o->evacuate->state != NN__LOADER__WAITING) continue;
+        o->evacuate->after = gather->ticket;
         o->evacuate->state = NN__LOADER__QUEUED;
         o->evacuate->seq = ++nn__loader__zzprivate_seq;
         sys__os__condition_wake_all(&nn__loader__zzprivate_work);
@@ -761,11 +915,11 @@ static void nn__loader__zzprivate_let_writes_go(void) {
     }
 }
 
-/* How many more swaps worker `owner` may start: a group's cards share the evacuation channels and the swaps' table — each
- * swap holds one channel until its commit — so each takes at most its share of the channels, `ranks` the group's cards,
- * and what one card is refused never hangs on another's timing. Lock held. */
-static uint64_t nn__expert_tier__zzprivate_swaps_left(uint64_t owner, uint64_t ranks) {
-    const uint64_t share = NN__EXPERT_TIER__CHANNELS / (ranks == 0u ? 1u : ranks);
+/* How many more swaps worker `owner` may start: each swap parks its outgoing expert in a chunk of its card's pad's down
+ * way until its commit, so a card has as many in flight as that way has chunks — a group's share of the parking, each
+ * card its own, so what one card is refused never hangs on another's timing (▶ `expert_tier.tier`). Lock held. */
+static uint64_t nn__expert_tier__zzprivate_swaps_left(uint64_t owner, const sys__pad* pad) {
+    const uint64_t share = sys__pad__chunks(pad, SYS__PAD__DOWN);
     uint64_t mine = 0u;
     for (unsigned i = 0u; i < NN__EXPERT_TIER__OUTGOING; ++i)
         mine += nn__expert_tier__zzprivate_out[i].used && nn__expert_tier__zzprivate_out[i].owner == owner;
@@ -786,25 +940,25 @@ static inline uint64_t nn__loader__zzprivate_since(const struct timespec* a) {
     return (uint64_t)(b.tv_sec - a->tv_sec) * 1000000000ull + (uint64_t)(b.tv_nsec - a->tv_nsec);
 }
 
-/* A channel for an evacuation of `bytes`, its pinned memory made the first time. ⛳ A CHANNEL STILL PENDING — written
- *   into RAM by some earlier commit — IS WAITED FOR, as ruled; one HELD (its expert not yet committed) cannot be, because
- *   the commit that frees it runs on this same thread later: with every channel held, the answer is none. Lock held. */
-static int nn__loader__zzprivate_channel_take(sys__silicon_family__id family, uint64_t bytes) {
+/* A channel for an evacuation of `bytes`: a region of `pad`'s down way. ⛳ A CHANNEL STILL PENDING — written into RAM by
+ *   some earlier commit — IS WAITED FOR, as ruled; one HELD (its expert not yet committed) cannot be, because the commit
+ *   that frees it runs on this same thread later: with every chunk of the way held, the answer is none. Lock held. */
+static int nn__loader__zzprivate_channel_take(sys__pad* pad, uint64_t bytes) {
     for (;;) {
-        int pending = -1;
+        int pending = -1, free_channel = -1;
         for (unsigned c = 0u; c < NN__EXPERT_TIER__CHANNELS; ++c) {
             nn__loader__channel* ch = &nn__loader__zzprivate_channels[c];
             if (ch->held) continue;
-            if (ch->pending != 0u) { pending = (int)c; continue; }
-            if (ch->host == 0 || ch->bytes < bytes) {
-                void* card = 0;
-                if (ch->host != 0) sys__gpu__memory_free_host_ram(family, ch->host);
-                ch->host = 0; ch->bytes = 0u;
-                if (!sys__gpu__memory_allocate_host_ram_mapped(family, &ch->host, &card, (size_t)bytes)) return -1;
-                ch->bytes = bytes;
+            if (ch->pending != 0u) { if (ch->pad == pad) pending = (int)c; continue; }
+            if (free_channel < 0) free_channel = (int)c;
+        }
+        if (free_channel >= 0) {
+            nn__loader__channel* ch = &nn__loader__zzprivate_channels[free_channel];
+            if (sys__pad__try_claim(pad, SYS__PAD__DOWN, bytes, &ch->hold) != 0) {
+                ch->pad = pad;
+                ch->held = true;
+                return free_channel;
             }
-            ch->held = true;
-            return (int)c;
         }
         if (pending < 0) { ++nn__loader__zzprivate_count[NN__EXPERT__COUNT_CHANNEL_FULL]; return -1; }
         /* ⛳ A CHANNEL PENDING ON A HELD WRITE IS LET GO FIRST: the held writes wait for the program to say the CPUs are done,
@@ -896,6 +1050,9 @@ static __device__ inline int nn__expert_tier__promote(sys__silicon_family__id fa
     if (me.args[NN__EXPERT__SLOT_AT] != 0ull) return NN__EXPERT__RESIDENT;
     nn__expert__gather g;
     if (bytes == 0ull || !nn__expert_tier__stitch(t, x, &g)) return NN__EXPERT__REFUSED;     /* not in RAM: none to gather */
+    const bool in_place = nn__loader__zzprivate_in_place(family, &g);
+    sys__pad* pad = sys__pad__of(family, sys__silicon__bound_device(family));
+    if (pad == 0) return NN__EXPERT__REFUSED;                                                /* no pad: no promotion */
     sys__os__lock_take(&nn__loader__zzprivate_lock);
     /* ⛳ THE WAITS FIRST, AND EACH LETS THE LOCK GO — so nothing is reserved until the last is behind, and what they wait for
      *   is asked again after each: a channel (it may wait for a pending one); an expert still being written into RAM —
@@ -903,15 +1060,18 @@ static __device__ inline int nn__expert_tier__promote(sys__silicon_family__id fa
      *   ⛔ WAITED FOR, NOT REFUSED: a write frees itself when it lands, so a refusal would make which promotions start the
      *   writes' timing (⚖ one config, one answer) */
     int channel = -1;
-    if (nn__expert_tier__zzprivate_swaps_left(owner, t->ranks) == 0u) { sys__os__lock_give(&nn__loader__zzprivate_lock); return NN__EXPERT__REFUSED; }
+    if (nn__expert_tier__zzprivate_swaps_left(owner, pad) == 0u) { sys__os__lock_give(&nn__loader__zzprivate_lock); return NN__EXPERT__REFUSED; }
     for (;;) {
         if (nn__loader__zzprivate_find(owner, layer, type, x) != 0) {
-            if (channel >= 0) nn__loader__zzprivate_channels[channel].held = false;
+            if (channel >= 0) {
+                nn__loader__zzprivate_channels[channel].held = false;
+                nn__loader__zzprivate_channel_settle(&nn__loader__zzprivate_channels[channel]);
+            }
             sys__os__lock_give(&nn__loader__zzprivate_lock);
             return NN__EXPERT__ARRIVING;
         }
         if (channel < 0) {
-            channel = nn__loader__zzprivate_channel_take(family, bytes);
+            channel = nn__loader__zzprivate_channel_take(pad, bytes);
             if (channel < 0) { sys__os__lock_give(&nn__loader__zzprivate_lock); return NN__EXPERT__REFUSED; }
             continue;
         }
@@ -938,6 +1098,7 @@ static __device__ inline int nn__expert_tier__promote(sys__silicon_family__id fa
      || !nn__expert__slot(vl, type, v, &vm) || vm.args[NN__EXPERT__SLOT_AT] == 0ull || !nn__loader__zzprivate_start()
      || !nn__expert__type_take(type, &slot, &room)) {
         ch->held = false;
+        nn__loader__zzprivate_channel_settle(ch);
         sys__os__lock_give(&nn__loader__zzprivate_lock);
         return NN__EXPERT__REFUSED;                                   /* no room in flight, no candidate, no FREE slot */
     }
@@ -945,12 +1106,14 @@ static __device__ inline int nn__expert_tier__promote(sys__silicon_family__id fa
     rg->predicted = false; rg->owner = owner; rg->family = family;
     rg->layer = layer; rg->type = type; rg->expert = x; rg->slot = slot; rg->room = room;
     rg->gather = true; rg->bytes = bytes; rg->runs = g; rg->job = NN__LOADER__JOB_GATHER;
+    rg->device = sys__silicon__bound_device(family); rg->in_place = in_place;
     rg->queued_ns = nn__loader__zzprivate_now_ns();
     rg->made = rg->seq = ++nn__loader__zzprivate_seq;
     re->state = t->duplex == 1u ? NN__LOADER__QUEUED : NN__LOADER__WAITING;
     re->predicted = false; re->owner = owner; re->family = family;
     re->layer = vl; re->type = type; re->expert = v; re->slot = 0ull; re->room = vm.args[NN__EXPERT__SLOT_AT];
     re->gather = false; re->bytes = bytes; re->job = NN__LOADER__JOB_EVACUATE; re->channel = (unsigned)channel;
+    re->after.way = SYS__PAD__UP; re->after.number = 0ull;
     re->seq = ++nn__loader__zzprivate_seq;
     o->used = true; o->owner = owner; o->lx = layer; o->x = x; o->lv = vl; o->v = v; o->channel = (unsigned)channel; o->evacuate = re;
     o->made = rg->made; o->visits = 0u;
@@ -1023,6 +1186,17 @@ static __device__ inline bool nn__expert_tier__commit(sys__silicon_family__id fa
              *   runs on the card's thread between layers, so no one is reading that layer's index. */
             nn__loader__zzprivate_let_go(rx);
             if (rx->state != NN__LOADER__DONE && rx->state != NN__LOADER__FAILED) { nn__loader__zzprivate_wait(); continue; }
+            /* ⛳ LANDED BEFORE ITS RAM SLOT IS HANDED ON: a copy from registered RAM reads the slot the outgoing expert is
+             *   about to be written into — waited for here, the lock let go meanwhile (only this worker settles it) */
+            if (rx->state == NN__LOADER__DONE && rx->ticket.number != 0ull) {
+                sys__pad* pad = sys__pad__of(rx->family, rx->device);
+                const sys__pad__ticket ticket = rx->ticket;
+                sys__os__lock_give(&nn__loader__zzprivate_lock);
+                const bool reached = sys__pad__landed(pad, ticket);
+                sys__os__lock_take(&nn__loader__zzprivate_lock);
+                if (!reached) rx->state = NN__LOADER__FAILED;
+                rx->ticket.number = 0ull;
+            }
             const bool got = rx->state == NN__LOADER__DONE;
             const uint64_t slot = rx->slot, room = rx->room;
             if (got) nn__loader__zzprivate_landed(rx);
@@ -1053,9 +1227,9 @@ static __device__ inline bool nn__expert_tier__commit(sys__silicon_family__id fa
         re->state = NN__LOADER__FREE;
         nn__loader__channel* ch = &nn__loader__zzprivate_channels[o->channel];
         o->used = false;
-        if (!landed) { ch->held = false; continue; }                                            /* undone: v stays */
+        if (!landed) { ch->held = false; nn__loader__zzprivate_channel_settle(ch); continue; }   /* undone: v stays */
         /* the card: the outgoing expert leaves, its slot back to FREE */
-        if (!nn__expert__evict(o->lv, type, o->v)) { ch->held = false; ok = false; continue; }
+        if (!nn__expert__evict(o->lv, type, o->v)) { ch->held = false; nn__loader__zzprivate_channel_settle(ch); ok = false; continue; }
         /* the sockets: the arriving expert's slot handed to the outgoing one, and the channel written into it */
         ch->pending = 0u;
         for (uint64_t p = 0u; p < P; ++p) {
@@ -1074,7 +1248,8 @@ static __device__ inline bool nn__expert_tier__commit(sys__silicon_family__id fa
              || !nn__expert__hand_over(o->lx, o->x, o->lv, o->v, t->part_type)) { ok = false; continue; }
             for (unsigned r = 0u; r < gp.runs; ++r) {
                 const nn__expert__run u = gp.run[r];
-                const nn__expert__run back = { (uint64_t)(uintptr_t)ch->host + u.into, u.into_stride, u.from, u.from_stride, u.bytes, u.count };
+                const nn__expert__run back = { (uint64_t)(uintptr_t)sys__pad__at(ch->pad, &ch->hold) + u.into, u.into_stride, u.from,
+                                               u.from_stride, u.bytes, u.count };
                 w.run[w.runs++] = back;
             }
             const uint64_t writer = nn__expert__zzpackage_owner();
@@ -1095,6 +1270,7 @@ static __device__ inline bool nn__expert_tier__commit(sys__silicon_family__id fa
         }
         sys__silicon__host_act_as(acting);
         ch->held = false;
+        nn__loader__zzprivate_channel_settle(ch);
         ++nn__loader__zzprivate_count[NN__EXPERT__COUNT_DEMOTED];
         sys__os__condition_wake_all(&nn__loader__zzprivate_work);
     }
@@ -1484,6 +1660,7 @@ static bool nn__expert_tier__zzprivate_stage_down(sys__silicon_family__id family
     r->predicted = false; r->owner = nn__expert__zzpackage_owner(); r->family = family;
     r->layer = layer; r->type = type; r->expert = x; r->slot = 0ull; r->room = n.args[NN__EXPERT__SLOT_AT];
     r->gather = false; r->bytes = bytes; r->runs.runs = 0u; r->job = NN__LOADER__JOB_STAGE_DOWN; r->channel = stage; r->by = gen;
+    r->device = sys__silicon__bound_device(family);
     r->seq = ++nn__loader__zzprivate_seq;
     r->state = NN__LOADER__QUEUED;
     sys__os__condition_wake_all(&nn__loader__zzprivate_work);
@@ -1501,6 +1678,7 @@ static nn__loader__read* nn__expert_tier__zzprivate_stage_up(sys__silicon_family
     r->predicted = false; r->owner = nn__expert__zzpackage_owner(); r->family = family;
     r->layer = layer; r->type = type; r->expert = x; r->slot = 0ull; r->room = room;
     r->gather = false; r->bytes = bytes; r->runs.runs = 0u; r->job = NN__LOADER__JOB_STAGE_UP; r->channel = stage; r->by = gen;
+    r->device = sys__silicon__bound_device(family);
     r->seq = ++nn__loader__zzprivate_seq;
     r->state = s->filled == gen ? NN__LOADER__QUEUED : s->failed == gen ? NN__LOADER__FAILED : NN__LOADER__WAITING;
     sys__os__condition_wake_all(&nn__loader__zzprivate_work);
@@ -1782,8 +1960,19 @@ static __device__ inline bool nn__expert_tier__visit_group(sys__silicon_family__
         while (at > 0u && score[at - 1u] < sc) { cand[at] = cand[at - 1u]; score[at] = score[at - 1u]; --at; }
         cand[at] = j; score[at] = sc;
     }
+    /* ⭐ AN INCLUSIVE GROUP'S CARD PROMOTES WITHIN ITS SHARE OF THE TABLE OF READS: a token's promotions are admitted at
+     *   the band's next visit, so a card holds up to `land` a layer across every layer at once — more than the table
+     *   holds for two cards — and which card's promotion found the last read free was the two cards' timing, the answer
+     *   after it with it (NN-115 ④, MEASURED: two processes' tokens' logits apart from the second). Its own reads change
+     *   only by its own promotions and admissions, so counted against its share alone a card decides the same way on
+     *   every run. An exclusive tier's swaps keep their own count (▶ `…_swaps_left`). */
+    unsigned room = land;
+    if (ranks > 1u && t->exclusive != 1u) {
+        const unsigned mine = NN__EXPERT__FLIGHT_MAX / ranks, held_now = nn__expert__flight_mine();
+        room = held_now >= mine ? 0u : mine - held_now;
+    }
     unsigned started = 0u;
-    for (unsigned c = 0u; c < n_cand && started < land; ++c) {
+    for (unsigned c = 0u; c < n_cand && started < land && started < room; ++c) {
         nn__expert__gather g;
         if (t->exclusive == 1u ? nn__expert_tier__promote(family, t, ids[cand[c]], pinned, n_pinned) == NN__EXPERT__ARRIVING
                                : (nn__expert_tier__stitch(t, ids[cand[c]], &g)
@@ -1808,6 +1997,15 @@ static __device__ inline bool nn__expert_tier__chunk(sys__silicon_family__id fam
      *   alone: its CPUs hold every expert. */
     const bool group = t->ranks > 1u && t->exclusive == 1u;
     const uint32_t ranks = (uint32_t)t->ranks, rank = (uint32_t)sys__silicon__worker();
+    /* ⭐ STREAMED (NN-115 ② ③): a line of 0, or one with NOTE_STREAM, where the tier has a ring — every pick the card's;
+     *   the experts it does not hold are promoted into the ring as the card computes the chunk (▶ `nn__routed__rows`), and
+     *   with a line the ones picked that often into the tier first, as below. ⭐ AND IN AN INCLUSIVE GROUP (NN-115 ④): every
+     *   card streams the experts numbered its own modulo the group, the others' marked `2·experts` past as an exclusive
+     *   group's are — a pick computed once, by the card it falls to, the sites' group sum adding the cards' routed rows */
+    const bool stream = t->stream != 0u && (threshold == 0u || (threshold & NN__EXPERT_TIER__NOTE_STREAM) != 0u)
+                     && fed && !group && t->exclusive != 1u;
+    const bool share = stream && t->ranks > 1u;
+    threshold &= ~NN__EXPERT_TIER__NOTE_STREAM;
     /* an exclusive group's slice: the last choice's changes switched, and at the layer's first chunk the slice learned (▶
      *   NN-106) — a chunk never chooses one */
     nn__expert_tier__slice* v = group && t->shared != 0u ? nn__expert_tier__zzprivate_slice(rank, experts) : 0;
@@ -1816,36 +2014,58 @@ static __device__ inline bool nn__expert_tier__chunk(sys__silicon_family__id fam
          || !nn__expert_tier__zzprivate_slice_ready(t, v, rank))) return false;
     uint32_t* picked = (uint32_t*)calloc(experts, sizeof(uint32_t));
     uint8_t* card = (uint8_t*)calloc(experts, 1u);                 /* 1: the card computes this expert for the chunk */
-    uint8_t* other = group ? (uint8_t*)calloc(experts, 1u) : 0;    /* 1: another card of the group does */
+    uint8_t* other = group || share ? (uint8_t*)calloc(experts, 1u) : 0;    /* 1: another card of the group does */
     uint64_t* list = (uint64_t*)malloc(sizeof(uint64_t) * experts);
     uint64_t* pinned = (uint64_t*)malloc(sizeof(uint64_t) * experts);
-    bool ok = picked != 0 && card != 0 && list != 0 && pinned != 0 && (!group || other != 0);
-    /* every call recorded a row at a time, every resident expert touched */
-    for (uint64_t r = 0u; r < n && ok; ++r) {
-        const uint64_t now = nn__expert__tick();
-        for (unsigned j = 0u; j < k && ok; ++j) {
-            const uint64_t id = chosen[r * k + j];
-            sys__heap_node me;
-            if (id >= experts || !nn__expert__slot(layer, type, id, &me)) { ok = false; break; }
-            ++picked[id];
-            if (me.args[NN__EXPERT__SLOT_AT] != 0ull) { (void)nn__expert__touch(layer, type, id); card[id] = 1u; }
-            (void)nn__expert__called(layer, type, id, now);
-        }
+    bool ok = picked != 0 && card != 0 && list != 0 && pinned != 0 && (!(group || share) || other != 0);
+    /* ⭐ EVERY CALL RECORDED AS A ROW AT A TIME WOULD RECORD IT, ONCE AN EXPERT: a row a tick, an expert's two newest calls
+     *   the ticks of the last two rows that picked it, and the resident ones touched in the order of their last picks —
+     *   the chain as a touch a pick leaves it. Done a pick at a time it was ~50 ms of a 10,000-row slice's layer, the
+     *   card idle (NN-115 ④). */
+    uint64_t* last_pick = ok ? (uint64_t*)malloc(sizeof(uint64_t) * experts) : 0;   /* its last pick: row · k + j */
+    uint64_t* rows_two = ok ? (uint64_t*)malloc(sizeof(uint64_t) * 2u * experts) : 0; /* the rows of its last two picks */
+    ok = ok && last_pick != 0 && rows_two != 0;
+    for (uint64_t i = 0u; i < n * k && ok; ++i) {
+        const uint64_t id = chosen[i];
+        if (id >= experts) { ok = false; break; }
+        ++picked[id];
+        last_pick[id] = i;
+        rows_two[2u * id] = rows_two[2u * id + 1u]; rows_two[2u * id + 1u] = i / k;
     }
+    const uint64_t first_tick = ok ? nn__expert__ticks(n) : 0u;            /* row r's: first_tick + r */
+    uint64_t touched = 0u;
+    for (uint64_t e = 0u; e < experts && ok; ++e) {
+        if (picked[e] == 0u) continue;
+        sys__heap_node me;
+        if (!nn__expert__slot(layer, type, e, &me)) { ok = false; break; }
+        if (me.args[NN__EXPERT__SLOT_AT] != 0ull) {                      /* resident: touched, by its last pick's order */
+            card[e] = 1u;
+            uint64_t q = touched++;
+            while (q > 0u && last_pick[list[q - 1u]] > last_pick[e]) { list[q] = list[q - 1u]; --q; }
+            list[q] = e;
+        }
+        if (picked[e] > 1u) (void)nn__expert__called(layer, type, e, (first_tick + rows_two[2u * e]) & 0xFFFFFFFFull);
+        (void)nn__expert__called(layer, type, e, (first_tick + rows_two[2u * e + 1u]) & 0xFFFFFFFFull);
+    }
+    for (uint64_t q = 0u; q < touched && ok; ++q) (void)nn__expert__touch(layer, type, list[q]);
+    free(last_pick); free(rows_two);
     if (ok && group) ok = nn__expert_tier__zzprivate_share_held(rank, ranks, experts, card, other);
     /* a pick of the slice, which every card holds: the card its number modulo the group names computes it */
     for (uint64_t e = 0u; e < experts && ok && v != 0; ++e)
         if (v->in[layer * experts + e] && card[e] && e % ranks != rank) { card[e] = 0u; other[e] = 1u; }
+    /* a streaming group's: the experts not numbered this card's are the others' — held here or not */
+    for (uint64_t e = 0u; e < experts && ok && share; ++e)
+        if (picked[e] != 0u && e % ranks != rank) { card[e] = 0u; other[e] = 1u; }
     unsigned n_pinned = 0u;
     for (uint64_t e = 0u; e < experts && ok; ++e) if (card[e]) pinned[n_pinned++] = e;
     /* the line: the experts not on the card picked `threshold` times or more, the most picked first, as many as there is room */
-    if (ok && fed) {
+    if (ok && fed && !(stream && threshold == 0u)) {
         uint64_t m = 0u;
         for (uint64_t e = 0u; e < experts; ++e) {
             if (card[e] || picked[e] == 0u || picked[e] < threshold) continue;
             /* in a group, an expert another card holds is not this one's to take, and each card takes the ones numbered
              *   its own modulo the group — the same split on every card, from the same picks */
-            if (group && (other[e] || e % ranks != rank)) continue;
+            if ((group || share) && (other[e] || e % ranks != rank)) continue;
             uint64_t q = m++;
             while (q > 0u && picked[list[q - 1u]] < picked[e]) { list[q] = list[q - 1u]; --q; }
             list[q] = e;
@@ -1855,10 +2075,22 @@ static __device__ inline bool nn__expert_tier__chunk(sys__silicon_family__id fam
         uint64_t room = 0u;
         if (t->exclusive == 1u) {
             sys__os__lock_take(&nn__loader__zzprivate_lock);
-            room = nn__expert_tier__zzprivate_swaps_left(nn__expert__zzpackage_owner(), t->ranks);
+            room = nn__expert_tier__zzprivate_swaps_left(nn__expert__zzpackage_owner(),
+                                                         sys__pad__of(family, sys__silicon__bound_device(family)));
             sys__os__lock_give(&nn__loader__zzprivate_lock);
         } else {
             room = nn__expert__flight_free();
+            /* a streaming group's cards promote at once from one table of reads, and a read is free again only when the card
+             *   that made it settles it: each card's line takes at most its share of the table less a batch of the ring's,
+             *   so its stream always finds a read free (▶ `nn__routed__zzprivate_stream_one`) — and how many the line
+             *   promotes is the same on every run, not the other cards' timing */
+            if (share) {
+                /* ...less what this card holds already — a token's promotions not yet admitted, before a prompt read
+                 *   later in a conversation */
+                const uint64_t mine = NN__EXPERT__FLIGHT_MAX / ranks, held_now = nn__expert__flight_mine();
+                const uint64_t line = mine > t->stream_batch + held_now ? mine - t->stream_batch - held_now : 0u;
+                if (room > line) room = line;
+            }
         }
         if (m > room) m = room;
         for (uint64_t q = m; q-- > 0u; ) {                         /* queued from the fewest picks to the most */
@@ -1871,9 +2103,10 @@ static __device__ inline bool nn__expert_tier__chunk(sys__silicon_family__id fam
                 card[list[q]] = group ? 0u : 1u;
         }
     }
+    for (uint64_t e = 0u; e < experts && ok && stream; ++e) if (picked[e] != 0u && !(share && other[e])) card[e] = 1u;
     for (uint64_t i = 0u; i < n * k && ok; ++i) {
         if (card[chosen[i]]) chosen[i] += experts;
-        else if (group && other[chosen[i]]) chosen[i] += 2u * experts;
+        else if ((group || share) && other[chosen[i]]) chosen[i] += 2u * experts;
     }
     free(picked); free(card); free(other); free(list); free(pinned);
     return ok;

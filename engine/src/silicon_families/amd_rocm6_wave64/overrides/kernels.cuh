@@ -2,8 +2,9 @@
 #define SILVANN__SILICON_FAMILIES_AMD_ROCM6_WAVE64_OVERRIDES_KERNELS_CUH
 /* ══ WHAT THE OVERRIDES SHARE — amd_rocm6_wave64 ══════════════════════════════════════════════════════════════════════
  * What more than one file beside this is written with: the wave's constants, the 4-bit levels as `v_perm_b32` finds
- * them, two half pairs' dot, the blocks the card holds at once, the half an output holds and the value of the lane
- * `m` away — as nn's bodies share theirs in `nn/gpu/kernels/kernels.cuh`. */
+ * them, two half pairs' dot, the blocks the card holds at once, the half an output holds, the value of the lane
+ * `m` away, a half read by the scalar unit and the sum of 128 squares in the fold's order — as nn's bodies share theirs
+ * in `nn/gpu/kernels/kernels.cuh`. */
 
 /* What this file needs, named where a reader — and an editor — can follow it. */
 #include <stdint.h>
@@ -91,6 +92,42 @@ static __device__ inline float amd_rocm6_wave64__zzpackage_xor(float v, uint32_t
     else if (m == 16u) r = __builtin_amdgcn_ds_swizzle(b, 0x401F);                    /* xor 16 inside 32 lanes */
     else               return __shfl_xor(v, (int)m);
     return __builtin_bit_cast(float, r);
+}
+
+/* Half `i` of `at`, read through the constant address space, which the compiler reads with the scalar unit when the
+ * address is the same for the whole wave. `REASONED`, on the premise that the scalar cache is invalidated at every
+ * dispatch (the LLVM AMDGPU memory model for gfx6-9) and does not see this launch's own stores: a caller reads through
+ * it only what the launch before wrote, and its door refuses an output that overlaps it. `MEASURED`: deltanet's
+ * positions decoded with `conved` rewritten by a kernel between steps are byte-identical to its rows kernel over the same
+ * positions (test/src_gemv_27b_bench.cpp's positions case). */
+static __device__ inline float amd_rocm6_wave64__zzpackage_scalar_half(const uint16_t* at, uint32_t i) {
+    const uint32_t word = ((const __attribute__((address_space(4))) uint32_t*)(const void*)at)[i / 2u];
+    return nn__silicon__half_to_float((uint16_t)(i % 2u != 0u ? word >> 16 : word & 0xFFFFu));
+}
+/* `at` again, at an offset of zero the compiler cannot see through: reads through it are its own, so the compiler does
+ * not keep an earlier pass's values of the same memory alive until a later one needs them — 128 registers a lane for
+ * `k`, beside the column's 128, and the kernel spilled. */
+static __device__ inline const uint16_t* amd_rocm6_wave64__zzpackage_afresh(const uint16_t* at) {
+    uint32_t none = 0u;
+    __asm__ volatile("" : "+s"(none));
+    return at + none;
+}
+/* The sum of the squares of 128 halves, in the order the family's fold adds them when a lane holds one each: pairs,
+ *   then pairs of pairs. A wave's lane holds the squares of halves `lane` and `lane + 64`; exchanging partners one lane,
+ *   then two, ... then 32 apart builds the two 64-wide trees exactly as the fold does — a lane's partial and its partner's
+ *   added in either order are the same float — and the fold's last step adds the two. No wait for the block. Each square
+ *   is rounded on its own, as each lane's is before the fold, hence the pragma: a fused multiply-add of a square onto a
+ *   partial would be a different sum. */
+static __device__ inline float amd_rocm6_wave64__zzpackage_squares128(const uint16_t* x) {
+#pragma clang fp contract(off)
+    const uint32_t lane = (uint32_t)(nn__silicon__lane() % AMD_ROCM6_WAVE64__ZZPRIVATE_WAVE);
+    const float a = nn__silicon__half_to_float(x[lane]), b = nn__silicon__half_to_float(x[lane + AMD_ROCM6_WAVE64__ZZPRIVATE_WAVE]);
+    float lo = a * a, hi = b * b;
+    for (uint32_t m = 1u; m < AMD_ROCM6_WAVE64__ZZPRIVATE_WAVE; m <<= 1) {
+        lo = lo + __shfl_xor(lo, (int)m);
+        hi = hi + __shfl_xor(hi, (int)m);
+    }
+    return lo + hi;
 }
 
 #endif /* SILVANN__SILICON_FAMILIES_AMD_ROCM6_WAVE64_OVERRIDES_KERNELS_CUH */

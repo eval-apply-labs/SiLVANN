@@ -25,11 +25,21 @@
 ;; ── the token: its row of the embedding, un-rotated (Rᵀu = S ⊙ H·u), into every stream ──────────────────────────────
 ;; EMBEDDING is a table in RAM the card reads a row of in place: every token's packed row (EMB_HALVES halves each), then
 ;; every token's scale from EMB_SCALES on — the embedding stays in RAM and only a row crosses.
-(defun (embed_e tok)                                   ; the token's row into e
-  (begin (nn__turboquant__decode (nn__vector__range EMBEDDING (* tok EMB_HALVES) EMB_HALVES)
-                                 (nn__vector__range EMBEDDING (+ EMB_SCALES tok) 1) u 1 HIDDEN EMB_BITS)
-         (nn__hadamard__rotate u ones512 hu HIDDEN)
-         (nn__vector__pointwise_mul hu signs_row e HIDDEN)))
+;; With EMBED_ON_CPU the table is the first socket's (c_embedding), which decodes the row (▶ glm5_cpu.lisp `xe`) for the
+;; card to copy across and un-rotate: where the card's family keeps mapped RAM as a copy of its own, the table neither
+;; crosses nor takes the card's room.
+(if EMBED_ON_CPU
+    (defun (embed_e tok)                               ; the token's row into e, decoded by the first socket
+      (begin (sys__node_array__set EMB_TOK 0 tok)
+             (sys__compute (nth SOCKET 0) names xe) (sys__result (nth SOCKET 0))
+             (nn__buffer__copy c_emb (nth SOCKET 0) u HIDDEN_BYTES)
+             (nn__hadamard__rotate u ones512 hu HIDDEN)
+             (nn__vector__pointwise_mul hu signs_row e HIDDEN)))
+    (defun (embed_e tok)                               ; the token's row into e
+      (begin (nn__turboquant__decode (nn__vector__range EMBEDDING (* tok EMB_HALVES) EMB_HALVES)
+                                     (nn__vector__range EMBEDDING (+ EMB_SCALES tok) 1) u 1 HIDDEN EMB_BITS)
+             (nn__hadamard__rotate u ones512 hu HIDDEN)
+             (nn__vector__pointwise_mul hu signs_row e HIDDEN))))
 
 (defun (embed tok)
   (let ((j 0))
@@ -178,3 +188,63 @@
     (sys__node_array__set nrows 0 n)
     (while '(< i RUN) '(begin (rows_layer i first n) (set! i (+ i 1))))
     (type srows)))
+
+
+;; ── a prompt read layer-major: a slice of chunks, every layer once over all of it (NN-115 ③) ─────────────────────────
+;; With STREAM (▶ glm5.py `_prefill_streamed`) a slice of chunks is held on the card — SROWS_S its rows' streams, HANDS_S
+;; and CARRIES_S its MoE sites' hands and carries, RROWS_S its routed rows — and each layer runs once over it: every chunk's
+;; attention and router in order, then the layer's experts once over all the slice's rows, streamed onto the card through
+;; the tier's ring (a note with NOTE_STREAM: every pick the card's, the sockets computing none, the ones picked the line's
+;; times or more into the tier first), then every chunk's close. `w` rows a chunk, the slice's last chunk `last_n`.
+(if STREAM
+    (begin
+      ;; a chunk's `n` tokens, PROMPT's first `n`, into the slice's streams from its row `row`
+      (defun (embed_slice_row tok row)
+        (let ((j 0))
+          (embed_e tok)
+          (while '(< j MULT)
+                 '(begin (nn__vector__add e zero_h (nn__vector__range SROWS_S (* (+ (* row MULT) j) HIDDEN) HIDDEN) HIDDEN)
+                         (set! j (+ j 1))))
+          (type e)))
+      (defun (embed_slice row n)
+        (let ((i 0))
+          (while '(< i n) '(begin (embed_slice_row (nth PROMPT i) (+ row i)) (set! i (+ i 1))))
+          (type SROWS_S)))
+      ;; chunk `c`'s `n` rows of a part of the slice, `halves` a row
+      (defun (part_rows v c n halves w)
+        (nn__vector__range v (* c (* w halves)) (* n halves)))
+      (defun (slice_layer i first k last_n w)
+        (let ((c 0) (n w) (all (+ (* (- k 1) w) last_n)))
+          (while '(< c k)
+                 '(begin (set! n (if (eq? c (- k 1)) last_n w))
+                         (if (nth KDA i)
+                             (ai_z__glm_5_3__kda_rows (part_rows SROWS_S c n SROW_HALVES w) (nth AT i) n rwork)
+                             (ai_z__glm_5_3__mla_rows (part_rows SROWS_S c n SROW_HALVES w) (nth AT i) (+ first (* c w)) n rwork))
+                         (if (nth MOE i)
+                             (ai_z__glm_5_3__route_rows (part_rows SROWS_S c n SROW_HALVES w) (nth MO i)
+                                                        (part_rows HANDS_S c n HAND_HALVES w)
+                                                        (part_rows CARRIES_S c n CARRY_HALVES w) n rwork)
+                             (ai_z__glm_5_3__mlp_rows (part_rows SROWS_S c n SROW_HALVES w) (nth ML i) n rwork))
+                         (set! c (+ c 1))))
+          (if (nth MOE i)
+              (begin
+                (nn__expert_tier__note HANDS_S nn__expert_tier (nth LAYER i) all HAND HAND_PICKS_AT
+                                       (+ nn__expert_major__vram_promotion_threshold_picks NOTE_STREAM))
+                (ai_z__glm_5_3__experts_rows HANDS_S (nth EXKS i) RROWS_S all nn__expert_tier)
+                (set! c 0)
+                (while '(< c k)
+                       '(begin (set! n (if (eq? c (- k 1)) last_n w))
+                               (ai_z__glm_5_3__close_rows (part_rows SROWS_S c n SROW_HALVES w) (nth MO i)
+                                                          (part_rows RROWS_S c n HIDDEN w)
+                                                          (part_rows CARRIES_S c n CARRY_HALVES w) n rwork)
+                               (set! c (+ c 1))))
+                (type SROWS_S))
+              (type SROWS_S))
+          (type SROWS_S)))
+      (defun (rows_slice first k last_n w)
+        (let ((i 0))
+          (sys__node_array__set nrows 0 w)
+          (while '(< i RUN) '(begin (slice_layer i first k last_n w) (set! i (+ i 1))))
+          (type SROWS_S))))
+    (defun (rows_slice first k last_n w)               ; no slice: the prompt is read a chunk at a time
+      (type srows)))

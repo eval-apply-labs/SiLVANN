@@ -36,7 +36,8 @@ DEFAULT_CONFIG = {"max_context": "auto", "max_tokens_per_video": 8192, "num_card
                   "lora": None, "thinking": True,
                   "sampler": "generation", "options": {},
                   "pipeline_parallelism": "no", "pipeline_parallelism_layers": "", "pipeline_parallelism_next": "192.0.2.2:8766",
-                  "pipeline_parallelism_port": 8766, "tools": "chill", "image_model": "auto", "workers": []}
+                  "pipeline_parallelism_port": 8766, "tools": "chill", "tools_config": "default",
+                  "workers": []}
 IMAGE_CONFIG = {"card": "auto", "image": {"width": 1024, "height": 1024, "steps": 40, "seed": None}}
 
 

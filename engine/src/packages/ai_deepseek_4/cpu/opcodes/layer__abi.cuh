@@ -10,7 +10,6 @@
  * ▶ `contracts/objects/layer.cuh` for the tables. */
 
 #include <math.h>
-#include <stdlib.h>                       /* a chunk's pairs, made on the host: malloc, free */
 #include "../table.cuh"
 #include "../../../nn/cpu/routed__header.cuh"   /* the routed experts, as nn runs them */
 
@@ -639,23 +638,18 @@ static inline uint64_t ai_deepseek_4__rows__zzprivate_sum(sys__engine__ctx* ctx,
 /* The chunk's pairs, a row of `x` and a row of `out` each: `n` of `(t, t)`; `n` of `(t, 2t)` and `n` of `(t, 2t + 1)` — a
  * gate's answer and an up's side by side a row, as the clamped swiglu reads them; then for each of the attention output's
  * `groups` maps `n` of `(t · groups + j, t · groups + j)` — row `t`'s heads of group `j` into its rows of the groups'
- * answer. */
+ * answer. Written on the worker (nn's `expert_pairs_rows`), queued like the site's launches: a copy from the host would
+ * wait for every launch before it, at each site of each chunk. */
 #define AI_DEEPSEEK_4__ROWS__PAIRS(n, groups)  (8ull * (n) * (3ull + (groups)))
 static bool ai_deepseek_4__rows__zzprivate_pairs(sys__engine__ctx* ctx, uint64_t pairs, uint64_t n, uint64_t groups) {
-    uint32_t* p = (uint32_t*)malloc(AI_DEEPSEEK_4__ROWS__PAIRS(n, groups));
-    if (p == 0) return false;
-    for (uint64_t t = 0u; t < n; ++t) {
-        p[2u * t] = (uint32_t)t;                  p[2u * t + 1u] = (uint32_t)t;
-        p[2u * (n + t)] = (uint32_t)t;            p[2u * (n + t) + 1u] = (uint32_t)(2u * t);
-        p[2u * (2u * n + t)] = (uint32_t)t;       p[2u * (2u * n + t) + 1u] = (uint32_t)(2u * t + 1u);
-        for (uint64_t j = 0u; j < groups; ++j) {
-            const uint64_t i = (3u + j) * n + t;
-            p[2u * i] = (uint32_t)(t * groups + j);   p[2u * i + 1u] = (uint32_t)(t * groups + j);
-        }
-    }
-    const bool ok = sys__gpu__memory_write(ctx->family, (void*)(uintptr_t)pairs, p, AI_DEEPSEEK_4__ROWS__PAIRS(n, groups));
-    free(p);
-    return ok;
+    const nn__doors* doors = nn__doors_for(ctx);
+    if (doors == 0) return false;
+    doors->expert_pairs_rows((uint32_t*)(uintptr_t)pairs, n, 1u, 0u, 1u, 0u);
+    doors->expert_pairs_rows((uint32_t*)(uintptr_t)(pairs + 8u * n), n, 1u, 0u, 2u, 0u);
+    doors->expert_pairs_rows((uint32_t*)(uintptr_t)(pairs + 16u * n), n, 1u, 0u, 2u, 1u);
+    for (uint64_t j = 0u; j < groups; ++j)
+        doors->expert_pairs_rows((uint32_t*)(uintptr_t)(pairs + 8u * (3u + j) * n), n, groups, j, groups, j);
+    return true;
 }
 
 /* `out = W x` for every row a pair names: a matrix (codes, then scales) over the rows of `x`, `cols` wide. */

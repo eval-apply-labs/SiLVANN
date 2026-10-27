@@ -66,7 +66,7 @@ def open_model(path, lora=None, max_context=4096, silicon=None, progress=None, *
     model = arch(folder, machine, max_context=max_context, **options)
     # ⭐ THE PROGRAMS ARE READ, NOT COMPOSED, when `programs.lisp` was written for this key
     path = os.path.join(folder.path, "programs.lisp")
-    key = programs_key(folder, folder.architecture, max_context, options)
+    key = programs_key(folder, folder.architecture, max_context, options, machine.silicon)
     machine.programs_file = (path, key)
     params = model.device_params()
     if isinstance(params, dict):          # a section a worker: the card and the CPU's
@@ -90,16 +90,17 @@ def open_model(path, lora=None, max_context=4096, silicon=None, progress=None, *
     return model
 
 
-def programs_key(folder, architecture, max_context, options):
-    """What a model's programs are composed from, as one digest: the pack, the settings, the model's Lisp files, and the
-    source of the code that binds what they read — this package and the bundle loader whose type ids and plane offsets
-    they carry. ⛳ The silicon is not in it: no composer reads it (`REASONED` from qwen3_5.py and glm5.py, where it only
-    names the card's worker)."""
+def programs_key(folder, architecture, max_context, options, silicon):
+    """What a model's programs are composed from, as one digest: the pack, the settings, the silicon family, the model's
+    Lisp files, and the source of the code that binds what they read — this package and the bundle loader whose type ids
+    and plane offsets they carry. ⛳ The silicon is in it since a composer reads it: `embed_on` "auto" puts the embedding
+    on a CPU worker through khronos_opencl1_igpu alone, and a dense model's programs then hand it work — `MEASURED`
+    2026-10-26, a CPU-alone boot of the 27B read a file an OpenCL 1.2 boot had written and refused at its worker 1."""
     from .model_folder import NL
     h = hashlib.sha256()
     with open(os.path.join(folder.path, "pack.json"), "rb") as f:
         h.update(f.read())
-    h.update(json.dumps([architecture, max_context, folder.lora, options], sort_keys=True, default=str).encode())
+    h.update(json.dumps([architecture, max_context, folder.lora, options, silicon], sort_keys=True, default=str).encode())
     here = os.path.dirname(os.path.abspath(__file__))
     for src in sorted(glob.glob(os.path.join(here, "*.py")) + glob.glob(os.path.join(folder.path, "lisp", "*.lisp"))) + [NL.__file__]:
         with open(src, "rb") as f:

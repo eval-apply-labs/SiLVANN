@@ -17,6 +17,7 @@
 #include "../procedure.cuh"                  /* defun */
 #include "../string.cuh"                     /* a path's bytes, for file open */
 #include "../../contracts/objects/file.cuh"  /* file open's fault word */
+#include "../silicon/pad.cuh"                /* a card's landing pad, for the pad's verbs */
 #include "../symbol.cuh"                     /* names by number */
 #include "../system_register__header.cuh"    /* the register verbs */
 #include "../silicon/silicon__header.cuh"    /* the block a verb runs on */
@@ -650,6 +651,49 @@ static __device__ sys__heap_node sys__opcodes__zzabi_worker(const sys__heap_node
     return n;
 }
 SYS__ENGINE__ABI__BRIDGE(sys__opcodes__zzabi_adapter_worker, sys__opcodes__zzabi_worker)
+
+/* ── ⭐ A CARD'S LANDING PAD (NN-115, ▶ `silicon/pad.cuh`) ─────────────────────────────────────────────────────────────
+ * `(sys__pad__open up down chunk_bytes)` -> the chunks: the calling worker's card's pad, pinned now — `up` chunks up,
+ *   `down` down. */
+static __device__ sys__heap_node sys__opcodes__zzabi_pad_open(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx) {
+    if (argc != 3u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
+    for (unsigned i = 0u; i < 3u; ++i)
+        if (argv[i].dtype != SYS__KIND__VALUE_INT) return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
+    if (!sys__pad__open(ctx->family, ctx->device, (unsigned)argv[0].args[0], (unsigned)argv[1].args[0], argv[2].args[0]))
+        return sys__engine__abi__error(SYS__PAD__FAULT_OPEN);
+    sys__heap_node n = sys__heap_node__nothing();
+    n.dtype = SYS__KIND__VALUE_INT; n.args[0] = argv[0].args[0] + argv[1].args[0];
+    return n;
+}
+SYS__ENGINE__ABI__BRIDGE(sys__opcodes__zzabi_adapter_pad_open, sys__opcodes__zzabi_pad_open)
+
+/* `(sys__pad__move card_to host_from up_bytes host_to card_from down_bytes [threads])` -> the bytes moved: RAM to the
+ *   card and the card to RAM through its pad, both at once, by `threads` threads (1 by default; ▶ `sys__pad__move`); a
+ *   way of no bytes is left out. */
+static __device__ sys__heap_node sys__opcodes__zzabi_pad_move(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx) {
+    if (argc != 6u && argc != 7u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
+    for (unsigned i = 0u; i < argc; ++i)
+        if (argv[i].dtype != SYS__KIND__VALUE_INT) return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
+    const uint64_t up = argv[2].args[0], down = argv[5].args[0];
+    const unsigned threads = argc == 7u ? (unsigned)argv[6].args[0] : 1u;
+    if (!sys__pad__move(sys__pad__of(ctx->family, ctx->device),
+                        (void*)(uintptr_t)argv[0].args[0], (const void*)(uintptr_t)argv[1].args[0], up,
+                        (void*)(uintptr_t)argv[3].args[0], (const void*)(uintptr_t)argv[4].args[0], down, threads))
+        return sys__engine__abi__error(SYS__PAD__FAULT_MOVE);
+    sys__heap_node n = sys__heap_node__nothing();
+    n.dtype = SYS__KIND__VALUE_INT; n.args[0] = up + down;
+    return n;
+}
+SYS__ENGINE__ABI__BRIDGE(sys__opcodes__zzabi_adapter_pad_move, sys__opcodes__zzabi_pad_move)
+
+/* `(sys__pad__close)` -> nothing: the calling worker's card's pad given back, its copies reached. */
+static __device__ sys__heap_node sys__opcodes__zzabi_pad_close(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx) {
+    (void)argv;
+    if (argc != 0u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
+    sys__pad__close(ctx->family, ctx->device);
+    return sys__heap_node__nothing();
+}
+SYS__ENGINE__ABI__BRIDGE(sys__opcodes__zzabi_adapter_pad_close, sys__opcodes__zzabi_pad_close)
 
 /* `(sys__package__init '(the list of inits))` — the language's own init.
  * ⛳ THE ARGUMENT IS CHECKED THOUGH NOTHING IS DONE WITH IT, because the refusal is what says this call

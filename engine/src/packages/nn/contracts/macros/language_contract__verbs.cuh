@@ -269,6 +269,9 @@
     X(PKG, 80, "nn__hyper__pre_fp32", nn__hyper__zzabi_adapter_pre_fp32,           NN__HYPER__PRE_FP32) \
     X(PKG, 81, "nn__hyper__post_fp32", nn__hyper__zzabi_adapter_post_fp32,         NN__HYPER__POST_FP32) \
     X(PKG, 82, "nn__rmsnorm__apply_fp32", nn__rmsnorm__zzabi_adapter_fp32,         NN__RMSNORM__APPLY_FP32) \
-    X(PKG, 83, "nn__vector__widen",   nn__vector__zzabi_adapter_widen,             NN__VECTOR__WIDEN)
+    X(PKG, 83, "nn__vector__widen",   nn__vector__zzabi_adapter_widen,             NN__VECTOR__WIDEN) \
+    /* ⭐ THE CPUS' EXPERTS REGISTERED WITH A CARD (NN-115): a promotion copied straight from where it lies in RAM. ▶     */ \
+    /* `contracts/objects/expert.cuh`, `cpu/opcodes/expert__abi.cuh`.                                                 */ \
+    X(PKG, 84, "nn__expert__register", nn__expert__zzabi_adapter_register,         NN__EXPERT__REGISTER)
 
 #endif /* SILVANN__PACKAGES_NN_CONTRACTS_MACROS_LANGUAGE_CONTRACT__VERBS_CUH */

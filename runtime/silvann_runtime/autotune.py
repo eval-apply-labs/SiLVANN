@@ -79,7 +79,12 @@ NOT_A_CARD = ("x86_avx2", "host", "khronos_opencl1_igpu")   # silicon whose pool
 TIER_MAX_GB = 128        # the binary search's ceiling, past any card's memory
 DISK_CHUNK = 1024        # GLM's prompt rows a step with its experts on the disk (Qwen's chunk is at most 256)
 FREED_GB = 1             # a card this much emptier than when a kept choice was made chooses again (`_freed`)
-RULES = 6                # the rules' version, in what a kept choice was made for: a change to them chooses again
+RULES = 7                # the rules' version, in what a kept choice was made for: a change to them chooses again
+REGISTER_TABLES = 512    # registered RAM over the card memory that maps it: an 8-byte page-table entry a 4 KiB page.
+                         # MEASURED node03 2026-10-26: GLM's 142 GiB registered took 281 MiB more of the MI50 at its peak
+                         # (measurements/2026-10-26_v0200_r730_rows_node03.md, vram_register.sh); held beside the margin,
+                         # since a card filled to it then has no room for them — at 150 GB of RAM a 17.75 GB tier's load
+                         # took 1,036 s against 251 s unregistered, and registered nothing in the end
 CARD_CONTEXT = 32768     # growing, the experts stay on the card where it holds this much context beside them (NN-93)
 FILES_SHARE = 0.10       # what DeepSeek's experts in RAM leave of what this process may hold, beside the spare: the system's
                          # own and the files it reads in place (its n-gram tables, its layers mapped from their files).
@@ -113,6 +118,14 @@ def _held(params, workers, mb, machine):
     return grow(params)
 
 
+def _tables_mb(model):
+    """The card memory, in MB, that maps the experts a setup registers with its cards (▶ `experts_register`) — a trial
+    boot holds it beside the margin, as the registration takes it once the experts are loaded."""
+    if not getattr(model, "EXPERTS_REGISTER", False):
+        return 0
+    return -(-int(getattr(model, "cpu_arena", 0) or 0) // REGISTER_TABLES // 2**20)
+
+
 class _Prober:
     def __init__(self, folder, arch, silicon, log, margin_mb=VRAM_MARGIN_MB):
         self.folder, self.arch, self.silicon, self.log = folder, arch, silicon, log
@@ -131,7 +144,7 @@ class _Prober:
         `self.answer`."""
         model = self.model(max_context, options)
         machine = model.m
-        params = _held(model.device_params(), model.workers(), self.margin_mb, machine)
+        params = _held(model.device_params(), model.workers(), self.margin_mb + _tables_mb(model), machine)
         self.tried += 1
         try:
             if isinstance(params, dict):

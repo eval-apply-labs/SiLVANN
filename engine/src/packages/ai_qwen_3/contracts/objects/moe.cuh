@@ -139,5 +139,8 @@
 /* ⭐ THE MOST ROWS A PROMPT VERB TAKES AT ONCE (`ai_qwen_3__*_rows`): its MoE lists a pair for every pick of every
  * row on the host, `rows · TOP_K` of them. A longer prompt is several calls, each its next rows. */
 #define AI_QWEN_3__ROWS_MAX            256u
+/* ...but the experts' rows alone (`ai_qwen_3__experts_rows`) take a prompt's slice read layer-major (NN-115 ③): nn's
+ * routine lists its picks on the heap, so every row of a slice goes through a layer's experts in one call. */
+#define AI_QWEN_3__SLICE_ROWS_MAX     16384u
 
 #endif /* SILVANN__PACKAGES_AI_QWEN_3_CONTRACTS_OBJECTS_MOE_CUH */

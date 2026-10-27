@@ -59,7 +59,7 @@ RUNTIME = Path(os.environ.get("SILVANN_RUNTIME", ROOT / "runtime" if (ROOT / "ru
 from silvann_core import default_config                                   # noqa: E402
 sys.path.insert(0, str(RUNTIME))
 import silvann_runtime as SR                                              # noqa: E402
-from silvann_runtime import autotune, experts_file, tools              # noqa: E402
+from silvann_runtime import autotune, experts_file, skills, tools, tools_config     # noqa: E402
 from silvann_runtime.chat import Chat, ToolMarkup                         # noqa: E402
 from silvann_runtime.fetch import ensure_model                            # noqa: E402
 from silvann_runtime.session import Busy, Cartridge, Runtime, _state_read, sampler, state_bytes     # noqa: E402
@@ -68,6 +68,7 @@ from silvann_runtime.qwen_image import Stopped, image_pack                 # noq
 from silvann_runtime.vision import MAX_VIDEO_TOKENS                       # noqa: E402
 
 IDLE_EVICTION_SECONDS = 120.0
+PICTURE_WAIT_SECONDS = 600.0          # how long (image …) waits on a picture server drawing another's picture
 EVICTION_TICK_SECONDS = 30.0
 
 
@@ -163,6 +164,9 @@ class State:
         self.setup = None                   # what the text model booted with, so a switch boots it again the same
         self.picture = None                 # the picture model the REPL's (image …) draws with (▶ `_tool_picture`)
         self.no_picture = ""                # why there is none: what (image …) answers the model at once
+        self.toolbox = None                 # what the REPL reaches on this machine, as the tools file sets it up and
+                                            #   the startup check found it (▶ tools_config.Toolbox), every session's
+        self.web = None                     # how the REPL's fetch goes onto the web (▶ tools.Web)
 
 
 S = State()
@@ -414,15 +418,24 @@ def _boot(args):
     S.setup = dict(folder=str(folder), lora=cfg.get("lora"), max_context=max_context, options=options, ring=ring)
     S.runtime = Runtime(S.model)
     S.chat = Chat(S.model.folder)
-    S.picture = _picture_model(cfg)
+    S.model_id = folder.name
     # the model's REPL starts in the workspace, where it reads unasked (▶ the classifier); tools.json keeps the folders
     #   allowed since, tools_library.json the definitions kept (▶ tools' `keep`) — every conversation's
     S.workspace = Path(cfg.get("tools_folder") or DATA / "workspace")
-    S.classifier = tools.Classifier(str(DATA / "tools.json"), "ask" if S.tools == "no" else S.tools,
-                                    allowed=[str(S.workspace)])
     S.library = DATA / "tools_library.json"
     S.skills = [DATA / "skills", SKILLS_SHIPPED]         # the user's first: theirs takes a shipped skill's name
-    S.model_id = folder.name
+    # ⭐ THE TOOLS FILE (NN-127): what the REPL reaches on this machine, set up in one place — `tools/default.json` in the
+    #   data folder, or the one the config's `tools_config` names; its folder is never the model's to read or write
+    # the tools the model adds (▶ tools' add_tool) go in skills_added/, read after the rest; both folders made now, so the
+    #   model's commands find them read-only from the start
+    for place in (DATA / "skills", DATA / "skills_added"):
+        place.mkdir(parents=True, exist_ok=True)
+    S.toolbox = tools_config.Toolbox(_tools_file(cfg), S.skills, added=DATA / "skills_added")
+    S.classifier = tools.Classifier(str(DATA / "tools.json"), "ask" if S.tools == "no" else S.tools,
+                                    allowed=[str(S.workspace)], sealed=[S.toolbox.file.folder()])
+    S.web = tools.Web()
+    for line in _tools_ready(cfg):
+        print("[silvann_server] %s" % line, flush=True)
     S.dir = DATA / "user_sessions" / folder.name
     S.dir.mkdir(parents=True, exist_ok=True)
     lent = S.model.lent() if hasattr(S.model, "lent") else None
@@ -432,15 +445,91 @@ def _boot(args):
              "conversation grows" % lent[1] if lent else ""), flush=True)
 
 
-def _picture_model(cfg):
-    """The picture model a text model's REPL draws with — the config's `image_model`: a folder in `models/` or a path,
-    `"auto"` (the default) the first picture model downloaded into `models/`, `"no"` none (▶ `_tool_picture`) — or None:
-    none, or a folder that is not a picture model's (said, not refused)."""
-    name = cfg.get("image_model", "auto")
+def _tools_file(cfg):
+    """The machine's tools file: `tools_config` names it — a name, `tools/<name>.json` in the data folder, or a path —
+    and `"default"` is `tools/default.json`. ⛔ One its reader cannot take refuses the boot, a line what."""
+    name = str(cfg.get("tools_config") or "default")
+    path = Path(name) if os.path.isabs(name) or name.endswith(".json") else DATA / "tools" / (name + ".json")
+    f = tools_config.ToolsFile(path)
+    try:
+        wrong = f.problems()
+    except (OSError, ValueError) as ex:
+        raise SR.Refused("the tools file %s is not read: %s" % (path, ex))
+    if wrong:
+        raise SR.Refused("; ".join(wrong))
+    return f
+
+
+def _tools_ready(cfg):
+    """⭐ THE TOOLS FILE KEPT, AND THE STARTUP CHECK (NN-127) — at boot and on `POST /tools/rebuild`: the file's entries
+    made to match the commands and skills installed (▶ tools_config.ToolsFile.sync), the picture model found, each
+    skill's check called with its settings. ⚖ 2026-10-26 *"a startup check could see if searXNG is in a container it
+    can reach and same for qwen image and doing so will comment a line on the skills if it is not available"*: a command
+    its entry leaves on "auto" that nothing answers is a comment in (help), with why (▶ tools_config.Toolbox's
+    `checked`); one set "yes" stays listed, and the check's reason is said here. What it finds reaches every session at
+    its next call. Answers what it says, a line each."""
+    box = S.toolbox
+    changed = box.refresh()
+    said = ["the tools file %s: %s" % (box.file.path, "; ".join(changed) if changed else "as it was")]
+    S.web.named(box.config("fetch").get("contact"))
+    missing, cache = {}, {}
+    switch = box.enabled("image")
+    S.picture = _picture_model(cfg, switch)
+    if S.picture is None and switch == "auto":
+        missing["image"] = S.no_picture
+    p = S.picture
+    if p:
+        where = ("" if p["host"] else ", on card %s" % p["card"] if p["card"] is not None
+                 else ", on the text model's card: the model is put down while it draws")
+        said.append("the REPL's (image …): draws with %s%s" % (p["name"], where))
+    else:
+        said.append("the REPL's (image …): %s" % _not_ready(switch, S.no_picture))
+    if box.enabled("bash") == "no":
+        said.append("the REPL's (bash …): switched off in the tools file")
+    else:                                             # where the model's commands reach (▶ tools.confinement)
+        c = tools.confinement(box, S.classifier.sealed, str(S.workspace))
+        said.append("the REPL's (bash …): %s" % (
+            "the machine but its tools file and the server's process (Landlock ABI %d)" % c.rules["abi"]
+            if c.rules is not None and c.shape == "machine" else
+            "the workspace alone and what is linked at its top (Landlock ABI %d)" % c.rules["abi"]
+            if c.rules is not None else "refused — %s" % c.why if c.wanted else
+            "everything the server's user reaches (a direct install: the tools file's bash entry, confined, says so)"))
+    for sk in box.skills:
+        switch = box.enabled(sk.name)
+        why = None if switch == "no" else skills.run_check(sk, box.config(sk.name), cache)
+        if why and switch == "auto":
+            missing.update((c.name, why) for c in sk.commands)
+        if switch == "no" or sk.check:
+            said.append("the %s skill: %s" % (sk.name, _not_ready(switch, why) if switch == "no" or why else "ready"))
+    box.checked(missing)
+    return said
+
+
+def _not_ready(switch, why):
+    """A tool the startup check found nothing for, as the boot says it: by its entry's switch."""
+    return {"no": "switched off in the tools file", "auto": "not available — %s" % why}.get(switch, "on, though %s" % why)
+
+
+def _picture_model(cfg, switch="auto"):
+    """The picture model a text model's REPL draws with — the tools file's `image` entry (▶ tools_config.BUILT_IN):
+    `host` "local", or another SiLVANN server's address, a picture model's (▶ `_picture_from`); `model` a folder in
+    `models/` or a path, "auto" the first picture model downloaded there; `card` a card of its own, or null the text
+    model's (▶ `_tool_picture`) — a model config's `image_model` and `image_card`, the older keys, over the entry's
+    where they name one. Or None: switched off, none, or a folder that is not a picture model's — `S.no_picture` says
+    why (said, not refused)."""
+    entry = S.toolbox.config("image")
+    name = cfg.get("image_model")
+    name = entry.get("model") or "auto" if name in (None, "auto") else name
     fetch = "the user can download one, Qwen-Image 2.1, from the UI's Options"
+    if switch == "no":
+        S.no_picture = "the tools file switches (image …) off on this machine"
+        return None
     if not name or str(name).lower() in ("no", "none", "false"):
         S.no_picture = "pictures are turned off in this model's config (image_model)"
         return None
+    host = str(entry.get("host") or "local").rstrip("/")
+    if host.lower() != "local":
+        return _picture_server(host)
     if str(name).lower() == "auto":
         found = sorted(d for d in (DATA / "models").glob("*") if d.is_dir() and image_pack(str(d)))
         if not found:
@@ -449,8 +538,7 @@ def _picture_model(cfg):
         name = str(found[0])
     path = Path(name) if os.path.isabs(str(name)) else DATA / "models" / str(name)
     if not image_pack(str(path)):
-        S.no_picture = "the picture model this model's config names (%s) is not installed (%s)" % (path.name, fetch)
-        print("[silvann_server] image_model %s is not a downloaded picture model: (image …) says so" % path, flush=True)
+        S.no_picture = "the picture model named (%s) is not installed (%s)" % (path.name, fetch)
         return None
     settings = cfg.get("image")
     if settings is None:                              # the picture model's own config's
@@ -458,15 +546,29 @@ def _picture_model(cfg):
             settings = json.load(open(path / "configs" / "default.json")).get("image")
         except (OSError, ValueError):
             settings = None
-    card = cfg.get("image_card")
+    card = cfg["image_card"] if cfg.get("image_card") is not None else entry.get("card")
     if card is None and S.setup["ring"]:
-        S.no_picture = "a model run over several machines draws only on a card of its own (image_card in its config)"
-        print("[silvann_server] a ring's machine draws only on a card of its own (image_card): (image …) says so",
-              flush=True)
+        S.no_picture = "a model run over several machines draws only on a card of its own (the tools file's image card)"
         return None
-    print("[silvann_server] the REPL's (image …) draws with %s, %s" % (path.name, "on card %s" % card if card is not None
-          else "on the text model's card: the model is put down while it draws"), flush=True)
-    return dict(path=str(path), settings=settings or {}, card=card)
+    return dict(path=str(path), settings=settings or {}, card=card, host=None, name=path.name)
+
+
+def _picture_server(host):
+    """The picture server the tools file's image `host` names, as `_picture_model` answers one, where it answers
+    and serves a picture model — else None, `S.no_picture` why."""
+    import httpx
+    if not host.startswith(("http://", "https://")):
+        S.no_picture = "the tools file's image host is \"local\" or a picture server's address, http://host:port, not %r" % host
+        return None
+    try:
+        h = httpx.get(host + "/health", timeout=5).json()
+    except (httpx.HTTPError, ValueError) as ex:
+        S.no_picture = "the picture server the tools file names, %s, does not answer (%s)" % (host, type(ex).__name__)
+        return None
+    if not h.get("pictures"):
+        S.no_picture = "the server the tools file names, %s, serves %s, not a picture model" % (host, h.get("model_id"))
+        return None
+    return dict(path=None, settings={}, card=None, host=host, name="%s at %s" % (h.get("model_id"), host))
 
 
 def _tool_picture(cid, text):
@@ -475,13 +577,15 @@ def _tool_picture(cid, text):
     reloads the old model and the old conversation"*. On the text model's card: the conversation on the card read off
     into RAM, the text model shut down, the picture made by the picture worker, the worker ended, the text model booted
     again as it booted first (`S.setup`), and the runtime handed it — the conversation's state written back when its
-    answer goes on (▶ `Runtime._activate`). On a card of its own (`image_card`) the text model stays up. While it draws,
+    answer goes on (▶ `Runtime._activate`). On a card of its own (the tools file's image `card`) the text model stays up. While it draws,
     the runtime is busy: another conversation's turn is answered 503 and the eviction waits. Answers the model's text."""
     if S.picture is None:                             # answered at once, so the model can tell the user
         raise SR.Refused("no picture can be made: %s. Do not look for one or try to install it: tell the user now that "
                          "you cannot make pictures here, and why." % S.no_picture)
     p, session = S.picture, S.tool_sessions.get(cid)
     answering = getattr(session, "answering", None)
+    if p["host"]:
+        return _picture_from(p, cid, text, answering)
     model = image_session.ImageModel(p["path"], silicon=getattr(S.model.m, "silicon", None), settings=p["settings"])
     rt = image_session.ImageRuntime(model, card=p["card"])
     prompt, settings = rt.settings(text)
@@ -523,6 +627,72 @@ def _tool_picture(cid, text):
     return "; ".join("a picture of %d×%d, %d steps, seed %d, made in %d s, is shown to the user in the conversation "
                      "(pictures/%s)" % (st["width"], st["height"], st["steps"], st["seed"], round(seconds), name)
                      for name, seconds, st in made)
+
+
+def _picture_from(p, cid, text, answering):
+    """⭐ (image "prompt") DRAWN BY ANOTHER SiLVANN SERVER — the tools file's image `host`, whose model is a picture
+    model: a conversation of its own there, the prompt its message, its progress said here as it comes, each picture it
+    made copied into this conversation's `pictures/`, and its conversation there deleted. The text model stays up. A
+    server drawing another picture answers 503: asked again as it says, for PICTURE_WAIT_SECONDS at most."""
+    import httpx
+    host, said, t0 = p["host"], "", time.time()
+    http = httpx.Client(base_url=host, timeout=httpx.Timeout(30.0, read=None),
+                        headers={"X-Web-User-Id": "silvann-%s-%s" % (S.model_id, cid)})
+    try:
+        made = http.post("/cartridges", json={"name": "a picture for %s" % S.model_id})
+        made.raise_for_status()
+        there = made.json()["id"]
+        try:
+            http.post("/cartridges/%s/bind" % there).raise_for_status()
+            while not said:
+                with http.stream("POST", "/cartridges/%s/messages" % there, json={"text": text}) as r:
+                    if r.status_code == 503 and time.time() - t0 < PICTURE_WAIT_SECONDS:
+                        if answering is not None:
+                            answering._emit("progress", {"stage": "wait", "done": 0, "total": 0,
+                                                         "text": "the picture server is drawing another picture"})
+                        time.sleep(float(r.headers.get("Retry-After") or 5))
+                        continue
+                    if r.status_code != 200:
+                        raise SR.Refused("the picture server %s: HTTP %d %s" % (host, r.status_code, r.read()[:300]))
+                    kind = None
+                    for line in r.iter_lines():
+                        if line.startswith("event:"):
+                            kind = line[6:].strip()
+                        elif line.startswith("data:"):
+                            d = json.loads(line[5:])
+                            if kind == "progress" and answering is not None:
+                                answering._emit("progress", d)
+                            elif kind == "token":
+                                said += d.get("text", "")
+                            elif kind == "error":
+                                raise SR.Refused("the picture server %s: %s" % (host, d.get("error")))
+            names = re.findall(r"!\[picture\]\(picture:([A-Za-z0-9_.-]+\.png)\)", said)
+            if not names:
+                raise SR.Refused("the picture server %s made no picture: %s" % (host, said[:300]))
+            folder = S.dir / cid / "pictures"
+            folder.mkdir(parents=True, exist_ok=True)
+            for name in names:
+                got = http.get("/cartridges/%s/pictures/%s" % (there, name))
+                got.raise_for_status()
+                (folder / name).write_bytes(got.content)
+        finally:
+            try:
+                http.delete("/cartridges/%s" % there)
+            except httpx.HTTPError:
+                pass
+    except httpx.HTTPError as ex:
+        raise SR.Refused("the picture server %s: %s" % (host, ex))
+    finally:
+        http.close()
+    if answering is not None:                         # the pictures in the answer the user reads, its captions theirs
+        answering._show("token", "\n\n" + said.strip() + "\n\n", token_id=-1)
+    made = dict(zip(names, re.findall(r"_(\d+)×(\d+) · (\d+) steps · seed (\d+) · (\d+) s_", said)))
+    told = []
+    for n in names:
+        w, h, steps, seed, seconds = made.get(n) or ("?",) * 5
+        told.append("a picture of %s×%s, %s steps, seed %s, made by the picture server %s in %s s, is shown to the user in "
+                    "the conversation (pictures/%s)" % (w, h, steps, seed, host, seconds, n))
+    return "; ".join(told)
 
 
 def _tool_agent(cid, model, config, task):
@@ -645,8 +815,7 @@ def _whoami(cid):
                                                         " (LoRAs %s)" % ", ".join(h["loras"]) if h.get("loras") else ""))
             except (httpx.HTTPError, ValueError):
                 lines.append("worker %s does not answer" % w)
-        lines.append("pictures: %s" % ("(image …) draws with %s" % Path(S.picture["path"]).name if S.picture
-                                       else S.no_picture))
+        lines.append("pictures: %s" % ("(image …) draws with %s" % S.picture["name"] if S.picture else S.no_picture))
     return "\n".join(lines)
 
 
@@ -1356,13 +1525,13 @@ def _tool_session(cid):
         extra = _sidecar(cid).get("extra", {})
         mode = _tools_mode(extra)
         s = S.tool_sessions[cid] = tools.Session(str(S.workspace), S.classifier.conversation(mode),
-                                                 library=str(S.library), skills=S.skills,
+                                                 library=str(S.library),
                                                  guide=str(TOOLS_GUIDE),
                                                  image=lambda text: _tool_picture(cid, text),
                                                  agent=None if extra.get("agent") else
                                                  lambda model, config, task: _tool_agent(cid, model, config, task),
                                                  allowed=extra.get("tools_allowed"),
-                                                 whoami=lambda: _whoami(cid))
+                                                 whoami=lambda: _whoami(cid), web=S.web, toolbox=S.toolbox)
     return s
 
 
@@ -1561,9 +1730,43 @@ async def answer_ask(cid: str, req: AnswerReq, x_cart_password: Optional[str] = 
 @app.get("/tools")
 def tools_settings():
     """The config's tools — a new conversation's mode ("ask", "chill", "full-auto"), or "no": no conversation has the
-    tool — the modes, the folders every conversation reads unasked, and where its REPL starts."""
+    tool — the modes, the folders every conversation reads unasked, where its REPL starts, and the machine's tools file
+    (▶ `_tools_listed`)."""
     return {"tools": S.tools, "modes": list(tools.MODES), "allowed": S.classifier.allowed,
-            "workspace": str(S.workspace)}
+            "workspace": str(S.workspace), **_tools_listed()}
+
+
+@app.post("/tools/rebuild")
+async def tools_rebuild():
+    """⭐ "REBUILD THE TOOLS" (⚖ 2026-10-26 *"maybe a rebuild skill tree button would also be good"*): the skills read
+    again, the tools file's entries kept in step with them, and the startup check run again — what a skill installed or
+    a setting changed since the boot needs. A conversation's REPL reads its skills again at its `(reset)`; what the
+    check found reaches every one at once. Answers what it did, `said`, and the tools as `GET /tools` does."""
+    if S.toolbox is None:
+        raise HTTPException(409, "%s is a picture model: it has no tools" % S.model_id)
+    try:
+        said = await asyncio.to_thread(_tools_ready, S.config)
+    except (OSError, ValueError) as ex:
+        raise HTTPException(422, "the tools file %s: %s" % (S.toolbox.file.path, ex))
+    for line in said:
+        print("[silvann_server] %s" % line, flush=True)
+    return {"said": said, **_tools_listed()}
+
+
+def _tools_listed():
+    """The tools file — where it is — and each tool's entry: its switch, what the startup check found, what it is, and
+    its settings, a key, a password or a token said only as set or not (the file holds them, the UI never shows them)."""
+    if S.toolbox is None:
+        return {"tools_file": None, "entries": {}}
+    out = S.toolbox.listing()
+    for e in out.values():
+        e["config"] = {k: ("(set)" if v not in (None, "") else None) if _secret(k) else v for k, v in e["config"].items()}
+    return {"tools_file": S.toolbox.file.path, "entries": out}
+
+
+def _secret(key):
+    return re.search(r"key|password|passwd|secret|token", str(key), re.I) is not None
+
 
 
 def main():

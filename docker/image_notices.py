@@ -45,19 +45,32 @@ def main():
           % (commit.strip(), source.strip() or "its repository"))
     print("Built in this image from that source: the evaluator (`lib/silvann_engine_cpu*.so`) and the silicon "
           "families (%s).\n" % ", ".join("`lib/silicon_families/%s`" % f for f in families))
-    print("## NVIDIA's CUDA runtime\n")
-    print("`libsilvann_nvidia_cuda12.so` holds NVIDIA's CUDA runtime, linked statically when it was compiled (%s). "
-          "The runtime is NVIDIA's, distributed under the NVIDIA CUDA Toolkit End User License Agreement, which is in "
-          "`notices/CUDA_EULA.txt`. The image holds no other part of the CUDA toolkit: the driver is the host's, "
-          "handed to the container when it starts.\n" % cuda)
+    if "libsilvann_nvidia_cuda12.so" in families:
+        print("## NVIDIA's CUDA runtime\n")
+        print("`libsilvann_nvidia_cuda12.so` holds NVIDIA's CUDA runtime, linked statically when it was compiled (%s). "
+              "The runtime is NVIDIA's, distributed under the NVIDIA CUDA Toolkit End User License Agreement, which is in "
+              "`notices/CUDA_EULA.txt`. The image holds no other part of the CUDA toolkit: the driver is the host's, "
+              "handed to the container when it starts.\n" % cuda)
+    rows = [r.split("\t") for r in subprocess.run(["dpkg-query", "-W", "-f", "${Package}\t${Version}\t${Maintainer}\n"],
+                                                  capture_output=True, text=True, check=True).stdout.split("\n") if r]
+    rocm = [r for r in rows if "amd.com" in r[2].lower()]
+    if rocm:
+        version = read("/opt/rocm/.info/version", "unknown").strip()
+        print("## AMD's ROCm, its HIP runtime\n")
+        print("`libsilvann_amd_rocm6_wave64.so` is linked against ROCm's HIP runtime (%s), installed from AMD's repository "
+              "(repo.radeon.com) as the packages below. Each one's licence is in `/opt/rocm/share/doc/<component>/` "
+              "(and `/usr/share/doc/<package>/` where it has one); their source is published by AMD at "
+              "https://github.com/ROCm. The card's kernel driver is the host's.\n" % version)
+        print("| package | version |\n|---|---|")
+        for r in sorted(rocm):
+            print("| %s | %s |" % (r[0], r[1]))
+        print()
     print("## Ubuntu's packages\n")
     print("The system is Ubuntu 22.04. Each package's copyright and licence are in `/usr/share/doc/<package>/copyright`, "
           "and its source is in Ubuntu's archive at the version below.\n")
-    rows = subprocess.run(["dpkg-query", "-W", "-f", "${Package}\t${Version}\n"], capture_output=True, text=True,
-                          check=True).stdout.split("\n")
     print("| package | version |\n|---|---|")
-    for row in sorted(r for r in rows if r):
-        print("| %s | %s |" % tuple(row.split("\t")))
+    for r in sorted(r for r in rows if r not in rocm):
+        print("| %s | %s |" % (r[0], r[1]))
     print("\n## Python packages\n")
     print("In `/opt/silvann/venv`, installed from PyPI by `requirements.txt` and what it requires. Each one's licence "
           "files are in its `.dist-info` folder under `venv/lib/python3.10/site-packages/`.\n")

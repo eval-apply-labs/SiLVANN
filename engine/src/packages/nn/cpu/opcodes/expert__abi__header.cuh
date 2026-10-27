@@ -28,5 +28,7 @@ static sys__heap_node nn__expert__zzabi_apply_lend(const sys__heap_node* argv, u
 static __device__ SYS__NOINLINE void nn__expert__zzabi_adapter_lend(sys__heap_node* base, uint64_t form);
 static sys__heap_node nn__expert__zzabi_apply_lent(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx);
 static __device__ SYS__NOINLINE void nn__expert__zzabi_adapter_lent(sys__heap_node* base, uint64_t form);
+static sys__heap_node nn__expert__zzabi_apply_register(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx);
+static __device__ SYS__NOINLINE void nn__expert__zzabi_adapter_register(sys__heap_node* base, uint64_t form);
 
 #endif /* SILVANN__PACKAGES_NN_CPU_OPCODES_EXPERT__ABI__HEADER_CUH */

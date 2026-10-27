@@ -6,11 +6,13 @@
 #include "turboquant.cuh"   /* the gemvs, on the tensor cores */
 #include "hadamard.cuh"     /* the rotations */
 #include "deltanet.cuh"     /* a prompt's rows */
-#include "attention.cuh"    /* a prompt's causal attention: the scores on the tensor cores */
+#include "attention.cuh"    /* a prompt's causal attention: the scores on the tensor cores; a latent's; MLA's absorb and expand */
 #include "result.cuh"       /* argmax */
 #include "expert.cuh"       /* the expert-major GEMM, on the tensor cores */
 #include "conv.cuh"         /* a convolution's rows */
 #include "vector.cuh"       /* a sampler's top k */
+#include "index.cuh"        /* the indexer's pool scores and top k */
+#include "kda.cuh"          /* KDA's steps over a prompt's rows */
 #include "doors.cuh"        /* into nn's table */
 
 /* ══ ⭐⭐ OVERRIDES — THE DOORS THIS FAMILY RUNS FASTER THAN THE GENERIC BODY ══════════════════════════

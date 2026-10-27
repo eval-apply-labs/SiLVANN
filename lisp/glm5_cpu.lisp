@@ -15,7 +15,11 @@
                       (ai_z__glm_5_3__experts (nth C_HAND s) picks (nth (nth EX s) (nth HERE 0)) (nth C_ROUTED s))))
   (picture xr (let ((s (- (sys__worker) FIRST_SOCKET)))
                 (nn__buffer__copy hands CARD (nth C_HANDS s) (* (nth nrows 0) HAND))   ; the chunk's rows, not a whole chunk's
-                (ai_z__glm_5_3__experts_rows (nth C_HANDS s) (nth (nth EXR s) (nth HERE 0)) (nth C_RROWS s) (nth nrows 0)))))
+                (ai_z__glm_5_3__experts_rows (nth C_HANDS s) (nth (nth EXR s) (nth HERE 0)) (nth C_RROWS s) (nth nrows 0))))
+  ;; the embedding the first socket's (EMBED_ON_CPU, ▶ glm5.lisp `embed_e`): a token's row, decoded from c_embedding into c_emb
+  (picture xe (let ((tok (nth EMB_TOK 0)))
+                (nn__turboquant__decode (nn__vector__range c_embedding (* tok EMB_HALVES) EMB_HALVES)
+                                        (nn__vector__range c_embedding (+ EMB_SCALES tok) 1) c_emb 1 HIDDEN EMB_BITS))))
 
 ;; what a socket's block sees: the pictures, the tables, the card's hand and picks — the bindings as they stand
 (view names)

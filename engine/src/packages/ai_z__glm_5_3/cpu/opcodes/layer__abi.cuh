@@ -8,7 +8,7 @@
  * input rotated; the router is lossless and reads it as it is. ▶ `contracts/objects/layer.cuh` for the tables. */
 
 #include <math.h>
-#include <stdlib.h>                       /* a chunk's picks, inverted on the host: malloc, free */
+#include <stdlib.h>                       /* the attention's lever, read from the environment: getenv */
 #include "../table.cuh"
 #include "../../../nn/cpu/routed__header.cuh"   /* the routed experts, as nn runs them */
 
@@ -639,18 +639,16 @@ static inline uint64_t ai_z__glm_5_3__rows__zzprivate_take(uint64_t* next, uint6
 }
 
 /* The chunk's pairs, a row of `x` and a row of `out` each: `n` of `(t, t)`, then `n` of `(t, 2t)` and `n` of `(t, 2t + 1)` —
- * a gate's answer and an up's side by side for each row, as the clamped swiglu reads them. */
+ * a gate's answer and an up's side by side for each row, as the clamped swiglu reads them. Written on the worker (nn's
+ * `expert_pairs_rows`), queued like the site's launches: a copy from the host would wait for every launch before it,
+ * at each site of each chunk, and a group's hosts would wait on their cards (NN-115 ④). */
 static bool ai_z__glm_5_3__rows__zzprivate_pairs(sys__engine__ctx* ctx, uint64_t pairs, uint64_t n) {
-    uint32_t* p = (uint32_t*)malloc(sizeof(uint32_t) * 6u * n);
-    if (p == 0) return false;
-    for (uint64_t t = 0u; t < n; ++t) {
-        p[2u * t] = (uint32_t)t;                  p[2u * t + 1u] = (uint32_t)t;
-        p[2u * (n + t)] = (uint32_t)t;            p[2u * (n + t) + 1u] = (uint32_t)(2u * t);
-        p[2u * (2u * n + t)] = (uint32_t)t;       p[2u * (2u * n + t) + 1u] = (uint32_t)(2u * t + 1u);
-    }
-    const bool ok = sys__gpu__memory_write(ctx->family, (void*)(uintptr_t)pairs, p, 24u * n);
-    free(p);
-    return ok;
+    const nn__doors* doors = nn__doors_for(ctx);
+    if (doors == 0) return false;
+    doors->expert_pairs_rows((uint32_t*)(uintptr_t)pairs, n, 1u, 0u, 1u, 0u);
+    doors->expert_pairs_rows((uint32_t*)(uintptr_t)(pairs + 8u * n), n, 1u, 0u, 2u, 0u);
+    doors->expert_pairs_rows((uint32_t*)(uintptr_t)(pairs + 16u * n), n, 1u, 0u, 2u, 1u);
+    return true;
 }
 
 /* Every row's site input: its streams collapsed by the site's map — the weights into its record of `mixes` — and normed. */
@@ -766,9 +764,10 @@ static sys__heap_node ai_z__glm_5_3__kda_rows__zzabi_apply(const sys__heap_node*
     const uint64_t gate = ai_z__glm_5_3__rows__zzprivate_take(&next, end, 2u * n * KW);
     const uint64_t ko = ai_z__glm_5_3__rows__zzprivate_take(&next, end, 2u * n * KW);
     const uint64_t kor = ai_z__glm_5_3__rows__zzprivate_take(&next, end, 2u * n * KW);
+    const uint64_t decays = ai_z__glm_5_3__rows__zzprivate_take(&next, end, 4u * n * KW);
     const uint64_t y = xin;                                /* the collapse's input is read once, by the norm */
     if (pairs == 0u || mixes == 0u || xin == 0u || h == 0u || hr == 0u || proj == 0u || conved == 0u || far == 0u || gar == 0u
-     || fb == 0u || gate == 0u || ko == 0u || kor == 0u)
+     || fb == 0u || gate == 0u || ko == 0u || kor == 0u || decays == 0u)
         return sys__engine__abi__error(AI_Z__GLM_5_3__LAYER__FAULT_ROOM);
     const uint64_t fa = proj + 2u * n * 3u * KW, ga = fa + 2u * n * hd, b = ga + 2u * n * hd;
     const uint64_t signs = at[AI_Z__GLM_5_3__KDA__SIGNS];
@@ -797,11 +796,13 @@ static sys__heap_node ai_z__glm_5_3__kda_rows__zzabi_apply(const sys__heap_node*
     doors->hadamard_blocks((uint16_t*)(uintptr_t)gar, (const uint16_t*)(uintptr_t)ga, (const uint16_t*)(uintptr_t)signs, n * hd, hd, 0u, over);
     ai_z__glm_5_3__rows__zzprivate_gemm(doors, over, at, room, AI_Z__GLM_5_3__KDA__FB, fb, far, pairs, n, d[6], KW, hd);
     ai_z__glm_5_3__rows__zzprivate_gemm(doors, over, at, room, AI_Z__GLM_5_3__KDA__GB, gate, gar, pairs, n, d[7], KW, hd);
-    doors->kda_steps((float*)(uintptr_t)at[AI_Z__GLM_5_3__KDA__STATE], (const uint16_t*)(uintptr_t)conved, (const uint16_t*)(uintptr_t)fb,
-                     (const uint16_t*)(uintptr_t)b, (const uint16_t*)(uintptr_t)at[AI_Z__GLM_5_3__KDA__DT_BIAS],
-                     (const uint16_t*)(uintptr_t)at[AI_Z__GLM_5_3__KDA__A_LOG], (const uint16_t*)(uintptr_t)gate,
-                     (const uint16_t*)(uintptr_t)at[AI_Z__GLM_5_3__KDA__O_NORM], (uint16_t*)(uintptr_t)ko, heads, hd,
-                     r[AI_Z__GLM_5_3__KDA__LOWER], r[AI_Z__GLM_5_3__KDA__EPS], n, over);
+    /* every row's decays made once, then the recurrence, which reads each of them at every column of its state */
+    doors->kda_decays((float*)(uintptr_t)decays, (const uint16_t*)(uintptr_t)fb, (const uint16_t*)(uintptr_t)at[AI_Z__GLM_5_3__KDA__DT_BIAS],
+                      (const uint16_t*)(uintptr_t)at[AI_Z__GLM_5_3__KDA__A_LOG], heads, hd, r[AI_Z__GLM_5_3__KDA__LOWER], n);
+    doors->kda_steps_decayed((float*)(uintptr_t)at[AI_Z__GLM_5_3__KDA__STATE], (const uint16_t*)(uintptr_t)conved,
+                             (const float*)(uintptr_t)decays, (const uint16_t*)(uintptr_t)b, (const uint16_t*)(uintptr_t)gate,
+                             (const uint16_t*)(uintptr_t)at[AI_Z__GLM_5_3__KDA__O_NORM], (uint16_t*)(uintptr_t)ko, heads, hd,
+                             r[AI_Z__GLM_5_3__KDA__EPS], n, over);
     doors->hadamard_rotate((uint16_t*)(uintptr_t)kor, (const uint16_t*)(uintptr_t)ko, (const uint16_t*)(uintptr_t)signs, n * KW, over);
     ai_z__glm_5_3__rows__zzprivate_gemm(doors, over, at, room, AI_Z__GLM_5_3__KDA__O, y, kor, pairs, n, d[8], H, KW);
     uint64_t f = ai_z__glm_5_3__table__zzpackage_masked(doors, over, argv[1].args[0], AI_Z__GLM_5_3__KDA__MASK, y, kor, n, H, KW,
@@ -863,9 +864,6 @@ static sys__heap_node ai_z__glm_5_3__mla_rows__zzabi_apply(const sys__heap_node*
          || !nn__primitives__fits(KP * ID, room[AI_Z__GLM_5_3__IDX__APE]))
             return sys__engine__abi__error(AI_Z__GLM_5_3__LAYER__FAULT_ROOM);
     }
-    /* a row's own: its query absorbed into the latent, and its answer in the latent — in the table's scratch */
-    if (room[AI_Z__GLM_5_3__MLA__SCRATCH] < 2u * 2u * heads * LAT) return sys__engine__abi__error(AI_Z__GLM_5_3__LAYER__FAULT_ROOM);
-    const uint64_t qabs = at[AI_Z__GLM_5_3__MLA__SCRATCH], olat = qabs + 2u * heads * LAT;
     uint64_t next = work;
     const uint64_t end = work + w_room;
     const uint64_t pairs = ai_z__glm_5_3__rows__zzprivate_take(&next, end, 24u * n);
@@ -920,16 +918,27 @@ static sys__heap_node ai_z__glm_5_3__mla_rows__zzabi_apply(const sys__heap_node*
     /* ⭐ THE ROWS THAT ATTEND EVERY POSITION BEFORE THEM, AND THE ROWS THAT DO NOT. Up to the indexer's `topk` positions
      *   a row attends the whole cache up to itself, which the latents already written make a causal attention over
      *   the chunk — a launch of every (row, head) for its scores and one for its mix, a block of rows at a time. Past
-     *   them a row attends the positions the indexer chooses from the pools finished before it, so it runs a row at a
-     *   time, in order. Whether a row is past them only grows with its position: the first `dense` rows are the one
-     *   kind, the rest the other. The indexer's ring and pools are kept for every row, in order, either way. */
+     *   them a row attends the positions the indexer chooses from the pools finished at it: a block's keys, gates and
+     *   pools in order, then its rows' choices and attention a launch each. Whether a row is past them only grows with
+     *   its position: the first `dense` rows are the one kind, the rest the other. The indexer's ring and pools are
+     *   kept for every row, in order, either way. */
     uint64_t dense = 0u;
     while (dense < n && !(indexed && (first + dense + 1u) / KP > TOPK / KP)) ++dense;
-    const uint64_t block = dense < AI_Z__GLM_5_3__MLA__ROWS_BLOCK ? dense : AI_Z__GLM_5_3__MLA__ROWS_BLOCK;
-    const uint64_t qabs_rows = block == 0u ? 1u : ai_z__glm_5_3__rows__zzprivate_take(&next, end, 2u * block * heads * LAT);
-    const uint64_t olat_rows = block == 0u ? 1u : ai_z__glm_5_3__rows__zzprivate_take(&next, end, 2u * block * heads * LAT);
-    const uint64_t p_rows = block == 0u ? 1u : ai_z__glm_5_3__rows__zzprivate_take(&next, end, 4u * block * heads * (first + dense));
-    if (qabs_rows == 0u || olat_rows == 0u || p_rows == 0u) return sys__engine__abi__error(AI_Z__GLM_5_3__LAYER__FAULT_ROOM);
+    const uint64_t block = n < AI_Z__GLM_5_3__MLA__ROWS_BLOCK ? n : AI_Z__GLM_5_3__MLA__ROWS_BLOCK;
+    const uint64_t qabs_rows = ai_z__glm_5_3__rows__zzprivate_take(&next, end, 2u * block * heads * LAT);
+    const uint64_t olat_rows = ai_z__glm_5_3__rows__zzprivate_take(&next, end, 2u * block * heads * LAT);
+    const uint64_t p_rows = dense == 0u ? 1u : ai_z__glm_5_3__rows__zzprivate_take(&next, end, 4u * block * heads * (first + dense));
+    /* ⛳ a block of the rows past them chooses and attends at once: each row's pools' scores, its positions (its chosen
+     *   pools', then its unfinished pool's — `most` at most) and their count, its latents gathered, its scores over them */
+    const uint64_t most = TOPK + KP, pmost = (first + n) / KP + 1u, sb = dense < n ? block : 0u;
+    const uint64_t iscores = sb == 0u ? 1u : ai_z__glm_5_3__rows__zzprivate_take(&next, end, 4u * sb * pmost);
+    const uint64_t irows = sb == 0u ? 1u : ai_z__glm_5_3__rows__zzprivate_take(&next, end, 4u * sb * most);
+    const uint64_t icounts = sb == 0u ? 1u : ai_z__glm_5_3__rows__zzprivate_take(&next, end, 4u * sb);
+    const uint64_t gathered = sb == 0u ? 1u : ai_z__glm_5_3__rows__zzprivate_take(&next, end, 2u * sb * most * LAT);
+    const uint64_t s_rows = sb == 0u ? 1u : ai_z__glm_5_3__rows__zzprivate_take(&next, end, 4u * sb * heads * most);
+    if (qabs_rows == 0u || olat_rows == 0u || p_rows == 0u || iscores == 0u || irows == 0u || icounts == 0u || gathered == 0u
+     || s_rows == 0u)
+        return sys__engine__abi__error(AI_Z__GLM_5_3__LAYER__FAULT_ROOM);
     const uint64_t keys = indexed ? at[AI_Z__GLM_5_3__IDX__KEYS] : 0u, gates = indexed ? at[AI_Z__GLM_5_3__IDX__GATES] : 0u;
     const uint64_t pooled = indexed ? at[AI_Z__GLM_5_3__IDX__POOLED] : 0u;
     for (uint64_t t = 0u; t < dense && indexed; ++t) {
@@ -946,58 +955,48 @@ static sys__heap_node ai_z__glm_5_3__mla_rows__zzabi_apply(const sys__heap_node*
     for (uint64_t b0 = 0u; b0 < dense; b0 += block) {
         const uint64_t rows = dense - b0 < block ? dense - b0 : block;
         /* ⛳ the attention's own scale is 1/√latent and the model's 1/√head, so the absorbed query carries their ratio */
-        for (uint64_t r = 0u; r < rows; ++r)
-            doors->attention_absorb((uint16_t*)(uintptr_t)(qabs_rows + 2u * r * heads * LAT),
-                                    (const uint16_t*)(uintptr_t)(q + 2u * (b0 + r) * heads * NOPE), (const uint16_t*)(uintptr_t)kvb,
-                                    heads, NOPE, LAT, stride, sqrtf((float)LAT / (float)NOPE), over);
+        doors->attention_absorb_rows((uint16_t*)(uintptr_t)qabs_rows, (const uint16_t*)(uintptr_t)(q + 2u * b0 * heads * NOPE),
+                                     (const uint16_t*)(uintptr_t)kvb, heads, NOPE, LAT, stride, sqrtf((float)LAT / (float)NOPE), rows, over);
         doors->attention_causal_scores_grouped((float*)(uintptr_t)p_rows, (const uint16_t*)(uintptr_t)qabs_rows, (const uint16_t*)(uintptr_t)cache,
                                                        heads, 1u, LAT, first + b0, rows);
         doors->attention_causal_softmax((float*)(uintptr_t)p_rows, heads, first + b0, rows);
         doors->attention_causal_mix((uint16_t*)(uintptr_t)olat_rows, (const float*)(uintptr_t)p_rows, (const uint16_t*)(uintptr_t)cache,
                                     heads, 1u, LAT, first + b0, rows, over);
-        for (uint64_t r = 0u; r < rows; ++r)
-            doors->attention_expand((uint16_t*)(uintptr_t)(vh + 2u * (b0 + r) * heads * VD), (const uint16_t*)(uintptr_t)(olat_rows + 2u * r * heads * LAT),
-                                    (const uint16_t*)(uintptr_t)kvb, heads, VD, LAT, stride, NOPE, over);
+        doors->attention_expand_rows((uint16_t*)(uintptr_t)(vh + 2u * b0 * heads * VD), (const uint16_t*)(uintptr_t)olat_rows,
+                                     (const uint16_t*)(uintptr_t)kvb, heads, VD, LAT, stride, NOPE, rows, over);
     }
-    for (uint64_t t = dense; t < n; ++t) {
-        const uint64_t pos = first + t, len = pos + 1u;
-        const uint64_t pools = len / KP, chosen_pools = indexed ? TOPK / KP : 0u, tail = len - pools * KP;
-        const bool sparse = indexed && pools > chosen_pools;
-        const uint64_t alen = sparse ? chosen_pools * KP + tail : len;
-        if (room[AI_Z__GLM_5_3__MLA__SCORES] / 4u < heads * alen) return sys__engine__abi__error(AI_Z__GLM_5_3__LAYER__FAULT_ROOM);
-        uint64_t src = cache;
-        if (indexed) {
+    for (uint64_t b0 = dense; b0 < n; b0 += block) {
+        const uint64_t rows = n - b0 < block ? n - b0 : block, len0 = first + b0 + 1u;
+        doors->attention_absorb_rows((uint16_t*)(uintptr_t)qabs_rows, (const uint16_t*)(uintptr_t)(q + 2u * b0 * heads * NOPE),
+                                     (const uint16_t*)(uintptr_t)kvb, heads, NOPE, LAT, stride, sqrtf((float)LAT / (float)NOPE), rows, over);
+        for (uint64_t u = 0u; u < rows; ++u) {
             /* ⛳ A POSITION'S KEY AND GATE ARE READ ONLY TO FINISH ITS POOL, so they are kept in a ring of `kpool` rows */
-            const uint64_t ring = 2u * (pos % KP) * ID;
+            const uint64_t t = b0 + u, pos = first + t, len = pos + 1u, ring = 2u * (pos % KP) * ID;
             doors->vector_copy((uint16_t*)(uintptr_t)(gates + ring), (const uint16_t*)(uintptr_t)(ig + 2u * t * ID), ID);
             doors->index_layernorm((uint16_t*)(uintptr_t)(keys + ring), (const uint16_t*)(uintptr_t)(ik + 2u * t * ID),
                                    (const uint16_t*)(uintptr_t)at[AI_Z__GLM_5_3__IDX__KNORM_W], (const uint16_t*)(uintptr_t)at[AI_Z__GLM_5_3__IDX__KNORM_B],
                                    ID, 1e-6f, over);
-            if (tail == 0u)
-                doors->index_pool((uint16_t*)(uintptr_t)(pooled + 2u * (pools - 1u) * ID), (const uint16_t*)(uintptr_t)keys,
+            if (len % KP == 0u)
+                doors->index_pool((uint16_t*)(uintptr_t)(pooled + 2u * (len / KP - 1u) * ID), (const uint16_t*)(uintptr_t)keys,
                                   (const uint16_t*)(uintptr_t)gates, (const uint16_t*)(uintptr_t)at[AI_Z__GLM_5_3__IDX__APE], 0u, 1u, ID, KP, over);
-            if (sparse) {
-                const uint64_t index = at[AI_Z__GLM_5_3__IDX__INDEX];
-                doors->index_scores((float*)(uintptr_t)at[AI_Z__GLM_5_3__IDX__SCORES], (const uint16_t*)(uintptr_t)(iq + 2u * t * IH * ID),
-                                    (const uint16_t*)(uintptr_t)(iw + 2u * t * IH), (const uint16_t*)(uintptr_t)pooled, IH, ID, pools,
-                                    1.0f / sqrtf((float)ID));
-                doors->index_select((uint32_t*)(uintptr_t)index, (uint32_t*)(uintptr_t)(index + 4u * (TOPK + KP)),
-                                    (const float*)(uintptr_t)at[AI_Z__GLM_5_3__IDX__SCORES], pools, chosen_pools, KP, pools * KP, tail);
-                doors->index_gather((uint16_t*)(uintptr_t)at[AI_Z__GLM_5_3__IDX__GATHER], (const uint16_t*)(uintptr_t)cache,
-                                    (const uint32_t*)(uintptr_t)index, alen, LAT);
-                src = at[AI_Z__GLM_5_3__IDX__GATHER];
-            }
         }
-        /* ⛳ the attention's own scale is 1/√latent and the model's 1/√head, so the absorbed query carries their ratio */
-        doors->attention_absorb((uint16_t*)(uintptr_t)qabs, (const uint16_t*)(uintptr_t)(q + 2u * t * heads * NOPE),
-                                (const uint16_t*)(uintptr_t)kvb, heads, NOPE, LAT, stride, sqrtf((float)LAT / (float)NOPE), over);
-        doors->attention_scores_grouped((float*)(uintptr_t)at[AI_Z__GLM_5_3__MLA__SCORES], (const uint16_t*)(uintptr_t)qabs,
-                                        (const uint16_t*)(uintptr_t)src, heads, 1u, LAT, alen);
-        doors->attention_softmax_rows((float*)(uintptr_t)at[AI_Z__GLM_5_3__MLA__SCORES], heads, alen);
-        doors->attention_mix((uint16_t*)(uintptr_t)olat, (const float*)(uintptr_t)at[AI_Z__GLM_5_3__MLA__SCORES],
-                             (const uint16_t*)(uintptr_t)src, heads, 1u, LAT, alen, over);
-        doors->attention_expand((uint16_t*)(uintptr_t)(vh + 2u * t * heads * VD), (const uint16_t*)(uintptr_t)olat,
-                                (const uint16_t*)(uintptr_t)kvb, heads, VD, LAT, stride, NOPE, over);
+        /* every pool a row reads is finished by a row before it or by itself, so the block's rows choose and attend at once */
+        doors->index_scores_rows((float*)(uintptr_t)iscores, pmost, (const uint16_t*)(uintptr_t)(iq + 2u * b0 * IH * ID),
+                                 (const uint16_t*)(uintptr_t)(iw + 2u * b0 * IH), (const uint16_t*)(uintptr_t)pooled, IH, ID, len0, KP, rows,
+                                 1.0f / sqrtf((float)ID));
+        doors->index_select_rows((uint32_t*)(uintptr_t)irows, most, (uint32_t*)(uintptr_t)icounts, (const float*)(uintptr_t)iscores, pmost,
+                                 TOPK / KP, KP, len0, rows);
+        doors->index_gather_rows((uint16_t*)(uintptr_t)gathered, most * LAT, (const uint16_t*)(uintptr_t)cache, (const uint32_t*)(uintptr_t)irows,
+                                 most, (const uint32_t*)(uintptr_t)icounts, most, LAT, rows);
+        doors->attention_scores_grouped_rows((float*)(uintptr_t)s_rows, heads * most, (const uint16_t*)(uintptr_t)qabs_rows, heads * LAT,
+                                             (const uint16_t*)(uintptr_t)gathered, most * LAT, (const uint32_t*)(uintptr_t)icounts, heads, 1u,
+                                             LAT, most, rows);
+        doors->attention_softmax_lens((float*)(uintptr_t)s_rows, heads * most, (const uint32_t*)(uintptr_t)icounts, heads, rows);
+        doors->attention_mix_rows((uint16_t*)(uintptr_t)olat_rows, heads * LAT, (const float*)(uintptr_t)s_rows, heads * most,
+                                  (const uint16_t*)(uintptr_t)gathered, most * LAT, (const uint32_t*)(uintptr_t)icounts, heads, 1u, LAT, rows,
+                                  over);
+        doors->attention_expand_rows((uint16_t*)(uintptr_t)(vh + 2u * b0 * heads * VD), (const uint16_t*)(uintptr_t)olat_rows,
+                                     (const uint16_t*)(uintptr_t)kvb, heads, VD, LAT, stride, NOPE, rows, over);
     }
     doors->hadamard_rotate((uint16_t*)(uintptr_t)vhr, (const uint16_t*)(uintptr_t)vh, (const uint16_t*)(uintptr_t)signs, n * heads * VD, over);
     ai_z__glm_5_3__rows__zzprivate_gemm(doors, over, at, room, AI_Z__GLM_5_3__MLA__O, y, vhr, pairs, n, d[3], H, heads * VD);
@@ -1083,10 +1082,11 @@ static sys__heap_node ai_z__glm_5_3__route_rows__zzabi_apply(const sys__heap_nod
     const uint64_t gu = ai_z__glm_5_3__rows__zzprivate_take(&next, end, 2u * n * 2u * I);
     const uint64_t act = ai_z__glm_5_3__rows__zzprivate_take(&next, end, 2u * n * I);
     const uint64_t actr = ai_z__glm_5_3__rows__zzprivate_take(&next, end, 2u * n * I);
-    if (pairs == 0u || xin == 0u || h == 0u || hr == 0u || gu == 0u || act == 0u || actr == 0u)
+    const uint64_t logits_rows = ai_z__glm_5_3__rows__zzprivate_take(&next, end, 2u * n * E);
+    if (pairs == 0u || xin == 0u || h == 0u || hr == 0u || gu == 0u || act == 0u || actr == 0u || logits_rows == 0u)
         return sys__engine__abi__error(AI_Z__GLM_5_3__LAYER__FAULT_ROOM);
     const uint64_t mixes = carries, shared = carries + AI_Z__GLM_5_3__CARRY_MIX * n;
-    const uint64_t logits = at[AI_Z__GLM_5_3__MOE__SCRATCH], signs = at[AI_Z__GLM_5_3__MOE__SIGNS];
+    const uint64_t signs = at[AI_Z__GLM_5_3__MOE__SIGNS];
     const nn__doors* doors = nn__doors_for(ctx);
     if (doors == 0) return sys__engine__abi__error(NN__PRIMITIVES__FAULT_NO_DEVICE);
     if (!ai_z__glm_5_3__rows__zzprivate_pairs(ctx, pairs, n)) return sys__engine__abi__error(NN__PRIMITIVES__FAULT_NO_DEVICE);
@@ -1094,15 +1094,14 @@ static sys__heap_node ai_z__glm_5_3__route_rows__zzabi_apply(const sys__heap_nod
     ai_z__glm_5_3__rows__zzprivate_collapse(doors, over, at, mixes, streams, xin, h, H, M, n, v[AI_Z__GLM_5_3__MOE__ITERS],
                                          r[AI_Z__GLM_5_3__MOE__EPS], r[AI_Z__GLM_5_3__MOE__HC_EPS]);
     doors->hadamard_rotate((uint16_t*)(uintptr_t)hr, (const uint16_t*)(uintptr_t)h, (const uint16_t*)(uintptr_t)signs, n * H, over);
-    for (uint64_t t = 0u; t < n; ++t) {
-        const uint64_t hand = hands + t * hand_bytes;
-        doors->vector_copy((uint16_t*)(uintptr_t)hand, (const uint16_t*)(uintptr_t)(hr + 2u * t * H), H);
-        doors->expert_multiply_fp16((uint16_t*)(uintptr_t)logits, (const uint16_t*)(uintptr_t)at[AI_Z__GLM_5_3__MOE__ROUTER],
-                                    (const uint16_t*)(uintptr_t)(h + 2u * t * H), E, H, over);
-        doors->vector_top_k_biased((uint64_t*)(uintptr_t)(hand + AI_Z__GLM_5_3__HAND_PICKS(H, K)), 1ull, (uint16_t*)(uintptr_t)(hand + 2u * H),
-                                   (const uint16_t*)(uintptr_t)logits, (const uint16_t*)(uintptr_t)at[AI_Z__GLM_5_3__MOE__BIAS], E, K,
-                                   r[AI_Z__GLM_5_3__MOE__SCALE]);
-    }
+    /* every row into its hand, the router over every row, every row's picks — a launch each for the chunk, each row the
+     *   one-row doors' to the bit */
+    doors->vector_copy_rows((uint16_t*)(uintptr_t)hands, hand_bytes / 2u, (const uint16_t*)(uintptr_t)hr, H, H, n);
+    doors->expert_multiply_fp16_rows((uint16_t*)(uintptr_t)logits_rows, (const uint16_t*)(uintptr_t)at[AI_Z__GLM_5_3__MOE__ROUTER],
+                                     (const uint16_t*)(uintptr_t)h, E, H, n, over);
+    doors->vector_top_k_biased_rows((uint64_t*)(uintptr_t)(hands + AI_Z__GLM_5_3__HAND_PICKS(H, K)), 1ull, hand_bytes / 8u,
+                                    (uint16_t*)(uintptr_t)(hands + 2u * H), hand_bytes / 2u, (const uint16_t*)(uintptr_t)logits_rows,
+                                    (const uint16_t*)(uintptr_t)at[AI_Z__GLM_5_3__MOE__BIAS], E, K, r[AI_Z__GLM_5_3__MOE__SCALE], n);
     ai_z__glm_5_3__rows__zzprivate_swiglu(doors, over, at, room, AI_Z__GLM_5_3__MOE__GATE, AI_Z__GLM_5_3__MOE__UP, AI_Z__GLM_5_3__MOE__DOWN,
                                        &v[AI_Z__GLM_5_3__MOE__D], hr, pairs, gu, act, actr, signs, shared, H, I, n, r[AI_Z__GLM_5_3__MOE__LIMIT]);
     const uint64_t f = ai_z__glm_5_3__table__zzpackage_masked(doors, over, argv[1].args[0], AI_Z__GLM_5_3__MOE__MASK, shared, actr, n, H, I,

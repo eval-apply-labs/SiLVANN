@@ -21,8 +21,8 @@ command in `~/.local/bin`: `silvann list`, `silvann download <model>`, `silvann 
 
 `silvann data <folder>` keeps what SiLVANN keeps for you in that folder from then on: SiLVANN on a USB drive, say, with
 its models on the machine's own disk. That is the models (`models/`), the conversations (`user_sessions/`), and beside
-them your skills (`skills/`), the tool's workspace, the folders it was allowed and the definitions it kept
-(`workspace/`, `tools.json`, `tools_library.json`), the Hugging Face token (`.huggingface_token`) and the UI's last start
+them your skills (`skills/`), the tools file (`tools/`), the tool's workspace, the folders it was allowed and the
+definitions it kept (`workspace/`, `tools.json`, `tools_library.json`), the Hugging Face token (`.huggingface_token`) and the UI's last start
 (`ui_last_start.json`). What the old folder holds stays there; the command names what to move across. The `silvann`
 command's `serve`, `ui` and `download` read the folder; the server and the UI started by hand read `SILVANN_DATA`, which
 also comes before it. It installs nothing system-wide and asks for no
@@ -269,14 +269,18 @@ Ask the model for a picture and it calls it. The picture appears in the conversa
 made.
 
 On one card, the text model is put down while the picture is drawn and brought back after, its conversation where it
-was. A free card can draw instead, with `image_card` in the config. How, and what it costs:
+was. A free card can draw instead, or another machine's SiLVANN server running the picture model — the tools file's
+`image` entry ([`tools.md`](tools.md#the-tools-file)). How, and what it costs:
 [`config.md`](config.md#a-picture-from-the-text-model).
 
 ### Skills
 
 A skill gives the model's REPL commands of yours, written in Python or as a program: a folder with a `SKILL.md` that
-declares them, in `skills/` beside the conversations (`/data/skills` in a container built from `docker/`). The release ships `files`:
-`(find "folder" "pattern")`. `(skills)` lists them. **How to write one, step by step, and how values cross between Lisp
+declares them, in `skills/` beside the conversations (`/data/skills` in a container built from `docker/`). The release ships `files`,
+`(find "folder" "pattern")`, and `search`, `(search "query")` through a SearXNG or a search API's key. `(skills)` lists
+them. What each needs on this machine is set up in the tools file ([`tools.md`](tools.md#the-tools-file)). The model
+can add tools of its own: it writes one in its workspace and `(add_tool …)` installs it, where the tools file allows it
+([`tools.md`](tools.md#a-tool-in-one-file-added-from-the-repl)). **How to write one, step by step, and how values cross between Lisp
 and Python: [`tools.md`](tools.md).**
 
 ### A picture model: Qwen-Image 2.1

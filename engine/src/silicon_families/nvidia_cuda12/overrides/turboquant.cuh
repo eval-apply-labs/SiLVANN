@@ -22,10 +22,13 @@
  *   · the columns in `expert.cuh`'s order, widened: a slice is 256 columns at 4 bits and 128 at 8, and lane `t` of four
  *     takes its quarter of them in one run, four columns a step, both operands alike
  *   · a tile's codes loaded two slices ahead of its products; the sum in fp32, rounded once, as nn's
+ *   · a matrix of few tiles has its columns split between `split` warps of a block, each a run of whole slices, their
+ *     sums added in shared memory in the warps' order — so a short matrix keeps the card's warps busy
  * Covers 4 and 8 bits over whole slices, codes and `x` on sixteen bytes; anything else is nn's door. The products are
- * nn's and the order they are summed in is not.
- * ⛳ THE ONE BARRIER: the block waits once, after staging nn's levels and before its first row — the category of
- *   amd_rocm6_wave64's row kernels (`groups_rows`, `scripts/claim_rules/no_rendezvous.py`). */
+ * nn's and the order they are summed in is not; it is a function of the shapes and the card, the same every call.
+ * ⛳ THE BARRIERS: the block waits once after staging nn's levels, and where the columns are split, once before a tile's
+ *   parts are added and once after — the category of amd_rocm6_wave64's row kernels (`groups_rows`,
+ *   `scripts/claim_rules/no_rendezvous.py`); each is a block-wide pass every warp reaches. */
 #define NVIDIA_CUDA12__ZZPRIVATE_GEMV_WARPS 8u
 #define NVIDIA_CUDA12__ZZPRIVATE_GEMV_BOUNDS __launch_bounds__(256)
 
@@ -33,13 +36,14 @@ typedef struct nvidia_cuda12__gemv_job {
     uint64_t codes[NN__TURBOQUANT__GROUPS_MAX], luts[NN__TURBOQUANT__GROUPS_MAX], rows[NN__TURBOQUANT__GROUPS_MAX];
     uint64_t d[NN__TURBOQUANT__GROUPS_MAX], out_at[NN__TURBOQUANT__GROUPS_MAX], first[NN__TURBOQUANT__GROUPS_MAX + 1];
     uint64_t count, cols, sum;                      /* `sum`: each matrix over its own `x`, weighted onto `residual` */
+    uint64_t split;                                 /* warps a tile's columns are split between; 1 in a sum */
     uint16_t* out; const uint16_t* x; const uint16_t* w; const uint16_t* residual; unsigned int* over;
 } nvidia_cuda12__gemv_job;
 
 /* One lane's 32 bytes of a row's codes at byte `at` — two 16-byte loads; zeros for a row past the matrix (`row` null). */
 static __device__ __forceinline__ void nvidia_cuda12__zzprivate_codes32(const uint8_t* row, uint64_t at, uint32_t c[2][8], uint32_t r) {
     if (!row) { for (uint32_t i = 0u; i < 8u; ++i) c[r][i] = 0u; return; }
-    const uint4 a = ((const uint4*)(const void*)(row + at))[0], b = ((const uint4*)(const void*)(row + at))[1];
+    const uint4 a = __ldcs((const uint4*)(const void*)(row + at)), b = __ldcs((const uint4*)(const void*)(row + at) + 1);
     c[r][0] = a.x; c[r][1] = a.y; c[r][2] = a.z; c[r][3] = a.w; c[r][4] = b.x; c[r][5] = b.y; c[r][6] = b.z; c[r][7] = b.w;
 }
 
@@ -49,17 +53,23 @@ static __device__ __forceinline__ float nvidia_cuda12__zzprivate_scale(const uin
 }
 
 /* Where a tile's walk is: matrix `m`, its slice from column `k`, and the rows' codes there. A slice is `64 · U` columns,
- * U = 4 at 4 bits and 2 at 8, and lane `t` of four takes its columns `16U · t ..` — 32 bytes of each row's codes. */
+ * U = 4 at 4 bits and 2 at 8, and lane `t` of four takes its columns `16U · t ..` — 32 bytes of each row's codes. A walk
+ * runs until it reaches `stop`. */
 typedef struct nvidia_cuda12__gemv_walk { uint64_t m, k; } nvidia_cuda12__gemv_walk;
 static __device__ __forceinline__ uint64_t nvidia_cuda12__zzprivate_slice(uint64_t d) { return d == 4u ? 256u : 128u; }
-/* The codes of rows `g` and `g + 8` of tile `r0` at `w`, or zeros once the walk is past its last matrix `end`. */
+static __device__ __forceinline__ bool nvidia_cuda12__zzprivate_before(nvidia_cuda12__gemv_walk w, nvidia_cuda12__gemv_walk stop) {
+    return w.m < stop.m || (w.m == stop.m && w.k < stop.k);
+}
+/* The codes of rows `g` and `g + 8` of tile `r0` at `w`, or zeros once the walk has reached `stop`. */
 static __device__ __forceinline__ void nvidia_cuda12__zzprivate_fetch(const nvidia_cuda12__gemv_job* j, nvidia_cuda12__gemv_walk w,
-                                                                       uint64_t end, uint64_t r0, uint32_t g, uint32_t t, uint32_t c[2][8]) {
-    const uint64_t m = w.m < end ? w.m : end - 1u, D = j->d[m], row_bytes = j->cols * D / 8u;
+                                                                       nvidia_cuda12__gemv_walk stop, uint64_t r0, uint32_t g, uint32_t t,
+                                                                       uint32_t c[2][8]) {
+    const bool on = nvidia_cuda12__zzprivate_before(w, stop);
+    const uint64_t m = w.m < j->count ? w.m : j->count - 1u, D = j->d[m], row_bytes = j->cols * D / 8u;
     const uint8_t* codes = (const uint8_t*)(uintptr_t)j->codes[m];
     const uint64_t at = w.k * D / 8u + 32u * t;
-    nvidia_cuda12__zzprivate_codes32(w.m < end && r0 + g < j->rows[m] ? codes + (r0 + g) * row_bytes : 0, at, c, 0u);
-    nvidia_cuda12__zzprivate_codes32(w.m < end && r0 + g + 8u < j->rows[m] ? codes + (r0 + g + 8u) * row_bytes : 0, at, c, 1u);
+    nvidia_cuda12__zzprivate_codes32(on && r0 + g < j->rows[m] ? codes + (r0 + g) * row_bytes : 0, at, c, 0u);
+    nvidia_cuda12__zzprivate_codes32(on && r0 + g + 8u < j->rows[m] ? codes + (r0 + g + 8u) * row_bytes : 0, at, c, 1u);
 }
 static __device__ __forceinline__ void nvidia_cuda12__zzprivate_advance(const nvidia_cuda12__gemv_job* j, nvidia_cuda12__gemv_walk* w) {
     w->k += nvidia_cuda12__zzprivate_slice(j->d[w->m]);
@@ -96,50 +106,66 @@ static __device__ __forceinline__ void nvidia_cuda12__zzprivate_slice_mma(const 
     }
 }
 
-/* The body: nn's levels staged once, then each warp its tiles of 16 rows — a matrix's, into its own outputs, or every
- * matrix's at those rows, weighted into one sum onto the residual. A tile walks its matrices' slices in one sequence and
- * loads each slice's codes two slices ahead of its products, across a matrix's end as within one: a downs' sum of short
- * matrices keeps as many bytes in flight as one long matrix. */
+/* The body: each warp its tiles of 16 rows — a matrix's, into its own outputs, or every matrix's at those rows, weighted
+ * into one sum onto the residual — or its part of a tile's columns, `split` warps a tile. A tile walks its slices in one
+ * sequence and loads each slice's codes two slices ahead of its products, across a matrix's end as within one: a downs'
+ * sum of short matrices keeps as many bytes in flight as one long matrix. A block's first codes are asked for before nn's
+ * levels are staged, so the staging waits under their load. */
 static __device__ __forceinline__ void nvidia_cuda12__zzprivate_groups_rows(const nvidia_cuda12__gemv_job* j) {
     __shared__ uint32_t pair4[256];
     __shared__ uint16_t lev8[256];
+    __shared__ float parts[NVIDIA_CUDA12__ZZPRIVATE_GEMV_WARPS][16];
     const uint32_t lane = (uint32_t)nn__silicon__lane(), lanes = (uint32_t)nn__silicon__lanes();
-    for (uint32_t e = lane; e < 256u; e += lanes) {
-        const uint16_t* lev4 = nn__turboquant__zzabi_levels(4u);
-        pair4[e] = (uint32_t)lev4[e & 15u] | ((uint32_t)lev4[e >> 4] << 16);
-        lev8[e] = nn__turboquant__zzabi_levels(8u)[e];
-    }
-    __syncthreads();
     const uint32_t l = lane % NVIDIA_CUDA12__ZZPACKAGE_WARP, g = l / 4u, t = l % 4u, warps = lanes / NVIDIA_CUDA12__ZZPACKAGE_WARP;
-    for (uint64_t it = (uint64_t)nn__silicon__block() * warps + lane / NVIDIA_CUDA12__ZZPACKAGE_WARP;
-         it < j->first[j->count]; it += (uint64_t)nn__silicon__blocks() * warps) {
+    const uint32_t warp = lane / NVIDIA_CUDA12__ZZPACKAGE_WARP, S = (uint32_t)j->split, per = warps / S, p = warp % S;
+    const uint64_t tiles = j->first[j->count];
+    bool staged = false;
+    for (uint64_t base = (uint64_t)nn__silicon__block() * per; base < tiles; base += (uint64_t)nn__silicon__blocks() * per) {
+        const uint64_t it = base + warp / S;
+        const bool live = it < tiles;
         uint64_t i = 0u;
-        while (it >= j->first[i + 1u]) ++i;
-        const uint64_t r0 = (it - j->first[i]) * 16u, begin = j->sum ? 0u : i, end = j->sum ? j->count : i + 1u;
+        while (live && it >= j->first[i + 1u]) ++i;
+        const uint64_t r0 = live ? (it - j->first[i]) * 16u : 0u;
+        nvidia_cuda12__gemv_walk now = { 0u, 0u }, stop = { 0u, 0u };
+        if (live && j->sum) stop.m = j->count;
+        else if (live) {                                   /* part `p` of the matrix's slices */
+            /* in shifts: a slice is 2^7 or 2^8 columns and the split a power of two */
+            const uint32_t ls = j->d[i] == 4u ? 8u : 7u, lS = (uint32_t)__ffs((int)S) - 1u;
+            const uint32_t n = (uint32_t)(j->cols >> ls);
+            now.m = i; now.k = (uint64_t)((n * p) >> lS) << ls;
+            const uint64_t k1 = (uint64_t)((n * (p + 1u)) >> lS) << ls;
+            if (k1 < j->cols) { stop.m = i; stop.k = k1; } else stop.m = i + 1u;
+        }
         float acc[4] = { 0.0f, 0.0f, 0.0f, 0.0f }, part[2] = { 0.0f, 0.0f };
         uint32_t c0[2][8], c1[2][8], c2[2][8];
-        nvidia_cuda12__gemv_walk now = { begin, 0u }, ahead = now;
-        nvidia_cuda12__zzprivate_fetch(j, ahead, end, r0, g, t, c0);
-        nvidia_cuda12__zzprivate_advance(j, &ahead);
-        nvidia_cuda12__zzprivate_fetch(j, ahead, end, r0, g, t, c1);
-        if (ahead.m < end) nvidia_cuda12__zzprivate_advance(j, &ahead);
-        while (now.m < end) {
-            nvidia_cuda12__zzprivate_fetch(j, ahead, end, r0, g, t, c2);
-            if (ahead.m < end) nvidia_cuda12__zzprivate_advance(j, &ahead);
+        nvidia_cuda12__gemv_walk ahead = now;
+        nvidia_cuda12__zzprivate_fetch(j, ahead, stop, r0, g, t, c0);
+        if (nvidia_cuda12__zzprivate_before(ahead, stop)) nvidia_cuda12__zzprivate_advance(j, &ahead);
+        nvidia_cuda12__zzprivate_fetch(j, ahead, stop, r0, g, t, c1);
+        if (nvidia_cuda12__zzprivate_before(ahead, stop)) nvidia_cuda12__zzprivate_advance(j, &ahead);
+        if (!staged) {
+            for (uint32_t e = lane; e < 256u; e += lanes) {
+                const uint16_t* lev4 = nn__turboquant__zzabi_levels(4u);
+                pair4[e] = (uint32_t)lev4[e & 15u] | ((uint32_t)lev4[e >> 4] << 16);
+                lev8[e] = nn__turboquant__zzabi_levels(8u)[e];
+            }
+            __syncthreads();
+            staged = true;
+        }
+        while (nvidia_cuda12__zzprivate_before(now, stop)) {
+            nvidia_cuda12__zzprivate_fetch(j, ahead, stop, r0, g, t, c2);
+            if (nvidia_cuda12__zzprivate_before(ahead, stop)) nvidia_cuda12__zzprivate_advance(j, &ahead);
             const uint64_t m = now.m;
             const uint16_t* xm = (j->sum ? j->x + m * j->cols : j->x) + now.k;
             if (j->d[m] == 4u) nvidia_cuda12__zzprivate_slice_mma(4u, c0, xm, t, pair4, lev8, acc);
             else               nvidia_cuda12__zzprivate_slice_mma(8u, c0, xm, t, pair4, lev8, acc);
             nvidia_cuda12__zzprivate_advance(j, &now);
-            if (now.m != m) {                                  /* the matrix is done: its rows' answers */
+            if (j->sum && now.m != m) {                        /* a matrix of the sum is done: its share */
                 const uint8_t* lut = (const uint8_t*)(uintptr_t)j->luts[m];
 #pragma unroll
                 for (uint32_t h = 0u; h < 2u; ++h) {
                     const uint64_t r = r0 + g + 8u * h;
-                    if (r >= j->rows[m] || t != 0u) continue;
-                    const float dot = acc[2u * h], scale = nvidia_cuda12__zzprivate_scale(lut, r);
-                    if (j->sum) part[h] += dot * scale * nn__silicon__half_to_float(j->w[j->out_at[m]]);
-                    else        j->out[j->out_at[m] + r] = nn__kernels__zzabi_to_half(dot * scale, j->over);
+                    if (r < j->rows[m] && t == 0u) part[h] += acc[2u * h] * nvidia_cuda12__zzprivate_scale(lut, r) * nn__silicon__half_to_float(j->w[j->out_at[m]]);
                 }
                 acc[0] = acc[1] = acc[2] = acc[3] = 0.0f;
             }
@@ -148,43 +174,79 @@ static __device__ __forceinline__ void nvidia_cuda12__zzprivate_groups_rows(cons
 #pragma unroll
                 for (uint32_t q = 0u; q < 8u; ++q) { c0[r][q] = c1[r][q]; c1[r][q] = c2[r][q]; }
         }
-        if (j->sum && t == 0u)
+        if (j->sum) {
+            if (live && t == 0u)
+#pragma unroll
+                for (uint32_t h = 0u; h < 2u; ++h) {
+                    const uint64_t r = r0 + g + 8u * h;
+                    if (r < j->rows[0]) j->out[r] = nn__kernels__zzabi_to_half(nn__silicon__half_to_float(j->residual[r]) + part[h], j->over);
+                }
+            continue;
+        }
+        if (S > 1u) {                                      /* the tile's parts, added in the warps' order */
+            if (t == 0u) { parts[warp][g] = acc[0]; parts[warp][g + 8u] = acc[2]; }
+            __syncthreads();
+            if (p == 0u && t == 0u)
+                for (uint32_t h = 0u; h < 2u; ++h) {
+                    float dot = parts[warp][g + 8u * h];
+                    for (uint32_t q = 1u; q < S; ++q) dot += parts[warp + q][g + 8u * h];
+                    acc[2u * h] = dot;
+                }
+            __syncthreads();
+        }
+        if (live && p == 0u && t == 0u) {                  /* the tile's rows' answers */
+            const uint8_t* lut = (const uint8_t*)(uintptr_t)j->luts[i];
 #pragma unroll
             for (uint32_t h = 0u; h < 2u; ++h) {
                 const uint64_t r = r0 + g + 8u * h;
-                if (r < j->rows[0]) j->out[r] = nn__kernels__zzabi_to_half(nn__silicon__half_to_float(j->residual[r]) + part[h], j->over);
+                if (r < j->rows[i]) j->out[j->out_at[i] + r] = nn__kernels__zzabi_to_half(acc[2u * h] * nvidia_cuda12__zzprivate_scale(lut, r), j->over);
             }
+        }
     }
 }
 static __global__ NVIDIA_CUDA12__ZZPRIVATE_GEMV_BOUNDS void nvidia_cuda12__zzprivate_gemv(nvidia_cuda12__gemv_job j) {
     nvidia_cuda12__zzprivate_groups_rows(&j);
 }
 
-/* ⛳ WARPS A BLOCK FROM THE CARD: eight unless the tiles are too few to spread. A matrix of few long rows — the 27B's MLP
- *   down, 5,120 rows of 17,408 columns — is 320 tiles, 40 blocks of eight on a card of 36 SMs: four SMs ran two blocks
- *   and the launch lasted as long as they did (`MEASURED`: 279 GB/s against the gate + up's 373, 272 blocks). So a
- *   block's warps halve while the blocks would be fewer than four an SM, down to one; each warp still takes its 16 rows
- *   the same way, so the answer is the same bytes. The SM count is the bound card's, asked once a card. */
-static inline uint32_t nvidia_cuda12__zzprivate_gemv_warps(uint64_t tiles) {
-    static int sms[64];
+/* The bound card's SM count and the kernel's warps resident on one, asked once a card; 0 where they cannot be asked. */
+static inline uint64_t nvidia_cuda12__zzprivate_gemv_sms(uint64_t* resident) {
+    static int sms[64], blocks[64];
     int d = 0;
-    if (cudaGetDevice(&d) != cudaSuccess || d < 0 || d >= 64) return NVIDIA_CUDA12__ZZPRIVATE_GEMV_WARPS;
+    *resident = 0u;
+    if (cudaGetDevice(&d) != cudaSuccess || d < 0 || d >= 64) return 0u;
     if (sms[d] == 0 && cudaDeviceGetAttribute(&sms[d], cudaDevAttrMultiProcessorCount, d) != cudaSuccess) sms[d] = 0;
-    uint32_t warps = NVIDIA_CUDA12__ZZPRIVATE_GEMV_WARPS;
-    while (warps > 1u && (tiles + warps - 1u) / warps < 4u * (uint64_t)(sms[d] > 0 ? sms[d] : 0)) warps /= 2u;
-    return warps;
+    if (blocks[d] == 0 && cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blocks[d], nvidia_cuda12__zzprivate_gemv,
+                              NVIDIA_CUDA12__ZZPRIVATE_GEMV_WARPS * NVIDIA_CUDA12__ZZPACKAGE_WARP, 0) != cudaSuccess) blocks[d] = 0;
+    *resident = blocks[d] > 0 ? (uint64_t)blocks[d] * NVIDIA_CUDA12__ZZPRIVATE_GEMV_WARPS : 0u;
+    return sms[d] > 0 ? (uint64_t)sms[d] : 0u;
 }
 
 /* A job each matrix checked as nn's body would — 4 or 8 bits, whole slices, codes and `x` on sixteen bytes, the rows the
  * room holds — and launched; false, and nothing launched, when one does not fit. In a sum every matrix has the sum's
- * rows, so its tiles are those rows' and each tile walks every matrix. */
+ * rows, so its tiles are those rows' and each tile walks every matrix.
+ * ⛳ THE SPLIT AND THE WARPS A BLOCK FROM THE CARD. A matrix of 3,072 rows is 192 tiles, 5 warps an SM of the 5060 Ti's
+ *   36: each walks every column alone, and the card idles between their loads (`MEASURED`, Nsight Compute, 2026-10-25:
+ *   0.3 warps ready a scheduler; the 122B's shared expert down at 4 bits 34% of the DRAM peak) — and a matrix of 1,284
+ *   tiles is 2.2 waves of the warps resident at once, its last wave a quarter full. So outside a sum a tile's columns
+ *   are split between up to eight warps, each part at least a slice, while doubling the parts fills their waves more
+ *   than a tenth better — a wave the warps resident on every SM at once, from the runtime's occupancy at the kernel's
+ *   registers, so the split follows the card it runs on — and within one wave in two at most: there more parts only
+ *   shorten each warp's walk (`MEASURED`, Nsight Compute: the 122B's shared expert at 128 and 192 tiles fastest in
+ *   two, four 4-30% slower). Then a block's warps halve while the blocks
+ *   would be fewer than four an SM, down to the split: a matrix of few long rows — the 27B's MLP down, 5,120 rows of
+ *   17,408 columns — is 320 tiles, 40 blocks of eight on a card of 36 SMs, and four SMs ran two blocks and the launch
+ *   lasted as long as they did (`MEASURED`: 279 GB/s against the gate + up's 373, 272 blocks). A tile's split and so
+ *   its answer's bytes follow the shapes and the card, never the call. */
 static inline bool nvidia_cuda12__zzprivate_gemvs(nvidia_cuda12__gemv_job* j) {
     if (j->count == 0u || j->count > NN__TURBOQUANT__GROUPS_MAX || j->cols == 0u || ((uint64_t)(uintptr_t)j->x) % 16u != 0u)
         return false;
+    uint64_t fewest = ~0ull;                               /* the fewest slices a row of any matrix */
     for (uint64_t i = 0u; i < j->count; ++i) {
         const uint64_t D = j->d[i];
         if ((D != 4u && D != 8u) || j->cols % (D == 4u ? 256u : 128u) != 0u || ((uint64_t)(uintptr_t)j->codes[i]) % 16u != 0u) return false;
         if (j->sum && j->rows[i] != j->rows[0]) return false;
+        const uint64_t n = j->cols / (D == 4u ? 256u : 128u);
+        if (n < fewest) fewest = n;
     }
     j->first[0] = 0u;
     if (j->sum) {
@@ -195,8 +257,22 @@ static inline bool nvidia_cuda12__zzprivate_gemvs(nvidia_cuda12__gemv_job* j) {
     }
     const uint64_t tiles = j->first[j->count];
     if (tiles == 0u) return true;
-    const uint32_t warps = nvidia_cuda12__zzprivate_gemv_warps(tiles);
-    const uint64_t want = (tiles + warps - 1u) / warps;
+    uint64_t resident = 0u;
+    const uint64_t sms = nvidia_cuda12__zzprivate_gemv_sms(&resident);
+    uint32_t split = 1u;
+    const uint64_t wave = resident * sms;
+    while (!j->sum && wave != 0u && split < NVIDIA_CUDA12__ZZPRIVATE_GEMV_WARPS && 2u * split <= fewest) {
+        /* the waves' fill, parts over the room their waves have: `now / (waves(now) · wave)`, against the doubled */
+        const uint64_t now = tiles * split, next = 2u * now;
+        const uint64_t waves = (now + wave - 1u) / wave, waves2 = (next + wave - 1u) / wave;
+        if (10u * next * waves <= 11u * now * waves2) break;           /* less than a tenth better */
+        if (split >= 2u && next <= wave) break;                        /* within one wave, two parts at most */
+        split *= 2u;
+    }
+    uint32_t warps = NVIDIA_CUDA12__ZZPRIVATE_GEMV_WARPS;
+    while (warps > split && (tiles * split + warps - 1u) / warps < 4u * sms) warps /= 2u;
+    j->split = split;
+    const uint64_t per = warps / split, want = (tiles + per - 1u) / per;
     const uint32_t blocks = want < 0x7FFFFFFFull ? (uint32_t)want : 0x7FFFFFFFu;
     void* args[] = { j };
     const size_t sizes[] = { sizeof *j };

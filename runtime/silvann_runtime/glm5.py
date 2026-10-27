@@ -55,9 +55,10 @@ class Glm5(Generates):
     SAMPLES_ON_CARD = True          # `head_sample` — ▶ `sampling`
 
     def __init__(self, folder, machine, max_context=2048, layers=None, grid=True, fused=True, sockets=None, experts_int8=True,
-                 experts_lock=False, experts_from="auto", experts_dir=None, chunk=256, experts_ram_gb=None, card_experts_gb=0, card_hot=None,
+                 experts_lock=False, experts_register="auto", experts_from="auto", experts_dir=None, chunk=256, experts_ram_gb=None, card_experts_gb=0, card_hot=None,
                  card_landing="auto", card_line=None, card_exclusive=False, card_free=16, card_duplex_line=1200, card_duplex=None, card_landing_line=3,
                  lend_cache=True, picture_pixels=1 << 22, mtp=False, mtp_hidden="hn", tensor_parallel=1, card_shared="auto", card_visit_first=False,
+                 stream=False, embed_on="auto",
                  ):
         if folder.architecture not in ARCHITECTURES:
             raise Refused("%s is a %r model, not one of %s" % (folder.path, folder.architecture, ARCHITECTURES))
@@ -220,6 +221,11 @@ class Glm5(Generates):
         #   tier is lent none: what it gives back is RAM, sized at boot, and an expert withheld from it would have no RAM
         #   slot to go to. `lend_cache` false keeps the tier to its own run
         self.LEND_ON = bool(lend_cache)
+        # `stream`: a prompt read layer-major, its experts streamed onto the card through a ring (NN-115 ② ③, ▶ qwen3_5.py's,
+        #   `_prefill_streamed`) — a slice SLICE_CHUNKS chunks of rows: eight with `true`, or as many as a number of rows
+        #   needs, each expert then crossing once for that many positions
+        self.STREAM_ON, self.STREAM_CH = bool(stream), max(1, min(chunk, max_context)) if fused else 0
+        self.SLICE_CHUNKS = 8 if stream is True or not self.STREAM_CH else max(1, -(-int(stream) // self.STREAM_CH))
         if self.CARD_EXCLUSIVE and not self.CARD_GB:
             raise Refused("an exclusive tier needs a card tier — card_experts_gb")
         if self.CARD_GB and not fused:
@@ -240,6 +246,14 @@ class Glm5(Generates):
         #   unfused layer, nn's words a layer, is composed here (`_composed_procedures`), for the router's log
         self.SOURCE = fused
         self.CPUS = [dict(w=self.P + i, dev=(1 + i) if sockets > 1 else 0, part=i) for i in range(sockets)]
+        # ⭐ THE EMBEDDING ON THE CPU (as Qwen's, ▶ qwen3_5.py): the first socket keeps the table in its RAM and decodes a
+        #   token's row, which the card copies across and un-rotates — where the card's family keeps mapped RAM as a copy on
+        #   the card (khronos_opencl1_igpu), so the table neither takes the card's room nor crosses whole each token.
+        if embed_on not in ("auto", "card", "cpu"):
+            raise Refused("embed_on is 'auto', 'card' or 'cpu', not %r" % (embed_on,))
+        if embed_on == "cpu" and self.P > 1:
+            raise Refused("embed_on 'cpu' is one card's: a group's card 0 reads the table in place")
+        self.EMBED_CPU = embed_on == "cpu" or (embed_on == "auto" and self.P == 1 and machine.silicon == "khronos_opencl1_igpu")
         self._plan()
         self.EXPERTS_FROM = experts_file.choose(experts_from, self.cpu_arena, video_ram(folder.config))
         # `experts_lock`: the sockets' experts in RAM locked there, so the system cannot swap them out (▶ `experts_file.lock_check`)
@@ -247,6 +261,17 @@ class Glm5(Generates):
         if self.EPLAN is not None:
             experts_file.lock_check(self.EXPERTS_LOCK, self.EXPERTS_FROM, self.EPLAN.slot_bytes * self.EXPERTS * self.PARTS
                                     * sum(1 for l in self.run_layers if self.moe[l]))
+        # `experts_register`: the sockets' experts in RAM registered with the tier's cards, a promotion copied straight from
+        #   where it lies (▶ `experts_file.register_of`: NVIDIA's cards) — "auto" on one socket only: an expert split
+        #   between sockets is stitched a down row a piece, past nn's NN__EXPERT__IN_PLACE_PIECES, and staged however it
+        #   is registered.
+        #   `MEASURED` node03 2026-10-26 (measurements/2026-10-26_v0200_r730_rows_node03.md): two sockets, 142 GB
+        #   registered, 0 of 7,461 promotions in place — and at 150 GB with a 17.75 GB tier the load took 1,036 s against
+        #   251 s unregistered, registering nothing in the end
+        register = False if experts_register == "auto" and self.PARTS > 1 else experts_register
+        self.EXPERTS_REGISTER, self.REGISTERED_GB = experts_file.register_of(register, self.EXPERTS_FROM, self.CARD_GB,
+                                                                             machine.silicon), 0.0
+        self.REGISTER_REQUIRED = experts_register is True
         if self.CARD_EXCLUSIVE and self.EXPERTS_FROM != "ram":
             raise Refused("an exclusive tier moves experts between the card and the sockets' memory — experts_from 'ram', "
                           "not %r" % self.EXPERTS_FROM)
@@ -403,6 +428,7 @@ class Glm5(Generates):
         self.cpu_arena = self.EPLAN.slot_bytes * self.EXPERTS * len(moe) * self.PARTS if moe else 0
         # the card's tier: whole experts — every inner row, every down column — a slot each, a collection after the KV's
         self.CPLAN, self.T_CEXP, self.CARD_SLOTS = None, None, 0
+        self.T_STREAM, self.T_SLICE, self.SLICE = None, None, None
         if self.CARD_GB and moe:
             self.CPLAN = NL.SlotPlan(2 * self.MINTER * g.row_bytes, 2 * self.MINTER * 2, dn.rows * dn.row_bytes, dn.rows * 2)
             self.T_CEXP = self.T_KV + 1
@@ -411,6 +437,26 @@ class Glm5(Generates):
             if self.CARD_SLOTS < len(moe):
                 raise Refused("%.1f GB holds %d experts, fewer than one a MoE layer" % (self.CARD_GB, self.CARD_SLOTS))
             self.collections.append((self.T_CEXP, self.CPLAN, self.CARD_SLOTS))
+            # ⭐ THE RING AND THE SLICE A PROMPT IS STREAMED AND READ LAYER-MAJOR THROUGH (NN-115 ② ③, ▶ qwen3_5.py's): the
+            #   ring two of the largest batch of whole experts; the slice SLICE_CHUNKS chunks held on the card from one layer to
+            #   the next — its rows' streams, hands, carries and routed rows, and the experts' scratch over all its rows
+            #   — on every card of a group, each streaming its share of a layer's experts over its own link (NN-115 ④)
+            if self.STREAM_ON:
+                if self.CARD_EXCLUSIVE or not self.STREAM_CH:
+                    raise Refused("stream takes an inclusive tier, the layers fused")
+                self.T_STREAM, self.T_SLICE = self.T_CEXP + 1, self.T_CEXP + 2
+                self.collections.append((self.T_STREAM, self.CPLAN, 2 * expert_tier.STREAM_BATCH_MAX))
+                S = self.SLICE_CHUNKS * self.STREAM_CH
+                P, H, I = S * self.TOPK, self.H, self.MINTER
+                parts = [("srows", S * self.MULT * H * 2), ("hands", S * self.HAND), ("carries", S * (256 + 2 * H)),
+                         ("rrows", S * H * 2),
+                         ("scratch", 2 * S * H + 16 * P + 2 * P + 4 * P * I + 2 * P * I + 2 * P * I + 4 * P * H + 4096)]
+                self.SLICE, at = dict(rows=S), 0
+                for name, size in parts:
+                    self.SLICE[name] = (at, size)
+                    at = (at + size + 4095) // 4096 * 4096
+                self.collections.append((self.T_SLICE, NL.SlotPlan(at, 0, 0, 256), 1))
+                self.arena += self.CPLAN.slot_bytes * 2 * expert_tier.STREAM_BATCH_MAX + self.collections[-1][1].slot_bytes
             # exclusive: each MoE layer's even share of all but the landing slots held on the card, and not in RAM
             self.CARD_PER, self.CARD_SLICE, self.RAM_PER = 0, 0, self.EXPERTS
             if self.CARD_EXCLUSIVE:
@@ -490,9 +536,10 @@ class Glm5(Generates):
         if self.LEND:                                  # the links for the slots the tier may be lent (▶ nn's `__lendable`)
             card += "nn__expert__type%d__lendable:%d\n" % (self.T_CEXP, self.LEND["regions"] * self.LEND["most"])
         # the embedding table's RAM class — ⛳ with the other two RAM classes, which nn takes all or none of
-        card += ("nn__ram_buffer_result__size_bytes:64\nnn__ram_buffer_result__qty:1\n"
-                 "nn__ram_buffer_experts__size_bytes:64\nnn__ram_buffer_experts__qty:1\n"
-                 "nn__ram_buffer_table__size_bytes:%d\nnn__ram_buffer_table__qty:1\n" % self.TABLE_BYTES)
+        ram = ("nn__ram_buffer_result__size_bytes:64\nnn__ram_buffer_result__qty:1\n"
+               "nn__ram_buffer_experts__size_bytes:64\nnn__ram_buffer_experts__qty:1\n"
+               "nn__ram_buffer_table__size_bytes:%d\nnn__ram_buffer_table__qty:1\n" % self.TABLE_BYTES)
+        card += ram.replace("size_bytes:%d\n" % self.TABLE_BYTES, "size_bytes:256\n") if self.EMBED_CPU else ram
         # ⛳ a section with no collection is refused, so a run with no MoE layer gives the CPU one of a single slot
         out = {CARD: card}
         # a group's other cards: the same collections and classes, and no embedding to hold
@@ -512,6 +559,8 @@ class Glm5(Generates):
                 cbig, cbigs = max(cbig, self.MASK_ASK[c["w"]]), cbigs + 1
             out[c["w"]] = self._section(cbig, self.EPLAN.slot_bytes * slots if self.EPLAN else 0, experts,
                                         kinds, many=16, bigs=cbigs, mains=2 + (3 if self.CH else 0))
+            if self.EMBED_CPU and c is self.CPUS[0]:   # the embedding's table, the first socket's (▶ `__init__`)
+                out[c["w"]] += ram
         return out
 
     def _work_bytes(self):
@@ -520,14 +569,19 @@ class Glm5(Generates):
         n, H, KW, KD, KH = self.CH, self.H, self.KW, self.KD, self.KH
         QR, LAT, QH = self.QR, self.LAT, self.QH
         common = 24 * n + 256 * n + 3 * 2 * n * H
-        kda = common + 2 * n * (3 * KW + 2 * KD + KH) + 2 * n * 3 * KW + 2 * 2 * n * KD + 4 * 2 * n * KW
+        kda = common + 2 * n * (3 * KW + 2 * KD + KH) + 2 * n * 3 * KW + 2 * 2 * n * KD + 4 * 2 * n * KW + 4 * n * KW
         # ⛳ and a block of the rows that attend every position before them: its absorbed queries, its answers in the latent,
         #   and its scores over at most the indexer's `topk` positions and a pool — ▶ AI_Z__GLM_5_3__MLA__ROWS_BLOCK
         blk, span = min(32, n), min(self.max_context, self.ITOPK + self.KP)
         mla = (common + 2 * n * (QR + LAT) + 2 * 2 * n * QR + 2 * n * LAT + 2 * n * QH * self.NOPE + 2 * 2 * n * QH * self.VD
                + 2 * n * (self.IH * self.ID + 2 * self.ID + self.IH) + 2 * 2 * blk * QH * LAT + 4 * blk * QH * span)
+        # ⛳ and a block of the rows past the indexer's `topk`, chosen and attended at once: each row's pools' scores, its
+        #   positions and their count, its latents gathered and its scores over them — ▶ ai_z__glm_5_3's `mla_rows`
+        most = self.ITOPK + self.KP
+        mla += (4 * blk * (self.max_context // self.KP + 2) + 4 * blk * most + 4 * blk + 2 * blk * most * LAT
+                + 4 * blk * QH * most)
         mlp = common + 2 * n * 2 * self.INTER + 2 * 2 * n * self.INTER
-        route = 24 * n + 3 * 2 * n * H + 2 * n * 2 * self.MINTER + 2 * 2 * n * self.MINTER
+        route = 24 * n + 3 * 2 * n * H + 2 * n * 2 * self.MINTER + 2 * 2 * n * self.MINTER + 2 * n * self.EXPERTS
         return max(kda, mla, mlp, route) + 32 * 256
 
     # ── ② the load ───────────────────────────────────────────────────────────────────────────────────────────
@@ -625,9 +679,13 @@ class Glm5(Generates):
         m = self.m
         loader.layer_width(0, self.T_HEAD, 1)
         self.HEAD_AT = loader.load_bytes(self.HPLAN, self.T_HEAD, 0, self.head_data, self.head_lut)
-        self.EMB_AT = m.buffer(self.TABLE_BYTES, "EMBEDDING", ram=True)
+        if self.EMBED_CPU:                          # the first socket's own (▶ `__init__`)
+            m.act_as(self.CPUS[0]["w"])
+        self.EMB_AT = m.buffer(self.TABLE_BYTES, self.cn(0, "embedding") if self.EMBED_CPU else "EMBEDDING", ram=True)
         m.write(self.EMB_AT, self.emb_data)
         m.write(self.EMB_AT + self.EMB_DATA_BYTES, self.emb_lut)
+        if self.EMBED_CPU:
+            m.act_as(CARD)
         for name in ("lm_head.weight", "model.language_model.embed_tokens.weight"):
             del self.global_[name]
         self.head_rec = self.emb_rec = None
@@ -726,6 +784,11 @@ class Glm5(Generates):
         moe = [l for l in self.run_layers if self.moe[l]]
         for l in moe:
             loader.layer_width(l, self.T_CEXP, self.EXPERTS)
+            if self.T_STREAM is not None:               # ...and the ring's, which every MoE layer streams through
+                loader.layer_width(l, self.T_STREAM, self.EXPERTS)
+        if self.T_SLICE is not None:                    # the slice a prompt is read layer-major in, its one slot — every card's
+            loader.layer_width(0, self.T_SLICE, 1)
+            loader.assign(0, self.T_SLICE, 0, loader.reserve(self.T_SLICE))
         if card == 0:
             self.CARD_HELD = {}
         if not self.CARD_HOT and not self.CARD_EXCLUSIVE:
@@ -788,6 +851,9 @@ class Glm5(Generates):
             if loaders[c["w"]].handed() != 0:
                 raise Refused("%d expert slots were reserved and never published" % loaders[c["w"]].handed())
         self.LOCKED_GB = experts_file.lock_experts(self.EXPERTS_LOCK, [a for xs in self.SRC.values() for a in xs], p.slot_bytes)
+        self.REGISTERED_GB = experts_file.register_experts(m, self.EXPERTS_REGISTER, range(self.P),
+                                                           [a for xs in self.SRC.values() for a in xs], p.slot_bytes,
+                                                           self.REGISTER_REQUIRED)
 
     def _slot_pieces(self, view, l, x, s, whole=False):
         """Expert `x` of layer `l`, part `s`, as (offset in its slot, bytes) pieces (▶ `expert_tier.part_pieces`). `whole`:
@@ -965,6 +1031,8 @@ class Glm5(Generates):
         for nm, n in (("hr", H), ("gu", 2 * self.MINTER), ("act", self.MINTER), ("actr", self.MINTER), ("e", H), ("routed", H)):
             self.at[c(nm)] = m.buffer(n * 2, c(nm))
         m.buffer(64, c("w"))
+        if self.EMBED_CPU and i == 0:                 # a token's decoded row of the embedding (▶ `__init__`)
+            m.buffer(H * 2, c("emb"))
         m.buffer(2 * (H + self.TOPK), c("hand"))
         m.buffer(2 * H, c("zero"), _half(np.zeros(H)))
         if self.MTP is not None:                      # a draft's check: the second position's hand and routed sum
@@ -1169,7 +1237,13 @@ class Glm5(Generates):
         t = self._TIER[k]
         expert_tier.tier(self.m, self.sfx("tier_card", k), self.T_CEXP, self.EXPERTS, self.TOPK, self.H, self.MINTER, self.CPLAN,
                          self.LAYERS, t["fed"], self.PARTS, self.EPLAN, self.GATE_ROW, self.DOWN_ROW, self.CARD_LANDING or 1,
-                         t["exclusive"], self.CARD_LANDING_LINE, ranks=self.P, shared=shared)
+                         t["exclusive"], self.CARD_LANDING_LINE, ranks=self.P, shared=shared,
+                         stream=self.T_STREAM, stream_batch=expert_tier.STREAM_BATCH)
+
+    def _slice_plane(self, name):
+        """A part of the slice (▶ `_plan`'s SLICE) as a plane of its slot: a view the rows' words read and write."""
+        at, size = self.SLICE[name]
+        return "(nn__expert__plane 0 %d 0 %d %d)" % (self.T_SLICE, at, size)
 
     def _from_speeds(self):
         """`card_shared` "auto" in a group and `card_landing` "auto": a CPU pick against a card expert and an expert's
@@ -1255,6 +1329,8 @@ class Glm5(Generates):
                 #   every card's its own, each the experts only it holds
                 if self.CH and (k == 0 or self.CARD_EXCLUSIVE):
                     m.table(n("exkr%d" % l), [n("signs"), n("zero_h"), n("krscratch")] + cells[3:])
+                if self.T_SLICE is not None:                # a slice's: the experts' scratch over all its rows, the card's own
+                    m.table(n("exks%d" % l), [n("signs"), n("zero_h"), self._slice_plane("scratch")] + cells[3:])
             mats = ["mlp.shared_experts.%s_proj.weight" % n for n in ("gate", "up", "down")]
             # ⛳ a draft's check runs a layer's MoE site for two positions at once: the second its own table over the same
             #   planes, its scratch its own (`gscratch2`), so the first's carry is not written over (▶ `_check_procedures`)
@@ -1343,11 +1419,22 @@ class Glm5(Generates):
                            HAND=self.HAND, HAND_PICKS_AT=self.HAND - 8 * K, HAND_BYTES=2 * (H + K),
                            ROWS_HANDS_BYTES=self.CH * self.HAND, ROWS_BYTES=2 * H * self.CH, ROWS_HALVES=H * self.CH,
                            CARD_TIER=tier, CARD=CARD, SOCKETS=len(self.CPUS), FIRST_SOCKET=self.P, CARDS=self.P, GROUP=self.GROUP,
-                           VISIT_FIRST=self.VISIT_FIRST))
+                           VISIT_FIRST=self.VISIT_FIRST, STREAM=self.T_SLICE is not None, CH=self.CH,
+                           EMBED_ON_CPU=bool(self.EMBED_CPU),
+                           NOTE_STREAM=expert_tier.NOTE_STREAM))
+        if self.T_SLICE is not None:
+            m.bind_values(dict({name.upper() + "_S": self._slice_plane(name) for name in ("srows", "hands", "carries", "rrows")},
+                               SROW_HALVES=self.MULT * H, HAND_HALVES=self.HAND // 2, CARRY_HALVES=(256 + 2 * H) // 2))
+            for k in range(1, self.P):          # every other card's slice, by its own names, made on its own worker
+                m.act_as(k)
+                m.bind_values({self.sfx(name.upper() + "_S", k): self._slice_plane(name) for name in ("srows", "hands", "carries", "rrows")})
+            m.act_as(CARD)
         if self.P > 1:
             m.node_array("TP_POS", 1)           # the position the group's other cards run (▶ `_group_procedures`)
             if self.CH:
                 m.node_array("TP_ROWS", 2)      # a chunk's first position and its rows, for the same
+            if self.T_SLICE is not None:
+                m.node_array("TP_SLICE", 4)     # a slice's first position, its chunks, its last chunk's rows and a chunk's
         moe = lambda name: [name % l if self.moe[l] else 0 for l in run]
         m.array("KDA", [self.kinds[l] == "d" for l in run])
         m.array("MOE", [bool(self.moe[l]) for l in run])
@@ -1359,6 +1446,8 @@ class Glm5(Generates):
             m.array("EXK", moe("exk%d"))
             if self.CH:
                 m.array("EXKR", moe("exkr%d"))
+            if self.T_SLICE is not None:
+                m.array("EXKS", moe("exks%d"))
         socket = range(len(self.CPUS))
         m.array("SOCKET", [c["w"] for c in self.CPUS])
         m.array("ROUTED_INTO", ["routed" if i == 0 else "routed%d" % i for i in socket])
@@ -1378,6 +1467,7 @@ class Glm5(Generates):
                 m.array("EXR_%d" % i, [("exr%d_" + str(i)) % l if self.moe[l] else 0 for l in run])
             m.array("EXR", ["EXR_%d" % i for i in socket])
         m.node_array("HERE", 1)             # the layer a socket's picture runs (▶ lisp/glm5_cpu.lisp)
+        m.node_array("EMB_TOK", 1)          # the token the first socket decodes the row of (EMBED_ON_CPU)
 
     def _procedures(self):
         """The program: `lisp/glm5.lisp`, the sampler's and the sockets' pictures — or, unfused, `_composed_procedures`.
@@ -1430,6 +1520,12 @@ class Glm5(Generates):
             n = lambda name: self.sfx(name, k)
             m.picture(n("tp_first"), "(begin (nn__partials__reduce GROUP %s %s %d) %s (type %s))"
                       % (n("zstreams"), n("streams"), MH, self._group_layers(k), n("streams")))
+            if self.T_SLICE is not None:
+                srows = self.sfx("SROWS_S", k)
+                m.picture(n("tp_slice"), "(let ((first (nth TP_SLICE 0)) (k (nth TP_SLICE 1)) (last_n (nth TP_SLICE 2)) (w (nth TP_SLICE 3)) "
+                          "(c 0) (n 0) (all 0)) (set! all (+ (* (- k 1) w) last_n)) (nn__vector__zero %s (* all SROW_HALVES)) "
+                          "(nn__partials__reduce GROUP %s %s (* all SROW_HALVES)) %s (type %s))"
+                          % (srows, srows, srows, self._group_slice(k), srows))
             if self.CH:
                 m.picture(n("tp_rows"), "(begin (nn__partials__reduce GROUP %s %s (* (nth TP_ROWS 1) %d)) %s (type %s))"
                           % (n("zsrows"), n("srows"), MH, self._group_rows(k), n("srows")))
@@ -1467,6 +1563,61 @@ class Glm5(Generates):
             m.defun("(defun (rows first n) (let ((i 0)) (sys__node_array__set TP_ROWS 0 first) (sys__node_array__set TP_ROWS 1 n) "
                     "%s (nn__partials__reduce GROUP srows srows (* n %d)) (sys__node_array__set nrows 0 n) "
                     "(while '(< i RUN) '(begin (rows_layer i first n) (set! i (+ i 1)))) %s (type srows)))" % (start, MH, wait))
+        if self.T_SLICE is not None:
+            # ⭐ A SLICE READ LAYER-MAJOR BY THE GROUP (NN-115 ④): lisp/glm5.lisp's `slice_layer`, each site taking the group's
+            #   sum of a chunk's rows, every card's tier noting the slice and streaming its share of the layer's experts into
+            #   its own routed rows, which the close's group sum adds (▶ nn's `nn__expert_tier__chunk`)
+            g = " GROUP tsums"
+            part = lambda v, halves: "(part_rows %s c n %s w)" % (v, halves)
+            m.defun("(defun (slice_layer i first k last_n w) (let ((c 0) (n w) (all (+ (* (- k 1) w) last_n))) "
+                    "(while '(< c k) '(begin (set! n (if (eq? c (- k 1)) last_n w)) "
+                    "(if (nth KDA i) (ai_z__glm_5_3__kda_rows %s (nth AT i) n rwork%s) "
+                    "(ai_z__glm_5_3__mla_rows %s (nth AT i) (+ first (* c w)) n rwork%s)) "
+                    "(if (nth MOE i) (ai_z__glm_5_3__route_rows %s (nth MO i) %s %s n rwork) "
+                    "(ai_z__glm_5_3__mlp_rows %s (nth ML i) n rwork%s)) (set! c (+ c 1)))) "
+                    "(if (nth MOE i) (begin (nn__expert_tier__note HANDS_S nn__expert_tier (nth LAYER i) all HAND HAND_PICKS_AT "
+                    "(+ nn__expert_major__vram_promotion_threshold_picks NOTE_STREAM)) "
+                    "(ai_z__glm_5_3__experts_rows HANDS_S (nth EXKS i) RROWS_S all nn__expert_tier) (set! c 0) "
+                    "(while '(< c k) '(begin (set! n (if (eq? c (- k 1)) last_n w)) "
+                    "(ai_z__glm_5_3__close_rows %s (nth MO i) %s %s n rwork%s) (set! c (+ c 1)))) (type SROWS_S)) "
+                    "(type SROWS_S)) (type SROWS_S)))"
+                    % (part("SROWS_S", "SROW_HALVES"), g, part("SROWS_S", "SROW_HALVES"), g, part("SROWS_S", "SROW_HALVES"),
+                       part("HANDS_S", "HAND_HALVES"), part("CARRIES_S", "CARRY_HALVES"), part("SROWS_S", "SROW_HALVES"), g,
+                       part("SROWS_S", "SROW_HALVES"), part("RROWS_S", "HIDDEN"), part("CARRIES_S", "CARRY_HALVES"), g))
+            start = " ".join("(sys__compute %d names %s)" % (k, self.sfx("tp_slice", k)) for k in range(1, self.P))
+            m.defun("(defun (rows_slice first k last_n w) (let ((i 0) (all (+ (* (- k 1) w) last_n))) "
+                    "(sys__node_array__set TP_SLICE 0 first) (sys__node_array__set TP_SLICE 1 k) (sys__node_array__set TP_SLICE 2 last_n) "
+                    "(sys__node_array__set TP_SLICE 3 w) %s (nn__partials__reduce GROUP SROWS_S SROWS_S (* all SROW_HALVES)) "
+                    "(sys__node_array__set nrows 0 w) (while '(< i RUN) '(begin (slice_layer i first k last_n w) (set! i (+ i 1)))) "
+                    "%s (type SROWS_S)))" % (start, wait))
+
+    def _group_slice(self, k):
+        """A slice through every layer on card `k` past the first, by its own names — its place, its chunks and their rows
+        in TP_SLICE: the same sites as card 0's `slice_layer`, each output the group's sum; a MoE site its tier noting the
+        slice — its share of the layer's experts streamed — its routed rows those experts', which the close's group sum
+        adds to the other cards'."""
+        n, S = (lambda name: self.sfx(name, k)), (lambda name: self.sfx(name.upper() + "_S", k))
+        g = " GROUP %s" % n("tsums")
+        part = lambda v, halves: "(part_rows %s c n %s w)" % (v, halves)
+        chunks = "(set! c 0) (while '(< c k) '(begin (set! n (if (eq? c (- k 1)) last_n w)) %s (set! c (+ c 1))))"
+        out = []
+        for l in self.run_layers:
+            rows = part(S("srows"), "SROW_HALVES")
+            if self.kinds[l] == "d":
+                mixer = "(ai_z__glm_5_3__kda_rows %s %s n %s%s)" % (rows, n("at%d" % l), n("rwork"), g)
+            else:
+                mixer = "(ai_z__glm_5_3__mla_rows %s %s (+ first (* c w)) n %s%s)" % (rows, n("at%d" % l), n("rwork"), g)
+            if not self.moe[l]:
+                out.append(chunks % (mixer + " (ai_z__glm_5_3__mlp_rows %s %s n %s%s)" % (rows, n("ml%d" % l), n("rwork"), g)))
+                continue
+            out.append(chunks % (mixer + " (ai_z__glm_5_3__route_rows %s %s %s %s n %s)"
+                                 % (rows, n("mo%d" % l), part(S("hands"), "HAND_HALVES"), part(S("carries"), "CARRY_HALVES"), n("rwork"))))
+            out.append("(nn__expert_tier__note %s %s %d all HAND HAND_PICKS_AT (+ nn__expert_major__vram_promotion_threshold_picks "
+                       "NOTE_STREAM)) (ai_z__glm_5_3__experts_rows %s %s %s all %s)"
+                       % (S("hands"), expert_tier.BINDING, l, S("hands"), n("exks%d" % l), S("rrows"), expert_tier.BINDING))
+            out.append(chunks % ("(ai_z__glm_5_3__close_rows %s %s %s %s n %s%s)"
+                                 % (rows, n("mo%d" % l), part(S("rrows"), "HIDDEN"), part(S("carries"), "CARRY_HALVES"), n("rwork"), g)))
+        return " ".join(out)
 
     def _group_rows(self, k):
         """A chunk's rows through every layer on card `k` past the first, by its own names — its place and length in
@@ -1659,10 +1810,21 @@ class Glm5(Generates):
         or captures the streams — composed here."""
         m, H = self.m, self.H
         # the token's row of the embedding table, un-rotated (Rᵀu = S ⊙ H·u), into e — and into every stream
-        m.defun("(defun (embed_e tok) (begin (nn__turboquant__decode (nn__vector__range EMBEDDING (* tok %d) %d) "
-                "(nn__vector__range EMBEDDING (+ %d tok) 1) u 1 %d %d) (nn__hadamard__rotate u ones512 hu %d) "
-                "(nn__vector__pointwise_mul hu signs_row e %d)))"
-                % (self.EMB_ROW_BYTES // 2, self.EMB_ROW_BYTES // 2, self.EMB_DATA_BYTES // 2, H, self.EMB_BITS, H, H))
+        if self.EMBED_CPU:                          # the first socket decodes the row (▶ lisp/glm5_cpu.lisp `xe`)
+            m.act_as(self.CPUS[0]["w"])
+            m.picture("xe", "(let ((tok (nth EMB_TOK 0))) (nn__turboquant__decode (nn__vector__range c_embedding (* tok %d) %d) "
+                      "(nn__vector__range c_embedding (+ %d tok) 1) c_emb 1 %d %d))"
+                      % (self.EMB_ROW_BYTES // 2, self.EMB_ROW_BYTES // 2, self.EMB_DATA_BYTES // 2, H, self.EMB_BITS))
+            m.act_as(CARD)
+            m.defun("(defun (embed_e tok) (begin (sys__node_array__set EMB_TOK 0 tok) (sys__compute %d names xe) "
+                    "(sys__result %d) (nn__buffer__copy c_emb %d u %d) (nn__hadamard__rotate u ones512 hu %d) "
+                    "(nn__vector__pointwise_mul hu signs_row e %d)))"
+                    % (self.CPUS[0]["w"], self.CPUS[0]["w"], self.CPUS[0]["w"], 2 * H, H, H))
+        else:
+            m.defun("(defun (embed_e tok) (begin (nn__turboquant__decode (nn__vector__range EMBEDDING (* tok %d) %d) "
+                    "(nn__vector__range EMBEDDING (+ %d tok) 1) u 1 %d %d) (nn__hadamard__rotate u ones512 hu %d) "
+                    "(nn__vector__pointwise_mul hu signs_row e %d)))"
+                    % (self.EMB_ROW_BYTES // 2, self.EMB_ROW_BYTES // 2, self.EMB_DATA_BYTES // 2, H, self.EMB_BITS, H, H))
         m.defun("(defun (embed tok) (begin (embed_e tok) %s (type e)))"
                 % " ".join("(nn__vector__add e zero_h %s %d)" % (self.rng("streams", j * H, H), H) for j in range(self.MULT)))
         # the head: the streams' mean, the final norm, the logits
@@ -1834,7 +1996,7 @@ class Glm5(Generates):
             value = self._run("(begin (position %d %d) %s)" % (token, pos, head), "position %d" % pos)
             return value if greedy or sample else None
         m = self.m
-        m.must("(embed %d)" % token, "the embedding at %d" % pos)
+        self._embedding("(embed %d)" % token, "the embedding at %d" % pos)
         for l in self.run_layers:
             self.layer(l, pos)
         got = m.must(head, "the head at %d" % pos)
@@ -2075,6 +2237,8 @@ class Glm5(Generates):
             return out
         if first + len(tokens) > self.max_context:
             raise Refused("positions to %d are past the context of %d" % (first + len(tokens), self.max_context))
+        if self.T_SLICE is not None and not pictures and self.MTP is None and self.SOURCE:
+            return self._prefill_streamed(tokens, first, greedy, sample)
         out = None
         for at in range(0, len(tokens), self.CH):
             chunk = tokens[at:at + self.CH]
@@ -2109,13 +2273,20 @@ class Glm5(Generates):
         m = self.m
         self._room(pos + 1)
         if token is not None:
-            m.must("(begin (embed %d) (type streams))" % token, "the embedding at %d" % pos)
+            self._embedding("(begin (embed %d) (type streams))" % token, "the embedding at %d" % pos)
         else:
             m.write(self.STREAMS_AT, x)
         m.grid("(layers_f %d)" % pos)
         if head:                                     # the greedy head, or the head expression it is (`sampling.head`)
             return m.must(head if isinstance(head, str) else "(head)", "the head at %d" % pos)
         return m.read(self.STREAMS_AT, self.MULT * self.H * 2)
+
+    def _embedding(self, text, what):
+        """A program that embeds: with the table the first socket's (EMBED_CPU) a grid's, every worker standing for the
+        hand-off (▶ `Machine.grid`), else the card's alone."""
+        if self.EMBED_CPU:
+            return self.m.grid(text)[1]
+        return self.m.must(text, what)
 
     def forward_rows(self, first, tokens=None, xs=None, n=None, head=False, greedy=True, sample=None, rows=None):
         """A chunk of rows through this stage's layers: its tokens embedded (the first stage) — a picture's `rows` {index in
@@ -2129,12 +2300,12 @@ class Glm5(Generates):
         if tokens is not None:
             if self.SOURCE:
                 self._prompt(tokens)
-                m.must("(embed_rows %d)" % n, "the chunk's embeddings")
+                self._embedding("(embed_rows %d)" % n, "the chunk's embeddings")
             else:
                 # ⛳ the embeddings in programs of their own, a hundred rows each: one program is one form, and a form
                 #   must fit in one of the heap's chunks
                 for e0 in range(0, n, 128):
-                    m.must("(begin %s (type srows))" % " ".join(
+                    self._embedding("(begin %s (type srows))" % " ".join(
                         "(embed_row %d %s)" % (tokens[i], " ".join(str((i * M + j) * H) for j in range(M)))
                         for i in range(e0, min(n, e0 + 128))), "the chunk's embeddings")
             if rows:
@@ -2153,6 +2324,29 @@ class Glm5(Generates):
         m.must("(begin %s (type streams))" % " ".join("(nn__vector__add %s zero_h %s %d)" % (
             self.rng("srows", last + j * H, H), self.rng("streams", j * H, H), H) for j in range(M)), "the prompt's last row")
         return m.must(head if isinstance(head, str) else sample or ("(head)" if greedy else "(head_logits)"), "the head")
+
+    def _prefill_streamed(self, tokens, first, greedy, sample):
+        """⭐ A PROMPT READ LAYER-MAJOR (NN-115 ③) — `prefill`'s, with `stream` (▶ qwen3_5.py's): a slice of SLICE_CHUNKS
+        chunks at a time, its chunks' embeddings into the slice's streams, then every layer once over the slice — each
+        chunk's attention and router, the layer's experts once over all the slice's rows, streamed onto the card, each
+        chunk's close (▶ `rows_slice`). Then the next token from the last row."""
+        m, H, M, step = self.m, self.H, self.MULT, self.CH
+        self._room(first + len(tokens))
+        span, last = step * self.SLICE_CHUNKS, 0
+        for s0 in range(0, len(tokens), span):
+            part = tokens[s0:s0 + span]
+            k = (len(part) + step - 1) // step
+            for c in range(k):
+                chunk = part[c * step:(c + 1) * step]
+                self._prompt(chunk)
+                self._embedding("(embed_slice %d %d)" % (c * step, len(chunk)), "the slice's embeddings")
+            last_n = len(part) - (k - 1) * step
+            m.grid("(begin (rows_slice %d %d %d %d) (type SROWS_S))" % (first + s0, k, last_n, step))
+            last = len(part) - 1
+        at = last * M * H
+        m.must("(begin %s (type streams))" % " ".join("(nn__vector__add (nn__vector__range SROWS_S %d %d) zero_h %s %d)" % (
+            at + j * H, H, self.rng("streams", j * H, H), H) for j in range(M)), "the prompt's last row")
+        return m.must(sample or ("(head)" if greedy else "(head_logits)"), "the head")
 
     def logits(self):
         return np.frombuffer(self.m.read(self.LOGITS_AT, self.VOCAB * 2), dtype="<f2").astype(np.float32)

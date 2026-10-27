@@ -48,14 +48,14 @@ and every option is explained here.
 | `sampler` | `"generation"` | How the next token is chosen. `"generation"` uses the model's own `generation_config.json`. `null` takes the most likely token (greedy). A dict sets its own: `{"temperature", "top_k", "top_p", "repetition_penalty", "seed"}`; what it leaves out is temperature 1.0, top_k 20, top_p 0.95, no penalty, a new seed each time. A `seed` gives the same answer to the same conversation. |
 | `tools` | `"chill"` | What the model's tool, a Lisp REPL on the server's machine, may do without asking in a new conversation. `"ask"`: read in the workspace and allowed folders. `"chill"`: read anywhere. `"full-auto"`: everything. `"no"`: no conversation has the tool. |
 | `tools_folder` | `workspace/` | Where the REPL starts, and where it reads without asking. By default it is `workspace/` beside the conversations. |
+| `tools_config` | `"default"` | The machine's tools file: which of the REPL's tools are on, and their settings — the picture model, a SearXNG's address, a search API's key ([`tools.md`](tools.md#the-tools-file)). A name is `tools/<name>.json` beside the conversations; a path ending in `.json` is that file. `"default"` is `tools/default.json`, which the server makes at its first start. |
 | `lora` | `null` | A LoRA in the model's `loras/`, loaded at boot: the one a conversation runs under unless it names its own. An adapter is switched between conversations; a rank-1 mask stays for every conversation ([`tools.md`](tools.md#subagents)). |
 | `vram_margin_mb` | `50` | How much of each card the setup chosen at boot leaves free, in MB, for whatever else draws on it (a desktop, a browser). `0` on a card nothing else uses. |
 | `num_cards` | `1` | How many of the machine's cards the model is split over — the one placement a config is meant to name, as the boot does not choose it. `1`: one card. `2`, `4` …: every layer split over the machine's first cards ([tensor parallelism](#tensor-parallelism), a developer preview) — for the Qwen models and GLM their `tensor_parallel`, for DeepSeek its `cards`. A model that runs on one card (Ministral) refuses more. A config written before it may still say `"options": {"tensor_parallel": 2}`; the two together must agree. |
 | `card` | `"auto"` | Which of the machine's cards to run on: `0`, `1` …, `"auto"` the first, or `"cpu"`, which uses no card (the CPU and its RAM). With `num_cards` above 1 leave it `"auto"`: the group is the first cards. |
 | `options` | `{}` | Handed to the model's runtime, below. |
-| `image_model` | `"auto"` | The picture model the REPL's `(image "…")` draws with: a folder in `models/`, or a path. `"auto"` takes a picture model downloaded into `models/`, if there is one. `"no"` turns pictures off, and `(image …)` says so. |
 | `image` | the picture model's own | The settings of a picture the REPL draws, as a picture model's config has them (below). |
-| `image_card` | `null` | The card the picture is drawn on. `null` uses the text model's card: the model is put down while it draws and comes back after (below). A card of its own (`1` …) keeps the text model up. |
+| `image_model`, `image_card` | — | Older keys for the tools file's `image` settings `model` and `card`, still read: one a config sets, other than `"auto"` and `null`, is used over the tools file's for this model. `image_model: "no"` turns pictures off for it. |
 | `workers` | `[]` | Other SiLVANN servers, `"host:port"`, that a subagent of another model runs on ([`tools.md`](tools.md#subagents)). With none free, this machine lends its card. |
 | `pipeline_parallelism` | `"no"` | `"yes"` runs the model over several machines in a ring, each with a run of its layers ([`users.md` §6](users.md#6-a-model-over-several-machines)). |
 | `pipeline_parallelism_layers` | — | This machine's run of the layers, first-last, as `"0-23"`. Needed with `pipeline_parallelism` `"yes"`. |
@@ -64,12 +64,14 @@ and every option is explained here.
 
 ### A picture from the text model
 
-A text model's REPL has `(image "prompt")` ([`tools.md`](tools.md)). When the config finds no picture model, or
-`image_model` is `"no"`, it answers at once with an error that says why, so the model tells the user.
+A text model's REPL has `(image "prompt")` ([`tools.md`](tools.md)). Which picture model draws, on which card, or on
+which other server, is the tools file's `image` entry ([`tools.md`](tools.md#the-tools-file)). When the server finds no
+picture model, or the entry switches it off, `(help)` lists it as a comment saying why, and it answers at once with an
+error that says why, so the model tells the user.
 The model calls it like any command, the user sees the picture's progress, and the picture appears in the
 conversation.
 
-**On the text model's card** (`image_card: null`), drawing a picture switches what is on the card:
+**On the text model's card** (the entry's `card: null`), drawing a picture switches what is on the card:
 
 1. The conversation on the card is read off into RAM.
 2. The text model shuts down.
@@ -81,8 +83,10 @@ conversation.
 in 16–17 s, and their answers went on to the same tokens as without the switch. While the picture is drawn, other
 conversations wait: the server answers them 503 with `Retry-After`.
 
-**On a card of its own** (`image_card: 1`), none of that happens, and that is better where the machine has a free
-card.
+**On a card of its own** (`card: 1`), none of that happens, and that is better where the machine has a free
+card. **On another machine** (`host: "http://host:port"`, a SiLVANN server running a picture model), none of it happens
+either: the picture is drawn there and copied into the conversation. A picture server drawing another conversation's
+picture is waited for, up to 10 minutes.
 
 A picture model (Qwen-Image 2.1) reads `card` and `image`:
 
@@ -103,7 +107,8 @@ tried on the card when the server starts, fastest first:
    in steps of 256 MB.
 
 Every trial boot holds `vram_margin_mb` of each card beside it, so what is chosen leaves that much free for whatever else
-draws on the card — a desktop, a browser. 50 MB by default; `0` on a card nothing else uses.
+draws on the card — a desktop, a browser. 50 MB by default; `0` on a card nothing else uses. Where the experts' RAM is
+registered with the card (`experts_register`), the trial also holds what maps it there: 2 MB a GB registered.
 
 **The cache comes first.** The whole context's cache is sized before the tier: a smaller tier costs a little speed, but
 a cache too small refuses a conversation. If nothing boots, the context is halved, down to 4,096. With `max_context`
@@ -176,6 +181,9 @@ These options apply to Qwen 3.6 35B-A3B, Qwen 3.8 27B, and Qwen 3.5 122B-A10B an
 | `lend_cache` | `true` by default, or `false` | With a tier, whether it also holds experts in the cache's rows a conversation has not reached, given back as it grows ([above](#the-context-and-the-tier-share-the-card)). |
 | `experts_int8` | `false` by default, or `true` | With the experts on the CPU, a generated token's experts are multiplied in integers: faster, and slightly less exact. Named alone, it puts the experts on the CPU. |
 | `experts_lock` | `false` by default, or `true` | With the experts copied into RAM (`experts_from: "ram"`), lock them there, so the system never swaps them out to keep files cached (Linux's `mlock`). The boot refuses where the experts are more than the process may lock (`ulimit -l`): raise `memlock` for the user in `/etc/security/limits.conf` and log in again. The system setting `vm.swappiness` 1 makes the system unwilling to swap any process out, though it does not forbid it. |
+| `experts_register` | `"auto"` by default, `true` or `false` | With a card's tier (`card_experts_gb`) fed from the experts in RAM, register that RAM with the card, so the card copies an expert it takes straight from where it lies — no thread copying it through a buffer of its own first, which takes the CPUs' memory from the experts they compute. Registered memory is page-locked, so the system keeps the experts in RAM as `experts_lock` does. `"auto"`: on Linux with an NVIDIA card; off on Windows and on AMD's cards, where it bought no speed and, after the setup's trials in the same process, made a prompt five times slower (`true` registers there all the same). Where the system refuses it, the copies go through the buffer as before. `true` refuses the boot instead. |
+| `stream` | `false` by default, `true`, or a number of positions | With the experts on the CPU and a card's tier (`card_experts_gb`, one card), read a prompt a layer at a time over up to 2,048 of its positions (`true`), or over as many as the number given: each layer's experts are streamed onto the card once for those positions, through a small ring of its own, and the card computes every one of them while the CPUs compute none. The 35B-A3B reads a 2,000-position prompt about twice as fast; its first answers are a little slower, the tier warmer after a prompt read a chunk at a time. A number holds that many positions on the card between layers — about 120 KB a position for the 35B-A3B. |
+| `embed_on` | `"auto"` by default, `"card"` or `"cpu"` | Where a token's row of the embedding is decoded, on one card. `"cpu"` keeps the embedding table in RAM for a CPU worker to decode — the experts' worker, or one of its own for a dense model — and only the decoded row is copied to the card, so the table takes no room on the card. `"card"` has the card read its row from RAM where it lies. `"auto"` chooses `"cpu"` on a card through `khronos_opencl1_igpu` (OpenCL 1.2), which would otherwise keep the whole table on the card and copy it across PCIe every token, and `"card"` elsewhere, where reading in place costs nothing. |
 | `experts_dir` | a folder | With the experts read from the disk, where they are written when they cannot be read in place ([`users.md` §5](users.md#5-the-experts-on-the-disk)): `experts/` in the model's folder by default — another drive, say. |
 | `picture_pixels` | default `4194304` (2048 × 2048) | The largest picture the boot makes room for on the card, about 23 KB a 16 × 16 patch. A larger picture is made smaller. `0` keeps no room and reads pictures on the CPU. |
 | `picture_weights` | `"auto"` by default, or `"card"`, `"ram"` | Where the vision tower's 0.6 GB of weights sit. In RAM, they are written to the card a block at a time as a picture is read, so the card holds them only while it reads one. `auto` keeps them in RAM on a card — the 0.6 GB left to the model and its tier of experts, a picture about 50 ms slower (4% at 1,024 × 1,024) — and in the one memory where the worker is a CPU; `card` keeps them on the card. |
@@ -248,14 +256,17 @@ four.
 | `sockets` | `1`, `2` | The CPU sockets the experts are split over. By default, all of them. |
 | `experts_int8` | `true` by default, or `false` | The experts are multiplied in integers on the CPU. |
 | `experts_lock` | `false` by default, or `true` | With the experts copied into RAM (`experts_from: "ram"`), lock them there, so the system never swaps them out to keep files cached (Linux's `mlock`). The boot refuses where the experts are more than the process may lock (`ulimit -l`): raise `memlock` for the user in `/etc/security/limits.conf` and log in again. The system setting `vm.swappiness` 1 makes the system unwilling to swap any process out, though it does not forbid it. |
+| `experts_register` | `"auto"` by default, `true` or `false` | With a card's tier (`card_experts_gb`) fed from the experts in RAM, register that RAM with the card, so the card copies an expert it takes straight from where it lies — no thread copying it through a buffer of its own first, which takes the CPUs' memory from the experts they compute. Registered memory is page-locked, so the system keeps the experts in RAM as `experts_lock` does. `"auto"`: on Linux with an NVIDIA card and one socket's CPU; off on Windows, on AMD's cards (as the Qwen models'), and where the experts are split between sockets — each then copied a row at a time through the buffer, however it is registered. Where the system refuses it, the copies go through the buffer as before. `true` refuses the boot instead. |
 | `card_experts` | `"yes"` by default, or `"no"` | With the experts in RAM, whether the card keeps its own tier of experts, sized at boot. |
 | `card_experts_gb` | gigabytes | The tier's size, rather than the size chosen at boot. |
+| `stream` | `false` by default, `true`, or a number of positions | As the Qwen models', with an inclusive tier on one card. A number of positions as long as the prompt streams each layer's experts once for the whole of it: a 10,000-position prompt about 1.6 times as fast with `10240` as with `true`. The positions held on the card between layers take about 320 KB each — 3.3 GB at 10,240. |
 | `lend_cache` | `true` by default, or `false` | As the Qwen models': an inclusive tier also holds experts in the latent cache's rows a conversation has not reached. |
 | `card_landing` | `"auto"` by default, or a number | As the Qwen models'. |
 | `tensor_parallel` | set by `num_cards` | Every layer split over this many cards, a tier of experts on each ([below](#tensor-parallelism)): the server's `num_cards` sets it. |
 | `card_shared` | `"auto"` by default, or a share such as `0.1` | As the Qwen models'. With `card_exclusive` in a group, a number deals that share as the slice at boot, changed between the cards as the picks go ([below](#tensor-parallelism)); `"auto"` keeps none. |
 | `card_exclusive` | chosen at boot; `false`, `true` | With `experts_from: "ram"`, an expert the card's tier holds is not also kept in RAM ([`users.md`](users.md#the-cards-tier-of-experts)). Chosen where the tier is a quarter of the experts or more and the card copies both ways at once. `true` needs `card_experts_gb`. |
 | `picture_pixels` | default `4194304` | As the Qwen models'. |
+| `embed_on` | `"auto"` by default, `"card"` or `"cpu"` | As the Qwen models': the first socket decodes a token's row of the embedding from the table in its RAM, and the card copies the row across. `"cpu"` is one card's. |
 | `mtp` | `"no"` by default, or `"yes"` | The model's multi-token prediction layer, which is in every GLM pack: it drafts the token after the next one, and the model checks the draft and the next token together, keeping the draft when it is the token the model would have picked. A greedy answer is the same tokens either way; whether it is faster depends on the machine and the context. Through the server, a 33-token chat prompt and 159 tokens of answer: 1.18× on two Xeon sockets with the experts in RAM, 0.99× on one socket with the experts from the disk. On a 1,600-token prompt it was slower, 0.92–0.94×, though 81% of the drafts were kept: a check reads both positions over the whole context. A sampled answer runs without it, for now. It adds the MTP layer's weights (about 127 MB of the card) and its experts beside the others, about 141 MB of the card for the check, and to the prompt about 8–12 ms a position (about +10%). |
 
 ### Options for measuring
@@ -286,6 +297,8 @@ These are for measuring the engine rather than for use: their defaults are the o
 | `engram_from` | a folder | Where the n-gram memory's tables (203 GB) are read from, a row at a time: by default the pack's `engram/`. Another folder — on a faster drive — holds the same two files and their index. |
 | `experts_int8` | `true` by default, or `false` | The experts are multiplied in integers on the CPU. |
 | `experts_lock` | `false` by default, or `true` | As GLM's: the layers copied into RAM are locked there. |
+| `experts_register` | `"auto"` by default, `true` or `false` | As the Qwen models': the layers copied into RAM are registered with the cards' tiers — `"auto"` on Linux with an NVIDIA card, off on Windows and on AMD's cards. |
+| `embed_on` | `"auto"` by default, `"card"` or `"cpu"` | As the Qwen models': the CPU worker decodes a token's row of the embedding, and the card copies it across. `"cpu"` is one card's. |
 | `card_experts_gb` | gigabytes, `0` by default | A tier of the experts used most on the card, promoted from RAM as they are picked, which the card computes while the CPU computes the rest. Off by default; a layer mapped from its file feeds none. |
 | `card_exclusive` | `false` by default, or `true` | With `card_experts_gb`, an expert a card's tier holds is not also kept in RAM — the cards' tiers are RAM given back, which can bring a layer mapped from its file into RAM. Each card starts with its share of every layer in RAM; a promotion sends one back. A prompt's chunk gives each card the picks it holds. Not chosen at boot. |
 | `card_line` | default `8` | With `card_exclusive`, how many of a prompt chunk's rows an expert must have to be copied onto a card. |

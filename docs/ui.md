@@ -87,6 +87,13 @@ Its chat has no thinking and no tool switches, and no context meter.
 - **remote**: a server started on another machine — its **Address** appears, and **connect** asks it. That server is
   started and stopped on its own machine.
 
+**The server's tools**, below it, lists what the model's REPL reaches on the server's machine, as its tools file sets
+it up ([`tools.md`](tools.md#the-tools-file)): each tool on, switched off, or not available and why, with its
+settings — a key shown only as `(set)`. The file is edited on the server's machine. **Rebuild the tools** reads the
+file and the skills again, gives each skill installed since its entry in the file, and checks again what each tool
+needs — after you install a skill, start a SearXNG or change a setting. Every open conversation has the result at its
+next call: a tool switched off answers so, and the model's `(help)` says it.
+
 **Download models** lists the models this release can fetch, their sizes and which are here.
 - **download** fetches one from Hugging Face into the data folder's `models/`, with its progress. One downloads at a
   time. A download is refused when the disk has less room than the model needs; stopped and started again, it keeps the
@@ -116,12 +123,15 @@ and in the editor — opens [`config.md`](config.md), which says what every key 
 
 - **The data folder** holds the models and the conversations: `models/<name>/` and `user_sessions/<model>/<id>/`, on
   the server's machine. It is the release's folder, or the one `silvann data <folder>` named (for `silvann ui` and
-  `silvann serve`), or `SILVANN_DATA`. In a container built from `docker/` it is the volume, `/data`.
+  `silvann serve`), or `SILVANN_DATA`. In a container built from `docker/` it is `/data`, the folder of yours the
+  container is given (`~/SiLVANN` in [`docker/README.md`](../docker/README.md)).
+- **The tools file**: `tools/default.json` in the data folder — which of the REPL's tools are on, and their settings,
+  keys too ([`tools.md`](tools.md#the-tools-file)).
 - **A model's folder**: its configs, and the programs it runs as written at its last start
   (`models/<name>/programs.lisp`). The setup the server chose is kept there too (`autotune.json`).
 - **The UI's own settings** (the endpoint, the last conversation, the conversations' passwords you typed): kept by the
   UI, on its machine, for this browser — in `.nicegui/` beside `silvann_ui.py`, or `/data/.nicegui` in a container
   built from `docker/`. The passwords are there as you typed them.
 - **The Hugging Face token** that Options saves: `.huggingface_token` in the data folder, readable by its owner alone.
-  A copy of the data folder (or of a container's volume) carries it, and the UI's settings with the passwords:
+  A copy of the data folder carries it, and the UI's settings with the passwords:
   **forget** the token, and remove `.nicegui/`, before giving such a copy to someone else.

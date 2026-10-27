@@ -286,5 +286,14 @@ static inline bool x86_avx2__mark_open(void** mark) {
 static inline void x86_avx2__mark_close(void* mark) { (void)mark; }
 static inline bool x86_avx2__mark_record(void* mark) { return mark != 0; }
 static inline bool x86_avx2__mark_wait(void* mark) { return mark != 0; }
+/* A queued copy is done when the call returns, so a mark is reached as soon as it is recorded. */
+static inline bool x86_avx2__side_memory_write_queued(void* to, const void* from, size_t bytes, void* channel) {
+    return x86_avx2__side_memory_write(to, from, bytes, channel);
+}
+static inline bool x86_avx2__side_memory_read_queued(void* to, const void* from, size_t bytes, void* channel) {
+    return x86_avx2__side_memory_read(to, from, bytes, channel);
+}
+static inline bool x86_avx2__side_mark_record(void* mark, void* channel) { (void)channel; return mark != 0; }
+static inline bool x86_avx2__mark_reached(void* mark) { return mark != 0; }
 
 #endif /* SILVANN__SILICON_FAMILIES_X86_AVX2_PRIMITIVES_SYS_CUH */

@@ -1,24 +1,22 @@
 # syntax=docker/dockerfile:1.7
 # SiLVANN's image: the release installed by install.sh — the one line a Linux machine runs — with the families for
 # every NVIDIA card nvidia_cuda12 lists and for the CPU (x86_avx2), then copied onto a plain Ubuntu 22.04 that holds no
-# compiler. The models and the conversations live in a volume at /data; the UI is the app, on port 8080.
+# compiler. The models and the conversations live in a folder of yours at /data; the UI is the app, on port 8080.
 #
 #   from the release's folder:
-#   docker build -f docker/Dockerfile -t silvann .                                   GitHub's default branch
-#   docker build -f docker/Dockerfile --build-arg SILVANN_REF=<branch> -t silvann .  a branch of it
-#   docker build -f docker/Dockerfile --build-context source=<a git checkout of a release> \
-#                --build-arg SILVANN_SOURCE=/source --build-arg SILVANN_REF=<branch> -t silvann .
-#                                                                                    a checkout on this machine
-#   docker run --gpus all -p 127.0.0.1:8080:8080 -v silvann-data:/data silvann     ▶ docker/README.md
+#   podman build -f docker/Dockerfile -t silvann .                                   GitHub's default branch
+#   podman build -f docker/Dockerfile --build-arg SILVANN_SOURCE=<a repository> --build-arg SILVANN_REF=<branch> \
+#                -t silvann .                                                        another repository or branch
+#   podman run --device nvidia.com/gpu=all -p 127.0.0.1:8080:8080 -v ~/SiLVANN:/data silvann   ▶ docker/README.md
+#
+# The release comes from a repository's URL, as install.sh fetches it — no mount of the build's own, which Ubuntu 22.04's
+# Podman (3.4, buildah 1.23) does not take: a checkout with changes of its own goes in by a repository it is pushed to.
 #
 # CUDA's runtime is linked into the family (`-cudart static`) and the container is handed the host's driver
 # (`--gpus all`, or CDI), so the final image carries no CUDA toolkit. What it holds, and each part's licence:
 # /opt/silvann/IMAGE_NOTICES.md.
 
 ARG UBUNTU=ubuntu:22.04
-
-# A checkout to install from instead of a URL (`--build-context source=…`); empty unless one is given.
-FROM scratch AS source
 
 # ── the build: install.sh with the compilers ─────────────────────────────────────────────────────────────────────────
 FROM ${UBUNTU} AS build
@@ -40,8 +38,7 @@ ARG SILVANN_REF=
 # the commit SILVANN_REF must be at, when the caller knows it (a workflow does): the build fails on any other
 ARG SILVANN_COMMIT=
 COPY install.sh /tmp/install.sh
-RUN --mount=type=bind,from=source,target=/source \
-    SILVANN_DIR=/opt/silvann SILVANN_BIN=/usr/local/bin \
+RUN SILVANN_DIR=/opt/silvann SILVANN_BIN=/usr/local/bin \
     SILVANN_SOURCE=${SILVANN_SOURCE} SILVANN_REF=${SILVANN_REF} \
     SILVANN_SILICON_FAMILIES="x86_avx2 nvidia_cuda12" SILVANN_NONFREE=0 \
     SILVANN_NVCC=/usr/local/cuda/bin/nvcc \
@@ -63,14 +60,14 @@ RUN --mount=type=bind,from=source,target=/source \
 FROM ${UBUNTU}
 ARG DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates python3 tini \
+ && apt-get install -y --no-install-recommends ca-certificates git python3 tini \
  && rm -rf /var/lib/apt/lists/* \
  && useradd --uid 1000 --create-home --shell /bin/bash silvann \
  && mkdir -p /data && chown silvann:silvann /data
 COPY --from=build /opt/silvann /opt/silvann
 COPY docker/image_notices.py /opt/silvann/docker/image_notices.py
 COPY docker/entrypoint.sh /opt/silvann/docker/entrypoint.sh
-# requirements-nonfree.txt is not in the image: docker/README.md's command installs it from PyPI into the volume, under
+# requirements-nonfree.txt is not in the image: docker/README.md's command installs it from PyPI into the data folder, under
 # /data/python/<the image's Python version>, which silvann-data.pth puts on the environment's path when it exists
 RUN ln -s /opt/silvann/silvann /usr/local/bin/silvann \
  && ln -s /opt/silvann/silvann_cli /usr/local/bin/silvann_cli \
@@ -85,7 +82,7 @@ ENV NVIDIA_VISIBLE_DEVICES=all \
     NICEGUI_STORAGE_PATH=/data/.nicegui \
     PYTHONUNBUFFERED=1 \
     HOME=/home/silvann
-# no USER: the entrypoint starts as root, gives what the volume holds to silvann (a model pasted in through Windows'
+# no USER: the entrypoint starts as root, gives what /data holds to silvann (a model pasted in through Windows'
 # Explorer comes in as root's), and runs the app as silvann
 WORKDIR /opt/silvann
 VOLUME /data

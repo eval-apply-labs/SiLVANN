@@ -39,6 +39,8 @@ FAMILY = 'khronos_opencl1_igpu'
 ARENAS = 32            # buffers a kernel is handed; the family's `KHRONOS_OPENCL1_IGPU__ARENAS`
 LANES_MAX = 256        # nn's `NN__SILICON__LANES_MAX`: the fold's scratch, one float a lane
 AT = FAMILY + '__zzprivate_at'
+# the family's own kernels, read after nn's card side: the doors it runs faster than nn's generic body launch them by name
+OVERRIDES = os.path.join(HERE, '..', 'src', 'silicon_families', FAMILY, 'overrides', 'kernels.cuh')
 G, C, P = '__global', '__constant', '__private'
 
 # the names a parser needs that OpenCL C has built in; parsed, never written
@@ -63,10 +65,13 @@ SILICON = {
     'nn__silicon__lanes_sum':  'float nn__silicon__lanes_sum(float part);',
     'nn__silicon__lanes_max':  'float nn__silicon__lanes_max(float part);',
     'nn__silicon__lanes_sums': 'void nn__silicon__lanes_sums(float* parts, uint n);',
+    'khronos_opencl1_igpu__zzpackage_lanes_sum_each': 'float khronos_opencl1_igpu__zzpackage_lanes_sum_each(float part, uint width);',
+    'khronos_opencl1_igpu__zzpackage_lanes_hadamard': 'float khronos_opencl1_igpu__zzpackage_lanes_hadamard(float v, uint width);',
     'nn__silicon__half_to_float': 'float nn__silicon__half_to_float(ushort h);',
     'nn__silicon__dot2': 'float nn__silicon__dot2(uint a, uint b, float c);',
 }
-FOLDS = ('nn__silicon__lanes_sum', 'nn__silicon__lanes_max', 'nn__silicon__lanes_sums')
+FOLDS = ('nn__silicon__lanes_sum', 'nn__silicon__lanes_max', 'nn__silicon__lanes_sums', 'khronos_opencl1_igpu__zzpackage_lanes_sum_each',
+         'khronos_opencl1_igpu__zzpackage_lanes_hadamard')
 # ⛳ THE FOLDS WAIT FOR THE WHOLE BLOCK, as `work_group_reduce_add` does in the 2.0 family: every lane of the block reaches
 #   each one, which nn's bodies already promise. The order of the sum is a tree over the lanes, the same every run.
 DEFINITIONS = r'''
@@ -122,6 +127,34 @@ static inline float nn__silicon__lanes_max(float part, __local float* zz_lanes) 
 static inline void nn__silicon__lanes_sums(float* parts, uint n, __local float* zz_lanes) {
     for (uint k = 0u; k < n; ++k) parts[k] = nn__silicon__lanes_sum(parts[k], zz_lanes);
 }
+/* The sum over each run of `width` lanes (a power of two dividing the block), every lane of a run its run's: a fold of
+ * its own a run, all of them at once — the family's overrides' many outputs a block (nn's bodies never call it). */
+static inline float khronos_opencl1_igpu__zzpackage_lanes_sum_each(float part, uint width, __local float* zz_lanes) {
+    const uint i = (uint)get_local_id(0), first = i & ~(width - 1u), j = i - first;
+    zz_lanes[i] = part;
+    barrier(CLK_LOCAL_MEM_FENCE);
+    for (uint span = width >> 1; span > 0u; span >>= 1) {
+        if (j < span) zz_lanes[i] = zz_lanes[i] + zz_lanes[i + span];
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+    const float all = zz_lanes[first];
+    barrier(CLK_LOCAL_MEM_FENCE);
+    return all;
+}
+/* The Walsh-Hadamard transform over each run of `width` lanes (a power of two dividing the block, at most the fold's
+ * scratch): lane `j` of a run gets `Σ_i (−1)^popcount(i & j) · v_i` over the run's lanes `i`, unscaled — the butterfly,
+ * a stage a bit of the lane, through the fold's scratch. */
+static inline float khronos_opencl1_igpu__zzpackage_lanes_hadamard(float v, uint width, __local float* zz_lanes) {
+    const uint i = (uint)get_local_id(0);
+    for (uint span = 1u; span < width; span <<= 1) {
+        zz_lanes[i] = v;
+        barrier(CLK_LOCAL_MEM_FENCE);
+        const float other = zz_lanes[i ^ span];
+        barrier(CLK_LOCAL_MEM_FENCE);
+        v = (i & span) ? other - v : v + other;
+    }
+    return v;
+}
 static inline float nn__silicon__half_to_float(ushort h) { return vload_half(0, (const half*)&h); }
 static inline float nn__silicon__dot2(uint a, uint b, float c) {
     return (c + nn__silicon__half_to_float((ushort)(a & 0xffffu)) * nn__silicon__half_to_float((ushort)(b & 0xffffu)))
@@ -158,10 +191,19 @@ def flatten(with_doors, dial):
         for inc in re.findall(r'^#include "([^"]+)"', own, re.M):
             inc = 'gpu/kernels/kernels.cuh' if inc == 'gpu/doors.cuh' else inc
             lines.append('#include "%s"' % os.path.join(two.PK, p, inc))
+    lines.append('#include "%s"' % OVERRIDES)
     tmp = tempfile.mkdtemp()
     for name, body in two.FAKE.items():
         open(os.path.join(tmp, name), 'w').write(body)
     return preprocess('\n'.join(lines) + '\n', tmp, dial), tmp
+
+
+def override_rows():
+    """The family's own kernels (`overrides/kernels.cuh`): each row's body and parameters, run on every lane as a wide door's."""
+    text = open(OVERRIDES, encoding='utf-8').read()
+    block = text[text.index('#define %s__OVERRIDE_ROWS(X)' % FAMILY.upper()):]
+    return [(body, params, ('NN__GPU__ZZPRIVATE_WIDE', body, [re.findall(r'(\w+)\s*$', x.strip())[0] for x in params.split(',')]))
+            for body, params in re.findall(r'X\((\w+),\s*\(([^)]*)\)\)', block)]
 
 
 def kernel(fn, params, run):
@@ -705,6 +747,10 @@ def main():
                 continue
             source += kernel(fn, params, r[fn])
             roots.append(fn + '__kernel')
+    own = override_rows()
+    for fn, params, run in own:
+        source += kernel(fn, params, run)
+        roots.append(fn + '__kernel')
     # ⛳ A TYPE WITH AN ALIGNMENT IS WRITTEN AS IT WAS: the parser takes no attributes, so it reads one without and the
     #   writer puts back the original
     raw = {}
@@ -756,8 +802,8 @@ def main():
                 '/* how many kernels it holds: the family sizes its table of made kernels from this */\n'
                 'extern "C" const unsigned %s__kernel_count;\n'
                 'extern "C" const unsigned %s__kernel_count = %du;\n' % (FAMILY, FAMILY, lit, FAMILY, FAMILY, len(roots)))
-    print('✅ %d kernels from %s, %d functions in reach, %d lines of OpenCL C 1.2; %d into an arena, %d through the folds%s' % (
-        len(roots), ', '.join(with_doors), len(prog.reached), text.count('\n'), len(prog.needs_arena), len(prog.needs_lanes),
+    print('✅ %d kernels from %s and %d of the family\'s own, %d functions in reach, %d lines of OpenCL C 1.2; %d into an arena, %d through the folds%s' % (
+        len(roots) - len(own), ', '.join(with_doors), len(own), len(prog.reached), text.count('\n'), len(prog.needs_arena), len(prog.needs_lanes),
         ', checked for gfx906' if os.path.exists(two.CLANG) else ''))
     if os.environ.get('OPENCL1_PROGRAM'):
         open(os.environ['OPENCL1_PROGRAM'], 'w').write(text)

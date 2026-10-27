@@ -267,8 +267,16 @@ class Client:
         return r.json()
 
     async def tools_settings(self):
-        """The server config's tools — a new conversation's mode, or "no" — and the folders (▶ /tools)."""
+        """The server config's tools — a new conversation's mode, or "no" — the folders, and the machine's tools file's
+        entries (▶ /tools)."""
         r = await self.http.get(f"{self.endpoint}/tools")
+        r.raise_for_status()
+        return r.json()
+
+    async def rebuild_tools(self):
+        """The server's skills read again, its tools file kept in step and its startup check run again
+        (▶ /tools/rebuild): what it did, and the tools as `tools_settings` answers them."""
+        r = await self.http.post(f"{self.endpoint}/tools/rebuild", timeout=httpx.Timeout(120.0))
         r.raise_for_status()
         return r.json()
 
@@ -429,7 +437,7 @@ def new_config(model: str) -> dict:
             "max_context": "auto",
             "max_tokens_per_video": 8192, "thinking": True, "sampler": "generation",
             "tools": "chill", "tools_folder": None, "lora": None, "num_cards": 1, "card": "auto", "vram_margin_mb": 50,
-            "image_model": "auto", "image_card": None, "workers": [],
+            "tools_config": "default", "workers": [],
             "options": {},
             "pipeline_parallelism": "no",
             "pipeline_parallelism_layers": "0-%d" % (layers - 1) if layers else "",
@@ -1595,6 +1603,46 @@ async def page():
             server_sel.disable()
         server_sel.on_value_change(lambda e: asyncio.create_task(on_server_mode(e.value)))
 
+        # ⭐ THE SERVER'S TOOLS (NN-127): what its model's REPL reaches on its machine, as the machine's tools file sets
+        #   it up — the file is edited there (docs/tools.md); "Rebuild the tools" reads the skills again, gives each one
+        #   installed since its entry, and checks again what each tool needs
+        ui.separator().classes("mt-4")
+        with ui.row().classes("items-center gap-2"):
+            ui.label("The server's tools").classes("font-bold")
+            ui.button("Rebuild the tools", icon="build", on_click=lambda: asyncio.create_task(on_rebuild_tools())
+                      ).props("dense outline").tooltip(
+                "Read the skills again, give each one installed since its entry in the tools file, and check again "
+                "what each tool needs — a SearXNG to search with, a picture model to draw with")
+            ui.button(icon="refresh", on_click=lambda: asyncio.create_task(show_tools())
+                      ).props("dense flat").tooltip("Ask the server again")
+        tools_lbl = ui.label("").classes("text-xs font-mono whitespace-pre-wrap")
+
+        async def show_tools(got=None, said=()):
+            try:
+                got = got or await client.tools_settings()
+            except Exception as ex:                       # noqa: BLE001 — said in the section
+                tools_lbl.set_text("the server does not answer (%s)" % type(ex).__name__)
+                return
+            if not got.get("tools_file"):
+                tools_lbl.set_text("the server's model has no tools")
+                return
+            lines = list(said) + (["—"] if said else []) + ["the tools file: %s" % got["tools_file"]]
+            for name, e in sorted(got.get("entries", {}).items()):
+                now = ("switched off" if e["enabled"] == "no" else "not available — %s" % e["unavailable"]
+                       if e.get("unavailable") else "on" if e["enabled"] == "yes" else "on (auto)")
+                settings = ", ".join("%s %s" % (k, json.dumps(v)) for k, v in e.get("config", {}).items())
+                lines.append("%-10s %s%s" % (name, now, "\n           %s" % settings if settings else ""))
+            tools_lbl.set_text("\n".join(lines))
+
+        async def on_rebuild_tools():
+            try:
+                got = await client.rebuild_tools()
+            except Exception as ex:                       # noqa: BLE001 — said to the user
+                safe_notify("the tools were not rebuilt: %s" % ex, type="negative")
+                return
+            await show_tools(got, got.get("said") or ["nothing changed"])
+            safe_notify("the tools rebuilt", type="positive")
+
     # --- Help view: a document picker over the release's documents, the UI's guide first ---
     help_view = ui.column().classes("silvann-main w-full p-6 overflow-auto")
     with help_view:
@@ -1674,6 +1722,8 @@ async def page():
     async def select_other_view(v: str):
         state["view"] = v
         update_view()
+        if v == "options":
+            await show_tools()
 
     chat_row.on("click", lambda: asyncio.create_task(on_chat_click()))
     opts_row.on("click", lambda: asyncio.create_task(select_other_view("options")))

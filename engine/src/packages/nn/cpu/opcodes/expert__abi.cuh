@@ -6,6 +6,8 @@
 
 #include "../doors.cuh"
 #include "../../../../operating_systems/os.cuh"   /* the duplex copy's two threads and the clock: the system's */
+#include <stdlib.h>                                /* a note's rows read across: malloc, free */
+#include <string.h>                                /* ...and their picks taken from them and put back: memcpy */
 
 /* ── ⭐⭐⭐ THE fp16 MATVEC — ▶ `expert__header.cuh` for why it is its own verb ──────────────────────── */
 /* `(nn__expert__multiply_fp16 W x out rows cols)` — `out = W x`, W rows × cols as stored, every operand
@@ -129,14 +131,35 @@ static sys__heap_node nn__expert_tier__zzabi_apply_note(const sys__heap_node* ar
     uint64_t* chosen = (uint64_t*)malloc(sizeof(uint64_t) * n * K);
     if (chosen == 0) return sys__engine__abi__error(NN__EXPERT__FAULT_ROOM);
     uint64_t fault = 0u;
-    for (uint64_t r = 0u; r < n && fault == 0u; ++r)
-        if (!sys__gpu__memory_read(ctx->family, chosen + r * K, (const void*)(uintptr_t)(hands + r * row + picks), 8u * K))
+    /* ⭐ THE PICKS ALONE CROSS: gathered on the worker into a landing of their own, read, marked, written back and put in
+     *   their rows there — the rows whole through RAM were ~10 s of a group's 10,000-position prompt (NN-115 ④). Rows
+     *   whose picks are not on a half's boundary are read across whole and written back so. */
+    const nn__doors* doors = row % 2u == 0u && picks % 2u == 0u ? nn__doors_for(ctx) : 0;
+    void* landing = 0;
+    if (doors != 0 && sys__gpu__memory_allocate(ctx->family, &landing, (size_t)(8u * n * K))) {
+        doors->vector_copy_rows((uint16_t*)landing, 4u * K, (const uint16_t*)(uintptr_t)(hands + picks), row / 2u, 4u * K, n);
+        if (!sys__gpu__memory_read(ctx->family, chosen, landing, (size_t)(8u * n * K))) fault = NN__PRIMITIVES__FAULT_NO_DEVICE;
+        if (fault == 0u && !nn__expert_tier__chunk(ctx->family, &tier, chosen, n, argv[6].args[0])) fault = NN__EXPERT__FAULT_ABSENT;
+        if (fault == 0u && !sys__gpu__memory_write(ctx->family, landing, chosen, (size_t)(8u * n * K)))
             fault = NN__PRIMITIVES__FAULT_NO_DEVICE;
+        if (fault == 0u)
+            doors->vector_copy_rows((uint16_t*)(uintptr_t)(hands + picks), row / 2u, (const uint16_t*)landing, 4u * K, 4u * K, n);
+        /* the landing given back once the card has put the picks in their rows */
+        if (!sys__gpu__compute_completed(ctx->family) && fault == 0u) fault = NN__PRIMITIVES__FAULT_NO_DEVICE;
+        sys__gpu__memory_free(ctx->family, landing);
+        free(chosen);
+        return fault != 0u ? sys__engine__abi__error(fault) : nn__doors_answer(&argv[0]);
+    }
+    uint8_t* rows_seen = (uint8_t*)malloc((size_t)(n * row));   /* the rows read across at once, and written back so */
+    if (rows_seen == 0) { free(chosen); return sys__engine__abi__error(NN__EXPERT__FAULT_ROOM); }
+    if (!sys__gpu__memory_read(ctx->family, rows_seen, (const void*)(uintptr_t)hands, (size_t)(n * row)))
+        fault = NN__PRIMITIVES__FAULT_NO_DEVICE;
+    for (uint64_t r = 0u; r < n && fault == 0u; ++r) memcpy(chosen + r * K, rows_seen + r * row + picks, (size_t)(8u * K));
     if (fault == 0u && !nn__expert_tier__chunk(ctx->family, &tier, chosen, n, argv[6].args[0])) fault = NN__EXPERT__FAULT_ABSENT;
-    for (uint64_t r = 0u; r < n && fault == 0u; ++r)
-        if (!sys__gpu__memory_write(ctx->family, (void*)(uintptr_t)(hands + r * row + picks), chosen + r * K, 8u * K))
-            fault = NN__PRIMITIVES__FAULT_NO_DEVICE;
-    free(chosen);
+    for (uint64_t r = 0u; r < n && fault == 0u; ++r) memcpy(rows_seen + r * row + picks, chosen + r * K, (size_t)(8u * K));
+    if (fault == 0u && !sys__gpu__memory_write(ctx->family, (void*)(uintptr_t)hands, rows_seen, (size_t)(n * row)))
+        fault = NN__PRIMITIVES__FAULT_NO_DEVICE;
+    free(chosen); free(rows_seen);
     return fault != 0u ? sys__engine__abi__error(fault) : nn__doors_answer(&argv[0]);
 }
 SYS__ENGINE__ABI__BRIDGE(nn__expert_tier__zzabi_adapter_note, nn__expert_tier__zzabi_apply_note)
@@ -253,5 +276,22 @@ static sys__heap_node nn__expert__zzabi_apply_lent(const sys__heap_node* argv, u
     return answer;
 }
 SYS__ENGINE__ABI__BRIDGE(nn__expert__zzabi_adapter_lent, nn__expert__zzabi_apply_lent)
+
+/* ── ⭐ THE CPUS' EXPERTS REGISTERED WITH A CARD (NN-115) ────────────────────────────────────────────────────────────────
+ * `(nn__expert__register at bytes)` -> `bytes`: RAM this process holds, `bytes` from `at`, registered with the calling
+ *   worker's family (▶ `nn__loader__register`) — a promotion whose runs lie in it copied by the card's copy engine
+ *   straight from where it lies. Run on each card worker whose tier the RAM feeds. */
+static sys__heap_node nn__expert__zzabi_apply_register(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx) {
+    if (argc != 2u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
+    if (argv[0].dtype != SYS__KIND__VALUE_INT || argv[1].dtype != SYS__KIND__VALUE_INT)
+        return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
+    if (!nn__loader__register(ctx->family, argv[0].args[0], argv[1].args[0]))
+        return sys__engine__abi__error(NN__EXPERT__FAULT_REGISTER);
+    sys__heap_node answer = sys__heap_node__nothing();
+    answer.dtype = SYS__KIND__VALUE_INT;
+    answer.args[0] = argv[1].args[0];
+    return answer;
+}
+SYS__ENGINE__ABI__BRIDGE(nn__expert__zzabi_adapter_register, nn__expert__zzabi_apply_register)
 
 #endif /* SILVANN__PACKAGES_NN_CPU_OPCODES_EXPERT__ABI_CUH */

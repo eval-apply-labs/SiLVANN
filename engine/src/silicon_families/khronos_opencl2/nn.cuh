@@ -125,7 +125,14 @@ static inline size_t khronos_opencl2__zzprivate_name_card(khronos_opencl2__state
 /* Start the kernel called `name` on `blocks` blocks of `threads` threads. `kernel` is null: this family
  * compiles no kernel of its own, so there is no address to take.
  * ⛳ UNDER THE LOCK, because a kernel's arguments belong to the kernel object and not to the launch: two
- *   threads setting them at once would launch each other's. */
+ *   threads setting them at once would launch each other's.
+ * ⛔ AND THE CARD'S QUEUE DRAINED WHEN ITS LIVE LIST HAS CHANGED SINCE ITS LAST LAUNCH: a kernel object launched again
+ *   with another list of allocations, while its last launch still waits in the queue, made that launch run wrong —
+ *   `MEASURED` on node03's MI50, ROCm 6.1.3's OpenCL: GLM's router copied a chunk's rows into the hands, the tier's note
+ *   made its landing, and its gather, the same kernel, ran before the copy had; in 1 to 4 runs of 8 the copy's rows were
+ *   lost. A kernel object made afresh each launch, or a drain anywhere between the two, and 8 of 8 were right
+ *   (measurements/2026-10-26_nn126_opencl2_node03.md). A list changes when memory is allocated or freed, a few times a
+ *   layer at most, and the drain waits only for what the next read would. */
 static inline void nn__silicon__launch(const void* kernel, const char* name, uint32_t blocks, uint32_t threads,
                                        void** args, const size_t* sizes, uint32_t count) {
     (void)kernel;
@@ -136,6 +143,10 @@ static inline void nn__silicon__launch(const void* kernel, const char* name, uin
     const uint32_t card = khronos_opencl2__bound_device();
     cl_kernel k = card < s->count ? khronos_opencl2__zzprivate_kernel(s, card, name) : 0;
     bool ok = k != 0;
+    if (ok && s->launched[card] != s->changed[card]) {
+        ok = clFinish(q) == CL_SUCCESS;
+        s->launched[card] = s->changed[card];
+    }
     for (uint32_t i = 0u; ok && i < count; ++i) ok = clSetKernelArg(k, i, sizes[i], args[i]) == CL_SUCCESS;
     const size_t named = ok ? khronos_opencl2__zzprivate_name_card(s, card) : 0u;
     if (ok && named)

@@ -36,8 +36,10 @@
  *   ⛳ nn's read of a value verb's answer (`nn__buffer__read`) waits for the card when its watch of the program's
  *   copy runs out, which is what brings the answer across.
  *   ⛔ THE STEP IS THE WHOLE ALLOCATION, and that is what this family's rate pays for: nn's RAM span (the 27B's
- *   embedding table, 1.27 GB, beside the 64-byte result a value verb writes) crosses whole both ways once a token —
- *   `MEASURED` 1.61 tokens/s against CUDA's 21 on the same bodies, same record.
+ *   embedding table, 1.27 GB) crosses whole both ways once a token, its one reader a kernel decoding a row of it, which
+ *   a launch cannot tell from a writer — `MEASURED` 1.61 tokens/s against CUDA's 21 on the same bodies, same record. A
+ *   model with the experts on the CPU decodes the row there instead (Qwen's `embed_on`), and the span holds nothing a
+ *   token reads.
  * ⭐⭐ ON A CARD WHOSE MEMORY IS THE HOST'S, ONE COPY (NN-73) — an integrated GPU's: a laptop's, an APU's. ⚖
  *   2026-10-20 *"so also pcs with an igpu get the benefit"*. Where the card says `CL_DEVICE_HOST_UNIFIED_MEMORY`, a span
  *   of mapped RAM is an arena of its own, a buffer made over the program's copy (`CL_MEM_USE_HOST_PTR`), and the steps
@@ -170,7 +172,8 @@ static void khronos_opencl1_igpu__zzprivate_stand_up(void) {
                      && unified == CL_TRUE && !(say && say[0] == '0');
         s->context[d] = clCreateContext(0, 1u, &s->device[d], 0, 0, &err);
         if (err != CL_SUCCESS) { s->count = 0u; return; }
-        s->queue[d] = clCreateCommandQueue(s->context[d], s->device[d], 0, &err);
+        cl_command_queue_properties props = 0;
+        s->queue[d] = clCreateCommandQueue(s->context[d], s->device[d], props, &err);
         if (err != CL_SUCCESS) { s->count = 0u; return; }
     }
 }
@@ -649,5 +652,14 @@ static inline bool khronos_opencl1_igpu__mark_open(void** mark) { (void)mark; re
 static inline void khronos_opencl1_igpu__mark_close(void* mark) { (void)mark; }
 static inline bool khronos_opencl1_igpu__mark_record(void* mark) { (void)mark; return false; }
 static inline bool khronos_opencl1_igpu__mark_wait(void* mark) { (void)mark; return false; }
+/* No marks, so a queued copy is the side channel's own, done when the call returns. */
+static inline bool khronos_opencl1_igpu__side_memory_write_queued(void* to, const void* from, size_t bytes, void* channel) {
+    return khronos_opencl1_igpu__side_memory_write(to, from, bytes, channel);
+}
+static inline bool khronos_opencl1_igpu__side_memory_read_queued(void* to, const void* from, size_t bytes, void* channel) {
+    return khronos_opencl1_igpu__side_memory_read(to, from, bytes, channel);
+}
+static inline bool khronos_opencl1_igpu__side_mark_record(void* mark, void* channel) { (void)mark; (void)channel; return false; }
+static inline bool khronos_opencl1_igpu__mark_reached(void* mark) { (void)mark; return false; }
 
 #endif /* SILVANN__SILICON_FAMILIES_KHRONOS_OPENCL1_IGPU_SYS_CUH */

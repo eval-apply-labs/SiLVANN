@@ -10,6 +10,7 @@
 #include "../../manifest__header.cuh"   /* the roster, which the row-count switch below is driven by */
 #include "opcodes/opcodes.cuh"              /* how a verb answers, and how it refuses */
 #include "heap__header.cuh"         /* a form is a heap object, and so is the list it names */
+#include "silicon/pad.cuh"          /* a card's landing pad, given back at the teardown */
 /* ══ THE INIT LIST, WALKED AND REWRITTEN ═════════════════════════════════════════════════════════════
  * The reasoning is beside this, in the file that declares these. What is here is the three operations
  * every package's init is written out of.
@@ -247,6 +248,8 @@ static inline bool sys__package__host_init(const char* config, uint64_t length, 
  * when its init took something is a teardown the loop has to ask about before calling. */
 static inline void sys__package__host_teardown(sys__package_room* room) {
     if (room == 0) return;
+    /* a card's pad, given back on its own worker — the packages after this one, whose threads use it, are down already */
+    sys__pad__close(room->family, sys__silicon__bound_device(room->family));
     room->at = 0; room->bytes = 0ull;
 }
 

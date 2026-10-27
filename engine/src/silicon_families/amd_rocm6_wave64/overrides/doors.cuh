@@ -14,6 +14,7 @@
 #include "vector.cuh"
 #include "hyper.cuh"
 #include "index.cuh"
+#include "kda.cuh"
 
 /* Into nn's table, once, when the family is first asked for it. */
 static inline void amd_rocm6_wave64__override_doors(nn__doors* doors) {
@@ -25,6 +26,7 @@ static inline void amd_rocm6_wave64__override_doors(nn__doors* doors) {
     doors->attention_scores             = amd_rocm6_wave64__override_attention_scores;
     doors->attention_mix                = amd_rocm6_wave64__override_attention_mix;
     doors->attention_causal_mix         = amd_rocm6_wave64__override_attention_causal_mix;
+    doors->attention_causal_scores_grouped = amd_rocm6_wave64__override_attention_causal_scores_grouped;
     doors->attention_scores_grouped     = amd_rocm6_wave64__override_attention_scores_grouped;
     doors->deltanet_steps               = amd_rocm6_wave64__override_deltanet_steps;
     doors->deltanet_step                = amd_rocm6_wave64__override_deltanet_step;
@@ -49,6 +51,16 @@ static inline void amd_rocm6_wave64__override_doors(nn__doors* doors) {
     doors->hadamard_ladder_rows      = amd_rocm6_wave64__override_hadamard_ladder_rows;
     doors->hyper_pre_fp32            = amd_rocm6_wave64__override_hyper_pre_fp32;
     doors->index_select              = amd_rocm6_wave64__override_index_select;
+    doors->kda_steps_decayed         = amd_rocm6_wave64__override_kda_steps_decayed;
+    doors->attention_absorb          = amd_rocm6_wave64__override_attention_absorb;
+    doors->attention_absorb_rows     = amd_rocm6_wave64__override_attention_absorb_rows;
+    doors->attention_expand          = amd_rocm6_wave64__override_attention_expand;
+    doors->attention_expand_rows     = amd_rocm6_wave64__override_attention_expand_rows;
+    doors->index_scores              = amd_rocm6_wave64__override_index_scores;
+    doors->index_scores_rows         = amd_rocm6_wave64__override_index_scores_rows;
+    doors->index_select_rows         = amd_rocm6_wave64__override_index_select_rows;
+    doors->attention_scores_grouped_rows = amd_rocm6_wave64__override_attention_scores_grouped_rows;
+    doors->attention_mix_rows        = amd_rocm6_wave64__override_attention_mix_rows;
 }
 
 #endif /* SILVANN__SILICON_FAMILIES_AMD_ROCM6_WAVE64_OVERRIDES_DOORS_CUH */

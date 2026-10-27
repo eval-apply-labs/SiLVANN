@@ -9,9 +9,11 @@
   "packages/sys/cpu/opcodes/opcodes.cuh": 29,
   "pybind.cuh": 14,
   "silicon_families/amd_rocm6_wave64/sys.cuh": 11,
+  "silicon_families/khronos_opencl1_igpu/nn.cuh": 73,
+  "silicon_families/khronos_opencl1_igpu/sys.cuh": 6,
   "silicon_families/x86_avx2/primitives/pool.cuh": 56,
   "silicon_families/x86_avx2/primitives/sys.cuh": 44
  },
- "total_lines": 253,
+ "total_lines": 332,
  "waived": []
 }

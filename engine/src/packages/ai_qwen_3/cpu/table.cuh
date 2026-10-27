@@ -52,13 +52,13 @@ static uint64_t ai_qwen_3__table__zzpackage_masked(const nn__doors* doors, unsig
 
 /* ⭐ THE ROUTER'S `k` LARGEST OF `n` LOGITS FOR `rows` ROWS (`n` apart), landed in card memory at `landing` (`rows · k`
  * words) rather than in a node array as nn's `nn__routed__top_k` lands a position's — a prompt's picks are hundreds, and nothing but this verb reads them: row `r`'s `k` picks
- * into `chosen[r·k ..]`, its weights at `weights + r·k`. One launch a row, then one read for them all. */
+ * into `chosen[r·k ..]`, its weights at `weights + r·k`. One launch for every row (each row `top_k`'s to the bit), then
+ * one read for them all. */
 static bool ai_qwen_3__table__zzpackage_top_k_rows(sys__engine__ctx* ctx, const nn__doors* doors, uint64_t landing,
                                                    uint64_t weights, uint64_t logits, uint64_t n, uint64_t k,
                                                    uint64_t rows, uint64_t* chosen) {
-    for (uint64_t r = 0u; r < rows; ++r)
-        doors->vector_top_k((uint64_t*)(uintptr_t)(landing + 8u * r * k), 1ull, (uint16_t*)(uintptr_t)(weights + 2u * r * k),
-                            (const uint16_t*)(uintptr_t)(logits + 2u * r * n), n, k);
+    doors->vector_top_k_rows((uint64_t*)(uintptr_t)landing, 1ull, k, (uint16_t*)(uintptr_t)weights, k, (const uint16_t*)(uintptr_t)logits, n, k,
+                             rows);
     return sys__gpu__memory_read(ctx->family, chosen, (const void*)(uintptr_t)landing, (size_t)(8u * rows * k));
 }
 

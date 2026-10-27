@@ -19,6 +19,7 @@ import os
 
 import numpy as np
 
+from .machine import EngineError
 from .model_folder import Refused
 from .system import BINARY, WINDOWS, lock, lockable, memory, spans, write_at
 
@@ -342,3 +343,65 @@ def lock_experts(on, addresses, size):
         return lock(spans(addresses, size)) / 2 ** 30
     except OSError as ex:
         raise Refused("experts_lock: the system would not lock the experts — %s" % ex.strerror)
+
+
+# ⭐ THE CPUS' EXPERTS REGISTERED WITH THE CARDS (`experts_register`, NN-115): the experts in RAM page-locked and mapped for
+#   each card a tier is fed to, so a promotion is copied by the card's copy engine straight from where the expert lies and
+#   no loader thread copies it through a staging buffer first — `MEASURED` (measurements/2026-10-24_nn115_link_node03.md):
+#   four threads staging copies cost the CPUs' experts 10% of a prompt and 15% of an answer, copies read in place 2% and
+#   5%. ⚖ 2026-10-24 Linux's alone: *"no pinning on windows"*.
+# "auto" registers for the families in REGISTERS only: NVIDIA's, whose tier rows were measured registered
+#   (measurements/2026-10-26_v0200_precision_map.md). On an MI50 it bought no rate — the 35B's prompt 125.0 against
+#   125.6 staged (2026-10-24_nn115_in_place_node03.md), the 122B's 116.7 against 118.6 — and after autotune's trials in
+#   the same process its copies in place cost the 122B's prompt five times its time: 20.9 positions/s against 116.7,
+#   125.1 unregistered (`MEASURED` node03, measurements/2026-10-26_v0200_r730_rows_node03.md); `true` registers there
+#   still.
+REGISTERS = ("nvidia_cuda12",)
+
+
+def register_of(setting, where, tier, silicon=None):
+    """`experts_register` resolved before the load: whether the cards copy promotions straight from the CPUs' RAM.
+    "auto": on Linux with the experts copied into RAM (`where` "ram"), a card's tier (`tier`) and the cards of a family
+    in REGISTERS (`silicon`); `true` refused where it cannot hold."""
+    if setting is False:
+        return False
+    can = not WINDOWS and where == "ram" and bool(tier)
+    if setting == "auto":
+        return can and silicon in REGISTERS
+    if setting is not True:
+        raise Refused("experts_register is \"auto\", true or false, not %r" % (setting,))
+    if WINDOWS:
+        raise Refused("experts_register is Linux's: on Windows a card's tier copies its promotions through staging")
+    if not tier:
+        raise Refused("experts_register registers the experts with a card's tier, and this model has none")
+    if where != "ram":
+        raise Refused("experts_register registers the experts the CPU holds in RAM (experts_from 'ram'), not %r" % (where,))
+    return True
+
+
+def register_experts(m, on, cards, addresses, size, required=False):
+    """`experts_register`'s registration once the experts are loaded — each at `addresses`, `size` bytes — on every card
+    worker in `cards` (▶ nn's `nn__expert__register`), the spans rounded out to whole pages, so no page is registered twice.
+    The GB registered, 0 when off or where the system refused it (a promotion then staged); `required` refuses instead."""
+    if not on:
+        return 0.0
+    out = []
+    for a, n in spans(addresses, size):
+        lo, hi = a & ~4095, (a + n + 4095) & ~4095
+        if out and lo <= out[-1][1]:
+            out[-1][1] = max(out[-1][1], hi)
+        else:
+            out.append([lo, hi])
+    was = m.worker
+    try:
+        for k in cards:
+            m.act_as(k)
+            for lo, hi in out:
+                m.must("(nn__expert__register %d %d)" % (lo, hi - lo), "the CPUs' experts registered with card %d" % k)
+    except EngineError as ex:
+        if required:
+            raise Refused("experts_register: the card would not register the experts — %s" % ex)
+        return 0.0
+    finally:
+        m.act_as(was)
+    return sum(hi - lo for lo, hi in out) / 2 ** 30

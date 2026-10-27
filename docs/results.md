@@ -2,8 +2,8 @@
 
 Every number on this page was measured on one of these machines, and every row names the version it was measured with.
 The README's table of machines is drawn from this page. The `D4E4` packs named below were retired in v0.18.0, and the
-397B's pack is no longer published: the R730's rows of a retired pack were measured again on `D8E4` with v0.18.1, and the
-others stay as they were measured.
+397B's pack is no longer published: the R730's rows of a retired pack were measured again on `D8E4` with v0.18.1, the
+RTX 5060 Ti's with v0.19.0, and the others stay as they were measured.
 
 | | The R730 (the test server) | The Precision 5820 (a desktop) | A Ryzen desktop |
 |---|---|---|---|
@@ -80,22 +80,27 @@ two-socket machine 1.5-3%, and the 35B's prompt with its experts on the CPU 5%.
 
 | Where it runs | Prompt | Answer | Version |
 |---|---|---|---|
-| one MI50 | 337 positions/s | 88 tokens/s | v0.19.0 |
-| one MI50 for the dense part, the experts on the CPU, all in RAM | 88 positions/s | 28.4 tokens/s | v0.7.0 |
+| one MI50 | 379 positions/s | 88 tokens/s | v0.20.0 |
+| one MI50 for the dense part, the experts on the CPU, all in RAM | 116 positions/s | 32.1-32.8 tokens/s | v0.20.0 |
+| the same, a 4 GB tier on the card and the prompt streamed onto it (`stream`), 2,035 positions | 450 positions/s (232 a chunk at a time) | 37.6 tokens/s | v0.20.0 |
 | the same, the experts read from the disk, 8 GB of RAM | 32 positions/s† | 11.9 tokens/s — 90% of expert reads from memory | v0.3 |
 | the same, 6 GB of RAM | 31 positions/s† | 10.2 tokens/s — 83% from memory | v0.3 |
-| the CPU alone, no card, all in RAM | 61-67 positions/s | 14.3-15.9 tokens/s | v0.18.1 |
-| the CPU alone, the experts on the CPU read from the disk, 12 GB of RAM (8 GB of it the experts' cache) | 35.3 positions/s† | 11.9 tokens/s — 94% from memory, 28 MB read a token | v0.18.1 |
+| the CPU alone, no card, all in RAM | 65-68 positions/s | 16.1 tokens/s | v0.20.0 |
+| the CPU alone, the experts on the CPU read from the disk, 12 GB of RAM (8 GB of it the experts' cache) | 45-46 positions/s† | 11.7-12.7 tokens/s — 94% from memory, 28 MB read a token | v0.20.0 |
 
 v0.19.0's prompt GEMM on an MI50 stages a tile's slice once and four elements a load, and sums a long row's tile 8 rows
 by 4 pairs a lane: the 35B reads a 2,000-position prompt at 337 positions a second where v0.18.1 read 226, the 27B at
-199 where it read 107 — the answers the same words.
+199 where it read 107 — the answers the same words. v0.20.0 takes the grouped causal scores in tiles too: the 27B 206,
+the 35B 379 — the 35B's on the v0.20.0 tree in its container and on the host, interleaved, the same words
+(`measurements/2026-10-26_nn119_v0200_image_node03.md`; the 27B's `measurements/2026-10-24_nn114_tile_staging_node03.md`).
+Streamed, a layer's experts cross to the card once for the whole prompt, and the card computes them all
+(`measurements/2026-10-25_nn115_qwen_router_rows_node03.md`).
 
 ### Qwen 3.8 27B
 
 | Where it runs | Prompt | Answer | Version |
 |---|---|---|---|
-| one MI50 | 199 positions/s | 31.8 tokens/s | v0.19.0 |
+| one MI50 | 206 positions/s | 31.8 tokens/s | v0.20.0 (the answer v0.19.0's) |
 | one MI50 through OpenCL | 52.5 positions/s | 10.4 tokens/s (13.1 on a short prompt) | v0.5.1 |
 | three stages over machines (pipeline parallel) | — | 6.8 tokens/s, the same tokens | v0.3 |
 
@@ -114,15 +119,17 @@ prompt about 620.
 
 | Pack | Where it runs | Prompt | Answer | Version |
 |---|---|---|---|---|
-| `D8E4` | one MI50 for the dense part, the experts on the CPU, all in RAM | 41 positions/s | 12.9-15.6 tokens/s | v0.18.1 |
-| `D8E4` | the same, 24 GB of the card the tier of experts, held to 80 GB of RAM | 62-64 positions/s | 24.1 tokens/s | v0.18.1 |
-| `D8E4` | the same, the experts read from the disk, 32 GB of RAM | 29.6 positions/s† | 8.2 tokens/s — 85% from memory, 257 MB read a token | v0.18.1 |
-| `D8E4` | the same, 16 GB of RAM | 28.0 positions/s† | 5.9 tokens/s — 71% from memory, 503 MB read a token | v0.18.1 |
-| `D8E4` | one MI50 through OpenCL 2.0, the experts on the CPU, all in RAM | 27 positions/s | 10.3 tokens/s | v0.18.1 |
-| `D8E4` | the same, 18 GB of the card the tier of experts (OpenCL allocates at most 85% of the card at once) | 30.7 positions/s | 13.8 tokens/s | v0.18.1 |
+| `D8E4` | one MI50 for the dense part, the experts on the CPU, all in RAM | 48-50 positions/s | 12.7-15.4 tokens/s | v0.20.0 |
+| `D8E4` | the same, 24 GB of the card the tier of experts, held to 80 GB of RAM | 91-94 positions/s | 25.0 tokens/s | v0.20.0 |
+| `D8E4` | the same, the experts read from the disk, 32 GB of RAM | 33.4 positions/s† | 7.8 tokens/s — 85% from memory, 257 MB read a token | v0.20.0 |
+| `D8E4` | the same, 16 GB of RAM | 31.2 positions/s† | 5.6-5.9 tokens/s — 72% from memory, 492 MB read a token | v0.20.0 |
+| `D8E4` | one MI50 through OpenCL 2.0, the experts on the CPU, all in RAM | 36-37 positions/s | 10.3 tokens/s | v0.20.0 |
+| `D8E4` | the same, 18 GB of the card the tier of experts (OpenCL allocates at most 85% of the card at once) | 49-51 positions/s | 13.5 tokens/s | v0.20.0 |
 
-The `D8E4` rows were measured again with v0.18.1 when the `D4E4` pack was retired, two runs each
-(`measurements/2026-10-23_nn111_d8e4_rows_node03.md`); the two runs without a tier answered at 12.9 and 15.6. With
+The `D8E4` rows were measured again with v0.20.0, two runs each (`measurements/2026-10-26_v0200_r730_rows_node03.md`),
+as v0.18.1's were when the `D4E4` pack was retired (`measurements/2026-10-23_nn111_d8e4_rows_node03.md`): the prompts
+read 11-63% faster, the answers within a few percent — from the disk at 32 GB 5% below, the same reads a token. The two
+runs without a tier answered at 12.7 and 15.4, as v0.18.1's did at 12.9 and 15.6. With
 v0.3.0, which brought the tier, the 122B `D4E4` answered at 10.9 tokens a second without it and 19.9 with 24 GB of it,
 measured side by side.
 
@@ -132,9 +139,11 @@ One MI50 for the dense part, the experts on the CPU.
 
 | Experts | Disk | Prompt | Answer | Version |
 |---|---|---|---|---|
-| `D8E4`: all in RAM, a 300,000-position cache and 18.5 GB of the card the tier of experts — the setup chosen at boot | — | 31.6 positions/s | 10.5 tokens/s | v0.18.1 |
-| `D8E4`: all in RAM, a 300,000-position cache and 6 GB of tier, lent 3.1 GB of the cache's unreached rows — 19.4 GiB of the card in all | — | 30.0 positions/s | 9.3 tokens/s | v0.18.1 |
-| `D8E4`: the same RAM and cache on a 16 GB card's room (16 GiB of the MI50 held) — a 2.25 GB tier, lent 3.1 GB, the setup chosen at boot | — | 29.8 positions/s | 8.8 tokens/s | v0.18.1 |
+| `D8E4`: all in RAM, a 300,000-position cache and 17.75 GB of the card the tier of experts — the setup chosen at boot | — | 54 positions/s | 10.8 tokens/s | v0.20.0 |
+| `D8E4`: all in RAM, a 300,000-position cache and 6 GB of tier, lent 3.1 GB of the cache's unreached rows — 20.1 GiB of the card in all | — | 50.4 positions/s | 9.1-9.6 tokens/s | v0.20.0 |
+| `D8E4`: the same RAM and cache on a 16 GB card's room (16 GiB of the MI50 held) — a 1.5 GB tier, lent 3.1 GB, the setup chosen at boot | — | 49.6 positions/s | 9.2 tokens/s | v0.20.0 |
+| `D8E4`: all in RAM, a 10,020-position prompt streamed onto the card (`stream`) | — | 138 positions/s (45 a chunk at a time) | — | v0.20.0 |
+| `D8E4`: the same over two MI50s' tiers | — | 152 positions/s | — | v0.20.0 |
 | all in RAM | — | 23.9 positions/s | 6.7 tokens/s | v0.3 |
 | all in RAM, 18 GB of the card the tier of experts | — | 25.0 positions/s | 8.1 tokens/s (6.8 without, side by side) | v0.3.0 |
 | all in RAM, 24 GB of the card the tier of experts, from token 224 | — | — | 10.7 tokens/s | v0.3.1 |
@@ -144,7 +153,9 @@ One MI50 for the dense part, the experts on the CPU.
 | 64 GB of RAM | 5 GB/s, overheating‡ | 4.9 positions/s† | 1.55 tokens/s — 80% from memory, 804 MB read a token ◦ | before v0.3 |
 | 32 GB of RAM, before grouped attention | 2.6 GB/s | 11 positions/s† | 1.1 tokens/s — 61% from memory ◦ | v0.2.0 |
 
-The first two rows were held to 150 GB of RAM, a prompt of 1,000 positions, then 128 tokens.
+The first two rows were held to 150 GB of RAM, a prompt of 1,000 positions, then 128 tokens. The streamed rows: each
+layer's experts cross to the cards once for the whole prompt (`measurements/2026-10-25_nn115_group_stream_node03.md`; a
+chunk at a time `measurements/2026-10-25_nn115_glm_prompt_kernels_node03.md`).
 With its experts on the CPU, a model reads a prompt a chunk of positions at a time through each layer — 256 for the
 35B, 1,024 for GLM — so each expert is read about once a chunk and runs once over every position that picked it.
 † Measured from a cold start, so reading the prompt is also when the experts are first read from the disk into
@@ -173,8 +184,13 @@ MI50 32 GB on PCIe 4, each held to 155 W; a prompt of 2,097 positions, then 32 t
 
 ### The RTX 5060 Ti
 
-In the Precision 5820, every row measured again with v0.11.1 on 2026-10-18 unless its version says otherwise
-(`measurements/2026-10-18_precision_map.md`).
+In the Precision 5820, every row measured again with v0.20.0 on 2026-10-26 unless its version says otherwise
+(`measurements/2026-10-26_v0200_precision_map.md`); the 122B's on `D8E4` with v0.19.0 on 2026-10-24, two rounds each
+(`measurements/2026-10-24_nn111_d8e4_rows_precision.md`). With 62 GB the server reads the 122B's experts from the disk
+unless its config says `"experts_from": "ram"`: they (54 GB), the server's own memory beside them and the spare miss what
+the system has free by under a gigabyte. `D8E4`'s dense part takes 4.66 GB of the card against the retired `D4E4`'s 2.37,
+so with its experts in RAM its tier is smaller and it answers about 15% below `D4E4`'s 20.4 in the chat and 18.2 after a
+prompt; from the disk the two are within 2-4%.
 
 **In the chat.** The server as it starts with the model's own config — its sampler, the setup it chooses for the
 machine — and the answer's rate as the chat's meter reads it: a new conversation, a story of 512 tokens (256 for the
@@ -185,21 +201,22 @@ prompt below.
 
 | Model | The machine | The setup the server chooses | In the chat |
 |---|---|---|---|
-| Ministral 3 14B `D4` | the card, 62 GB of RAM | on the card | 46.8 tokens/s |
-| Ministral 3 14B `D8` | the same | on the card | 28.2 tokens/s |
-| Qwen 3.8 27B `D4` | the same | on the card, a 35,840-token context | 25.8 tokens/s |
-| Qwen 3.6 35B-A3B `D8E4` | the same | the dense part on the card, the experts on the CPU in RAM, an 11.25 GB tier | 67.1 tokens/s (59 the first answer after a boot) |
-| Qwen 3.6 35B-A3B `D8E4` | the same, a config with `"card_experts": "no"` | the experts on the CPU in RAM, no tier | 29.0 tokens/s |
-| Qwen 3.6 35B-A3B `D8E4` | the same, a config with `"card": "cpu"` | the CPU alone | 10.5 tokens/s |
-| Qwen 3.5 122B-A10B `D4E4` | the same | the experts on the CPU in RAM (54 GB), a 9.5 GB tier | 20.4 tokens/s |
-| GLM 5.3 Flash `D8E4` | the same | the experts on the CPU, read from the disk | 3.2 tokens/s |
-| Qwen 3.6 35B-A3B `D8E4` | the card, 28 GB of RAM | as with 62 GB | 67.6 tokens/s (59 the first) |
-| Qwen 3.6 35B-A3B `D8E4` | 11.6 GB of the card free — a 12 GB card's room — 62 GB of RAM | the experts in RAM, a 7 GB tier | 64.6 tokens/s (58 the first) |
-| Qwen 3.6 35B-A3B `D8E4` | 7.8 GB of the card free — an 8 GB card's room — 32 GB of RAM | the experts in RAM, a 3.5 GB tier | 55.9 tokens/s (53-54 the first) |
-| Ministral 3 14B `D4` | the same | on the card, a 4,096-token context | 46.7 tokens/s |
-| Qwen 3.5 122B-A10B `D4E4` | 7.3 GB of the card free, 32 GB of RAM | the experts on the CPU, read from the disk | 8.6 tokens/s |
-| Qwen 3.5 122B-A10B `D4E4` | the card, 28 / 32 GB of RAM | the same | 8.1 / 8.5 tokens/s |
-| GLM 5.3 Flash `D8E4` | the card, 28 / 32 / 60 GB of RAM | the experts on the CPU, read from the disk | 2.3 / 2.4 / 3.2 tokens/s |
+| Ministral 3 14B `D4` | the card, 62 GB of RAM | on the card | 44.8 tokens/s |
+| Ministral 3 14B `D8` | the same | on the card | 27.7 tokens/s |
+| Qwen 3.8 27B `D4` | the same | on the card, a 35,840-token context | 24.5 tokens/s |
+| Qwen 3.6 35B-A3B `D8E4` | the same | the dense part on the card, the experts on the CPU in RAM, an 11.75 GB tier | 72.4 tokens/s (64 the first answer after a boot) |
+| Qwen 3.6 35B-A3B `D8E4` | the same, a config with `"card_experts": "no"` | the experts on the CPU in RAM, no tier | 30.4 tokens/s |
+| Qwen 3.6 35B-A3B `D8E4` | the same, a config with `"card": "cpu"` | the CPU alone | 9.2 tokens/s |
+| Qwen 3.5 122B-A10B `D8E4` | the same | the experts on the CPU, read from the disk | 9.7 tokens/s (v0.19.0) |
+| Qwen 3.5 122B-A10B `D8E4` | the same, a config with `"experts_from": "ram"`, held to 61 GB | the experts on the CPU in RAM (54 GB), a 5 GB tier lent 2.9 GB of the cache's rows (7.75 GB at a context of 32,768: 17.2) | 17.0 tokens/s (v0.19.0) |
+| GLM 5.3 Flash `D8E4` | the same | the experts on the CPU, read from the disk | 3.3 tokens/s |
+| Qwen 3.6 35B-A3B `D8E4` | the card, 28 GB of RAM | as with 62 GB | 72.5 tokens/s (63-64 the first) |
+| Qwen 3.6 35B-A3B `D8E4` | 11.6 GB of the card free — a 12 GB card's room — 62 GB of RAM | the experts in RAM, a 7.5 GB tier | 70.4 tokens/s (63 the first) |
+| Qwen 3.6 35B-A3B `D8E4` | 7.8 GB of the card free — an 8 GB card's room — 32 GB of RAM | the experts in RAM, a 4 GB tier | 63.5 tokens/s (59-60 the first) |
+| Ministral 3 14B `D4` | the same | on the card, a 4,096-token context | 44.9 tokens/s |
+| Qwen 3.5 122B-A10B `D8E4` | 7.5 GB of the card free, 32 GB of RAM | the experts on the CPU, read from the disk, a context of 33,792 | 8.3 tokens/s (v0.19.0) |
+| Qwen 3.5 122B-A10B `D8E4` | the card, 28 / 32 GB of RAM | the same | 7.8 / 8.3 tokens/s (v0.19.0) |
+| GLM 5.3 Flash `D8E4` | the card, 28 / 32 / 60 GB of RAM | the experts on the CPU, read from the disk | 2.4 / 2.5 / 3.25 tokens/s |
 
 **After a prompt.** A prompt of about 2,000 positions (2,568 for Ministral), then 64 tokens (32 on the CPU alone, 128
 where a row says so), every expert in RAM; the answer's rate from its 10th token on, and on a short prompt from the
@@ -207,53 +224,61 @@ check against Hugging Face's answer; two rounds, their mean.
 
 | Model | Where it runs | Prompt | Answer | Version |
 |---|---|---|---|---|
-| Ministral 3 14B `D4` | the card | 953 positions/s | 39.2 tokens/s (46.0 on a short prompt) | v0.11.1 |
-| Ministral 3 14B `D8` | the card | 869 positions/s | 24.9 tokens/s (27.5) | v0.11.1 |
-| Qwen 3.8 27B `D4` | the card | 545 positions/s | 23.5 tokens/s (24.4) | v0.11.1 |
-| Qwen 3.8 27B `D4` | the card, a prompt of 6,033 positions — past the 4,352 the cache keeps at full precision | 472 positions/s | 21.8 tokens/s | v0.11.1 |
-| Qwen 3.6 35B-A3B `D8E4` | the dense part on the card, the experts on the CPU, the context of 32,768 its config asks and an 11.25 GB tier — the server's setup; 128 tokens | 115 positions/s | 56.7 tokens/s | v0.11.1 |
-| Qwen 3.6 35B-A3B `D8E4` | the same with a context of 262,144 — a 9 GB tier, lent 2.44 GB more of the cache's rows; 128 tokens | 115 positions/s | 56.2 tokens/s | v0.11.1 |
-| Qwen 3.6 35B-A3B `D8E4` | the same, after a prompt of 16,037 positions | 126 positions/s | 41.8 tokens/s | v0.11.1 |
-| Qwen 3.6 35B-A3B `D8E4` | the same, after a prompt of 32,033 positions | 122 positions/s | 31.2 tokens/s | v0.11.1 |
-| Qwen 3.6 35B-A3B `D8E4` | the dense part on the card, the experts on the CPU, no tier | 53.5 positions/s | 28.7 tokens/s | v0.11.1 |
-| Qwen 3.6 35B-A3B `D8E4` | the CPU alone | 27.4 positions/s | 8.7 tokens/s (9.3) | v0.11.1 |
-| Qwen 3.6 35B-A3B `D8E4` | the CPU alone with AVX2 (`SILVANN_CPU_AVX512=0`), a prompt of 145 positions | 17.0 positions/s | 1.7 tokens/s | v0.11.1 |
-| Qwen 3.5 122B-A10B `D4E4` | 62 GB of RAM: the dense part on the card, the experts on the CPU in RAM (54 GB), a 9.5 GB tier — the server's setup; 128 tokens | 48.4 positions/s | 18.2 tokens/s | v0.11.1 |
+| Ministral 3 14B `D4` | the card | 952 positions/s | 40.4 tokens/s (48.4 on a short prompt) | v0.20.0 |
+| Ministral 3 14B `D8` | the card | 868 positions/s | 25.9 tokens/s (29.0) | v0.20.0 |
+| Qwen 3.8 27B `D4` | the card | 562 positions/s | 24.0 tokens/s (25.0) | v0.20.0 |
+| Qwen 3.8 27B `D4` | the card, a prompt of 6,033 positions — past the 4,352 the cache keeps at full precision | 486 positions/s | 22.2 tokens/s | v0.20.0 |
+| Qwen 3.6 35B-A3B `D8E4` | the dense part on the card, the experts on the CPU, the context of 32,768 its config asks and an 11.75 GB tier — the server's setup; 128 tokens | 182 positions/s | 60.9 tokens/s | v0.20.0 |
+| Qwen 3.6 35B-A3B `D8E4` | the same with a context of 262,144 — a 9.5 GB tier, lent 2.44 GB more of the cache's rows; 128 tokens | 181 positions/s | 60.8 tokens/s | v0.20.0 |
+| Qwen 3.6 35B-A3B `D8E4` | the same, after a prompt of 16,037 positions | 212 positions/s | 44.0 tokens/s | v0.20.0 |
+| Qwen 3.6 35B-A3B `D8E4` | the same, after a prompt of 32,033 positions | 196 positions/s | 32.6 tokens/s | v0.20.0 |
+| Qwen 3.6 35B-A3B `D8E4` | the dense part on the card, the experts on the CPU, no tier | 61.3 positions/s | 29.4 tokens/s | v0.20.0 |
+| Qwen 3.6 35B-A3B `D8E4` | the CPU alone | 28.0 positions/s | 8.7 tokens/s (9.25) | v0.20.0 |
+| Qwen 3.6 35B-A3B `D8E4` | the CPU alone with AVX2 (`SILVANN_CPU_AVX512=0`), a prompt of 145 positions | 17.1 positions/s | 1.8 tokens/s | v0.20.0 |
+| Qwen 3.6 35B-A3B `D8E4` | the card through OpenCL 1.2 (`khronos_opencl1_igpu`), the experts on the CPU in RAM, no tier; 128 tokens | 37.1 positions/s | 23.0 tokens/s | v0.20.0 |
+| Qwen 3.8 27B `D4` | the card through OpenCL 1.2; 128 tokens | 15.1 positions/s | 14.4 tokens/s | v0.20.0 |
+| Qwen 3.5 122B-A10B `D8E4` | 62 GB of RAM (held to 61): the dense part on the card, the experts on the CPU in RAM (54 GB), a 7.75 GB tier — the setup chosen with the experts in RAM at 32,768; 128 tokens | 44.3 positions/s | 15.6 tokens/s | v0.19.0 |
+| Qwen 3.5 122B-A10B `D8E4` | the same, the setup chosen at 32,768 as it is: the experts read from the disk; 128 tokens | 20.5 positions/s | 10.0 tokens/s — 99% from memory | v0.19.0 |
 
-Against one MI50 the 27B reads a prompt 5.3 times as fast here (545 positions a second against 102) — the card's tensor
-cores run the prompt's matrix products — and answers more slowly (23.5 tokens a second against 31.3): a token reads every
+Against one MI50 the 27B reads a prompt 5.5 times as fast here (562 positions a second against 102) — the card's tensor
+cores run the prompt's matrix products — and answers more slowly (24.0 tokens a second against 31.3): a token reads every
 weight once, so the answer follows the memory's speed, 448 GB/s here against the MI50's 1,024. With the experts on the
-CPU the four cores are what limits the 35B (53.5 positions a second against the R730's 88, whose 28 cores read the
-experts). Which experts the tier holds follows when its copies land, so a tier's rate varies from run to run, and over
-an answer it warms: the same setup answers at 51.8 tokens a second over 64 tokens and at 56.7 over 128. Before v0.5.0's
-kernels, through the library's generic ones, the 27B read a prompt at 19 positions a second and answered at 7.8 tokens a
-second; Ministral `D4` read its prompt a position at a time at 34.
+CPU the four cores are what limits the 35B (61 positions a second against the R730's 88, whose 28 cores read the
+experts). With a tier the 35B reads a prompt 1.6 times as fast as v0.11.1 did (182 positions a second against 115): on
+Linux the server pins the experts' RAM for the card (`experts_register` "auto", CUDA's `cudaHostRegister`, 15.1 GB),
+so the card copies them in place. Which experts the tier holds follows when its copies land, so a tier's rate varies
+from run to run, and over an answer it warms: 60.9 tokens a second from the 10th token of 128, 59.2 over all of them.
+Through OpenCL 1.2 the card decodes the embedding on the CPU and multiplies matrices by vectors in that family's own
+kernels, but reads a prompt a position at a time — it is the family for a card without OpenCL 2.0; through CUDA the
+same card answers 1.3 to 2.6 times as fast. Before v0.5.0's kernels, through the library's generic ones, the 27B read a
+prompt at 19 positions a second and answered at 7.8 tokens a second; Ministral `D4` read its prompt a position at a time
+at 34.
 
 **Less RAM, or less of the card.** Each held to the RAM a row names, allowed no swap; the experts on the CPU from the
 disk where a row says so, a prompt of about 1,000 positions from a cold start, then 128 tokens:
 
 | Model | Where it runs | Prompt | Answer | Version |
 |---|---|---|---|---|
-| Qwen 3.6 35B-A3B `D8E4` | 28 GB of RAM: the experts on the CPU in RAM, 8 GB of the card the tier | 105 positions/s | 56.0 tokens/s | v0.11.1 |
+| Qwen 3.6 35B-A3B `D8E4` | 28 GB of RAM: the experts on the CPU in RAM, 8 GB of the card the tier | 156 positions/s | 60.9 tokens/s | v0.20.0 |
 | Qwen 3.6 35B-A3B `D8E4` | 11.6 GB of the card free — a 12 GB card's room: the experts in RAM, a 6.75 GB tier, a prompt of 2,000 | 113 positions/s | 51.8 tokens/s (45.5 with AVX2) | v0.11.0 |
-| Qwen 3.6 35B-A3B `D8E4` | 7.8 GB of the card free — an 8 GB card's room — and 32 GB of RAM: the experts in RAM, a 3.5 GB tier, the setup chosen there | 99.6 positions/s | 48.8 tokens/s | v0.11.1 |
-| Ministral 3 14B `D4` | the same card's room: on the card, a 4,096-token context (2,568 positions) | 949 positions/s | 39.2 tokens/s | v0.11.1 |
-| Qwen 3.5 122B-A10B `D4E4` | 8 GB of the card held, 32 GB of RAM: the experts read from the disk | 19.0 positions/s | 8.1 tokens/s — 87% from memory | v0.8.0 |
-| Qwen 3.5 122B-A10B `D4E4` | 32 GB of RAM, the experts read from the disk | 19.2 positions/s | 8.2 tokens/s — 87% from memory | v0.11.1 |
-| Qwen 3.5 122B-A10B `D4E4` | 28 GB of RAM, the same | 19.0 positions/s | 7.8 tokens/s — 85% from memory | v0.11.1 |
-| GLM 5.3 Flash `D8E4` | 60 GB of RAM, the same | 10.6 positions/s | 3.1 tokens/s — 80% from memory | v0.11.1 |
-| GLM 5.3 Flash `D8E4` | 32 GB of RAM, the same | 10.7 positions/s | 2.3 tokens/s — 65% from memory | v0.11.1 |
-| GLM 5.3 Flash `D8E4` | 28 GB of RAM, the same | 10.6 positions/s | 2.2 tokens/s — 62% from memory | v0.11.1 |
+| Qwen 3.6 35B-A3B `D8E4` | 7.8 GB of the card free — an 8 GB card's room — and 32 GB of RAM: the experts in RAM, a 4 GB tier, the setup chosen there | 147 positions/s | 54.6 tokens/s | v0.20.0 |
+| Ministral 3 14B `D4` | the same card's room: on the card, a 4,096-token context (2,568 positions) | 948 positions/s | 40.4 tokens/s | v0.20.0 |
+| Qwen 3.5 122B-A10B `D8E4` | 8 GB of the card held, 32 GB of RAM: the experts read from the disk | 19.0 positions/s | 7.8 tokens/s — 86% from memory | v0.19.0 |
+| Qwen 3.5 122B-A10B `D8E4` | 32 GB of RAM, the experts read from the disk | 19.0 positions/s | 7.8 tokens/s — 86% from memory, 249 MB read a token | v0.19.0 |
+| Qwen 3.5 122B-A10B `D8E4` | 28 GB of RAM, the same | 18.8 positions/s | 7.5 tokens/s — 83% from memory, 287 MB read a token | v0.19.0 |
+| GLM 5.3 Flash `D8E4` | 60 GB of RAM, the same | 10.8 positions/s | 3.1 tokens/s — 78% from memory | v0.20.0 |
+| GLM 5.3 Flash `D8E4` | 32 GB of RAM, the same | 11.0 positions/s | 2.3 tokens/s — 61% from memory | v0.20.0 |
+| GLM 5.3 Flash `D8E4` | 28 GB of RAM, the same | 11.1 positions/s | 2.2 tokens/s — 58% from memory | v0.20.0 |
 
 Each card's room is a small program holding the rest of the card; 7.83 GB left is what a headless 8 GB card leaves,
 and Ministral `D4` at 4,096 positions holds 7.7 GB of it, so on an 8 GB card that also drives a display it does not
-start. On an 8 GB card's room the 35B's tier is 3.5 GB now (2 GB with v0.8.0, 42.2 tokens a second). The 12 GB room's
-rows ran with the experts in the 62 GB of RAM, and with AVX2's bodies alone (as a CPU without AVX-512 has) the 35B
-answers 12% slower. Holding the disk to 5 GB/s changed neither the 122B's nor GLM's answer; holding it to 2.5 GB/s
-slowed GLM's by 16% and the 122B's prompt by 25%. GLM's answer here is limited by reading its experts from RAM: the two
-channels give the four cores at most 36 GB/s, and its rate follows that bandwidth from one core to four. With 28 GB the
-122B and GLM answer 5% more slowly than with 32 GB; with the desktop's 62 GB the server keeps the 122B's experts in RAM
-instead, 18.2 tokens a second after a prompt and 20.4 in the chat, against 8.2 from the disk.
+start. On an 8 GB card's room the 35B's tier is 4 GB now (3.5 GB with v0.11.1, 48.8 tokens a second; 2 GB with v0.8.0,
+42.2). The 12 GB room's rows ran with the experts in the 62 GB of RAM, and with AVX2's bodies alone (as a CPU without
+AVX-512 has) the 35B answers 12% slower. Holding the disk to 5 GB/s changed neither the 122B's nor GLM's answer; holding
+it to 2.5 GB/s slowed GLM's by 16% and the 122B's prompt by 25%. GLM's answer here is limited by reading its experts
+from RAM: the two channels give the four cores at most 36 GB/s, and its rate follows that bandwidth from one core to
+four. With 28 GB the 122B and GLM answer 4-5% more slowly than with 32 GB; with the desktop's 62 GB the server keeps the
+122B's experts in RAM instead, 18.2 tokens a second after a prompt and 20.4 in the chat, against 8.2 from the disk.
 
 ### The RTX 5070 Ti
 

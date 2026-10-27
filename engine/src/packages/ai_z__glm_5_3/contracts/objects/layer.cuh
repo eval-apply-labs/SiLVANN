@@ -196,7 +196,7 @@
  * A HAND ROW, what the card hands the CPU for one position: the input rotated (hidden halves), the router's weights
  * (`k` halves), and its picks as words (`k`), at the next eight bytes. A CARRY ROW is the site's carry — its maps and
  * the shared expert's answer — kept from the route to the close. */
-#define AI_Z__GLM_5_3__ROWS_MAX        4096ull
+#define AI_Z__GLM_5_3__ROWS_MAX        16384ull
 #define AI_Z__GLM_5_3__HAND_PICKS(hidden, k)  ((2ull * (hidden) + 2ull * (k) + 7ull) & ~7ull)
 #define AI_Z__GLM_5_3__HAND(hidden, k)        (AI_Z__GLM_5_3__HAND_PICKS(hidden, k) + 8ull * (k))
 

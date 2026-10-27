@@ -70,7 +70,11 @@
     X(PKG, bool,     mark_open,                       SYS__SILICON_FAMILY__OF_THIS(mark_open),                       (void** mark)) \
     X(PKG, void,     mark_close,                      SYS__SILICON_FAMILY__OF_THIS(mark_close),                      (void* mark)) \
     X(PKG, bool,     mark_record,                     SYS__SILICON_FAMILY__OF_THIS(mark_record),                     (void* mark)) \
-    X(PKG, bool,     mark_wait,                       SYS__SILICON_FAMILY__OF_THIS(mark_wait),                       (void* mark))
+    X(PKG, bool,     mark_wait,                       SYS__SILICON_FAMILY__OF_THIS(mark_wait),                       (void* mark)) \
+    X(PKG, bool,     side_memory_write_queued,        SYS__SILICON_FAMILY__OF_THIS(side_memory_write_queued),        (void* to, const void* from, size_t bytes, void* channel)) \
+    X(PKG, bool,     side_memory_read_queued,         SYS__SILICON_FAMILY__OF_THIS(side_memory_read_queued),         (void* to, const void* from, size_t bytes, void* channel)) \
+    X(PKG, bool,     side_mark_record,                SYS__SILICON_FAMILY__OF_THIS(side_mark_record),                (void* mark, void* channel)) \
+    X(PKG, bool,     mark_reached,                    SYS__SILICON_FAMILY__OF_THIS(mark_reached),                    (void* mark))
 
 /* What each door does, in the order of the list:
  *     memory_allocate / memory_free            memory on the card
@@ -135,7 +139,15 @@
  *                                              recording another thread has not made yet is not waited for, so
  *                                              the caller orders the two calls itself. A family whose work is
  *                                              done when the call that asked returns has nothing to order: its
- *                                              marks are tokens and both calls are true at once */
+ *                                              marks are tokens and both calls are true at once
+ *     side_memory_write_queued / _read_queued  a copy queued on a side channel, NOT waited for: the caller keeps
+ *                                              `from` and `to` as they are until a mark recorded on that channel
+ *                                              after it is reached. ⛳ A family without marks (`mark_open` false)
+ *                                              has done the copy when the call returns
+ *     side_mark_record                         place the mark after everything queued on the side channel so far.
+ *                                              The caller does not wait
+ *     mark_reached                             the CALLER waits until the mark's latest recording is reached —
+ *                                              the one made before this call, as `mark_wait` */
 
 #define SYS__DOORS__ZZPRIVATE_FIELD(PKG, RET, NAME, FN, PARAMS)  RET (*NAME) PARAMS;
 typedef struct sys__doors {

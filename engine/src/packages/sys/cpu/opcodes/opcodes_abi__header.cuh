@@ -46,6 +46,9 @@ static __device__ SYS__NOINLINE void sys__opcodes__zzabi_adapter_array_set(sys__
 static __device__ SYS__NOINLINE void sys__opcodes__zzabi_adapter_file_open(sys__heap_node* base, uint64_t form);
 static __device__ SYS__NOINLINE void sys__opcodes__zzabi_adapter_file_close(sys__heap_node* base, uint64_t form);
 static __device__ SYS__NOINLINE void sys__opcodes__zzabi_adapter_worker(sys__heap_node* base, uint64_t form);
+static __device__ SYS__NOINLINE void sys__opcodes__zzabi_adapter_pad_open(sys__heap_node* base, uint64_t form);
+static __device__ SYS__NOINLINE void sys__opcodes__zzabi_adapter_pad_move(sys__heap_node* base, uint64_t form);
+static __device__ SYS__NOINLINE void sys__opcodes__zzabi_adapter_pad_close(sys__heap_node* base, uint64_t form);
 static __device__ SYS__NOINLINE void sys__opcodes__zzabi_adapter_unquote(sys__heap_node* base, uint64_t form);
 static __device__ SYS__NOINLINE void sys__opcodes__zzabi_adapter_package_init(sys__heap_node* base, uint64_t form);
 static __device__ SYS__NOINLINE void sys__opcodes__zzabi_adapter_defun(sys__heap_node* base, uint64_t form);

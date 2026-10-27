@@ -5,6 +5,7 @@
 #include "routed__header.cuh"
 #include "doors.cuh"                          /* nn's doors, launched on the worker's silicon */
 #include <stdlib.h>                           /* a chunk's picks, inverted on the host: malloc, free */
+#include <string.h>                           /* a hand row's picks and weights, taken from the rows read across */
 
 /* ══ A MODEL'S ROUTED EXPERTS, AS nn RUNS THEM — ▶ `routed__header.cuh` ══════════════════════════════════════════════ */
 
@@ -127,6 +128,38 @@ static void nn__routed__zzprivate_down(const nn__doors* doors, unsigned int* ove
 static uint64_t nn__routed__zzprivate_slot(const nn__routed* r, uint64_t expert) {
     sys__heap_node me;
     return nn__expert__slot(r->layer, r->type, expert, &me) ? me.args[NN__EXPERT__SLOT_AT] : 0ull;
+}
+/* ...or, where the tier does not hold it and a prompt streams (`ring`, a tier's STREAM: the ring's collection plus one),
+ * its slot in the ring. */
+static uint64_t nn__routed__zzprivate_slot_in(const nn__routed* r, uint64_t ring, uint64_t expert) {
+    const uint64_t at = nn__routed__zzprivate_slot(r, expert);
+    sys__heap_node me;
+    if (at != 0ull || ring == 0ull) return at;
+    return nn__expert__slot(r->layer, ring - 1u, expert, &me) ? me.args[NN__EXPERT__SLOT_AT] : 0ull;
+}
+
+/* ⭐ AN EXPERT STREAMED (NN-115 ②): where the tier does not hold expert `e`, promoted into the ring from the tier's sources
+ * — its copy queued, the card's queue waiting for it where it is settled — `pinned` (this batch's and the next's) kept
+ * from being given up for it. 0, or the fault to answer with. */
+static uint64_t nn__routed__zzprivate_stream_one(sys__engine__ctx* ctx, const nn__routed* r, const nn__expert_tier* tier,
+                                                 uint64_t e, const uint64_t* pinned, unsigned npinned) {
+    /* the tier holds it, or its promotion into the tier is on its way: computed there, the card waiting for that copy */
+    if (!nn__expert__settle_one(r->layer, r->type, e)) return NN__ROUTED__FAULT_EXPERT;
+    if (nn__routed__zzprivate_slot(r, e) != 0ull) return 0u;
+    nn__expert__gather g;
+    if (!nn__expert_tier__stitch(tier, r->first + e, &g)) return NN__ROUTED__FAULT_EXPERT;
+    const uint64_t ring = tier->stream - 1u;
+    int got = nn__expert__promote(ctx->family, r->layer, ring, e, &g, pinned, npinned);
+    if (got == NN__EXPERT__REFUSED) {                    /* every record in flight: the layer's admitted first, then again */
+        (void)nn__expert__settle(r->layer, r->type);
+        (void)nn__expert__settle(r->layer, ring);
+        got = nn__expert__promote(ctx->family, r->layer, ring, e, &g, pinned, npinned);
+    }
+    if (got == NN__EXPERT__REFUSED) return NN__ROUTED__FAULT_EXPERT;
+    /* the card waits on it: ahead of the experts the chunk's line is sending to the tier, which come last in the order
+     *   the batches run in — a layer's first batch waited behind the line's ~28 (~60 ms of a 10,000-row slice, NN-115 ④) */
+    (void)nn__expert__ahead(r->layer, ring, e);
+    return 0u;
 }
 
 /* ⭐ A TIER'S VISIT KEPT FOR THE COMPUTE AFTER IT — ▶ `nn__routed__visit`: a worker's last visit, taken by its next
@@ -322,14 +355,30 @@ static uint64_t nn__routed__rows(sys__engine__ctx* ctx, const nn__doors* doors, 
     uint64_t fault = 0u, P = 0u;
     if (rows_of == 0 || slot_of == 0 || w_of == 0 || expert_of == 0 || picked == 0 || begin == 0 || fill == 0 || order == 0)
         fault = NN__ROUTED__FAULT_ROOM;
+    /* the chunk's hand rows read across at once — a read a row each way was most of a long chunk's time (NN-115 ③). ⭐ ONLY
+     *   THEIR TAILS: each row's weights and picks, past its input, gathered on the worker into the scratch's first bytes
+     *   (the inputs' place, written after) and read; the inputs stay where they are — the rows whole through RAM were ~10 s
+     *   of a group's 10,000-position prompt (NN-115 ④). A hand whose tail would not fit there is read whole. */
+    const uint64_t tail = r->hand_bytes - 2u * H;
+    const bool gather = r->hand_bytes % 2u == 0u && r->picks_at >= 2u * H + 2u * K && tail <= 2u * H
+                     && n * tail <= r->scratch_room;
+    const uint64_t seen = gather ? tail : r->hand_bytes, past = gather ? 2u * H : 0u;    /* a row read, and from where */
+    uint8_t* rows_seen = fault == 0u ? (uint8_t*)malloc((size_t)(n * seen)) : 0;
+    if (fault == 0u && rows_seen == 0) fault = NN__ROUTED__FAULT_ROOM;
+    if (fault == 0u && gather)
+        doors->vector_copy_rows((uint16_t*)(uintptr_t)r->scratch, tail / 2u, (const uint16_t*)(uintptr_t)(hands + 2u * H),
+                                r->hand_bytes / 2u, tail / 2u, n);
+    if (fault == 0u && !sys__gpu__memory_read(ctx->family, rows_seen, (const void*)(uintptr_t)(gather ? r->scratch : hands),
+                                              (size_t)(n * seen)))
+        fault = NN__PRIMITIVES__FAULT_NO_DEVICE;
     for (uint64_t t = 0u; t < n && fault == 0u; ++t) {
-        const uint64_t hand = hands + t * r->hand_bytes;
-        if (!sys__gpu__memory_read(ctx->family, chosen, (const void*)(uintptr_t)(hand + r->picks_at), 8u * K)
-         || !sys__gpu__memory_read(ctx->family, weight, (const void*)(uintptr_t)(hand + 2u * H), 2u * K)) { fault = NN__PRIMITIVES__FAULT_NO_DEVICE; break; }
+        const uint8_t* hand = rows_seen + t * seen;                       /* what was read of the row, from byte `past` */
+        memcpy(chosen, hand + (r->picks_at - past), (size_t)(8u * K));
+        memcpy(weight, hand + (2u * H - past), (size_t)(2u * K));
         for (uint64_t j = 0u; j < K; ++j) {
             if (chosen[j] >= 3u * E) { fault = NN__ROUTED__FAULT_EXPERT; break; }
-            /* a pick numbered past `2·experts` is held by another card of a group's exclusive tiers: neither this card's
-             *   to compute nor the CPUs' (▶ `nn__expert_tier__chunk`) */
+            /* a pick numbered past `2·experts` is another card's of a group — its exclusive tiers', or a streaming group's
+             *   share: neither this card's to compute nor the CPUs' (▶ `nn__expert_tier__chunk`) */
             if (chosen[j] >= 2u * E) continue;
             const bool marked = chosen[j] >= E;                                    /* held by a card's tier */
             if (marked != holds) continue;
@@ -380,23 +429,48 @@ static uint64_t nn__routed__rows(sys__engine__ctx* ctx, const nn__doors* doors, 
             down[2u * j] = (uint32_t)j; down[2u * j + 1u] = slot_of[p];
             wj[j] = w_of[p]; laid[j] = expert_of[p];
         }
-        for (uint64_t t = 0u; t < n; ++t)                    /* the rows' inputs, contiguous */
-            doors->vector_copy((uint16_t*)(uintptr_t)(xs + 2u * t * H), (const uint16_t*)(uintptr_t)(hands + t * r->hand_bytes), H);
-        if (!sys__gpu__memory_write(ctx->family, (void*)(uintptr_t)pairs_at, pairs, 16u * P)
-         || !sys__gpu__memory_write(ctx->family, (void*)(uintptr_t)wj_at, wj, 2u * P)
-         || !sys__gpu__memory_zerofill(ctx->family, (void*)(uintptr_t)acc, 4u * n * K * H))
+        /* the rows' inputs, contiguous — gathered on the worker from the hand rows, over the tails read from there; a hand
+         *   read whole, made on the host from the rows read across and written in one copy */
+        if (gather) {
+            doors->vector_copy_rows((uint16_t*)(uintptr_t)xs, H, (const uint16_t*)(uintptr_t)hands, r->hand_bytes / 2u, H, n);
+        } else {
+            uint8_t* inputs = (uint8_t*)malloc((size_t)(2u * n * H));
+            if (inputs == 0) fault = NN__ROUTED__FAULT_ROOM;
+            for (uint64_t t = 0u; t < n && inputs != 0; ++t) memcpy(inputs + 2u * t * H, rows_seen + t * r->hand_bytes, (size_t)(2u * H));
+            if (fault == 0u && !sys__gpu__memory_write(ctx->family, (void*)(uintptr_t)xs, inputs, (size_t)(2u * n * H)))
+                fault = NN__PRIMITIVES__FAULT_NO_DEVICE;
+            free(inputs);
+        }
+        if (fault == 0u && (!sys__gpu__memory_write(ctx->family, (void*)(uintptr_t)pairs_at, pairs, 16u * P)
+                         || !sys__gpu__memory_write(ctx->family, (void*)(uintptr_t)wj_at, wj, 2u * P)
+                         || !sys__gpu__memory_zerofill(ctx->family, (void*)(uintptr_t)acc, 4u * n * K * H)))
             fault = NN__PRIMITIVES__FAULT_NO_DEVICE;
     }
     /* ② batch by batch: each expert's gate-and-up over its rows, twelve experts a launch; the activations and rotations
      *   over the batch's picks; each expert's down weighted into its picks' sums. A tier computes four experts a batch,
-     *   its first one alone, so the card begins after one copy has landed and a batch runs while the next ones land */
-    const uint64_t batch = r->backing.file != 0ull ? r->batch : holds ? 4u : used;
+     *   its first one alone, so the card begins after one copy has landed and a batch runs while the next ones land.
+     * ⭐ STREAMED (NN-115 ② ③, the tier's ring): the experts the tier does not hold promoted into the ring a batch ahead.
+     *   A batch's kernels are queued first; then, once the card has computed the batch before (a compute mark of the
+     *   card's pad, `sys__pad__mark_compute`: its queued kernels read those slots, and the host is ahead of them), the next
+     *   batch is promoted into that one's slots. So the card always has a batch queued, the next one's copies land while
+     *   it computes, and the ring holds two batches. */
+    const bool stream = holds && tier->stream != 0u;
+    const uint64_t ring = stream ? tier->stream : 0u;
+    const uint64_t batch = r->backing.file != 0ull ? r->batch : stream ? tier->stream_batch : holds ? 4u : used;
+    sys__pad* pad = stream ? sys__pad__of(ctx->family, ctx->device) : 0;
+    if (stream && pad == 0) fault = NN__ROUTED__FAULT_SHAPE;
+    unsigned turn = 0u;                                              /* the batches computed, for the compute marks */
     uint64_t pinned[2u * NN__ROUTED__BATCH_MAX];
+    if (stream && used > 0u && P > 0u && fault == 0u) {             /* the first batch: one expert, the card starts on it */
+        pinned[0] = order[0];
+        fault = nn__routed__zzprivate_stream_one(ctx, r, tier, order[0], pinned, 1u);
+    }
     for (uint64_t b0 = 0u, b_end = holds ? 1u : batch; b0 < used && fault == 0u && P > 0u; b0 = b_end, b_end = b0 + batch) {
         const uint64_t b1 = b_end < used ? b_end : used;
         if (holds)                                                   /* a copy still on its way, waited for here */
             for (uint64_t o = b0; o < b1 && fault == 0u; ++o)
-                if (!nn__expert__settle_one(layer, type, order[o])) fault = NN__ROUTED__FAULT_EXPERT;
+                if (!nn__expert__settle_one(layer, type, order[o]) || (stream && !nn__expert__settle_one(layer, ring - 1u, order[o])))
+                    fault = NN__ROUTED__FAULT_EXPERT;
         if (r->backing.file != 0ull) {
             /* this batch's reads, if not asked for already, and the next batch's, both kept from being given up */
             const uint64_t n1 = b1 + batch < used ? b1 + batch : used;
@@ -414,7 +488,7 @@ static uint64_t nn__routed__rows(sys__engine__ctx* ctx, const nn__doors* doors, 
             for (; o < b1 && k < NN__EXPERT__GROUPS_MAX; ++o) {
                 const uint64_t e0 = order[o];
                 if (!holds) nn__expert__wait_written(layer, type, e0);    /* ▶ `position`: a write still landing */
-                const uint64_t at = nn__routed__zzprivate_slot(r, e0);
+                const uint64_t at = nn__routed__zzprivate_slot_in(r, ring, e0);
                 if (at == 0ull) { fault = NN__ROUTED__FAULT_EXPERT; break; }
                 g.codes[k] = at; g.luts[k] = at + r->up_lut; g.out_rows[k] = 2u * I; g.d[k] = D;
                 g.out_at[k] = 0u; g.pairs_at[k] = begin[e0]; g.pairs[k] = picked[e0];
@@ -433,13 +507,23 @@ static uint64_t nn__routed__rows(sys__engine__ctx* ctx, const nn__doors* doors, 
         nn__routed__zzprivate_rotate(doors, over, r, actr + 2u * p0 * I, act + 2u * p0 * I, p1 - p0);
         for (uint64_t o = b0; o < b1 && fault == 0u; ++o) {
             const uint64_t e = order[o];
-            const uint64_t at = nn__routed__zzprivate_slot(r, e);
+            const uint64_t at = nn__routed__zzprivate_slot_in(r, ring, e);
             if (at == 0ull) { fault = NN__ROUTED__FAULT_EXPERT; break; }
             (r->int8 ? doors->expert_rows_sum_int8 : doors->expert_rows_sum)((float*)(uintptr_t)acc, (const uint8_t*)(uintptr_t)(at + r->down),
                                    r->down_lut - r->down, (const uint8_t*)(uintptr_t)(at + r->down_lut), 2u * H,
                                    (const uint16_t*)(uintptr_t)actr, (const uint32_t*)(uintptr_t)(pairs_at + 8u * (P + begin[e])),
                                    (const uint16_t*)(uintptr_t)wj_at, picked[e], D, H, I);
         }
+        if (stream && fault == 0u && !sys__pad__mark_compute(pad, turn & 1u)) fault = NN__PRIMITIVES__FAULT_NO_DEVICE;
+        if (stream && fault == 0u && b1 < used) {
+            /* the next batch, into the slots of the one before this — computed once its mark is reached — this one kept */
+            const uint64_t n1 = b1 + batch < used ? b1 + batch : used;
+            if (turn > 0u && !sys__pad__compute_reached(pad, (turn - 1u) & 1u)) fault = NN__PRIMITIVES__FAULT_NO_DEVICE;
+            unsigned np = 0u;
+            for (uint64_t o = b0; o < n1; ++o) pinned[np++] = order[o];
+            for (uint64_t o = b1; o < n1 && fault == 0u; ++o) fault = nn__routed__zzprivate_stream_one(ctx, r, tier, order[o], pinned, np);
+        }
+        ++turn;
     }
     /* ③ a model's own addition to the picks' sums, then the rows: each its picks' sums added in pick order */
     if (fault == 0u && mask != 0 && P != 0u) fault = mask(model, ctx, P, laid, actr, wj_at, pairs_at + 8u * P, acc);
@@ -447,6 +531,7 @@ static uint64_t nn__routed__rows(sys__engine__ctx* ctx, const nn__doors* doors, 
         if (!sys__gpu__memory_zerofill(ctx->family, (void*)(uintptr_t)routed, 2u * n * H)) fault = NN__PRIMITIVES__FAULT_NO_DEVICE;
         else doors->expert_rows_reduce((uint16_t*)(uintptr_t)routed, (float*)(uintptr_t)acc, (const uint16_t*)(uintptr_t)routed, n, K, H, over);
     }
+    free(rows_seen);
     free(rows_of); free(slot_of); free(w_of); free(expert_of); free(picked); free(begin); free(fill); free(order);
     free(pairs); free(laid); free(wj);
     return fault;

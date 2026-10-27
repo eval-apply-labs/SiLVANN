@@ -157,11 +157,12 @@ static __device__ SYS__NOINLINE void nn__weights__zzpackage_release_internal(sys
  * resident. */
 /* ⭐ THE PROMOTION QUALIFIER (NN-48) — ⚖ *"the lru is still ordered by absolute recency … the score is a promotion qualifier
  * not an organizer"*. Every expert of a band keeps its last two call times, on a clock that `tick` moves once a layer's
- * visit; its score is the older of the two. `called` records a call now; `qualifies`, asked BEFORE the call is recorded,
- * says whether an expert not resident has earned a slot: any call while its layer holds less than its share and a slot is
- * free; past that, three calls (two recorded and this one) and an older time newer than the band's least recently used
- * resident's. */
+ * visit (`ticks` moves it `n` times at once and answers the first: a chunk's rows, one each); its score is the older of
+ * the two. `called` records a call now; `qualifies`, asked BEFORE the call is recorded, says whether an expert not
+ * resident has earned a slot: any call while its layer holds less than its share and a slot is free; past that, three
+ * calls (two recorded and this one) and an older time newer than the band's least recently used resident's. */
 static __device__ inline uint64_t nn__expert__tick(void);
+static __device__ inline uint64_t nn__expert__ticks(uint64_t n);
 static __device__ inline bool nn__expert__called(uint64_t layer, uint64_t type, uint64_t expert, uint64_t now);
 static __device__ inline bool nn__expert__qualifies(uint64_t layer, uint64_t type, uint64_t expert);
 static __device__ inline bool nn__expert__recent(uint64_t layer, uint64_t type, uint64_t* expert);
@@ -221,6 +222,13 @@ static __device__ inline int nn__expert__promote(sys__silicon_family__id family,
                                                  const nn__expert__gather* gather, const uint64_t* pinned, unsigned npinned);
 /* How many more reads or promotions may be on their way at once — so a verb can choose which of its experts get the room. */
 static __device__ inline unsigned nn__expert__flight_free(void);
+/* How many of them this worker holds — queued, on the way or landed and not yet admitted: what only this worker's own
+ *   promotions and admissions change, so a group's card counts its share of the table by it alone. */
+static __device__ inline unsigned nn__expert__flight_mine(void);
+/* A promotion this worker queued taken ahead of every job but the ones taken ahead before it — a prompt's stream into
+ *   its ring, which the card waits on, ahead of the experts its line sends to the tier. The order the band admits them
+ *   in (`settle`) is unchanged. False where it is not queued. */
+static __device__ inline bool nn__expert__ahead(uint64_t layer, uint64_t type, uint64_t expert);
 
 /* ══ ⭐⭐ A CARD'S TIER OF EXPERTS (NN-48) — WHAT A MODEL'S EXPERTS VERBS ASK OF IT ══════════════════════════════════
  * A card holds some of a model's routed experts, the CPUs every one; the card computes the picks it holds and the CPUs the

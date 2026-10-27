@@ -158,6 +158,16 @@ static inline bool amd_rocm6_wave64__mark_open(void** mark) {
 static inline void amd_rocm6_wave64__mark_close(void* mark) { if (mark) (void)hipEventDestroy((hipEvent_t)mark); }
 static inline bool amd_rocm6_wave64__mark_record(void* mark) { return hipEventRecord((hipEvent_t)mark, 0) == hipSuccess; }
 static inline bool amd_rocm6_wave64__mark_wait(void* mark) { return hipStreamWaitEvent(0, (hipEvent_t)mark, 0) == hipSuccess; }
+static inline bool amd_rocm6_wave64__side_memory_write_queued(void* to, const void* from, size_t bytes, void* channel) {
+    return hipMemcpyAsync(to, from, bytes, hipMemcpyHostToDevice, (hipStream_t)channel) == hipSuccess;
+}
+static inline bool amd_rocm6_wave64__side_memory_read_queued(void* to, const void* from, size_t bytes, void* channel) {
+    return hipMemcpyAsync(to, from, bytes, hipMemcpyDeviceToHost, (hipStream_t)channel) == hipSuccess;
+}
+static inline bool amd_rocm6_wave64__side_mark_record(void* mark, void* channel) {
+    return hipEventRecord((hipEvent_t)mark, (hipStream_t)channel) == hipSuccess;
+}
+static inline bool amd_rocm6_wave64__mark_reached(void* mark) { return hipEventSynchronize((hipEvent_t)mark) == hipSuccess; }
 
 /* ⛳ THE FUNCTIONS ABOVE ARE THIS FAMILY'S OWN, prefixed with its name; `sys`'s door list names them
  * (`contracts/abi/gpu.cuh`), and the published `sys__gpu__*` names in `cpu/silicon/silicon_family.cuh`

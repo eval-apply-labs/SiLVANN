@@ -867,9 +867,12 @@ static __device__ inline bool nn__expert__touch(uint64_t layer, uint64_t type, u
  * The two call times live in the slot's last word, the newer in its high half and the older in its low: 32 bits of a
  * clock that moves once a layer's visit is some four billion visits. */
 #define NN__EXPERT__ZZPRIVATE_CALLS 5u
+static uint64_t nn__expert__zzprivate_clock = 0ull;
 static __device__ inline uint64_t nn__expert__tick(void) {
-    static uint64_t clock = 0ull;
-    return __atomic_add_fetch(&clock, 1ull, __ATOMIC_RELAXED) & 0xFFFFFFFFull;
+    return __atomic_add_fetch(&nn__expert__zzprivate_clock, 1ull, __ATOMIC_RELAXED) & 0xFFFFFFFFull;
+}
+static __device__ inline uint64_t nn__expert__ticks(uint64_t n) {
+    return __atomic_add_fetch(&nn__expert__zzprivate_clock, n, __ATOMIC_RELAXED) - n + 1ull;
 }
 static __device__ inline bool nn__expert__zzpackage_older(uint64_t layer, uint64_t type, uint64_t expert, uint64_t* older) {
     sys__heap_node me;

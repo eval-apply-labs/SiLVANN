@@ -75,10 +75,10 @@ class DeepSeek4(Generates):
     GENERATES = False
 
     def __init__(self, folder, machine, max_context=512, layers=None, experts_int8=True, engram_from=None,
-                 experts_from="ram", experts_in_ram=0, experts_lock=False, socket=None, card=0, cards=None,
+                 experts_from="ram", experts_in_ram=0, experts_lock=False, experts_register="auto", socket=None, card=0, cards=None,
                  card_experts=0, chunk=128, card_experts_gb=0, card_shared="auto", card_landing="auto", card_landing_line=3,
                  card_exclusive=False, card_free=16, card_duplex_line=1200, card_duplex=None, card_line=8,
-                 picture_pixels=1 << 22):
+                 picture_pixels=1 << 22, embed_on="auto"):
         if folder.architecture not in ARCHITECTURES:
             raise Refused("%s is a %r model, not one of %s" % (folder.path, folder.architecture, ARCHITECTURES))
         c, b = folder.config, folder.bundle
@@ -162,6 +162,14 @@ class DeepSeek4(Generates):
         # the routed experts' CPU worker: the whole machine, or — `socket` k, a stage of a pipeline a socket — that socket's
         #   device, its threads and its memory on that socket's node (▶ x86_avx2's devices: 0 the machine, 1 + k a socket)
         self.CPUS = [dict(w=self.CPU, dev=0 if socket is None else 1 + int(socket), part=0)]
+        # ⭐ THE EMBEDDING ON THE CPU (as Qwen's, ▶ qwen3_5.py): the CPU worker keeps the table in its RAM and decodes a
+        #   token's row, which the card copies across and un-rotates — where the card's family keeps mapped RAM as a copy
+        #   on the card (khronos_opencl1_igpu), so the table neither takes the card's room nor crosses whole each token.
+        if embed_on not in ("auto", "card", "cpu"):
+            raise Refused("embed_on is 'auto', 'card' or 'cpu', not %r" % (embed_on,))
+        if embed_on == "cpu" and self.P > 1:
+            raise Refused("embed_on 'cpu' is one card's: a group's card 0 reads the table in place")
+        self.EMBED_CPU = embed_on == "cpu" or (embed_on == "auto" and self.P == 1 and machine.silicon == "khronos_opencl1_igpu")
         # ⭐ THE ROUTED EXPERTS IN RAM, OR MAPPED FROM THE PACK (▶ `experts_file`) — the 40 layers' are 272 GB and node-01
         #   has 251 GB of RAM. `"mapped"`: the first `experts_in_ram` layers this machine runs copied into RAM as `"ram"`
         #   copies them all, the rest mapped from the pack over their slots — the page cache holds the ones in use, the
@@ -170,6 +178,8 @@ class DeepSeek4(Generates):
             raise Refused("experts_from is 'ram' or 'mapped', not %r" % (experts_from,))
         self.EXPERTS_FROM, self.EXPERTS_IN_RAM = experts_from, int(experts_in_ram)
         self.EXPERTS_LOCK, self.LOCKED_GB = bool(experts_lock), 0.0      # ▶ `_plan`
+        self.EXPERTS_REGISTER, self.REGISTERED_GB = experts_register, 0.0  # ▶ `_plan`
+        self.REGISTER_REQUIRED = experts_register is True
         # ⭐ THE CARDS' SHARE OF THE ROUTED EXPERTS — ⚖ 2026-10-19: *"each card keeps their half of the expert they are
         #   computing, and at the end we add up the two partials"*. Experts 0 .. card_experts-1 of every layer on the cards,
         #   each card its part of their inner width (the shared expert's cut: whole rotation blocks), the rest in the CPU's
@@ -389,6 +399,10 @@ class DeepSeek4(Generates):
         #   its file's (▶ `experts_file.lock_check`)
         experts_file.lock_check(self.EXPERTS_LOCK, "ram" if ram else self.EXPERTS_FROM,
                                 self.EPLAN.slot_bytes * self.RAM_PER * len(ram))
+        # `experts_register`: the layers copied into RAM registered with the tiers' cards, a promotion copied straight from
+        #   where it lies (▶ `experts_file.register_of`)
+        self.EXPERTS_REGISTER = experts_file.register_of(self.EXPERTS_REGISTER, "ram" if ram else self.EXPERTS_FROM,
+                                                         self.CARD_GB, self.m.silicon)
         # each card's slot of an expert: its part of the gate and up rows, their scales, its columns of every down row, every
         # down row's scale
         if any(dn.row_bytes * ip % self.MINTER for ip in self.I_OF):
@@ -472,10 +486,15 @@ class DeepSeek4(Generates):
                                    resids=8 + sum(1 for n in mine if (1 << 20) < n <= (2 << 20)))
             out[k] += ("nn__ram_buffer_result__size_bytes:64\nnn__ram_buffer_result__qty:1\n"
                        "nn__ram_buffer_experts__size_bytes:64\nnn__ram_buffer_experts__qty:1\n"
-                       "nn__ram_buffer_table__size_bytes:%d\nnn__ram_buffer_table__qty:1\n" % (self.TABLE_BYTES if k == 0 else 256))
+                       "nn__ram_buffer_table__size_bytes:%d\nnn__ram_buffer_table__qty:1\n"
+                       % (self.TABLE_BYTES if k == 0 and not self.EMBED_CPU else 256))
         for c in self.CPUS:
             out[c["w"]] = self._section(max(1 << 20, R * self.HANDB, R * self.H * 2, self.RSCRATCH if R else 0), self.cpu_arena,
                                         [(0, self.EPLAN, self.cpu_slots)], kinds, many=16, bigs=3 + (3 if R else 0))
+            if self.EMBED_CPU:                         # the embedding's table, the CPU worker's (▶ `__init__`)
+                out[c["w"]] += ("nn__ram_buffer_result__size_bytes:64\nnn__ram_buffer_result__qty:1\n"
+                                "nn__ram_buffer_experts__size_bytes:64\nnn__ram_buffer_experts__qty:1\n"
+                                "nn__ram_buffer_table__size_bytes:%d\nnn__ram_buffer_table__qty:1\n" % self.TABLE_BYTES)
         return out
 
     # ── ② the load ───────────────────────────────────────────────────────────────────────────────────────────
@@ -488,9 +507,13 @@ class DeepSeek4(Generates):
             if k == 0:
                 loader.layer_width(0, self.T_HEAD, 1)
                 self.HEAD_AT = loader.load_bytes(self.HPLAN, self.T_HEAD, 0, self.head_data, self.head_lut)
-                self.EMB_AT = m.buffer(self.TABLE_BYTES, "EMBEDDING", ram=True)
+                if self.EMBED_CPU:                      # the CPU worker's own (▶ `__init__`)
+                    m.act_as(self.CPU)
+                self.EMB_AT = m.buffer(self.TABLE_BYTES, "c_embedding" if self.EMBED_CPU else "EMBEDDING", ram=True)
                 m.write(self.EMB_AT, self.emb_data)
                 m.write(self.EMB_AT + self.EMB_DATA_BYTES, self.emb_lut)
+                if self.EMBED_CPU:
+                    m.act_as(k)
             for l in self.run_layers:
                 for t in sorted({self.TYPE[n] for n in self.dense_names(l)}):
                     loader.layer_width(l, t, self.WIDTH[t])
@@ -658,8 +681,10 @@ class DeepSeek4(Generates):
                 raise Refused("layer %d's slots were not handed out one after another, as its file is laid out" % l)
             # ⛳ A LAYER'S SLOTS ARE A WHOLE NUMBER OF PAGES (384 × 17,714,176 bytes), so each layer starts on a page
             m.map_file(lo, p.slot_bytes * self.EXPERTS, *paths[l])
-        self.LOCKED_GB = experts_file.lock_experts(self.EXPERTS_LOCK, [at[(l, x)] for l in ram for x in range(self.NK, self.EXPERTS)
-                                                                       if (l, x) in at], p.slot_bytes)
+        held = [at[(l, x)] for l in ram for x in range(self.NK, self.EXPERTS) if (l, x) in at]
+        self.LOCKED_GB = experts_file.lock_experts(self.EXPERTS_LOCK, held, p.slot_bytes)
+        self.REGISTERED_GB = experts_file.register_experts(m, self.EXPERTS_REGISTER, range(self.P), held, p.slot_bytes,
+                                                           self.REGISTER_REQUIRED)
         m.act_as(CARD)
 
     def _card_buffers(self, k):
@@ -726,6 +751,8 @@ class DeepSeek4(Generates):
                  n("ascratch"))
         m.buffer(2 * (4 * H + self.EXPERTS) + 8 * I + 256, n("mscratch"))
         cb["hand"] = m.buffer(2 * (H + self.TOPK), n("hand"))
+        if k == 0 and self.EMBED_CPU:
+            m.node_array("EMB_TOK", 1)              # the token the CPU worker decodes the row of (▶ `_procedures`)
         if k == 0 and self.CHUNK:
             # a chunk's rows: their streams and the two sites' mixes, the hands the CPU reads, what its experts give back,
             #   the n-gram memory's rows and the tokens
@@ -785,7 +812,7 @@ class DeepSeek4(Generates):
     def _cpu_buffers(self, i):
         m, H, c = self.m, self.H, lambda name: self.cn(i, name)
         m.buffer(1024, c("signs"), _half(self.signs[:512]))
-        for nm in ("e", "routed"):
+        for nm in ("e", "routed") + (("emb",) if self.EMBED_CPU and i == 0 else ()):
             self.at[c(nm)] = m.buffer(H * 2, c(nm))
         m.buffer(2 * (H + self.TOPK), c("hand"))
         if self.CHUNK:
@@ -1075,11 +1102,22 @@ class DeepSeek4(Generates):
 
     def _procedures(self):
         m, H = self.m, self.H
-        # the token's row of the embedding table, un-rotated (Rᵀu = S ⊙ H·u), into e — and into every stream
-        m.defun("(defun (embed_e tok) (begin (nn__turboquant__decode (nn__vector__range EMBEDDING (* tok %d) %d) "
-                "(nn__vector__range EMBEDDING (+ %d tok) 1) u 1 %d %d) (nn__hadamard__rotate u ones512 hu %d) "
-                "(nn__vector__pointwise_mul hu signs_row e %d)))"
-                % (self.EMB_ROW_BYTES // 2, self.EMB_ROW_BYTES // 2, self.EMB_DATA_BYTES // 2, H, self.EMB_BITS, H, H))
+        # the token's row of the embedding table, un-rotated (Rᵀu = S ⊙ H·u), into e — and into every stream; with the
+        # table the CPU worker's (EMBED_CPU), decoded there (`xe`) and copied across
+        if self.EMBED_CPU:
+            m.act_as(self.CPU)
+            m.picture("xe", "(let ((tok (nth EMB_TOK 0))) (nn__turboquant__decode (nn__vector__range c_embedding (* tok %d) %d) "
+                      "(nn__vector__range c_embedding (+ %d tok) 1) c_emb 1 %d %d))"
+                      % (self.EMB_ROW_BYTES // 2, self.EMB_ROW_BYTES // 2, self.EMB_DATA_BYTES // 2, H, self.EMB_BITS))
+            m.act_as(CARD)
+            m.defun("(defun (embed_e tok) (begin (sys__node_array__set EMB_TOK 0 tok) (sys__compute %d names xe) "
+                    "(sys__result %d) (nn__buffer__copy c_emb %d u %d) (nn__hadamard__rotate u ones512 hu %d) "
+                    "(nn__vector__pointwise_mul hu signs_row e %d)))" % (self.CPU, self.CPU, self.CPU, 2 * H, H, H))
+        else:
+            m.defun("(defun (embed_e tok) (begin (nn__turboquant__decode (nn__vector__range EMBEDDING (* tok %d) %d) "
+                    "(nn__vector__range EMBEDDING (+ %d tok) 1) u 1 %d %d) (nn__hadamard__rotate u ones512 hu %d) "
+                    "(nn__vector__pointwise_mul hu signs_row e %d)))"
+                    % (self.EMB_ROW_BYTES // 2, self.EMB_ROW_BYTES // 2, self.EMB_DATA_BYTES // 2, H, self.EMB_BITS, H, H))
         m.defun("(defun (embed tok) (begin (embed_e tok) %s (type e)))" % self._spread(0))
         # the head: the streams collapsed by the last site's mix (the model's `hc_pre` before its norm), the norm, the logits
         logits = ("(nn__hyper__collapse_fp32 streams mixb hm %d %d) (nn__rmsnorm__apply_fp32 hm fnw hn %d %r) "

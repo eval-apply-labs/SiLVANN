@@ -420,5 +420,12 @@ static inline bool sys__gpu__mark_open(sys__silicon_family__id family, void** ma
 static inline void sys__gpu__mark_close(sys__silicon_family__id family, void* mark);
 static inline bool sys__gpu__mark_record(sys__silicon_family__id family, void* mark);
 static inline bool sys__gpu__mark_wait(sys__silicon_family__id family, void* mark);
+static inline bool sys__gpu__side_memory_write_queued(sys__silicon_family__id family, void* to, const void* from, size_t bytes,
+                                                      void* channel);
+static inline bool sys__gpu__side_memory_read_queued(sys__silicon_family__id family, void* to, const void* from, size_t bytes,
+                                                     void* channel);
+static inline bool sys__gpu__side_mark_record(sys__silicon_family__id family, void* mark, void* channel);
+static inline bool sys__gpu__mark_reached(sys__silicon_family__id family, void* mark);
+static inline uint32_t sys__silicon__bound_device(sys__silicon_family__id family);
 
 #endif /* SILVANN__PACKAGES_SYS_CPU_SILICON_SILICON__HEADER_CUH */

@@ -151,6 +151,15 @@ static inline bool host__mark_open(void** mark) {
 static inline void host__mark_close(void* mark) { (void)mark; }
 static inline bool host__mark_record(void* mark) { return mark != 0; }
 static inline bool host__mark_wait(void* mark) { return mark != 0; }
+/* A queued copy is done when the call returns, so a mark is reached as soon as it is recorded. */
+static inline bool host__side_memory_write_queued(void* to, const void* from, size_t bytes, void* channel) {
+    return host__side_memory_write(to, from, bytes, channel);
+}
+static inline bool host__side_memory_read_queued(void* to, const void* from, size_t bytes, void* channel) {
+    return host__side_memory_read(to, from, bytes, channel);
+}
+static inline bool host__side_mark_record(void* mark, void* channel) { (void)channel; return mark != 0; }
+static inline bool host__mark_reached(void* mark) { return mark != 0; }
 
 /* sys's doors, filled from sys's own list the way a loaded family fills them. */
 #define SYS__SILICON_FAMILY__THIS host

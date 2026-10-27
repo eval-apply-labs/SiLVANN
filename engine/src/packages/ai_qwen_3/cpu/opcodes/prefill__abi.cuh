@@ -22,13 +22,15 @@
  * The pairs the GEMM doors take (`nn/contracts/abi/gpu.cuh`: a row of `x`, a row of `out`) are written into the
  * front of the scratch; the MoE's are its routing, inverted on the host. */
 
-/* The front of the scratch: `count` pairs `(first_x + j, first_out + j)`, written from the host. False if the
- * card would not take them. */
+/* The front of the scratch: `count` pairs `(first_x + j, first_out + j)`, written on the worker (nn's
+ * `expert_pairs_rows`), queued like the site's launches: a copy from the host would wait for every launch before it.
+ * False where the worker has no doors. */
 static bool ai_qwen_3__prefill__zzprivate_run_pairs(sys__engine__ctx* ctx, uint64_t at, uint64_t count, uint64_t first_x,
                                                     uint64_t first_out) {
-    uint32_t pairs[2u * AI_QWEN_3__ROWS_MAX];
-    for (uint64_t j = 0u; j < count; ++j) { pairs[2u * j] = (uint32_t)(first_x + j); pairs[2u * j + 1u] = (uint32_t)(first_out + j); }
-    return sys__gpu__memory_write(ctx->family, (void*)(uintptr_t)at, pairs, (size_t)(8u * count));
+    const nn__doors* doors = nn__doors_for(ctx);
+    if (doors == 0) return false;
+    doors->expert_pairs_rows((uint32_t*)(uintptr_t)at, count, 1u, first_x, 1u, first_out);
+    return true;
 }
 
 /* ⭐ A CHUNK'S POSITIONS FOR ITS ROTARY. `(… first h1 rows)` gives each row its place in the cache, `first + r`, as its

@@ -3,7 +3,8 @@
 /* ══ attention's DOORS, RUN FASTER — amd_rocm6_wave64 ═════════════════════════════════════════════════════════════════
  * nn's attention doors (`nn/cpu/opcodes/attention__abi.cuh`), where this family covers them: the scores and the mix
  * over heads of 128 or 256, as one call or as the two residual passes, and two residuals' merge; the grouped scores, the
- * mix as halves and the causal mix over heads of 512 too. */
+ * mix as halves and the causal mix over heads of 512 too, and those two over rows of keys of their own; MLA's absorb and
+ * expand, a row or many. */
 
 /* What this file needs, named where a reader — and an editor — can follow it. */
 #include <stdint.h>
@@ -161,38 +162,68 @@ static __device__ inline void amd_rocm6_wave64__zzprivate_attention_causal_mix(u
  *   head and sixteen lanes a position, each holding `D / 16` of the query, four positions a lane group in flight; the
  *   score `dot · 1/√D` into `p`. The products are nn's; the sixteen parts are summed by shuffles. */
 template <uint32_t D>
-static __device__ inline void amd_rocm6_wave64__zzprivate_attention_raw(float* p, const uint16_t* q, const uint16_t* k, uint64_t q_heads,
-                                                                         uint64_t kv_heads, uint64_t length) {
+static __device__ inline void amd_rocm6_wave64__zzprivate_attention_raw_head(float* ph, const uint16_t* qh, const uint16_t* kg, uint64_t row,
+                                                                              uint64_t length) {
     const uint32_t PER = D / 16u;                                         /* a lane's halves of a head: 8, 16 or 32 */
     const uint32_t t = (uint32_t)nn__silicon__lane(), sub = t % 16u, slot = t / 16u;
-    const uint64_t group = q_heads / kv_heads, row = kv_heads * D;
     const float scale = 1.0f / nn__silicon__sqrtf((float)D);
-    for (uint64_t h = nn__silicon__block(); h < q_heads; h += nn__silicon__blocks()) {
-        const uint16_t* kh = k + (h / group) * D + sub * PER;
-        float* ph = p + h * length;
-        uint32_t qv[PER / 2u];
-        const uint32_t* qw = (const uint32_t*)(q + h * D + sub * PER);
+    const uint16_t* kh = kg + sub * PER;
+    uint32_t qv[PER / 2u];
+    const uint32_t* qw = (const uint32_t*)(qh + sub * PER);
 #pragma unroll
-        for (uint32_t i = 0u; i < PER / 2u; ++i) qv[i] = qw[i];
-        for (uint64_t base = slot; base < length; base += 64u) {           /* four positions a lane group in flight */
-            uint32_t kv[4][PER / 2u];
+    for (uint32_t i = 0u; i < PER / 2u; ++i) qv[i] = qw[i];
+    for (uint64_t base = slot; base < length; base += 64u) {               /* four positions a lane group in flight */
+        uint32_t kv[4][PER / 2u];
 #pragma unroll
-            for (uint32_t u = 0u; u < 4u; ++u) {
-                const uint64_t pos = base + 16u * u < length ? base + 16u * u : base;
-                const uint32_t* kw = (const uint32_t*)(kh + pos * row);
+        for (uint32_t u = 0u; u < 4u; ++u) {
+            const uint64_t pos = base + 16u * u < length ? base + 16u * u : base;
+            const uint32_t* kw = (const uint32_t*)(kh + pos * row);
 #pragma unroll
-                for (uint32_t i = 0u; i < PER / 2u; ++i) kv[u][i] = kw[i];
-            }
-#pragma unroll
-            for (uint32_t u = 0u; u < 4u; ++u) {
-                float dot = 0.0f;
-#pragma unroll
-                for (uint32_t i = 0u; i < PER / 2u; ++i) dot = nn__silicon__dot2(qv[i], kv[u][i], dot);
-                for (uint32_t off = 8u; off > 0u; off >>= 1) dot += __shfl_xor(dot, (int)off);
-                const uint64_t pos = base + 16u * u;
-                if (pos < length && sub == 0u) ph[pos] = dot * scale;
-            }
+            for (uint32_t i = 0u; i < PER / 2u; ++i) kv[u][i] = kw[i];
         }
+#pragma unroll
+        for (uint32_t u = 0u; u < 4u; ++u) {
+            float dot = 0.0f;
+#pragma unroll
+            for (uint32_t i = 0u; i < PER / 2u; ++i) dot = nn__silicon__dot2(qv[i], kv[u][i], dot);
+            for (uint32_t off = 8u; off > 0u; off >>= 1) dot += __shfl_xor(dot, (int)off);
+            const uint64_t pos = base + 16u * u;
+            if (pos < length && sub == 0u) ph[pos] = dot * scale;
+        }
+    }
+}
+template <uint32_t D>
+static __device__ inline void amd_rocm6_wave64__zzprivate_attention_raw(float* p, const uint16_t* q, const uint16_t* k, uint64_t q_heads,
+                                                                         uint64_t kv_heads, uint64_t length) {
+    const uint64_t group = q_heads / kv_heads, row = kv_heads * D;
+    for (uint64_t h = nn__silicon__block(); h < q_heads; h += nn__silicon__blocks())
+        amd_rocm6_wave64__zzprivate_attention_raw_head<D>(p + h * length, q + h * D, k + (h / group) * D, row, length);
+}
+/* ⭐ THE GROUPED SCORES AND THE MIX AS HALVES FOR `rows` QUERIES, EACH OVER KEYS AND VALUES OF ITS OWN (NN-115 ③) — nn's
+ *   `scores_grouped_rows` and `mix_rows`: a block a (row, query head), each the one-row kernel's head above, so a
+ *   prompt's rows and a position at a time are the same bits; one launch a block of rows, where a launch a row gave the
+ *   card a block a head — 64 at GLM's, about one a compute unit. */
+template <uint32_t D>
+static __device__ inline void amd_rocm6_wave64__zzprivate_attention_raw_rows(float* p, uint64_t p_row, const uint16_t* q, uint64_t q_row,
+                                                                              const uint16_t* k, uint64_t k_row, const uint32_t* lens,
+                                                                              uint64_t q_heads, uint64_t kv_heads, uint64_t rows) {
+    const uint64_t group = q_heads / kv_heads, row = kv_heads * D;
+    for (uint64_t b = nn__silicon__block(); b < rows * q_heads; b += nn__silicon__blocks()) {
+        const uint64_t u = b / q_heads, h = b - u * q_heads, length = (uint64_t)lens[u];
+        amd_rocm6_wave64__zzprivate_attention_raw_head<D>(p + u * p_row + h * length, q + u * q_row + h * D, k + u * k_row + (h / group) * D,
+                                                          row, length);
+    }
+}
+template <uint32_t D>
+static __device__ inline void amd_rocm6_wave64__zzprivate_attention_mix_rows(uint16_t* o, uint64_t o_row, const float* p, uint64_t p_row,
+                                                                              const uint16_t* v, uint64_t v_row, const uint32_t* lens,
+                                                                              uint64_t q_heads, uint64_t kv_heads, uint64_t rows,
+                                                                              unsigned int* over) {
+    const uint64_t group = q_heads / kv_heads, row = kv_heads * D;
+    for (uint64_t b = nn__silicon__block(); b < rows * q_heads; b += nn__silicon__blocks()) {
+        const uint64_t u = b / q_heads, h = b - u * q_heads, length = (uint64_t)lens[u];
+        amd_rocm6_wave64__zzprivate_attention_mix_head<D, true>(0, o + u * o_row + h * D, p + u * p_row + h * length,
+                                                                v + u * v_row + (h / group) * D, row, length, over);
     }
 }
 /* The entry points, written out — a head of 128 and of 256 for each, and of 512 for the grouped scores, the mix as
@@ -208,6 +239,36 @@ static __global__ AMD_ROCM6_WAVE64__ZZPRIVATE_BOUNDS void amd_rocm6_wave64__zzpr
 static __global__ AMD_ROCM6_WAVE64__ZZPRIVATE_BOUNDS void amd_rocm6_wave64__zzprivate_attention_raw_512(float* p, const uint16_t* q, const uint16_t* k,
     uint64_t q_heads, uint64_t kv_heads, uint64_t length) {
     amd_rocm6_wave64__zzprivate_attention_raw<512u>(p, q, k, q_heads, kv_heads, length);
+}
+static __global__ AMD_ROCM6_WAVE64__ZZPRIVATE_BOUNDS void amd_rocm6_wave64__zzprivate_attention_raw_rows_128(float* p, uint64_t p_row,
+    const uint16_t* q, uint64_t q_row, const uint16_t* k, uint64_t k_row, const uint32_t* lens, uint64_t q_heads, uint64_t kv_heads,
+    uint64_t rows) {
+    amd_rocm6_wave64__zzprivate_attention_raw_rows<128u>(p, p_row, q, q_row, k, k_row, lens, q_heads, kv_heads, rows);
+}
+static __global__ AMD_ROCM6_WAVE64__ZZPRIVATE_BOUNDS void amd_rocm6_wave64__zzprivate_attention_raw_rows_256(float* p, uint64_t p_row,
+    const uint16_t* q, uint64_t q_row, const uint16_t* k, uint64_t k_row, const uint32_t* lens, uint64_t q_heads, uint64_t kv_heads,
+    uint64_t rows) {
+    amd_rocm6_wave64__zzprivate_attention_raw_rows<256u>(p, p_row, q, q_row, k, k_row, lens, q_heads, kv_heads, rows);
+}
+static __global__ AMD_ROCM6_WAVE64__ZZPRIVATE_BOUNDS void amd_rocm6_wave64__zzprivate_attention_raw_rows_512(float* p, uint64_t p_row,
+    const uint16_t* q, uint64_t q_row, const uint16_t* k, uint64_t k_row, const uint32_t* lens, uint64_t q_heads, uint64_t kv_heads,
+    uint64_t rows) {
+    amd_rocm6_wave64__zzprivate_attention_raw_rows<512u>(p, p_row, q, q_row, k, k_row, lens, q_heads, kv_heads, rows);
+}
+static __global__ AMD_ROCM6_WAVE64__ZZPRIVATE_BOUNDS void amd_rocm6_wave64__zzprivate_attention_mix_rows_128(uint16_t* o, uint64_t o_row,
+    const float* p, uint64_t p_row, const uint16_t* v, uint64_t v_row, const uint32_t* lens, uint64_t q_heads, uint64_t kv_heads,
+    uint64_t rows, unsigned int* over) {
+    amd_rocm6_wave64__zzprivate_attention_mix_rows<128u>(o, o_row, p, p_row, v, v_row, lens, q_heads, kv_heads, rows, over);
+}
+static __global__ AMD_ROCM6_WAVE64__ZZPRIVATE_BOUNDS void amd_rocm6_wave64__zzprivate_attention_mix_rows_256(uint16_t* o, uint64_t o_row,
+    const float* p, uint64_t p_row, const uint16_t* v, uint64_t v_row, const uint32_t* lens, uint64_t q_heads, uint64_t kv_heads,
+    uint64_t rows, unsigned int* over) {
+    amd_rocm6_wave64__zzprivate_attention_mix_rows<256u>(o, o_row, p, p_row, v, v_row, lens, q_heads, kv_heads, rows, over);
+}
+static __global__ AMD_ROCM6_WAVE64__ZZPRIVATE_BOUNDS void amd_rocm6_wave64__zzprivate_attention_mix_rows_512(uint16_t* o, uint64_t o_row,
+    const float* p, uint64_t p_row, const uint16_t* v, uint64_t v_row, const uint32_t* lens, uint64_t q_heads, uint64_t kv_heads,
+    uint64_t rows, unsigned int* over) {
+    amd_rocm6_wave64__zzprivate_attention_mix_rows<512u>(o, o_row, p, p_row, v, v_row, lens, q_heads, kv_heads, rows, over);
 }
 static __global__ AMD_ROCM6_WAVE64__ZZPRIVATE_BOUNDS void amd_rocm6_wave64__zzprivate_attention_causal_mix_128(uint16_t* o, const float* p, const uint16_t* v,
     uint64_t q_heads, uint64_t kv_heads, uint64_t first, uint64_t rows, unsigned int* over) {
@@ -299,6 +360,89 @@ static void amd_rocm6_wave64__override_attention_residual_mix(float* res, const 
                         AMD_ROCM6_WAVE64__ZZPRIVATE_ROWS * AMD_ROCM6_WAVE64__ZZPRIVATE_WAVE, args, sizes, 6u);
 }
 
+/* ⭐ A LATENT'S MIX OVER ROWS IN TILES (NN-115 ③) — `attention_mix_rows` for a kv head of 512 read by 32 or more query
+ *   heads (GLM's latent, DeepSeek's): a row's answer the GEMM it is, the heads' weights against its value rows. Each
+ *   element is the one-row mix's above to the bit — four chains, a wave's positions `w`, `w + 4` … in order, added as that
+ *   kernel adds its four waves' — and the values are read once for every head, where a block a head read them 64 times.
+ *   A block 64 heads by 64 elements, the positions 32 at a time staged in shared memory, a lane 4 heads by 4 elements 16
+ *   apart. (A query alone keeps the one-row kernel: one row's 8 tiles leave the card idle.) */
+#define AMD_ROCM6_WAVE64__ZZPRIVATE_MX_KT 32u
+static __device__ inline void amd_rocm6_wave64__zzprivate_mix_tile(uint16_t* o, const float* p, const uint16_t* v, uint64_t q_heads,
+                                                                   uint64_t kv_heads, uint64_t length, uint64_t g, uint64_t mi, uint64_t ei,
+                                                                   float (*ps)[AMD_ROCM6_WAVE64__ZZPRIVATE_MX_KT + 1u], float (*vs)[65],
+                                                                   unsigned int* over) {
+    const uint32_t D = 512u, KT = AMD_ROCM6_WAVE64__ZZPRIVATE_MX_KT, W = 64u, J = 4u, R = AMD_ROCM6_WAVE64__ZZPRIVATE_ROWS;
+    const uint32_t t = (uint32_t)nn__silicon__lane(), n = (uint32_t)nn__silicon__lanes();
+    const uint32_t tr = (t / 16u) * 4u, tp = t % 16u;
+    const uint64_t group = q_heads / kv_heads, row = kv_heads * D, m0 = mi * 64u, e0 = ei * W;
+    float acc[4][4][AMD_ROCM6_WAVE64__ZZPRIVATE_ROWS];      /* a chain a wave of the one-row kernel: positions ≡ w mod 4 */
+#pragma unroll
+    for (uint32_t a = 0u; a < 4u; ++a)
+#pragma unroll
+        for (uint32_t j = 0u; j < 4u; ++j)
+#pragma unroll
+            for (uint32_t w = 0u; w < R; ++w) acc[a][j][w] = 0.0f;
+    for (uint64_t pos0 = 0u; pos0 < length; pos0 += KT) {
+        for (uint32_t i = t; i < 64u * KT; i += n) {               /* the heads' weights: 64 heads by KT positions */
+            const uint32_t r = i / KT, c = i % KT;
+            const uint64_t m = m0 + r, pos = pos0 + c;
+            ps[r][c] = (m < group && pos < length) ? p[(g * group + m) * length + pos] : 0.0f;
+        }
+        for (uint32_t i = t; i < KT * W; i += n) {                 /* the values: KT positions by 64 elements */
+            const uint32_t r = i / W, c = i % W;
+            const uint64_t pos = pos0 + r;
+            vs[r][c] = pos < length ? nn__silicon__half_to_float(v[pos * row + g * D + e0 + c]) : 0.0f;
+        }
+        __syncthreads();
+        const uint64_t span = length - pos0 < KT ? length - pos0 : KT;
+        for (uint32_t c0 = 0u; c0 < (uint32_t)span; c0 += R) {   /* KT a multiple of 4: position pos0 + c is chain c % 4's */
+#pragma unroll
+            for (uint32_t w = 0u; w < R; ++w) {
+                const uint32_t c = c0 + w;
+                if (c >= (uint32_t)span) break;
+                float pv[4], vv[4];
+#pragma unroll
+                for (uint32_t a = 0u; a < 4u; ++a) pv[a] = ps[tr + a][c];
+#pragma unroll
+                for (uint32_t j = 0u; j < J; ++j) vv[j] = vs[c][tp + 16u * j];
+#pragma unroll
+                for (uint32_t a = 0u; a < 4u; ++a)
+#pragma unroll
+                    for (uint32_t j = 0u; j < J; ++j) acc[a][j][w] += pv[a] * vv[j];
+            }
+        }
+        __syncthreads();
+    }
+#pragma unroll
+    for (uint32_t a = 0u; a < 4u; ++a) {
+        const uint64_t m = m0 + tr + a;
+        if (m >= group) continue;
+#pragma unroll
+        for (uint32_t j = 0u; j < J; ++j) {
+            float sum = 0.0f;
+#pragma unroll
+            for (uint32_t w = 0u; w < R; ++w) sum += acc[a][j][w];
+            o[(g * group + m) * D + e0 + tp + 16u * j] = nn__kernels__zzabi_to_half(sum, over);
+        }
+    }
+}
+static __global__ AMD_ROCM6_WAVE64__ZZPRIVATE_BOUNDS void amd_rocm6_wave64__zzprivate_mix_tile_rows(
+        uint16_t* o, uint64_t o_row, const float* p, uint64_t p_row, const uint16_t* v, uint64_t v_row, const uint32_t* lens,
+        uint64_t q_heads, uint64_t kv_heads, uint64_t rows, unsigned int* over) {
+    __shared__ float ps[64][AMD_ROCM6_WAVE64__ZZPRIVATE_MX_KT + 1u];
+    __shared__ float vs[AMD_ROCM6_WAVE64__ZZPRIVATE_MX_KT][65];
+    const uint64_t mt = (q_heads / kv_heads + 63u) / 64u, per = kv_heads * mt * 8u;
+    for (uint64_t b = nn__silicon__block(); b < rows * per; b += nn__silicon__blocks()) {
+        const uint64_t u = b / per, rest = b - u * per, g = rest / (mt * 8u), tile = rest % (mt * 8u);
+        amd_rocm6_wave64__zzprivate_mix_tile(o + u * o_row, p + u * p_row, v + u * v_row, q_heads, kv_heads, (uint64_t)lens[u], g,
+                                             tile / 8u, tile % 8u, ps, vs, over);
+    }
+}
+/* Whether the mix's tile takes the call: a kv head of 512 read by at least 32 query heads, the values on 4 bytes. */
+static inline bool amd_rocm6_wave64__zzprivate_mix_tile_fit(const uint16_t* v, uint64_t q_heads, uint64_t kv_heads, uint64_t head_dim) {
+    return head_dim == 512u && kv_heads != 0u && q_heads % kv_heads == 0u && q_heads / kv_heads >= 32u && ((uint64_t)(uintptr_t)v) % 4u == 0u;
+}
+
 static void amd_rocm6_wave64__override_attention_scores(float* p, const uint16_t* q, const uint16_t* k, uint64_t q_heads,
                                                         uint64_t kv_heads, uint64_t head_dim, uint64_t length) {
     if (!amd_rocm6_wave64__zzprivate_attention_fit(q, k, q_heads, kv_heads, head_dim)) {
@@ -345,8 +489,126 @@ static void amd_rocm6_wave64__override_attention_causal_mix(uint16_t* o, const f
     nn__silicon__launch(kernel, "amd_rocm6_wave64__zzprivate_attention_causal_mix", blocks,
                         AMD_ROCM6_WAVE64__ZZPRIVATE_ROWS * AMD_ROCM6_WAVE64__ZZPRIVATE_WAVE, args, sizes, 8u);
 }
+/* ⭐ A PROMPT'S GROUPED CAUSAL SCORES IN TILES (NN-114) — nn's grouped causal scores give a lane 4 query rows by 8 keys
+ *   straight from memory; here a kv head's work is the GEMM it is: its rows each query row's heads of the group, its
+ *   columns the key positions, summed over the head's width — 64 rows by 64 positions a block, the width 64 columns at a
+ *   time staged in shared memory as the expert GEMM's tiles are (▶ expert.cuh), a lane 4 rows by 4 positions 16 apart. A
+ *   tile no row of which reaches its first position is not run; inside one, a position past its row's is not written. Each
+ *   dot is nn's: one chain of `dot2` over the width's pairs in order, then the scale — so the scores are nn's generic
+ *   kernel's to the bit (the bench's case). (The 27B's 2,000-position prompt: 0.43 s of its 10.2 s in nn's.) */
+#define AMD_ROCM6_WAVE64__ZZPRIVATE_CS_KT 64u
+/* One 64 × 64 tile of the scores — kv head `g`, query rows `mi`, positions `ni` — staged through `qs` and `ks`. */
+static __device__ inline void amd_rocm6_wave64__zzprivate_scores_tile(float* p, const uint16_t* q, const uint16_t* k, uint64_t q_heads,
+                                                                      uint64_t kv_heads, uint64_t head_dim, uint64_t first, uint64_t rows,
+                                                                      uint64_t g, uint64_t mi, uint64_t ni,
+                                                                      uint32_t (*qs)[AMD_ROCM6_WAVE64__ZZPRIVATE_CS_KT / 2u + 1u],
+                                                                      uint32_t (*ks)[AMD_ROCM6_WAVE64__ZZPRIVATE_CS_KT / 2u + 1u]) {
+    const uint32_t t = (uint32_t)nn__silicon__lane(), n = (uint32_t)nn__silicon__lanes();
+    const uint32_t tr = (t / 16u) * 4u, tp = t % 16u;
+    const uint64_t group = q_heads / kv_heads, span_all = first + rows, krow = kv_heads * head_dim;
+    const uint64_t M = rows * group;
+    const float scale = 1.0f / nn__silicon__sqrtf((float)head_dim);
+    {
+        const uint64_t m0 = mi * 64u, n0 = ni * 64u;
+        float sum[4][4];
+        for (uint32_t a = 0u; a < 4u; ++a)
+            for (uint32_t c = 0u; c < 4u; ++c) sum[a][c] = 0.0f;
+        for (uint64_t k0 = 0u; k0 < head_dim; k0 += AMD_ROCM6_WAVE64__ZZPRIVATE_CS_KT) {
+            /* a slice: 64 query rows and 64 keys, eight halves an item, two items a lane */
+            for (uint32_t h = 0u; h < 2u; ++h) {
+                const uint32_t i = t + n * h, r = i / 8u, c = (i % 8u) * 4u;
+                uint4 qv = make_uint4(0u, 0u, 0u, 0u), kv = make_uint4(0u, 0u, 0u, 0u);
+                const uint64_t m = m0 + r, pos = n0 + r;
+                if (m < M)
+                    qv = *(const uint4*)(const void*)(q + ((m / group) * q_heads + g * group + m % group) * head_dim + k0 + 2u * c);
+                if (pos < span_all)
+                    kv = *(const uint4*)(const void*)(k + pos * krow + g * head_dim + k0 + 2u * c);
+                qs[r][c] = qv.x; qs[r][c + 1u] = qv.y; qs[r][c + 2u] = qv.z; qs[r][c + 3u] = qv.w;
+                ks[r][c] = kv.x; ks[r][c + 1u] = kv.y; ks[r][c + 2u] = kv.z; ks[r][c + 3u] = kv.w;
+            }
+            __syncthreads();
+            for (uint32_t c = 0u; c < AMD_ROCM6_WAVE64__ZZPRIVATE_CS_KT / 2u; ++c) {
+                uint32_t qv[4], kv[4];
+                for (uint32_t a = 0u; a < 4u; ++a) qv[a] = qs[tr + a][c];
+                for (uint32_t j = 0u; j < 4u; ++j) kv[j] = ks[tp + 16u * j][c];
+                for (uint32_t a = 0u; a < 4u; ++a)
+                    for (uint32_t j = 0u; j < 4u; ++j) sum[a][j] = nn__silicon__dot2(qv[a], kv[j], sum[a][j]);
+            }
+            __syncthreads();
+        }
+        for (uint32_t a = 0u; a < 4u; ++a) {
+            const uint64_t m = m0 + tr + a;
+            if (m >= M) continue;
+            const uint64_t r = m / group, h = g * group + m % group;
+            for (uint32_t j = 0u; j < 4u; ++j) {
+                const uint64_t pos = n0 + tp + 16u * j;
+                if (pos <= first + r) p[(r * q_heads + h) * span_all + pos] = sum[a][j] * scale;
+            }
+        }
+    }
+}
+static __global__ AMD_ROCM6_WAVE64__ZZPRIVATE_BOUNDS void amd_rocm6_wave64__zzprivate_causal_scores_tile(
+        float* p, const uint16_t* q, const uint16_t* k, uint64_t q_heads, uint64_t kv_heads, uint64_t head_dim, uint64_t first,
+        uint64_t rows) {
+    __shared__ uint32_t qs[64][AMD_ROCM6_WAVE64__ZZPRIVATE_CS_KT / 2u + 1u];
+    __shared__ uint32_t ks[64][AMD_ROCM6_WAVE64__ZZPRIVATE_CS_KT / 2u + 1u];
+    const uint64_t group = q_heads / kv_heads, M = rows * group, mt = (M + 63u) / 64u, nt = (first + rows + 63u) / 64u;
+    for (uint64_t b = nn__silicon__block(); b < kv_heads * mt * nt; b += nn__silicon__blocks()) {
+        const uint64_t g = b / (mt * nt), mi = (b / nt) % mt, ni = b % nt;
+        const uint64_t last = (mi * 64u + 63u < M ? mi * 64u + 63u : M - 1u) / group;     /* the tile's last query row */
+        if (ni * 64u > first + last) continue;                                           /* past every row's reach */
+        amd_rocm6_wave64__zzprivate_scores_tile(p, q, k, q_heads, kv_heads, head_dim, first, rows, g, mi, ni, qs, ks);
+    }
+}
+/* ⭐ THE GROUPED SCORES OF `rows` QUERIES, EACH OVER `lens[u]` KEYS OF ITS OWN, IN THE SAME TILES (NN-115 ③): row `u` a
+ *   query of the tile above at `first = lens[u] − 1` — every query head of a kv head against every key, a block a 64 × 64
+ *   tile — so each score is nn's generic kernel's, and a row's keys are read once for all 64 heads of GLM's latent. */
+static __global__ AMD_ROCM6_WAVE64__ZZPRIVATE_BOUNDS void amd_rocm6_wave64__zzprivate_scores_tile_rows(
+        float* p, uint64_t p_row, const uint16_t* q, uint64_t q_row, const uint16_t* k, uint64_t k_row, const uint32_t* lens,
+        uint64_t q_heads, uint64_t kv_heads, uint64_t head_dim, uint64_t most, uint64_t rows) {
+    __shared__ uint32_t qs[64][AMD_ROCM6_WAVE64__ZZPRIVATE_CS_KT / 2u + 1u];
+    __shared__ uint32_t ks[64][AMD_ROCM6_WAVE64__ZZPRIVATE_CS_KT / 2u + 1u];
+    const uint64_t mt = (q_heads / kv_heads + 63u) / 64u, nt = (most + 63u) / 64u, per = kv_heads * mt * nt;
+    for (uint64_t b = nn__silicon__block(); b < rows * per; b += nn__silicon__blocks()) {
+        const uint64_t u = b / per, rest = b - u * per, length = (uint64_t)lens[u];
+        const uint64_t g = rest / (mt * nt), mi = (rest / nt) % mt, ni = rest % nt;
+        if (length == 0u || ni * 64u >= length) continue;
+        amd_rocm6_wave64__zzprivate_scores_tile(p + u * p_row, q + u * q_row, k + u * k_row, q_heads, kv_heads, head_dim, length - 1u, 1u,
+                                               g, mi, ni, qs, ks);
+    }
+}
+/* Through the tile where every query and key row starts on sixteen bytes and the width is whole slices of 64; else nn's. */
+static void amd_rocm6_wave64__override_attention_causal_scores_grouped(float* p, const uint16_t* q, const uint16_t* k,
+                                                                       uint64_t q_heads, uint64_t kv_heads, uint64_t head_dim,
+                                                                       uint64_t first, uint64_t rows) {
+    if (rows == 0u || kv_heads == 0u || q_heads % kv_heads != 0u || head_dim % AMD_ROCM6_WAVE64__ZZPRIVATE_CS_KT != 0u
+        || ((uint64_t)(uintptr_t)q) % 16u != 0u || ((uint64_t)(uintptr_t)k) % 16u != 0u) {
+        nn__attention__zzabi_launch_causal_scores_grouped(p, q, k, q_heads, kv_heads, head_dim, first, rows);
+        return;
+    }
+    const uint64_t tiles = kv_heads * ((rows * (q_heads / kv_heads) + 63u) / 64u) * ((first + rows + 63u) / 64u);
+    const uint32_t blocks = tiles < NN__KERNELS__BLOCKS_MAX ? (uint32_t)tiles : NN__KERNELS__BLOCKS_MAX;
+    void* args[] = { &p, &q, &k, &q_heads, &kv_heads, &head_dim, &first, &rows };
+    const size_t sizes[] = { sizeof p, sizeof q, sizeof k, sizeof q_heads, sizeof kv_heads, sizeof head_dim, sizeof first, sizeof rows };
+    nn__silicon__launch((const void*)amd_rocm6_wave64__zzprivate_causal_scores_tile, "amd_rocm6_wave64__zzprivate_causal_scores_tile",
+                        blocks, AMD_ROCM6_WAVE64__ZZPRIVATE_ROWS * AMD_ROCM6_WAVE64__ZZPRIVATE_WAVE, args, sizes, 8u);
+}
+/* Whether the tile takes a query's grouped scores: a latent's heads of 512, at least 32 query heads a kv head, every query
+ * and key row on sixteen bytes — GLM's and DeepSeek's latent attention, whose 64 heads then read each key once. A query
+ * alone takes it from 256 keys: `MEASURED` (test/src_gemv_27b_bench.cpp, BENCH_ATTENTION_ONLY, one MI50) at 2,048 keys 57
+ * us against the kernel above's 197, at 640 53 against 72, at 37 52 against 22. */
+#define AMD_ROCM6_WAVE64__ZZPRIVATE_SCORES_TILE_FROM 256u
+static inline bool amd_rocm6_wave64__zzprivate_scores_tile_fit(const uint16_t* q, const uint16_t* k, uint64_t q_heads, uint64_t kv_heads,
+                                                               uint64_t head_dim) {
+    return head_dim == 512u && kv_heads != 0u && q_heads % kv_heads == 0u && q_heads / kv_heads >= 32u
+        && ((uint64_t)(uintptr_t)q) % 16u == 0u && ((uint64_t)(uintptr_t)k) % 16u == 0u;
+}
 static void amd_rocm6_wave64__override_attention_scores_grouped(float* p, const uint16_t* q, const uint16_t* k, uint64_t q_heads,
                                                                 uint64_t kv_heads, uint64_t head_dim, uint64_t length) {
+    if (length >= AMD_ROCM6_WAVE64__ZZPRIVATE_SCORES_TILE_FROM && amd_rocm6_wave64__zzprivate_scores_tile_fit(q, k, q_heads, kv_heads, head_dim)) {
+        amd_rocm6_wave64__override_attention_causal_scores_grouped(p, q, k, q_heads, kv_heads, head_dim, length - 1u, 1u);
+        return;
+    }
     if (!amd_rocm6_wave64__zzprivate_attention_fit_wide(q, k, q_heads, kv_heads, head_dim)) {
         nn__attention__zzabi_launch_scores_grouped(p, q, k, q_heads, kv_heads, head_dim, length);
         return;
@@ -359,6 +621,66 @@ static void amd_rocm6_wave64__override_attention_scores_grouped(float* p, const 
     const size_t sizes[] = { sizeof p, sizeof q, sizeof k, sizeof q_heads, sizeof kv_heads, sizeof length };
     nn__silicon__launch(kernel, "amd_rocm6_wave64__zzprivate_attention_raw", blocks,
                         AMD_ROCM6_WAVE64__ZZPRIVATE_ROWS * AMD_ROCM6_WAVE64__ZZPRIVATE_WAVE, args, sizes, 6u);
+}
+/* The rows forms where the one-row kernels fit, every row's queries, keys and values on 4 bytes as the first's; else nn's. */
+static void amd_rocm6_wave64__override_attention_scores_grouped_rows(float* p, uint64_t p_row, const uint16_t* q, uint64_t q_row,
+                                                                     const uint16_t* k, uint64_t k_row, const uint32_t* lens,
+                                                                     uint64_t q_heads, uint64_t kv_heads, uint64_t head_dim, uint64_t most,
+                                                                     uint64_t rows) {
+    if (rows != 0u && most != 0u && q_row % 8u == 0u && k_row % 8u == 0u
+        && amd_rocm6_wave64__zzprivate_scores_tile_fit(q, k, q_heads, kv_heads, head_dim)) {
+        const uint64_t tiles = rows * kv_heads * ((q_heads / kv_heads + 63u) / 64u) * ((most + 63u) / 64u);
+        const uint32_t blocks = tiles < NN__KERNELS__BLOCKS_MAX ? (uint32_t)tiles : NN__KERNELS__BLOCKS_MAX;
+        void* args[] = { &p, &p_row, &q, &q_row, &k, &k_row, &lens, &q_heads, &kv_heads, &head_dim, &most, &rows };
+        const size_t sizes[] = { sizeof p, sizeof p_row, sizeof q, sizeof q_row, sizeof k, sizeof k_row, sizeof lens, sizeof q_heads,
+                                 sizeof kv_heads, sizeof head_dim, sizeof most, sizeof rows };
+        nn__silicon__launch((const void*)amd_rocm6_wave64__zzprivate_scores_tile_rows, "amd_rocm6_wave64__zzprivate_scores_tile_rows",
+                            blocks, AMD_ROCM6_WAVE64__ZZPRIVATE_ROWS * AMD_ROCM6_WAVE64__ZZPRIVATE_WAVE, args, sizes, 12u);
+        return;
+    }
+    if (rows == 0u || q_row % 2u != 0u || k_row % 2u != 0u
+        || !amd_rocm6_wave64__zzprivate_attention_fit_wide(q, k, q_heads, kv_heads, head_dim)) {
+        nn__attention__zzabi_launch_scores_grouped_rows(p, p_row, q, q_row, k, k_row, lens, q_heads, kv_heads, head_dim, most, rows);
+        return;
+    }
+    const void* kernel = head_dim == 128u ? (const void*)amd_rocm6_wave64__zzprivate_attention_raw_rows_128
+                       : head_dim == 256u ? (const void*)amd_rocm6_wave64__zzprivate_attention_raw_rows_256
+                                          : (const void*)amd_rocm6_wave64__zzprivate_attention_raw_rows_512;
+    const uint64_t n = rows * q_heads;
+    const uint32_t blocks = n < NN__KERNELS__BLOCKS_MAX ? (uint32_t)n : NN__KERNELS__BLOCKS_MAX;
+    void* args[] = { &p, &p_row, &q, &q_row, &k, &k_row, &lens, &q_heads, &kv_heads, &rows };
+    const size_t sizes[] = { sizeof p, sizeof p_row, sizeof q, sizeof q_row, sizeof k, sizeof k_row, sizeof lens, sizeof q_heads,
+                             sizeof kv_heads, sizeof rows };
+    nn__silicon__launch(kernel, "amd_rocm6_wave64__zzprivate_attention_raw_rows", blocks,
+                        AMD_ROCM6_WAVE64__ZZPRIVATE_ROWS * AMD_ROCM6_WAVE64__ZZPRIVATE_WAVE, args, sizes, 10u);
+}
+static void amd_rocm6_wave64__override_attention_mix_rows(uint16_t* o, uint64_t o_row, const float* p, uint64_t p_row, const uint16_t* v,
+                                                          uint64_t v_row, const uint32_t* lens, uint64_t q_heads, uint64_t kv_heads,
+                                                          uint64_t head_dim, uint64_t rows, unsigned int* over) {
+    if (rows != 0u && v_row % 2u == 0u && amd_rocm6_wave64__zzprivate_mix_tile_fit(v, q_heads, kv_heads, head_dim)) {
+        const uint64_t tiles = rows * kv_heads * ((q_heads / kv_heads + 63u) / 64u) * 8u;
+        const uint32_t blocks = tiles < NN__KERNELS__BLOCKS_MAX ? (uint32_t)tiles : NN__KERNELS__BLOCKS_MAX;
+        void* args[] = { &o, &o_row, &p, &p_row, &v, &v_row, &lens, &q_heads, &kv_heads, &rows, &over };
+        const size_t sizes[] = { sizeof o, sizeof o_row, sizeof p, sizeof p_row, sizeof v, sizeof v_row, sizeof lens, sizeof q_heads,
+                                 sizeof kv_heads, sizeof rows, sizeof over };
+        nn__silicon__launch((const void*)amd_rocm6_wave64__zzprivate_mix_tile_rows, "amd_rocm6_wave64__zzprivate_mix_tile_rows", blocks,
+                            AMD_ROCM6_WAVE64__ZZPRIVATE_ROWS * AMD_ROCM6_WAVE64__ZZPRIVATE_WAVE, args, sizes, 11u);
+        return;
+    }
+    if (rows == 0u || v_row % 2u != 0u || !amd_rocm6_wave64__zzprivate_attention_fit_wide(v, v, q_heads, kv_heads, head_dim)) {
+        nn__attention__zzabi_launch_mix_rows(o, o_row, p, p_row, v, v_row, lens, q_heads, kv_heads, head_dim, rows, over);
+        return;
+    }
+    const void* kernel = head_dim == 128u ? (const void*)amd_rocm6_wave64__zzprivate_attention_mix_rows_128
+                       : head_dim == 256u ? (const void*)amd_rocm6_wave64__zzprivate_attention_mix_rows_256
+                                          : (const void*)amd_rocm6_wave64__zzprivate_attention_mix_rows_512;
+    const uint64_t n = rows * q_heads;
+    const uint32_t blocks = n < NN__KERNELS__BLOCKS_MAX ? (uint32_t)n : NN__KERNELS__BLOCKS_MAX;
+    void* args[] = { &o, &o_row, &p, &p_row, &v, &v_row, &lens, &q_heads, &kv_heads, &rows, &over };
+    const size_t sizes[] = { sizeof o, sizeof o_row, sizeof p, sizeof p_row, sizeof v, sizeof v_row, sizeof lens, sizeof q_heads,
+                             sizeof kv_heads, sizeof rows, sizeof over };
+    nn__silicon__launch(kernel, "amd_rocm6_wave64__zzprivate_attention_mix_rows", blocks,
+                        AMD_ROCM6_WAVE64__ZZPRIVATE_ROWS * AMD_ROCM6_WAVE64__ZZPRIVATE_WAVE, args, sizes, 11u);
 }
 
 /* ⭐ TWO RESIDUALS INTO ONE, A WAVE A HEAD — what the tiered cache does once a tier is in: nn's `attention_merge` gives a
@@ -865,5 +1187,170 @@ static void amd_rocm6_wave64__override_attention_limits(uint16_t* o, const uint1
                              sizeof kv_stride, sizeof over };
     nn__silicon__launch(kernels[head_dim / 8u - 1u], "amd_rocm6_wave64__zzprivate_attention_limits", blocks, (uint32_t)lanes,
                         args, sizes, 10u);
+}
+/* ⭐ MLA's ABSORB, A WAVE 64 OF A HEAD'S COLUMNS OVER 8 ROWS — nn's `absorb` and `absorb_rows`: each column's sum the
+ *   same products added in the same order as nn's card body (`Σᵢ W[i][c] · q[i]`, `i` rising, a lane a column), so the
+ *   two agree to the bit. nn's gives a block a head and walks a column's 256 products one load at a time, 64 blocks on
+ *   the card; here a wave takes 64 columns of a head for 8 rows, so every weight it loads serves 8 rows, and the rows'
+ *   queries, the same for every lane, are read by the scalar unit. */
+#define AMD_ROCM6_WAVE64__ZZPRIVATE_ABSORB_ROWS  8u
+static __global__ AMD_ROCM6_WAVE64__ZZPRIVATE_BOUNDS void amd_rocm6_wave64__zzprivate_attention_absorb(
+    uint16_t* out, const uint16_t* q, const uint16_t* W, uint64_t heads, uint64_t nope, uint64_t latent, uint64_t stride,
+    float scale, uint64_t rows, unsigned int* over) {
+    const uint32_t R = AMD_ROCM6_WAVE64__ZZPRIVATE_ABSORB_ROWS, WAVE = AMD_ROCM6_WAVE64__ZZPRIVATE_WAVE;
+    const uint32_t l = (uint32_t)nn__silicon__lane() % WAVE, wave = (uint32_t)nn__silicon__lane() / WAVE;
+    const uint64_t waves = nn__silicon__lanes() / WAVE, groups = latent / WAVE, hg_all = heads * groups;
+    const uint64_t items = hg_all * ((rows + R - 1u) / R);
+    for (uint64_t x = (uint64_t)nn__silicon__block() * waves + wave; x < items; x += (uint64_t)nn__silicon__blocks() * waves) {
+        const uint64_t hg = x % hg_all, t0 = (x / hg_all) * R, h = hg / groups, c = (hg % groups) * WAVE + l;
+        const uint16_t* w = W + h * stride * latent + c;
+        const uint16_t* qr[AMD_ROCM6_WAVE64__ZZPRIVATE_ABSORB_ROWS];
+        float sum[AMD_ROCM6_WAVE64__ZZPRIVATE_ABSORB_ROWS];
+#pragma unroll
+        for (uint32_t r = 0u; r < R; ++r) {
+            const uint64_t t = t0 + r < rows ? t0 + r : rows - 1u;   /* a block's last rows read the last row, unwritten */
+            qr[r] = q + t * heads * nope + h * nope;
+            sum[r] = 0.0f;
+        }
+        for (uint64_t i0 = 0u; i0 < nope; i0 += 8u) {
+            float wf[8];
+#pragma unroll
+            for (uint32_t u = 0u; u < 8u; ++u) wf[u] = nn__silicon__half_to_float(w[(i0 + u) * latent]);
+#pragma unroll
+            for (uint32_t r = 0u; r < R; ++r)
+#pragma unroll
+                for (uint32_t u = 0u; u < 8u; ++u) sum[r] += wf[u] * amd_rocm6_wave64__zzpackage_scalar_half(qr[r], (uint32_t)(i0 + u));
+        }
+#pragma unroll
+        for (uint32_t r = 0u; r < R; ++r)
+            if (t0 + r < rows) out[(t0 + r) * heads * latent + h * latent + c] = amd_rocm6_wave64__zzpackage_to_half(sum[r] * scale, over);
+    }
+}
+/* Columns in whole waves, a query in whole groups of 8 on 4 bytes for the scalar reads, and `out` apart from the
+ * queries; anything else is nn's. */
+static bool amd_rocm6_wave64__zzprivate_absorb_fits(const uint16_t* out, const uint16_t* q, uint64_t heads, uint64_t nope,
+                                                    uint64_t latent, uint64_t rows) {
+    const uint64_t q0 = (uint64_t)(uintptr_t)q, q1 = q0 + rows * heads * nope * 2u;
+    const uint64_t o0 = (uint64_t)(uintptr_t)out, o1 = o0 + rows * heads * latent * 2u;
+    return heads != 0u && rows != 0u && nope != 0u && latent != 0u && latent % AMD_ROCM6_WAVE64__ZZPRIVATE_WAVE == 0u
+        && nope % 8u == 0u && q0 % 4u == 0u && (o1 <= q0 || q1 <= o0);
+}
+static void amd_rocm6_wave64__zzprivate_absorb_launch(uint16_t* out, const uint16_t* q, const uint16_t* W, uint64_t heads, uint64_t nope,
+                                                      uint64_t latent, uint64_t stride, float scale, uint64_t rows, unsigned int* over) {
+    const uint64_t lanes = AMD_ROCM6_WAVE64__ZZPRIVATE_ROWS * AMD_ROCM6_WAVE64__ZZPRIVATE_WAVE;
+    const uint64_t items = heads * (latent / AMD_ROCM6_WAVE64__ZZPRIVATE_WAVE)
+                         * ((rows + AMD_ROCM6_WAVE64__ZZPRIVATE_ABSORB_ROWS - 1u) / AMD_ROCM6_WAVE64__ZZPRIVATE_ABSORB_ROWS);
+    const uint64_t want = (items + AMD_ROCM6_WAVE64__ZZPRIVATE_ROWS - 1u) / AMD_ROCM6_WAVE64__ZZPRIVATE_ROWS;
+    const uint32_t blocks = want < NN__KERNELS__BLOCKS_MAX ? (uint32_t)want : NN__KERNELS__BLOCKS_MAX;
+    void* args[] = { &out, &q, &W, &heads, &nope, &latent, &stride, &scale, &rows, &over };
+    const size_t sizes[] = { sizeof out, sizeof q, sizeof W, sizeof heads, sizeof nope, sizeof latent, sizeof stride, sizeof scale,
+                             sizeof rows, sizeof over };
+    nn__silicon__launch((const void*)amd_rocm6_wave64__zzprivate_attention_absorb, "amd_rocm6_wave64__zzprivate_attention_absorb", blocks,
+                        (uint32_t)lanes, args, sizes, 10u);
+}
+static void amd_rocm6_wave64__override_attention_absorb(uint16_t* out, const uint16_t* q, const uint16_t* W, uint64_t heads, uint64_t nope,
+                                                        uint64_t latent, uint64_t stride, float scale, unsigned int* over) {
+    if (!amd_rocm6_wave64__zzprivate_absorb_fits(out, q, heads, nope, latent, 1u)) {
+        nn__attention__zzabi_launch_absorb(out, q, W, heads, nope, latent, stride, scale, over);
+        return;
+    }
+    amd_rocm6_wave64__zzprivate_absorb_launch(out, q, W, heads, nope, latent, stride, scale, 1u, over);
+}
+static void amd_rocm6_wave64__override_attention_absorb_rows(uint16_t* out, const uint16_t* q, const uint16_t* W, uint64_t heads,
+                                                             uint64_t nope, uint64_t latent, uint64_t stride, float scale, uint64_t rows,
+                                                             unsigned int* over) {
+    if (!amd_rocm6_wave64__zzprivate_absorb_fits(out, q, heads, nope, latent, rows)) {
+        nn__attention__zzabi_launch_absorb_rows(out, q, W, heads, nope, latent, stride, scale, rows, over);
+        return;
+    }
+    amd_rocm6_wave64__zzprivate_absorb_launch(out, q, W, heads, nope, latent, stride, scale, rows, over);
+}
+
+/* ⭐ MLA's EXPAND AT A LATENT OF 512, A WAVE 4 OF A HEAD'S OUTPUTS OVER 32 ROWS — nn's `expand` and `expand_rows`: nn's
+ *   door gives an output a block of 256 lanes, lane `L` adding its columns `L` and `L + 256`, and the family's fold adds
+ *   the 256 parts — each wave's by exchanges, then the four waves' sums in pairs. Here one wave holds the four waves'
+ *   parts, lane `l` those of lanes `l`, `l + 64`, `l + 128` and `l + 192`, makes each the same way, exchanges each as
+ *   its wave would and adds the four sums in the fold's pairs, so every output is nn's to the bit. nn's reads an
+ *   output's weight row again for every row and folds through block-shared memory; here a wave's four weight rows stay
+ *   in its registers for its 32 rows, and nothing waits for the block. */
+#define AMD_ROCM6_WAVE64__ZZPRIVATE_EXPAND_OUTS  4u
+#define AMD_ROCM6_WAVE64__ZZPRIVATE_EXPAND_ROWS  32u
+static __global__ AMD_ROCM6_WAVE64__ZZPRIVATE_BOUNDS void amd_rocm6_wave64__zzprivate_attention_expand512(
+    uint16_t* out, const uint16_t* o, const uint16_t* W, uint64_t heads, uint64_t width, uint64_t stride, uint64_t offset,
+    uint64_t rows, unsigned int* over) {
+    const uint32_t J = AMD_ROCM6_WAVE64__ZZPRIVATE_EXPAND_OUTS, R = AMD_ROCM6_WAVE64__ZZPRIVATE_EXPAND_ROWS;
+    const uint32_t WAVE = AMD_ROCM6_WAVE64__ZZPRIVATE_WAVE, LAT = 512u;
+    const uint32_t l = (uint32_t)nn__silicon__lane() % WAVE, wave = (uint32_t)nn__silicon__lane() / WAVE;
+    const uint64_t waves = nn__silicon__lanes() / WAVE, per = width / J, outs = heads * per;
+    const uint64_t items = outs * ((rows + R - 1u) / R);
+    for (uint64_t x = (uint64_t)nn__silicon__block() * waves + wave; x < items; x += (uint64_t)nn__silicon__blocks() * waves) {
+        const uint64_t hj = x % outs, t0 = (x / outs) * R, h = hj / per, j0 = (hj % per) * J;
+        const uint64_t tn = rows - t0 < R ? rows - t0 : R;
+        float wv[AMD_ROCM6_WAVE64__ZZPRIVATE_EXPAND_OUTS][4][2];
+#pragma unroll
+        for (uint32_t jj = 0u; jj < J; ++jj) {
+            const uint16_t* row = W + (h * stride + offset + j0 + jj) * LAT;
+#pragma unroll
+            for (uint32_t v = 0u; v < 4u; ++v)
+#pragma unroll
+                for (uint32_t k = 0u; k < 2u; ++k) wv[jj][v][k] = nn__silicon__half_to_float(row[v * WAVE + l + k * 256u]);
+        }
+        for (uint64_t r = 0u; r < tn; ++r) {
+            const uint16_t* xr = o + (t0 + r) * heads * LAT + h * LAT;
+            float ov[4][2];
+#pragma unroll
+            for (uint32_t v = 0u; v < 4u; ++v)
+#pragma unroll
+                for (uint32_t k = 0u; k < 2u; ++k) ov[v][k] = nn__silicon__half_to_float(xr[v * WAVE + l + k * 256u]);
+#pragma unroll
+            for (uint32_t jj = 0u; jj < J; ++jj) {
+                float s[4];
+#pragma unroll
+                for (uint32_t v = 0u; v < 4u; ++v) {
+                    float part = 0.0f;
+#pragma unroll
+                    for (uint32_t k = 0u; k < 2u; ++k) part += wv[jj][v][k] * ov[v][k];
+                    s[v] = part;
+                }
+#pragma unroll
+                for (uint32_t m = 1u; m < WAVE; m <<= 1)
+#pragma unroll
+                    for (uint32_t v = 0u; v < 4u; ++v) s[v] = s[v] + amd_rocm6_wave64__zzpackage_xor(s[v], m);
+                const float sum = (s[0] + s[1]) + (s[2] + s[3]);
+                if (l == jj) out[(t0 + r) * heads * width + h * width + j0 + jj] = amd_rocm6_wave64__zzpackage_to_half(sum, over);
+            }
+        }
+    }
+}
+/* A latent of 512 and outputs in whole fours; anything else is nn's. */
+static void amd_rocm6_wave64__zzprivate_expand_launch(uint16_t* out, const uint16_t* o, const uint16_t* W, uint64_t heads, uint64_t width,
+                                                      uint64_t stride, uint64_t offset, uint64_t rows, unsigned int* over) {
+    const uint64_t lanes = AMD_ROCM6_WAVE64__ZZPRIVATE_ROWS * AMD_ROCM6_WAVE64__ZZPRIVATE_WAVE;
+    const uint64_t items = heads * (width / AMD_ROCM6_WAVE64__ZZPRIVATE_EXPAND_OUTS)
+                         * ((rows + AMD_ROCM6_WAVE64__ZZPRIVATE_EXPAND_ROWS - 1u) / AMD_ROCM6_WAVE64__ZZPRIVATE_EXPAND_ROWS);
+    const uint64_t want = (items + AMD_ROCM6_WAVE64__ZZPRIVATE_ROWS - 1u) / AMD_ROCM6_WAVE64__ZZPRIVATE_ROWS;
+    const uint32_t blocks = want < NN__KERNELS__BLOCKS_MAX ? (uint32_t)want : NN__KERNELS__BLOCKS_MAX;
+    void* args[] = { &out, &o, &W, &heads, &width, &stride, &offset, &rows, &over };
+    const size_t sizes[] = { sizeof out, sizeof o, sizeof W, sizeof heads, sizeof width, sizeof stride, sizeof offset, sizeof rows,
+                             sizeof over };
+    nn__silicon__launch((const void*)amd_rocm6_wave64__zzprivate_attention_expand512, "amd_rocm6_wave64__zzprivate_attention_expand512",
+                        blocks, (uint32_t)lanes, args, sizes, 9u);
+}
+static void amd_rocm6_wave64__override_attention_expand(uint16_t* out, const uint16_t* o, const uint16_t* W, uint64_t heads, uint64_t width,
+                                                        uint64_t latent, uint64_t stride, uint64_t offset, unsigned int* over) {
+    if (latent != 512u || heads == 0u || width == 0u || width % AMD_ROCM6_WAVE64__ZZPRIVATE_EXPAND_OUTS != 0u) {
+        nn__attention__zzabi_launch_expand(out, o, W, heads, width, latent, stride, offset, over);
+        return;
+    }
+    amd_rocm6_wave64__zzprivate_expand_launch(out, o, W, heads, width, stride, offset, 1u, over);
+}
+static void amd_rocm6_wave64__override_attention_expand_rows(uint16_t* out, const uint16_t* o, const uint16_t* W, uint64_t heads,
+                                                             uint64_t width, uint64_t latent, uint64_t stride, uint64_t offset,
+                                                             uint64_t rows, unsigned int* over) {
+    if (latent != 512u || heads == 0u || width == 0u || rows == 0u || width % AMD_ROCM6_WAVE64__ZZPRIVATE_EXPAND_OUTS != 0u) {
+        nn__attention__zzabi_launch_expand_rows(out, o, W, heads, width, latent, stride, offset, rows, over);
+        return;
+    }
+    amd_rocm6_wave64__zzprivate_expand_launch(out, o, W, heads, width, stride, offset, rows, over);
 }
 #endif /* SILVANN__SILICON_FAMILIES_AMD_ROCM6_WAVE64_OVERRIDES_ATTENTION_CUH */

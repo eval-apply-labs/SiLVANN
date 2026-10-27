@@ -155,6 +155,18 @@ static inline bool sys__gpu__mark_record(sys__silicon_family__id family, void* m
     { SYS__SILICON__ZZPRIVATE_DOOR(mark_record, false)              return d->mark_record(mark); }
 static inline bool sys__gpu__mark_wait(sys__silicon_family__id family, void* mark)
     { SYS__SILICON__ZZPRIVATE_DOOR(mark_wait, false)                return d->mark_wait(mark); }
+/* ⭐ A SIDE CHANNEL'S COPIES QUEUED, AND THEIR MARKS — what a pinned landing pad is moved through (▶ `pad.cuh`): the
+ * copies run while the caller fills the next chunk, and a mark says when a chunk may be filled again. */
+static inline bool sys__gpu__side_memory_write_queued(sys__silicon_family__id family, void* to, const void* from, size_t bytes,
+                                                      void* channel)
+    { SYS__SILICON__ZZPRIVATE_DOOR(side_memory_write_queued, false) return d->side_memory_write_queued(to, from, bytes, channel); }
+static inline bool sys__gpu__side_memory_read_queued(sys__silicon_family__id family, void* to, const void* from, size_t bytes,
+                                                     void* channel)
+    { SYS__SILICON__ZZPRIVATE_DOOR(side_memory_read_queued, false)  return d->side_memory_read_queued(to, from, bytes, channel); }
+static inline bool sys__gpu__side_mark_record(sys__silicon_family__id family, void* mark, void* channel)
+    { SYS__SILICON__ZZPRIVATE_DOOR(side_mark_record, false)         return d->side_mark_record(mark, channel); }
+static inline bool sys__gpu__mark_reached(sys__silicon_family__id family, void* mark)
+    { SYS__SILICON__ZZPRIVATE_DOOR(mark_reached, false)             return d->mark_reached(mark); }
 
 /* How many devices of a family this machine has, as its family counts them; zero with no family. */
 static inline uint32_t sys__silicon__device_count(sys__silicon_family__id family)

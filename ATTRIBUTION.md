@@ -18,15 +18,14 @@ permission to convey the resulting work.
 
 The licensor is Eval-Apply, the Owner under `CLA.md`, through which every contribution is licensed to it. The permission
 is what lets a binary of the `nvidia_cuda12` family — which links the CUDA runtime statically — be conveyed with the
-rest of SiLVANN under the AGPL, as the prebuilt Windows libraries (§7) and a Docker image built from the release (§6)
-convey one. The CUDA runtime itself stays under NVIDIA's terms.
+rest of SiLVANN under the AGPL, as the prebuilt Windows libraries (§7) and the NVIDIA image (§6) convey one. The CUDA runtime itself stays under NVIDIA's terms.
 
 ## 2. Third-party code in the source tree
 
 One parser and the OpenCL API's headers, carried unchanged in `engine/scripts/third_party/` (its README says why). The engine, the runtime and
 the other build scripts are original work. The release is source: `install.sh` and `build.ps1` build the engine on the
 user's own machine. Two things carry binaries: the prebuilt Windows libraries attached to a release, which §7 lists, and
-a Docker image built from the release, which §6 lists.
+the published images, which §6 lists.
 
 | component | version | licence | its notice | used by |
 |---|---|---|---|---|
@@ -88,22 +87,25 @@ grep -rhoE "#include <(CL/[a-z_.]+|hip/[a-z_.]+|cuda[a-z_.]*|pybind11/[a-z_.]+)>
 python3 -c "import importlib.metadata as md; [print(n, md.metadata(n).get('License-Expression') or md.metadata(n).get('License')) for n in ('numpy','pybind11','tokenizers','huggingface_hub','fastapi','uvicorn','pydantic','httpx','nicegui')]"
 ```
 
-## 6. The Docker image
+## 6. The images
 
-`docker/`'s Dockerfile builds the release into an image of your own; no image is published (the registry's
-`ghcr.io/eval-apply-labs/silvann`, which held v0.11.1 and earlier, was deleted on 2026-10-21). What an image holds is
-listed, each part with its licence, in `/opt/silvann/IMAGE_NOTICES.md`, which `docker/image_notices.py` writes from what
-is installed when the image is built.
+From v0.20.0 two images are published on GitHub's registry, `ghcr.io/eval-apply-labs/silvann` — `:<version>-nvidia` and
+`:<version>-amd`, and the major's `:0-nvidia` and `:0-amd` — built by `.github/workflows/images.yml` from a release's tag;
+`docker/`'s Dockerfiles build the same of your own. (The registry's images of v0.11.1 and earlier were deleted on
+2026-10-21; none was published from v0.12.0 to v0.19.0.) What an image holds is listed, each part with its licence, in
+`/opt/silvann/IMAGE_NOTICES.md`, which `docker/image_notices.py` writes from what is installed when the image is built.
 
-| part | licence | its notice in the image |
-|---|---|---|
-| SiLVANN, its source at `/opt/silvann` and built there: the evaluator, `nvidia_cuda12`, `x86_avx2` | AGPL-3.0 with the §1 additional permission | `LICENSE`, `ATTRIBUTION.md`, and `SOURCE_COMMIT`: the commit of the public repository it was built from, which is its corresponding source |
-| NVIDIA's CUDA runtime, linked statically into `libsilvann_nvidia_cuda12.so` | NVIDIA CUDA Toolkit EULA (a redistributable component) | `notices/CUDA_EULA.txt`, `notices/CUDA_VERSION.txt` |
-| Ubuntu 22.04 and the packages installed on it (Python 3.10, tini, ca-certificates, and what they require) | each package's own; their source is Ubuntu's archive at the versions listed | `/usr/share/doc/<package>/copyright` |
-| the Python environment `/opt/silvann/venv`: `requirements.txt` (§3) and what it requires | each package's own (§3) | each package's `.dist-info` |
+| part | in | licence | its notice in the image |
+|---|---|---|---|
+| SiLVANN, its source at `/opt/silvann` and built there: the evaluator, the card's family, `x86_avx2` | both | AGPL-3.0 with the §1 additional permission | `LICENSE`, `ATTRIBUTION.md`, and `SOURCE_COMMIT`: the commit of the public repository it was built from, which is its corresponding source |
+| NVIDIA's CUDA runtime, linked statically into `libsilvann_nvidia_cuda12.so` | `-nvidia` | NVIDIA CUDA Toolkit EULA (a redistributable component) | `notices/CUDA_EULA.txt`, `notices/CUDA_VERSION.txt` |
+| AMD's ROCm HIP runtime (6.1.3), from AMD's repository: the HIP runtime, comgr, the HSA runtime, rocminfo and what they require — ROCm's compilers left out | `-amd` | each component's own: MIT (HIP, comgr, hsakmt, rocm-core), the University of Illinois/NCSA licence (the HSA runtime, rocminfo), Apache-2.0 (openmp-extras) | `/opt/rocm/share/doc/<component>/`; its source at https://github.com/ROCm |
+| Ubuntu 22.04 and the packages installed on it (Python 3.10, tini, ca-certificates, and what they require) | both | each package's own; their source is Ubuntu's archive at the versions listed | `/usr/share/doc/<package>/copyright` |
+| the Python environment `/opt/silvann/venv`: `requirements.txt` (§3) and what it requires | both | each package's own (§3) | each package's `.dist-info` |
 
-Not in it: PyAV (`requirements-nonfree.txt`, §3), which the scripts' `install_nonfree` fetches from PyPI into the user's
-volume; NVIDIA's driver, which the container toolkit hands in from the host when the container starts; the models.
+Not in them: PyAV (`requirements-nonfree.txt`, §3), which `docker/README.md`'s command fetches from PyPI into the user's
+volume; the card's driver, which is the host's (NVIDIA's handed in by its container toolkit; AMD's `amdgpu` is the
+host's kernel's); the models.
 
 ## 7. The prebuilt Windows libraries
 

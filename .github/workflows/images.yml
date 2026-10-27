@@ -1,0 +1,62 @@
+# The container images, prebuilt: NVIDIA's (with the CPU's family) and AMD's (gfx906, with the CPU's), each the release a
+# tag names installed by install.sh inside its Dockerfile, pushed to GitHub's registry as ghcr.io/<owner>/silvann —
+# `:<version>-nvidia` and `:<major>-nvidia`, `:<version>-amd` and `:<major>-amd`, the major's tags moved to each of its
+# releases (CLAUDE.md's lines: a major's image updated in place). The runners have no GPU: each image is built and its
+# libraries listed, no model is run. The images hold binaries: IMAGE_NOTICES.md in each says which, and each one's
+# licence (ATTRIBUTION.md §6). Plain docker commands, so no action but checkout's runs with the job's token, which may
+# write the registry's packages. A first push makes a package private: its visibility is set to public once, by hand.
+name: "images"
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: images-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  image:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: nvidia
+            dockerfile: docker/Dockerfile
+          - variant: amd
+            dockerfile: docker/Dockerfile.amd
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Room on the runner for a compiler's packages
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+      - name: The image, ${{ matrix.variant }}
+        env:
+          VARIANT: ${{ matrix.variant }}
+          DOCKERFILE: ${{ matrix.dockerfile }}
+        run: |
+          version=${GITHUB_REF_NAME#v}; major=${version%%.*}
+          image=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/silvann
+          docker build -f "$DOCKERFILE" \
+            --build-arg SILVANN_SOURCE="https://github.com/${GITHUB_REPOSITORY}" \
+            --build-arg SILVANN_REF="${GITHUB_REF_NAME}" --build-arg SILVANN_COMMIT="${GITHUB_SHA}" \
+            -t "$image:$version-$VARIANT" -t "$image:$major-$VARIANT" .
+          docker run --rm --entrypoint sh "$image:$version-$VARIANT" \
+            -c 'ls -l /opt/silvann/lib/silicon_families; head -2 /opt/silvann/SOURCE_COMMIT'
+          echo "IMAGE=$image" >> "$GITHUB_ENV"; echo "VERSION=$version" >> "$GITHUB_ENV"; echo "MAJOR=$major" >> "$GITHUB_ENV"
+      - name: Pushed to the registry
+        if: github.event_name == 'push'
+        env:
+          VARIANT: ${{ matrix.variant }}
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          echo "$TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+          docker push "$IMAGE:$VERSION-$VARIANT"
+          docker push "$IMAGE:$MAJOR-$VARIANT"

@@ -24,30 +24,56 @@
 
 ;; ── the token: its row of the embedding, decoded where it is wanted ─────────────────────────────────────────────────
 ;; EMBEDDING is a table in RAM the card reads a row of in place: every token's packed row (EMB_HALVES halves each), then
-;; every token's scale from EMB_SCALES on — the embedding stays in RAM and only a row crosses.
-(if ROTATED
-    (defun (embed_into tok into)                       ; the decoded row is R·e, the residual's own basis
-      (begin (nn__turboquant__decode (nn__vector__range EMBEDDING (* tok EMB_HALVES) EMB_HALVES)
-                                     (nn__vector__range EMBEDDING (+ EMB_SCALES tok) 1) into 1 HIDDEN EMB_BITS)
-             (type x)))
-    (defun (embed_into tok into)                       ; un-rotated: Rᵀu = S ⊙ H·u
-      (let ((u (nn__buffer__getnew HIDDEN_BYTES)) (hu (nn__buffer__getnew HIDDEN_BYTES)))
-        (nn__turboquant__decode (nn__vector__range EMBEDDING (* tok EMB_HALVES) EMB_HALVES)
-                                (nn__vector__range EMBEDDING (+ EMB_SCALES tok) 1) u 1 HIDDEN EMB_BITS)
-        (nn__hadamard__rotate u ones512 hu HIDDEN)
-        (nn__vector__pointwise_mul hu signs_row into HIDDEN)
-        (type x))))
+;; every token's scale from EMB_SCALES on — the embedding stays in RAM and only a row crosses. With EMBED_ON_CPU the table
+;; is the CPU worker's (c_embedding) and the CPU decodes the row (▶ qwen3_5_cpu.lisp `xe`), the card copying it across:
+;; where the card's family keeps mapped RAM as a copy of its own, the table neither crosses nor takes the card's room.
+(if EMBED_ON_CPU
+    (if ROTATED
+        (defun (embed_into tok into)
+          (begin (sys__node_array__set EMB_TOK 0 tok)
+                 (sys__compute CPU names xe) (sys__result CPU)
+                 (nn__buffer__copy c_emb CPU into HIDDEN_BYTES)
+                 (type x)))
+        (defun (embed_into tok into)
+          (let ((u (nn__buffer__getnew HIDDEN_BYTES)) (hu (nn__buffer__getnew HIDDEN_BYTES)))
+            (sys__node_array__set EMB_TOK 0 tok)
+            (sys__compute CPU names xe) (sys__result CPU)
+            (nn__buffer__copy c_emb CPU u HIDDEN_BYTES)
+            (nn__hadamard__rotate u ones512 hu HIDDEN)
+            (nn__vector__pointwise_mul hu signs_row into HIDDEN)
+            (type x))))
+    (if ROTATED
+        (defun (embed_into tok into)                   ; the decoded row is R·e, the residual's own basis
+          (begin (nn__turboquant__decode (nn__vector__range EMBEDDING (* tok EMB_HALVES) EMB_HALVES)
+                                         (nn__vector__range EMBEDDING (+ EMB_SCALES tok) 1) into 1 HIDDEN EMB_BITS)
+                 (type x)))
+        (defun (embed_into tok into)                   ; un-rotated: Rᵀu = S ⊙ H·u
+          (let ((u (nn__buffer__getnew HIDDEN_BYTES)) (hu (nn__buffer__getnew HIDDEN_BYTES)))
+            (nn__turboquant__decode (nn__vector__range EMBEDDING (* tok EMB_HALVES) EMB_HALVES)
+                                    (nn__vector__range EMBEDDING (+ EMB_SCALES tok) 1) u 1 HIDDEN EMB_BITS)
+            (nn__hadamard__rotate u ones512 hu HIDDEN)
+            (nn__vector__pointwise_mul hu signs_row into HIDDEN)
+            (type x)))))
 
 (defun (embed tok)
   (embed_into tok x))
 
-;; a prompt's `n` tokens, PROMPT's first `n`, a row of xs each
-(defun (embed_rows n)
+;; a prompt's `n` tokens, PROMPT's first `n`, a row of xs each — with the table the CPU's and rotated, its `n` rows in one
+;; hand-off (▶ qwen3_5_cpu.lisp `xer`) and one copy
+(defun (embed_rows_each n)
   (let ((i 0) (at 0))
     (while '(< i n)
            '(begin (embed_into (nth PROMPT i) (nn__vector__range xs at HIDDEN))
                    (set! at (+ at HIDDEN)) (set! i (+ i 1))))
     (type xs)))
+(if EMBED_ROWS_ON_CPU                                   ; EMBED_ON_CPU and ROTATED
+    (defun (embed_rows n)
+      (begin (sys__node_array__set EMB_TOK 1 n)
+             (sys__compute CPU names xer) (sys__result CPU)
+             (nn__buffer__copy c_embs CPU xs (* n HIDDEN_BYTES))
+             (type xs)))
+    (defun (embed_rows n)
+      (embed_rows_each n)))
 
 
 ;; ── the head: the final norm, then the logits ───────────────────────────────────────────────────────────────────────
@@ -176,6 +202,61 @@
   (let ((i 0))
     (while '(< i RUN) '(begin (rows_layer i first n) (set! i (+ i 1))))
     (type xs)))
+
+
+;; ── a prompt read layer-major: a slice of chunks, every layer once over all of it (NN-115 ③) ─────────────────────────
+;; With STREAM (▶ qwen3_5.py `_prefill_streamed`) a slice of chunks is held on the card — XS_S its residual rows, H1S_S
+;; its mixed rows, HANDS_S its hands, RROWS_S its routed rows — and each layer runs once over it: every chunk's mixer and
+;; router in order, then the layer's experts once over all the slice's rows, streamed onto the card through the tier's
+;; ring (a note with NOTE_STREAM: every pick the card's, the ones picked the line's times or more into the tier first, so
+;; the tier is as warm after the prompt as read a chunk at a time), then every chunk's close. An expert crosses the link once a slice,
+;; where read a chunk at a time it would cross once a chunk. `w` rows a chunk, the slice's last chunk `last_n` of them.
+(if STREAM
+    (begin
+      ;; a chunk's `n` tokens, PROMPT's first `n`, into the slice from its row `row`
+      (defun (embed_slice row n w)
+        (let ((i 0) (at (* row HIDDEN)))
+          (while '(< i n)
+                 '(begin (embed_into (nth PROMPT i) (nn__vector__range XS_S at HIDDEN))
+                         (set! at (+ at HIDDEN)) (set! i (+ i 1))))
+          (type XS_S)))
+      ;; chunk `c`'s `n` rows of a part of the slice, `halves` a row
+      (defun (part_rows v c n halves w)
+        (nn__vector__range v (* c (* w halves)) (* n halves)))
+      (if TIERED
+          (defun (slice_mixer i first xs_v h1s_v n)
+            (if (nth DELTANET i)
+                (ai_qwen_3__deltanet_rows xs_v (nth MIXER_ROWS i) h1s_v n)
+                (ai_qwen_3__attention_tiered_rows xs_v (nth MIXER_ROWS i) first h1s_v n)))
+          (defun (slice_mixer i first xs_v h1s_v n)
+            (if (nth DELTANET i)
+                (ai_qwen_3__deltanet_rows xs_v (nth MIXER_ROWS i) h1s_v n)
+                (ai_qwen_3__attention_rows xs_v (nth MIXER_ROWS i) first h1s_v n))))
+      (defun (slice_layer i first k last_n w)
+        (let ((c 0) (n w) (all (+ (* (- k 1) w) last_n)))
+          (while '(< c k)
+                 '(begin (set! n (if (eq? c (- k 1)) last_n w))
+                         (slice_mixer i (+ first (* c w)) (part_rows XS_S c n HIDDEN w) (part_rows H1S_S c n HIDDEN w) n)
+                         (ai_qwen_3__pre_expert_rows (part_rows H1S_S c n HIDDEN w) (nth PRE i)
+                                                     (part_rows HANDS_S c n HAND_HALVES w) n)
+                         (set! c (+ c 1))))
+          (nn__expert_tier__note HANDS_S nn__expert_tier (nth LAYER i) all HAND_ROW HAND_PICKS_AT
+                                 (+ nn__expert_major__vram_promotion_threshold_picks NOTE_STREAM))
+          (ai_qwen_3__experts_rows HANDS_S (nth EXPERTS_SLICE_ROWS i) RROWS_S all nn__expert_tier)
+          (set! c 0)
+          (while '(< c k)
+                 '(begin (set! n (if (eq? c (- k 1)) last_n w))
+                         (ai_qwen_3__post_expert_rows (part_rows H1S_S c n HIDDEN w) (part_rows HANDS_S c n HAND_HALVES w)
+                                                      (part_rows RROWS_S c n HIDDEN w) (nth POST i)
+                                                      (part_rows XS_S c n HIDDEN w) n)
+                         (set! c (+ c 1))))
+          (type XS_S)))
+      (defun (rows_slice first k last_n w)
+        (let ((i 0))
+          (while '(< i RUN) '(begin (slice_layer i first k last_n w) (set! i (+ i 1))))
+          (type XS_S))))
+    (defun (rows_slice first k last_n w)               ; no slice: the prompt is read a chunk at a time
+      (type xs)))
 
 ;; a token's position: its embedding, the angles, the layers
 (defun (position tok pos)

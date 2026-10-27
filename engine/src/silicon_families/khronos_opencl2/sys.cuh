@@ -49,9 +49,11 @@ typedef struct khronos_opencl2__state {
     sys__os__lock    lock;                                      /* the live list, and a kernel's arguments */
     khronos_opencl2__allocation* live;                          /* every allocation not yet freed */
     size_t           live_count, live_room;
+    uint64_t         changed[KHRONOS_OPENCL2__DEVICES_MAX];     /* a card's live list changed, counted (▶ nn.cuh's launch) */
+    uint64_t         launched[KHRONOS_OPENCL2__DEVICES_MAX];    /* ...as it stood at the card's last launch */
 } khronos_opencl2__state;
 
-static khronos_opencl2__state khronos_opencl2__zzprivate_state = { 0u, {0}, {0}, {0}, SYS__OS__LOCK_INIT, 0, 0u, 0u };
+static khronos_opencl2__state khronos_opencl2__zzprivate_state = { 0u, {0}, {0}, {0}, SYS__OS__LOCK_INIT, 0, 0u, 0u, {0}, {0} };
 static sys__os__once          khronos_opencl2__zzprivate_once  = SYS__OS__ONCE_INIT;
 static __thread uint32_t      khronos_opencl2__zzprivate_bound = 0u;
 
@@ -112,6 +114,7 @@ static inline bool khronos_opencl2__zzprivate_keep(khronos_opencl2__state* s, vo
     if (kept) {
         s->live[s->live_count].at = at; s->live[s->live_count].bytes = bytes; s->live[s->live_count].card = card;
         ++s->live_count;
+        ++s->changed[card];
     }
     sys__os__lock_give(&s->lock);
     return kept;
@@ -134,7 +137,9 @@ static inline bool khronos_opencl2__zzprivate_forget(khronos_opencl2__state* s, 
     bool found = false;
     sys__os__lock_take(&s->lock);
     for (size_t i = 0u; i < s->live_count; ++i)
-        if (s->live[i].at == at) { *card = s->live[i].card; s->live[i] = s->live[--s->live_count]; found = true; break; }
+        if (s->live[i].at == at) {
+            *card = s->live[i].card; s->live[i] = s->live[--s->live_count]; ++s->changed[*card]; found = true; break;
+        }
     sys__os__lock_give(&s->lock);
     return found;
 }
@@ -179,19 +184,24 @@ static inline bool khronos_opencl2__memory_allocate(void** at, size_t bytes) {
 static inline void khronos_opencl2__memory_free(void* at) { khronos_opencl2__zzprivate_release(at); }
 
 static inline bool khronos_opencl2__memory_zerofill(void* at, size_t bytes) {
+    if (bytes == 0u) return true;
     cl_command_queue q = khronos_opencl2__zzprivate_queue_for(at, 0);
     const cl_uchar zero = 0u;
     return q && clEnqueueSVMMemFill(q, at, &zero, 1u, bytes, 0u, 0, 0) == CL_SUCCESS && clFinish(q) == CL_SUCCESS;
 }
 
 /* ⛳ BLOCKING, AND IN THE QUEUE OF THE CARD THAT OWNS THE CARD END: the copy waits for the work asked for
- *   before it on that card, as `hipMemcpy` does. */
+ *   before it on that card, as `hipMemcpy` does.
+ * ⛳ A COPY OF NOTHING IS DONE, as `hipMemcpy`'s is: OpenCL refuses one (`CL_INVALID_VALUE`), and a caller's empty list —
+ *   a chunk with no picks for the card's tier — then failed the whole program. */
 static inline bool khronos_opencl2__memory_read(void* to, const void* from, size_t bytes) {
+    if (bytes == 0u) return true;
     cl_command_queue q = khronos_opencl2__zzprivate_queue_for(from, to);
     return q && clEnqueueSVMMemcpy(q, CL_TRUE, to, from, bytes, 0u, 0, 0) == CL_SUCCESS;
 }
 
 static inline bool khronos_opencl2__memory_write(void* to, const void* from, size_t bytes) {
+    if (bytes == 0u) return true;
     cl_command_queue q = khronos_opencl2__zzprivate_queue_for(to, from);
     return q && clEnqueueSVMMemcpy(q, CL_TRUE, to, from, bytes, 0u, 0, 0) == CL_SUCCESS;
 }
@@ -219,10 +229,12 @@ static inline void khronos_opencl2__side_close(void* channel) {
 }
 
 static inline bool khronos_opencl2__side_memory_read(void* to, const void* from, size_t bytes, void* channel) {
+    if (bytes == 0u) return true;
     return clEnqueueSVMMemcpy((cl_command_queue)channel, CL_TRUE, to, from, bytes, 0u, 0, 0) == CL_SUCCESS;
 }
 
 static inline bool khronos_opencl2__side_memory_write(void* to, const void* from, size_t bytes, void* channel) {
+    if (bytes == 0u) return true;
     return clEnqueueSVMMemcpy((cl_command_queue)channel, CL_TRUE, to, from, bytes, 0u, 0, 0) == CL_SUCCESS;
 }
 
@@ -284,5 +296,14 @@ static inline bool khronos_opencl2__mark_open(void** mark) { (void)mark; return 
 static inline void khronos_opencl2__mark_close(void* mark) { (void)mark; }
 static inline bool khronos_opencl2__mark_record(void* mark) { (void)mark; return false; }
 static inline bool khronos_opencl2__mark_wait(void* mark) { (void)mark; return false; }
+/* No marks, so a queued copy is the side channel's own, done when the call returns. */
+static inline bool khronos_opencl2__side_memory_write_queued(void* to, const void* from, size_t bytes, void* channel) {
+    return khronos_opencl2__side_memory_write(to, from, bytes, channel);
+}
+static inline bool khronos_opencl2__side_memory_read_queued(void* to, const void* from, size_t bytes, void* channel) {
+    return khronos_opencl2__side_memory_read(to, from, bytes, channel);
+}
+static inline bool khronos_opencl2__side_mark_record(void* mark, void* channel) { (void)mark; (void)channel; return false; }
+static inline bool khronos_opencl2__mark_reached(void* mark) { (void)mark; return false; }
 
 #endif /* SILVANN__SILICON_FAMILIES_KHRONOS_OPENCL2_SYS_CUH */

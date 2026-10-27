@@ -185,6 +185,16 @@ enum { NN__EXPERT__MAX_TYPES = 0u NN__EXPERT_TYPE_SLOT_LIST(NN__EXPERT__ZZPRIVAT
 
 #define NN__EXPERT__FAULT_TYPES  0x4E455459ull   /* "NETY" — the type table does not describe the arena */
 #define NN__EXPERT__FAULT_LEND   0x4E454C4Eull   /* "NELN" — lent slots a collection was not stood for, or outside its arena */
+#define NN__EXPERT__FAULT_REGISTER 0x4E455247ull /* "NERG" — RAM the family would not register, or past the spans' table */
+
+/* ⭐ THE CPUS' EXPERTS REGISTERED WITH A CARD (NN-115) — `(nn__expert__register at bytes)`: RAM this process holds (a CPU
+ * worker's slots of experts) page-locked and mapped for the calling worker's family, so a promotion whose runs lie in it is
+ * copied by the card's copy engine straight from where it lies, no thread staging it first — `MEASURED`
+ * (measurements/2026-10-24_nn115_link_node03.md): four threads staging copies cost the CPUs' experts 10% of a prompt and
+ * 15% of an answer, copies read in place 2% and 5%. A span is registered once; the loader's teardown gives every one back.
+ * A run of more pieces than IN_PLACE_PIECES is staged as before (a matrix split between sockets: a piece a row). */
+#define NN__EXPERT__SPANS_MAX         1024u
+#define NN__EXPERT__IN_PLACE_PIECES   64u
 
 /* ══ ⭐⭐ THE EXPERT INDEX — WHERE AN EXPERT IS, AND WHEN IT WAS LAST WANTED ══════════════════════════
  *
@@ -299,7 +309,9 @@ typedef struct nn__expert__backing {
 #define NN__EXPERT__COUNT_GROUP_VISITS    (NN__EXPERT__COUNT_BUSIEST + 1u)   /* ...over how many visits       */
 #define NN__EXPERT__COUNT_SLICE_CHANGED   (NN__EXPERT__COUNT_GROUP_VISITS + 1u)
                                                 /* an exclusive group's slice: experts that joined it, card 0's count */
-#define NN__EXPERT__COUNTS               (NN__EXPERT__COUNT_SLICE_CHANGED + 1u)
+#define NN__EXPERT__COUNT_IN_PLACE        (NN__EXPERT__COUNT_SLICE_CHANGED + 1u)
+                                                /* promotions copied straight from registered RAM, none staged     */
+#define NN__EXPERT__COUNTS               (NN__EXPERT__COUNT_IN_PLACE + 1u)
 
 /* ⭐ AN EXPERT PROMOTED FROM RAM TO A CARD (NN-48). Its bytes are in memory already, so a promotion is a GATHER: a few runs
  * copied into the card's slot in the slot's own layout — through a staging buffer of pinned memory and one write on the
@@ -397,6 +409,18 @@ typedef struct nn__expert__gather { nn__expert__run run[NN__EXPERT__GATHER_RUNS]
  *               a layer's own number of visits apart, so the layers change on different visits. */
 #define NN__EXPERT_TIER__SHARED       22u
 #define NN__EXPERT_TIER__LENGTH_SHARED 23u
+/* ⭐ A PROMPT STREAMED THROUGH A RING (NN-115 ②) — ⚖ 2026-10-23 *"stream the layers in one by one and let it do the matmul
+ *   setup"*: a card's collection of its own, a couple of batches of slots, that a chunk's experts are streamed through
+ *   when its note's line is 0 (▶ `nn__expert_tier__chunk`) — every pick the card's, the CPUs computing none; the experts
+ *   the tier does not hold promoted a batch ahead into the ring, from the tier's sources, each batch computed while the
+ *   next lands (▶ `nn__routed__rows`). STREAM: the ring's collection plus one, 0 none; STREAM_BATCH: its experts a batch. */
+#define NN__EXPERT_TIER__STREAM        23u
+#define NN__EXPERT_TIER__STREAM_BATCH  24u
+#define NN__EXPERT_TIER__LENGTH_STREAM 25u
+/* ...and a note's line with this bit: streamed as with 0, the experts picked `line` times or more promoted into the tier
+ *   all the same — so the tier is as warm after a streamed prompt as after one read a chunk at a time, each expert across
+ *   once either way. */
+#define NN__EXPERT_TIER__NOTE_STREAM   (1ull << 62)
 #define NN__EXPERT_TIER__SLICE_EVERY  64u    /* a layer's visits between two choices of its slice */
 #define NN__EXPERT_TIER__SLICE_PAIRS   2u    /* an exclusive group's slice: the changes at one choice at most */
 #define NN__EXPERT_TIER__STAGES        8u    /* ...the pinned stages its changes' experts wait in between the cards */
@@ -411,8 +435,9 @@ typedef struct nn__expert_tier {
     uint64_t landing_line;
     uint64_t ranks;                                               /* the cards of its group, 1 alone (▶ RANKS) */
     uint64_t shared;                                              /* a layer's experts on every card (▶ SHARED) */
+    uint64_t stream, stream_batch;                                /* a streamed prompt's ring and batch (▶ STREAM) */
 } nn__expert_tier;
-#define NN__EXPERT_TIER__CHANNELS  16u   /* evacuation channels, each an expert's bytes in pinned memory */
+#define NN__EXPERT_TIER__CHANNELS  64u   /* evacuation channels over every card, each a chunk of its card's pad's down way */
 #define NN__EXPERT_TIER__OUTGOING  64u   /* swaps in flight, over every layer */
 #define NN__EXPERT_TIER__COMMIT_VISITS 4u   /* a swap's worker's visits, at any layer, before it commits — at its own layer's
                                              * next if that comes first (▶ `nn__expert_tier__commit`) */

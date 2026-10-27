@@ -33,9 +33,21 @@ heading a command — the command as it is called, its `touches` and `run` lines
             command's time: what it prints is the answer, and a failing exit an error.
 A skill's commands never take a built-in's name, nor one an earlier skill took: `(skills)` says which were left out,
 and why. A skill is code the user installs: it runs as the server's user, as the REPL's commands do.
+
+The front matter may also say, for the machine's tools file (▶ `tools_config.py`, NN-127):
+```
+  enabled: auto                                   the entry a new install gets: yes (the default), no, or auto — on
+                                                  where its check finds what it needs
+  check: search.py:available                      a function called with the entry's `config` as the server starts:
+                                                  None where the skill can answer, else why not — said in (help)
+  config: {"searxng": "auto", "brave_key": null}  its settings, as JSON: the entry's `config` until the user sets them;
+                                                  a Python command gets them in `context["config"]`, a program in the
+                                                  environment's SILVANN_SKILL_CONFIG — the model never sees them
+```
 """
 import importlib.util
 import inspect
+import json
 import os
 import re
 import sys
@@ -57,6 +69,7 @@ class Skill:
     def __init__(self, folder):
         self.folder, self.name, self.description = folder, os.path.basename(folder), ""
         self.commands, self.problems = [], []
+        self.enabled, self.check, self.config = "yes", "", {}   # its tools file entry's defaults, and its startup check
 
 
 def read_skill(folder):
@@ -75,10 +88,26 @@ def read_skill(folder):
             if lines[at].strip() == "---":
                 break
             key, _, value = lines[at].partition(":")
-            if key.strip() == "name" and value.strip():
-                s.name = value.strip()
-            elif key.strip() == "description":
-                s.description = value.strip()
+            key, value = key.strip(), value.strip()
+            if key == "name" and value:
+                s.name = value
+            elif key == "description":
+                s.description = value
+            elif key == "enabled":
+                if value in ("yes", "no", "auto"):
+                    s.enabled = value
+                else:
+                    s.problems.append("enabled is yes, no or auto, not %r" % value)
+            elif key == "check":
+                s.check = value
+            elif key == "config":
+                try:
+                    s.config = json.loads(value)
+                except ValueError as ex:
+                    s.problems.append("config is not JSON: %s" % ex)
+                if not isinstance(s.config, dict):
+                    s.problems.append("config is a JSON object, its settings by name")
+                    s.config = {}
         at += 1
     current = None
     for line in lines[at:]:
@@ -134,6 +163,19 @@ def read_all(folders):
             seen.add(s.name)
             skills.append(s)
     return skills
+
+
+def run_check(skill, config, cache):
+    """A skill's startup check (`check: file.py:function`) called with its settings: None where it can answer, else why
+    not — what it raised, said as the reason."""
+    if not skill.check:
+        return None
+    try:
+        fn = load_function(Command(skill.name, "check", "", "none", skill.check, ""), skill.folder, cache)
+        why = fn(config)
+    except Exception as ex:                           # noqa: BLE001 — a check that fails says so; the server goes on
+        return "its check failed: %s: %s" % (type(ex).__name__, ex)
+    return None if not why else str(why)
 
 
 def first_sentence(page, most=110):

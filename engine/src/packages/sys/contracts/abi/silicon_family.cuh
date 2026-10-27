@@ -30,7 +30,7 @@
  * ⛳ `sys` NAMES NO OTHER PACKAGE'S DOORS, AND NO FAMILY. The slot is untyped here and each package reads
  * its own table as its own type; a family says its own name. So adding a package's doors, or a family,
  * never edits this file. */
-#define SYS__SILICON_FAMILY__ABI_VERSION  8u   /* 7: a family says its own name · 8: numbers have gaps (host 0, 200, 300) */
+#define SYS__SILICON_FAMILY__ABI_VERSION  9u   /* 7: a family says its own name · 8: numbers have gaps (host 0, 200, 300) · 9: queued side copies and their marks */
 #define SYS__SILICON_FAMILY__ENTRY        "silvann_silicon_family_get"
 
 /* A family, as the program keeps it: its number, or `SYS__SILICON_FAMILY__NONE` — what asking for one
