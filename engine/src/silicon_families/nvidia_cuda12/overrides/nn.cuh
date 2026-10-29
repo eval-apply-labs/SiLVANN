@@ -10,9 +10,11 @@
 #include "result.cuh"       /* argmax */
 #include "expert.cuh"       /* the expert-major GEMM, on the tensor cores */
 #include "conv.cuh"         /* a convolution's rows */
-#include "vector.cuh"       /* a sampler's top k */
+#include "vector.cuh"       /* a sampler's top k, a scored router's, a group's sum */
+#include "primitives.cuh"   /* the norm of a row of floats */
 #include "index.cuh"        /* the indexer's pool scores and top k */
-#include "kda.cuh"          /* KDA's steps over a prompt's rows */
+#include "kda.cuh"          /* KDA's steps over a prompt's rows, and a decoded position's step */
+#include "hyper.cuh"        /* the hyper-connections' logits and their `pre`, over halves and floats */
 #include "doors.cuh"        /* into nn's table */
 
 /* ══ ⭐⭐ OVERRIDES — THE DOORS THIS FAMILY RUNS FASTER THAN THE GENERIC BODY ══════════════════════════

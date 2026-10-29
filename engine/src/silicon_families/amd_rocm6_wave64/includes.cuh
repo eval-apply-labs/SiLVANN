@@ -7,8 +7,10 @@
 /* ══ THE CARDS THIS FAMILY TAKES ═════════════════════════════════════════════════════════════════════
  *
  * ⚖ *"the method is family.includes(card_name) and it returns true or false."* AMD's data-centre line on
- * ROCm 6, which runs 64 lanes to a wavefront: the MI50 and MI60 (`gfx906`), the MI100 (`gfx908`) and the
- * MI200s (`gfx90a`). A consumer card on the same ROCm runs 32 and is another family.
+ * ROCm 6, which runs 64 lanes to a wavefront: the MI50 and MI60 (`gfx906`), the MI100 (`gfx908`), the
+ * MI200s (`gfx90a`) and the MI300s (`gfx942`, ROCm 6.0 and later). A consumer card on the same ROCm runs 32 and is
+ * another family: ROCm 6.1's HIP refuses 64 lanes on one (`gfx1100`, "HIP is not supported on the specified GPU ARCH with
+ * wavefront size 64"), so a Radeon goes to `khronos_opencl2` (`MEASURED` node03, hipcc 6.1.3, 2026-10-29).
  *
  * ⭐ THE LIST IS ALSO WHAT THE FAMILY IS BUILT FOR. `scripts/build_silicon_families.sh` reads its targets
  *   from the row below, so the family cannot say it takes a card its binary has no code for.
@@ -17,7 +19,7 @@
  * ⛳ A CARD NOT NAMED HERE IS NOT TAKEN, even a newer one of the same line: AMD code is built for exact
  *   targets, so a card with none of them in the binary would fail at its first launch rather than here.
  *   Adding one is a row, checked against AMD's ROCm compatibility matrix. */
-#define AMD_ROCM6_WAVE64__TARGETS(X)  X(gfx906) X(gfx908) X(gfx90a)
+#define AMD_ROCM6_WAVE64__TARGETS(X)  X(gfx906) X(gfx908) X(gfx90a) X(gfx942)
 
 static inline bool amd_rocm6_wave64__includes(const char* card) {
 #define AMD_ROCM6_WAVE64__ZZPRIVATE_IS(T)  if (silicon_families__card_is(card, #T)) return true;

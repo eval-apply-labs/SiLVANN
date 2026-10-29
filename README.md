@@ -1,6 +1,6 @@
 # SiLVANN
 
-> **Developer preview, v0.21.2.** It runs the models below well on the hardware it was tested on, and it is shared
+> **Developer preview, v0.22.0.** It runs the models below well on the hardware it was tested on, and it is shared
 > for people who can find their way around a build and a stack trace. NVIDIA cards are tested on two, a GeForce
 > RTX 5060 Ti and an RTX 5070 Ti; Windows natively on one PC; macOS is not supported.
 
@@ -16,61 +16,27 @@ weights are packed with TurboQuant: rotated rows at 4 or 8 bits, so a 35-billion
 
 ## Models, and what they run on
 
-A row a kind of machine: the model that suits it, how it runs there, its answer in the chat and its prompt and answer
-after a prompt, and the machine it was measured on:
+The model for each kind of machine, from no card to two server cards — the card, the RAM, the CPU and the disk it was
+measured on, how fast it reads a prompt and answers after one:
 
-| Your machine | Model, and how it runs | In the chat | After a prompt: prompt · answer | Measured on |
-|---|---|---|---|---|
-| No graphics card, 12 GB of RAM, an NVMe disk | [Qwen 3.6 35B-A3B](https://huggingface.co/eval-apply/silvann_tq_D8E4_qwen3.6_35b_a3b) (`D8E4`) on the CPU alone, its experts read from the disk | — | 45 positions/s · 12.2 tokens/s | the R730's two Xeons, v0.20.0 |
-| No graphics card, 28 GB of RAM | [Qwen 3.6 35B-A3B](https://huggingface.co/eval-apply/silvann_tq_D8E4_qwen3.6_35b_a3b) (`D8E4`) on the CPU alone, in RAM | 9.2 tokens/s | 28 positions/s · 8.7 tokens/s | the desktop's four-core Xeon, v0.20.0 (the R730's 28 cores: 65 · 16.1) |
-| No graphics card, 32 GB of RAM, an NVMe disk | [GLM 5.3 Flash](https://huggingface.co/eval-apply/silvann_tq_D8E4_glm_5.3_flash) (`D8E4`) on the CPU alone, its experts read from the disk¶ | — | 6.8 positions/s · 1.2 tokens/s | the R730's two Xeons, v0.21.2 |
-| No graphics card, 64 GB of RAM, an NVMe disk | the same | — | 6.4 positions/s · 1.4 tokens/s | the R730's two Xeons, v0.21.2 |
-| No graphics card, 64 GB of RAM, an NVMe disk | [DeepSeek-V4.1-Flash](https://huggingface.co/eval-apply/silvann_tq_D8E4_deepseek_v4.1_flash_1017) (`D8E4`) on the CPU alone, its experts read from the disk¶ | — | 3.4 positions/s · 1.2 tokens/s | the R730's two Xeons, v0.21.2 |
-| No graphics card, 32 GB of RAM, an NVMe disk | the same | — | 3.1 positions/s · 0.7 tokens/s | the R730's two Xeons, v0.21.2 |
-| An 8 GB card | [Ministral 3 14B](https://huggingface.co/eval-apply/silvann_tq_D4_ministral_3_14b) (`D4`) on the card, at a 4,096-token context | 45 tokens/s | 948 positions/s · 40 tokens/s | an RTX 5060 Ti with 7.8 GB of it free, v0.20.0 (an RTX 5070 Ti: 1,682 · 59, v0.11.0; an MI50: 162 · 42, v0.7.0) |
-| An 8 GB card, 32 GB of RAM | [Qwen 3.6 35B-A3B](https://huggingface.co/eval-apply/silvann_tq_D8E4_qwen3.6_35b_a3b) (`D8E4`) — the dense part on the card, the experts on the CPU in RAM, and 4 GB of the card the tier of experts used most | 62 tokens/s | 164 positions/s · 52.2 tokens/s | an RTX 5060 Ti with 7.8 GB of it free, v0.21.0 |
-| An 8 GB card, 32 GB of RAM, an NVMe disk | [Qwen 3.5 122B-A10B](https://huggingface.co/eval-apply/silvann_tq_D8E4_qwen3.5_122b_a10b) (`D8E4`) — the dense part on the card, the experts on the CPU, read from the disk | 8.3 tokens/s | 19.0 positions/s · 7.8 tokens/s | an RTX 5060 Ti with 7.5 GB of it free, v0.19.0 |
-| A 12 GB card, 62 GB of RAM | [Qwen 3.6 35B-A3B](https://huggingface.co/eval-apply/silvann_tq_D8E4_qwen3.6_35b_a3b) (`D8E4`) — the same split, and 7.5 GB of the card the tier | 70 tokens/s | — | an RTX 5060 Ti with 11.6 GB of it free, v0.21.0 |
-| A 12 GB card, 32 GB of RAM, an NVMe disk | [DeepSeek-V4.1-Flash](https://huggingface.co/eval-apply/silvann_tq_D8E4_deepseek_v4.1_flash_1017) (`D8E4`) — the dense part on the card, the experts on the CPU, read from the disk¶ | — | 7.7 positions/s · 2.4 tokens/s | an MI50 with 20 GiB of it held, v0.21.2 |
-| A 12 GB card, 64 GB of RAM, an NVMe disk | the same | — | 8.2 positions/s · 2.7 tokens/s | an MI50 with 20 GiB of it held, v0.21.2 |
-| A 16 GB card | [Qwen 3.8 27B](https://huggingface.co/eval-apply/silvann_tq_D4_qwen3.8_27b) on the card | 24.5 tokens/s | 562 positions/s · 24 tokens/s | an RTX 5060 Ti, v0.20.0 (an MI50: 206 · 31.8) |
-| A 16 GB card — alt | [Ministral 3 14B](https://huggingface.co/eval-apply/silvann_tq_D8_ministral_3_14b) (`D8`) on the card, at an 8,192-token context | 28 tokens/s | 868 positions/s · 26 tokens/s | an RTX 5060 Ti, v0.20.0 (an MI50: 158 · 30.6, v0.7.0) |
-| A 16 GB card, 28 GB of RAM | [Qwen 3.6 35B-A3B](https://huggingface.co/eval-apply/silvann_tq_D8E4_qwen3.6_35b_a3b) (`D8E4`) — the dense part on the card, the experts on the CPU in RAM, and 11.75 GB of the card the tier of experts used most | 72 tokens/s | 174 positions/s · 59 tokens/s | an RTX 5060 Ti, v0.21.0 (with 62 GB: 194 · 59; an RTX 5070 Ti with 32 GB: 155 · 68, v0.11.0) |
-| the same | the same, without the tier | 30 tokens/s | 61 positions/s · 29 tokens/s | an RTX 5060 Ti, v0.20.0 |
-| A 16 GB card, 28 GB of RAM, an NVMe disk | [GLM 5.3 Flash](https://huggingface.co/eval-apply/silvann_tq_D8E4_glm_5.3_flash) (`D8E4`) — the dense part on the card, the experts on the CPU, read from the disk | 2.4 tokens/s | 11.1 positions/s · 2.2 tokens/s | an RTX 5060 Ti, v0.20.0 |
-| A 16 GB card, 16 GB of RAM, an NVMe disk | [DeepSeek-V4.1-Flash](https://huggingface.co/eval-apply/silvann_tq_D8E4_deepseek_v4.1_flash_1017) (`D8E4`) — the dense part on the card, the experts on the CPU, read from the disk¶ | — | 7.1-7.7 positions/s · 1.4-1.8 tokens/s | an MI50 with 16 GiB of it held, v0.21.2 |
-| A 16 GB card, 32 GB of RAM, an NVMe disk | the same | — | 7.4-7.6 positions/s · 2.4-2.6 tokens/s | an MI50 with 16 GiB of it held, v0.21.2 |
-| A 16 GB card, 62 GB of RAM | [Qwen 3.5 122B-A10B](https://huggingface.co/eval-apply/silvann_tq_D8E4_qwen3.5_122b_a10b) (`D8E4`) — the dense part on the card, the experts on the CPU in RAM (its config's `"experts_from": "ram"`‖), and 7.75 GB of the card the tier of experts used most | 17.5 tokens/s | 56 positions/s · 15.9 tokens/s | an RTX 5060 Ti, v0.21.0 |
-| A 16 GB card, 64 GB of RAM, an NVMe disk | [DeepSeek-V4.1-Flash](https://huggingface.co/eval-apply/silvann_tq_D8E4_deepseek_v4.1_flash_1017) (`D8E4`) — the dense part on the card, the experts on the CPU, read from the disk¶ | — | 9.8-11.0 positions/s · 2.3-2.8 tokens/s | an MI50 with 16 GiB of it held, v0.21.2 |
-| A 16 GB card, 150 GB of RAM | [GLM 5.3 Flash](https://huggingface.co/eval-apply/silvann_tq_D8E4_glm_5.3_flash) (`D8E4`), its experts in RAM, a 300,000-token context and 1.5 GB of the card the tier, lent 3.1 GB more of the cache's unreached rows | — | 50 positions/s · 9.2 tokens/s | an MI50 with 16 GiB of it held, v0.20.0 |
-| A 24 GB card | [Qwen 3.6 35B-A3B](https://huggingface.co/eval-apply/silvann_tq_D8E4_qwen3.6_35b_a3b) (`D8E4`) on the card | — | 379 positions/s · 88 tokens/s | an MI50, v0.21.0 (after 32,000 positions: 132 · 55) |
-| A 32 GB card, 80 GB of RAM | [Qwen 3.5 122B-A10B](https://huggingface.co/eval-apply/silvann_tq_D8E4_qwen3.5_122b_a10b) (`D8E4`), its experts in RAM and 24 GB of them on the card | — | 92 positions/s · 25.0 tokens/s | an MI50, v0.20.0 |
-| Two 32 GB cards, 251 GB of RAM | [GLM 5.3 Flash](https://huggingface.co/eval-apply/silvann_tq_D8E4_glm_5.3_flash) (`D8E4`) — every layer split over both cards (its config's `"num_cards": 2`), the experts on the CPU in RAM, 14 GB of each card the tier of experts used most, the model's whole 1,048,576-token context — the setup chosen at boot | 12.7-14.5 tokens/s | 55-56 positions/s · 11.2-11.3 tokens/s | two MI50s, v0.21.0 |
-| Two 32 GB cards, 128 GB of RAM | [GLM 5.3 Flash](https://huggingface.co/eval-apply/silvann_tq_D8E4_glm_5.3_flash) (`D8E4`) — the same, the tier exclusive (its config's `"card_experts_gb": 14`, `"card_exclusive": true`‡): an expert on a card is not also in RAM, so 114 GB of the 142 are | 11.4-11.8 tokens/s | 36 positions/s · 10.1 tokens/s | two MI50s, the process held to 120 GiB, v0.21.0 (with 251 GB: 11.3-11.9; 41 · 10.1-10.3) |
-| Two 32 GB cards, 251 GB of RAM | [DeepSeek-V4.1-Flash](https://huggingface.co/eval-apply/silvann_tq_D8E4_deepseek_v4.1_flash_1017) (`D8E4`) — every layer split over both cards, the experts on the CPU, all in RAM, and 22.5 GB of each card an exclusive tier of them (its config's `"num_cards": 2`, `"card_experts_gb": 22.5`, `"card_exclusive": true`‡), the model's whole 1,048,576-token context | 10.5-13.7 tokens/s (6.8-9.6 the first answer after a boot) | 21.8-23.7 positions/s · 6.5-7.9 tokens/s | two MI50s, v0.21.0 |
-| An older card or an integrated GPU, through OpenCL 1.2 | [Qwen 3.6 35B-A3B](https://huggingface.co/eval-apply/silvann_tq_D8E4_qwen3.6_35b_a3b) (`D8E4`) — the dense part on the card, the experts on the CPU in RAM, no tier | — | 37 positions/s · 23 tokens/s | the RTX 5060 Ti through OpenCL 1.2, v0.20.0 |
+<!-- rates:readme -->
+| GPU | RAM | CPU | Disk | Model | Setup | Prefill | Decode | Max context | Or |
+|---|---|---|---|---|---|---|---|---|---|
+| [none](docs/results.md#no-graphics-card) | 16 GB | 4 cores | — | [Qwen 3.5 4B](docs/models.md#qwen-35-4b) `D4` | the CPU alone | 18.9 positions/s | 7.95 tokens/s after 8k | 8,320 | — |
+| [8 GB](docs/results.md#an-8-gb-card) | 32 GB | 4 cores | — | [Qwen 3.6 35B-A3B](docs/models.md#qwen-36-35b-a3b) `D8E4` | the experts in RAM, a tier on the card | 94.9 positions/s | 14.34 tokens/s after 100k | 262,144 | the 4B on the card |
+| [16 GB](docs/results.md#a-16-gb-card) | 32 GB | 4 cores | NVMe, 5.7 GB/s | [Qwen 3.5 122B-A10B](docs/models.md#qwen-35-122b-a10b) `D8E4` | the experts from the disk, ~30 GB of them in RAM | 17.6 positions/s | 5.65 tokens/s after 100k | 110,000 | GLM 5.3 Flash from the disk |
+| [16 GB](docs/results.md#a-16-gb-card) | 14 GB | 4 cores | NVMe, 5.7 GB/s | [GLM 5.3 Flash](docs/models.md#glm-53-flash) `D8E4` | the experts from the disk | 9.1 positions/s | 2.21 tokens/s after 100k | 110,000 | — |
+| [16 GB](docs/results.md#a-16-gb-card) | 16 GB | 4 cores | — | [Qwen 3.8 27B](docs/models.md#qwen-38-27b) `D4` | on the card | 221.3 positions/s | 14.32 tokens/s after 35k | 35,840 | — |
+| [32 GB](docs/results.md#a-24-or-32-gb-card) | 160 GB | 28 cores | — | [GLM 5.3 Flash](docs/models.md#glm-53-flash) `D8E4` | every expert in RAM, a tier on the card | 72.1 positions/s | 9.86 tokens/s after 100k | 1,048,576 | DeepSeek-V4.1-Flash over two cards |
+| [2× 32 GB](docs/results.md#two-cards-or-more) | 251 GB | 28 cores | — | [DeepSeek-V4.1-Flash](docs/models.md#deepseek-v41-flash) `D8E4` | every expert in RAM, exclusive tiers | 31.3 positions/s | 9.72 tokens/s after 100k | 1,048,576 | GLM 5.3 Flash on one card |
+<!-- /rates -->
 
-**In the chat** is the server with the model's own config — its sampler, the setup it chooses, or the setup its row
-names — as the chat's meter reads a short conversation (from 54 positions; Ministral's from 583, its own system prompt). **After a prompt** is the
-most likely token after a prompt of about 2,000 positions (2,568 for Ministral; about 1,000 where the experts are read
-from the disk), the answer from its 10th token. A row's version is the release it was last measured with. The MI50s are
-in a Dell R730 with two Xeon E5-2680 v4; the RTX 5060 Ti in a desktop with a four-core Xeon W-2123 and two DDR4-2400
-sticks; the RTX 5070 Ti beside a Ryzen 7 5800X. Each process was held to the memory its row names, and a smaller card's
-room was a larger card with the rest of it held. ¶ From the disk: the R730's six NVMe drives in one array, which slow
-themselves when they are hot — 79-81 °C in every run — and that is the spread between a row's lowest and highest figure; a prompt
-of about 1,000 positions, then the answer from its 200th token; the process held to 14, 30 or 60 GB for 16, 32 or 64. ‡ An exclusive tier keeps each expert on a card or in RAM, never both, so the
-cards' tiers are RAM given back: GLM's needs 28 GB less of it, and answers a little slower than with its tier inclusive. DeepSeek's routed experts are
-272 GB: on one MI50 they are read from the disk into a cache in RAM; with 22.5 GB of each of two
-cards exclusive its experts all fit beside the R730's 251 GB, and it answers about twice as fast. The server does not
-choose an exclusive tier by itself: the config names it ([`docs/config.md`](docs/config.md)). ‖ With 62 GB the server reads the 122B's experts from the disk unless
-its config says `"experts_from": "ram"` (they and the server beside them miss what the system has free by under a
-gigabyte): 9.7 tokens/s. A model whose config names no setup — the default's — chooses its own when the server starts,
-by trying it on the card: where its experts go, how much of the card holds the ones used most, the context the card has
-room for ([`docs/config.md`](docs/config.md)). **Every model and pack, the other machines (down to a 4 GB card reading
-its experts from the disk), and how long a conversation fits: [`docs/models.md`](docs/models.md)**; every measurement,
-the machines, and each row's version: [`docs/results.md`](docs/results.md).
+Every model measured on each kind of machine, and how: [`docs/results.md`](docs/results.md#which-model-for-your-machine);
+every machine one model was measured on, its packs and its notes: [`docs/models.md`](docs/models.md). A model whose config
+names no setup chooses its own when the server starts, by trying it on the card: where its experts go, how much of the
+card holds the ones used most, the context the card has room for ([`docs/config.md`](docs/config.md)).
 
-**New in v0.21.2**, and in every release before it: [`release_logs/v0.md`](release_logs/v0.md).
+**New in v0.22.0**, and in every release before it: [`release_logs/v0.md`](release_logs/v0.md).
 
 ## Platforms
 

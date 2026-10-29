@@ -1,12 +1,15 @@
 # Models
 
-Every model this release runs, every pack of each, and what each needs. The README recommends one model a kind of
-machine; this page has the rest.
+Every model this release runs, every pack of each, and every machine each was measured on: a model's table in the
+columns [`results.md`](results.md)'s are in, its card linking that kind of machine there. Which model suits a machine:
+[`results.md`](results.md#which-model-for-your-machine).
 
 ## The packs
 
 | Model | Pack | Weights | Download |
 |---|---|---|---|
+| Qwen 3.5 4B (dense) | `D4`, for the CPU alone and small cards | 3.5 GB — 4 bits | [eval-apply/silvann_tq_D4_qwen3.5_4b](https://huggingface.co/eval-apply/silvann_tq_D4_qwen3.5_4b) |
+| Qwen 3.5 4B | `D8` | 5.3 GB — 8 bits | [eval-apply/silvann_tq_D8_qwen3.5_4b](https://huggingface.co/eval-apply/silvann_tq_D8_qwen3.5_4b) |
 | Ministral 3 14B (dense, Mistral AI) | `D4`, for 8 GB cards | 7.4 GB — 4 bits | [eval-apply/silvann_tq_D4_ministral_3_14b](https://huggingface.co/eval-apply/silvann_tq_D4_ministral_3_14b) |
 | Ministral 3 14B | `D8`, for 16 GB cards | 13.5 GB — 8 bits | [eval-apply/silvann_tq_D8_ministral_3_14b](https://huggingface.co/eval-apply/silvann_tq_D8_ministral_3_14b) |
 | Qwen 3.8 27B (dense) | `D4` | 15 GB — 4 bits | [eval-apply/silvann_tq_D4_qwen3.8_27b](https://huggingface.co/eval-apply/silvann_tq_D4_qwen3.8_27b) |
@@ -32,53 +35,199 @@ DeepSeek's MIT.
 ⚠ Qwen-Image 2.1's is the Qwen Research License Agreement: research and other non-commercial use only. A picture model
 runs as a server's model of its own: [`users.md`](users.md#a-picture-model-qwen-image-21).
 
-## What each needs, measured
+## Qwen 3.5 4B
 
-From a machine with no graphics card to a model near the frontier on salvaged server parts:
+A dense model of Qwen 3.5's family — the 27B's, smaller: 32 layers, three Gated DeltaNet layers to one of attention, its
+embedding and its head one matrix. For a machine without a card, or a small one: its `D4` answers on four cores of a
+2016 server Xeon at 4 tokens a second.
 
-| Your machine | Model, and how it runs | Answer |
-|---|---|---|
-| No graphics card, 12 GB of RAM, an NVMe disk | Qwen 3.6 35B-A3B (`D8E4`) on the CPU alone, its experts read from the disk, 8 GB of them kept in memory | 11.9 tokens/s |
-| An 8 GB card | Ministral 3 14B (`D4`) entirely on the card, at a 4,096-token context | 42 tokens/s (56 on a short prompt) ◦ |
-| A 16 GB card | Qwen 3.8 27B entirely on the card, at a 32,000-token context (14 GB) | 30.5 tokens/s (34 on a short prompt) |
-| A 16 GB card | Ministral 3 14B (`D8`) entirely on the card, at an 8,192-token context | 30 tokens/s (37 on a short prompt) ◦ |
-| A 24 GB card | Qwen 3.6 35B-A3B entirely on the card (17 GB at a 32,000-token context) | 88 tokens/s (101 on a short prompt; 55 after 32,000 positions) |
-| A 4 GB card, 8 GB of RAM, an NVMe disk | Qwen 3.6 35B-A3B — the dense part on the card, the experts on the CPU, read from the disk as they are needed | 11.9 tokens/s ◦ |
-| An 8 GB card, 32 GB of RAM, an NVMe disk | Qwen 3.5 122B-A10B (`D8E4`) — the same split | 8.2 tokens/s ◦ |
-| An 8 GB card (an RTX 5060 Ti with 7.5 GB of it held), 32 GB of RAM | Qwen 3.6 35B-A3B (`D8E4`) — the dense part on the card, the experts on the CPU in RAM, and 4 GB of the card the tier of experts used most | 62 tokens/s ‡ |
-| An 8 GB card (the same), 32 GB of RAM | Ministral 3 14B (`D4`) entirely on the card, at a 4,096-token context | 45 tokens/s ‡ |
-| A 12 GB card (an RTX 5060 Ti with 4 GB of it held), 62 GB of RAM | Qwen 3.6 35B-A3B (`D8E4`) — the same split, and 7.5 GB of the card the tier | 70 tokens/s ‡ |
-| A 16 GB card (an RTX 5060 Ti), 28 GB of RAM | Qwen 3.6 35B-A3B (`D8E4`) — the dense part on the card, the experts on the CPU in RAM, and 11.75 GB of the card the tier of experts used most | 72 tokens/s ‡ |
-| A 16 GB card (an RTX 5060 Ti), 28 GB of RAM, an NVMe disk reading 5 GB/s | Qwen 3.5 122B-A10B (`D8E4`) — the dense part on the card, the experts on the CPU, read from the disk | 7.8 tokens/s ‡ |
-| A 16 GB card (an RTX 5060 Ti), 28 GB of RAM, an NVMe disk reading 5 GB/s | GLM 5.3 Flash (`D8E4`) — the same split | 2.4 tokens/s ‡ |
-| A 16 GB card (an RTX 5060 Ti), 32 GB of RAM, an NVMe disk reading 5 GB/s | GLM 5.3 Flash — the same split | 2.5 tokens/s ‡ |
-| A 16 GB card (an RTX 5060 Ti), 60 GB of RAM, an NVMe disk reading 5 GB/s | GLM 5.3 Flash — the same split | 3.25 tokens/s ‡ |
-| A 16 GB card (an RTX 5060 Ti), 62 GB of RAM | Qwen 3.5 122B-A10B (`D8E4`) — the dense part on the card, the experts on the CPU in RAM (54 GB, the config's `"experts_from": "ram"`†), and 7.75 GB of the card the tier of experts used most | 17.5 tokens/s ‡ |
-| A 16 GB card, 128 GB of RAM, an NVMe disk reading 5 GB/s | GLM 5.3 Flash — the same split | 5.7 tokens/s |
-| A 16 GB card (an MI50 with 16 GiB of it held), 150 GB of RAM | GLM 5.3 Flash with all of its experts (142 GB) in RAM, a 300,000-token context, and 2.25 GB of the card the tier of experts used most — lent 3.1 GB more of the cache's unreached rows | 8.8 tokens/s |
-| A 32 GB card, 80 GB of RAM | Qwen 3.5 122B-A10B (`D8E4`), its experts in RAM and 24 GB of them on the card | 24.1 tokens/s |
-| A 32 GB card, 160 GB of RAM | GLM 5.3 Flash, its experts in RAM and 24 GB of them on the card | 10.7 tokens/s |
+<!-- rates:model Qwen 3.5 4B -->
+| GPU | RAM | CPU | Disk | Setup | Prefill | Decode | Max context | Version |
+|---|---|---|---|---|---|---|---|---|
+| [32 GB · MI50](results.md#a-24-or-32-gb-card) | 251 GB | 2× Xeon E5-2680 v4 (28 cores) | — | `D8` · on the card | 964 positions/s | 75.8 tokens/s after 2k | — | v0.22.0 |
+| [32 GB · MI50](results.md#a-24-or-32-gb-card) | 251 GB | 2× Xeon E5-2680 v4 (28 cores) | — | `D4` · on the card | 979 positions/s | 101.9 tokens/s after 2k | — | v0.22.0 |
+| [none](results.md#no-graphics-card) | 251 GB | 2× Xeon E5-2680 v4 (28 cores) | — | `D8` · the CPU alone | 51.4 positions/s | 11.7 tokens/s after 550 | — | v0.22.0 |
+| [none](results.md#no-graphics-card) | 62 GB | Xeon W-2123 (4 cores) | — | `D4` · the CPU alone | 18.9 positions/s | 7.95 tokens/s after 8k | 8,320 | v0.22.0 |
+| [none](results.md#no-graphics-card) | 251 GB | 2× Xeon E5-2680 v4 (28 cores) | — | `D4` · the CPU alone | 55.3 positions/s | 17.8 tokens/s after 550 | — | v0.22.0 |
+| [none](results.md#no-graphics-card) | 251 GB | Xeon E5-2680 v4, 4 threads | — | `D8` · the CPU alone | 9.8 positions/s | 2.3 tokens/s after 550 | — | v0.22.0 |
+| [none](results.md#no-graphics-card) | 251 GB | Xeon E5-2680 v4, 4 threads | — | `D4` · the CPU alone | 10.1 positions/s | 4.0 tokens/s after 550 | — | v0.22.0 |
+| [16 GB · RTX 5060 Ti, OpenCL 1.2](results.md#an-older-card-or-an-integrated-gpu) | 62 GB | Xeon W-2123 (4 cores) | — | `D4` · on the card | 175.9 positions/s | 47.1 tokens/s after 8k | — | v0.22.0 |
+<!-- /rates -->
 
-Measured on a Dell R730 (two Xeon E5-2680 v4, AMD Instinct MI50 cards; disk speed 5 GB/s, RAM speed 126 GB/s), each row
-with its process held to the memory it names — leave room beside it for the operating system — and from a cold start
-where the experts come from the disk. ◦ Ran on a 32 GB MI50: the model fits the smaller card, but a card that size has
-not been measured. The rows with a model entirely on the card are v0.7.0's and v0.8.0's, the 35B's v0.21.0's; the CPU alone's, the 122B's
-from the disk and with 24 GB of tier, and GLM's with 150 GB are v0.18.1's; the others were measured with v0.3's card
-kernels, and where a card does part of the work they are a floor ([`results.md`](results.md) names each row's version). ‡ The RTX 5060 Ti rows are another machine's, a
-four-core Xeon with two channels of DDR4: the answer in the chat — the server with the model's own config, held to the
-RAM its row names, as the chat's meter reads a short conversation — measured with v0.20.0
-(2026-10-26), the 35B's and the 122B's with a tier fed from RAM with v0.21.0 (2026-10-27), a smaller card's room the rest of the card held (7.5 GB held leaves what a headless 8 GB card does) — the
-122B's with v0.19.0 (2026-10-24), and from that disk with 32 GB of RAM it answers at 8.3 tokens/s, on an 8 GB card's room
-the same. † With 62 GB the server reads the 122B's experts from the disk unless its config says `"experts_from": "ram"`
-(they and the server beside them miss what the system has free by under a gigabyte): 9.7 tokens/s. Its dense part takes
-4.66 GB of the card against the retired `D4E4`'s 2.37, so its tier is smaller, and it answers at 17.5 where `D4E4` answered
-at 20. On that card in the chat Ministral `D4` answers at 47
-tokens/s, the 27B at 26, and the 35B with its experts on the four-core Xeon and the tier the setup chooses at 67; after
-a 2,000-position prompt at 39, 23.5 and 57 ([`results.md`](results.md#the-rtx-5060-ti)).
-Every measurement, the prompt rates, and what limits a model reading its experts from the disk:
-[`results.md`](results.md).
+Both packs answer Hugging Face's greedy continuation token for token, the `D4` its logits 0.33 off on average and the
+`D8` 0.05 (`measurements/2026-10-28_qwen35_4b_node03.md`). Four of the R730's threads stand in for a small machine's CPU;
+a recent four-core one is likely faster.
+
+## Ministral 3 14B
+
+<!-- rates:model Ministral 3 14B -->
+| GPU | RAM | CPU | Disk | Setup | Prefill | Decode | Max context | Version |
+|---|---|---|---|---|---|---|---|---|
+| [8 GB · RTX 5060 Ti, 7.8 GB free](results.md#an-8-gb-card) | 32 GB | Xeon W-2123 (4 cores) | — | `D4` · on the card | 948 positions/s | 40.4 tokens/s after 2.6k | 4,096 | v0.20.0 |
+| [16 GB · RTX 5060 Ti](results.md#a-16-gb-card) | 62 GB | Xeon W-2123 (4 cores) | — | `D4` · on the card | 952 positions/s | 40.4 tokens/s after 2.6k | — | v0.20.0 |
+| [16 GB · RTX 5060 Ti](results.md#a-16-gb-card) | 62 GB | Xeon W-2123 (4 cores) | — | `D8` · on the card | 868 positions/s | 25.9 tokens/s after 2.6k | 8,192 | v0.20.0 |
+| [16 GB · RTX 5070 Ti](results.md#a-16-gb-card) | 32 GB | Ryzen 7 5800X (8 cores) | — | `D4` · on the card | 1,682 positions/s | 59.0 tokens/s after 2.6k | — | v0.11.0 |
+| [32 GB · MI50](results.md#a-24-or-32-gb-card) | 251 GB | 2× Xeon E5-2680 v4 (28 cores) | — | `D4` · on the card | 162 positions/s | 42 tokens/s after 2.6k | — | v0.7.0 |
+| [32 GB · MI50](results.md#a-24-or-32-gb-card) | 251 GB | 2× Xeon E5-2680 v4 (28 cores) | — | `D8` · on the card | 158 positions/s | 30.6 tokens/s after 2.6k | — | v0.7.0 |
+<!-- /rates -->
+
+Ministral reads its prompt as rows, through nn's attention over many rows (v0.4.0, a position at a time, read 53
+positions a second on the `D4` pack). Its chat template adds about 560 positions, so its rows read about 2,600, and a
+short prompt about 620. On an 8 GB card at 4,096 positions it holds 7.7 GB of the 7.83 a headless card leaves, so on an
+8 GB card that also drives a display it does not start. The RTX 5070 Ti has twice the 5060 Ti's memory bandwidth (896
+GB/s against 448, by NVIDIA's figures), and Ministral answers 1.5 times as fast there; natively on Windows (v0.12.0, CUDA
+13.4, the chat's meter) it answered at 58 tokens a second on a PC with the same card, processor and RAM. In the chat
+([`results.md`](results.md#in-the-chat)) `D4` answers at 44.8 tokens a second and `D8` at 27.7 on the RTX 5060 Ti.
+
+## Qwen 3.8 27B
+
+<!-- rates:model Qwen 3.8 27B -->
+| GPU | RAM | CPU | Disk | Setup | Prefill | Decode | Max context | Version |
+|---|---|---|---|---|---|---|---|---|
+| [16 GB · RTX 5060 Ti](results.md#a-16-gb-card) | 16 GB | Xeon W-2123 (4 cores) | — | `D4` · on the card, the context the card holds | 221.3 positions/s | 14.32 tokens/s after 35k | 35,840 | v0.22.0 |
+| [16 GB · RTX 5060 Ti](results.md#a-16-gb-card) | 62 GB | Xeon W-2123 (4 cores) | — | `D4` · on the card | 562 positions/s | 24.0 tokens/s after 2k | 35,840 | v0.20.0 |
+| [16 GB · RTX 5060 Ti](results.md#a-16-gb-card) | 62 GB | Xeon W-2123 (4 cores) | — | `D4` · on the card | 486 positions/s | 22.2 tokens/s after 6k | 35,840 | v0.20.0 |
+| [32 GB · MI50](results.md#a-24-or-32-gb-card) | 251 GB | 2× Xeon E5-2680 v4 (28 cores) | — | `D4` · on the card | 206 positions/s | 31.8 tokens/s after 2k | — | v0.20.0 |
+| [32 GB · MI50](results.md#a-24-or-32-gb-card) | 251 GB | 2× Xeon E5-2680 v4 (28 cores) | — | `D4` · on the card | 69.1 positions/s | 21.3 tokens/s after 32k | — | v0.21.0 |
+| [32 GB · MI50](results.md#a-24-or-32-gb-card) | 251 GB | 2× Xeon E5-2680 v4 (28 cores) | — | `D4` · on the card | 34.7 positions/s | 13.4 tokens/s after 100k | — | v0.21.0 |
+| [4× 32 GB · MI50, 155 W](results.md#two-cards-or-more) | — | EPYC 7532 (32 cores) | — | `D4` · every layer over 4 cards | 194 positions/s | 37.2 tokens/s after 2k | — | v0.11.0 |
+| [2× 32 GB · MI50, 155 W](results.md#two-cards-or-more) | — | EPYC 7532 (32 cores) | — | `D4` · every layer over 2 cards | 158 positions/s | 38.4 tokens/s after 2k | — | v0.11.0 |
+| [16 GB · RTX 5060 Ti, OpenCL 1.2](results.md#an-older-card-or-an-integrated-gpu) | 62 GB | Xeon W-2123 (4 cores) | — | `D4` · on the card | 15.1 positions/s | 14.4 tokens/s after 2k | — | v0.20.0 |
+| [32 GB · MI50, OpenCL 2.0](results.md#an-older-card-or-an-integrated-gpu) | 251 GB | 2× Xeon E5-2680 v4 (28 cores) | — | `D4` · on the card | 52.5 positions/s | 10.4 tokens/s after 2k | — | v0.5.1 |
+<!-- /rates -->
+
+Against one MI50 the 27B reads a prompt 2.7 times as fast on the RTX 5060 Ti (562 positions a second against 206) — the
+card's tensor cores run the prompt's matrix products — and answers more slowly (24.0 tokens a second against 31.8): a
+token reads every weight once, so the answer follows the memory's speed, 448 GB/s there against the MI50's 1,024. v0.19.0's
+prompt GEMM on an MI50 stages a tile's slice once and four elements a load: the 27B reads a 2,000-position prompt at 199
+positions a second where v0.18.1 read 107, and v0.20.0's tiled grouped scores 206 — the same words
+(`measurements/2026-10-24_nn114_tile_staging_node03.md`). Past 32,000 positions its cache beyond the window is kept at 8
+bits; v0.21.0's TurboQuant passes over it in slices (32,098 positions: 69.1 · 21.3 against v0.20.0's 25.3 · 9.95;
+`measurements/2026-10-27_v0210_mi50_rows_node03.md`). Over two or four MI50s of one machine its layers split
+(`"tensor_parallel"`, v0.11.0): a prompt 1.8 and 2.2 times as fast as one card's 88. Through OpenCL 1.2 a card reads a
+prompt a position at a time; through CUDA the same card answers 1.3 to 2.6 times as fast. Three machines in a pipeline
+(v0.3) answered at 6.8 tokens a second, the same tokens. In the chat on the RTX 5060 Ti: 24.5 tokens a second, a
+35,840-token context.
+
+## Qwen 3.6 35B-A3B
+
+<!-- rates:model Qwen 3.6 35B-A3B -->
+| GPU | RAM | CPU | Disk | Setup | Prefill | Decode | Max context | Version |
+|---|---|---|---|---|---|---|---|---|
+| [none](results.md#no-graphics-card) | 12 GB | 2× Xeon E5-2680 v4 (28 cores) | NVMe array | `D8E4` · the experts from the disk, 8 GB of them in RAM | 45-46 positions/s | 11.7-12.7 tokens/s after 1k | — | v0.20.0 |
+| [none](results.md#no-graphics-card) | 251 GB | 2× Xeon E5-2680 v4 (28 cores) | — | `D8E4` · every expert in RAM | 65-68 positions/s | 16.1 tokens/s after 2k | — | v0.20.0 |
+| [none](results.md#no-graphics-card) | 62 GB | Xeon W-2123 (4 cores) | — | `D8E4` · every expert in RAM | 28.0 positions/s | 8.7 tokens/s after 2k | — | v0.20.0 |
+| [8 GB · RTX 5060 Ti, 7.8 GB free](results.md#an-8-gb-card) | 32 GB | Xeon W-2123 (4 cores) | — | `D8E4` · the experts in RAM, a 1.75 GB tier | 94.9 positions/s | 14.34 tokens/s after 100k | 262,144 | v0.22.0 |
+| [8 GB · RTX 5060 Ti, 7.8 GB free](results.md#an-8-gb-card) | 32 GB | Xeon W-2123 (4 cores) | — | `D8E4` · the experts in RAM, a 4 GB tier | 164 positions/s | 52.2 tokens/s after 2k | — | v0.21.0 |
+| [12 GB · RTX 5060 Ti, 11.6 GB free](results.md#a-12-gb-card) | 62 GB | Xeon W-2123 (4 cores) | — | `D8E4` · the experts in RAM, a 6.75 GB tier | 113 positions/s | 51.8 tokens/s after 2k | — | v0.11.0 |
+| [16 GB · RTX 5060 Ti](results.md#a-16-gb-card) | 62 GB | Xeon W-2123 (4 cores) | — | `D8E4` · the experts in RAM, an 11.75 GB tier | 194 positions/s | 59.4 tokens/s after 2k | 32,768 | v0.21.0 |
+| [16 GB · RTX 5060 Ti](results.md#a-16-gb-card) | 62 GB | Xeon W-2123 (4 cores) | — | `D8E4` · the experts in RAM, a 9.5 GB tier | 193 positions/s | 59.4 tokens/s after 2k | 262,144 | v0.21.0 |
+| [16 GB · RTX 5060 Ti](results.md#a-16-gb-card) | 62 GB | Xeon W-2123 (4 cores) | — | `D8E4` · the experts in RAM, a 9.5 GB tier | 207 positions/s | 32.4 tokens/s after 32k | 262,144 | v0.21.0 |
+| [16 GB · RTX 5060 Ti](results.md#a-16-gb-card) | 28 GB | Xeon W-2123 (4 cores) | — | `D8E4` · the experts in RAM, an 8 GB tier | 174 positions/s | 59.0 tokens/s after 2k | — | v0.21.0 |
+| [16 GB · RTX 5060 Ti](results.md#a-16-gb-card) | 62 GB | Xeon W-2123 (4 cores) | — | `D8E4` · the experts in RAM, no tier | 61.3 positions/s | 29.4 tokens/s after 2k | — | v0.20.0 |
+| [16 GB · RTX 5070 Ti](results.md#a-16-gb-card) | 32 GB | Ryzen 7 5800X (8 cores) | — | `D8E4` · the experts in RAM, an 11 GB tier | 155 positions/s | 68.3 tokens/s after 2k | — | v0.11.0 |
+| [16 GB · RTX 5070 Ti, natively on Windows](results.md#a-16-gb-card) | 32 GB | Ryzen 7 5800X (8 cores) | — | `D8E4` · the server's setup | — | 48 tokens/s in the chat | — | v0.21.2 |
+| [32 GB · MI50](results.md#a-24-or-32-gb-card) | 251 GB | 2× Xeon E5-2680 v4 (28 cores) | — | `D8E4` · on the card | 379 positions/s | 88 tokens/s after 2k | — | v0.21.0 |
+| [32 GB · MI50](results.md#a-24-or-32-gb-card) | 251 GB | 2× Xeon E5-2680 v4 (28 cores) | — | `D8E4` · on the card | 132 positions/s | 54.8 tokens/s after 32k | — | v0.21.0 |
+| [32 GB · MI50](results.md#a-24-or-32-gb-card) | 251 GB | 2× Xeon E5-2680 v4 (28 cores) | — | `D8E4` · the experts in RAM, no tier | 116 positions/s | 32.1-32.8 tokens/s after 2k | — | v0.20.0 |
+| [32 GB · MI50](results.md#a-24-or-32-gb-card) | 251 GB | 2× Xeon E5-2680 v4 (28 cores) | — | `D8E4` · the experts in RAM, a 4 GB tier, the prompt streamed | 450 positions/s | 37.6 tokens/s after 2k | — | v0.20.0 |
+| [32 GB · MI50](results.md#a-24-or-32-gb-card) | 8 GB | 2× Xeon E5-2680 v4 (28 cores) | NVMe, 5 GB/s | `D8E4` · the experts from the disk | 32 positions/s | 11.9 tokens/s after 1k | — | v0.3 |
+| [32 GB · MI50](results.md#a-24-or-32-gb-card) | 6 GB | 2× Xeon E5-2680 v4 (28 cores) | NVMe, 5 GB/s | `D8E4` · the experts from the disk | 31 positions/s | 10.2 tokens/s after 1k | — | v0.3 |
+| [16 GB · RTX 5060 Ti, OpenCL 1.2](results.md#an-older-card-or-an-integrated-gpu) | 62 GB | Xeon W-2123 (4 cores) | — | `D8E4` · the experts in RAM, no tier | 37.1 positions/s | 23.0 tokens/s after 2k | — | v0.20.0 |
+<!-- /rates -->
+
+With a tier — part of the card holding the experts used most — the 35B reads a prompt 1.7 times as fast as v0.11.1 did
+on the RTX 5060 Ti; v0.21.0 no longer pins the experts' RAM for the card (`experts_register`), which read prompts a
+little faster again (194 positions a second against 182) and answered after a short prompt 1-4% lower. Which experts
+the tier holds follows when its copies land, so a tier's rate varies from run to run, and over an answer it warms. On an
+8 GB card's room the tier is 4 GB (3.5 GB with v0.11.1, 48.8 tokens a second; 2 GB with v0.8.0, 42.2); on a 12 GB card's
+room the rows ran with the experts in 62 GB of RAM, and with AVX2's bodies alone (as a CPU without AVX-512 has) it answers
+12% slower. Streamed (`stream`), a layer's experts cross to the card once for the whole prompt
+(`measurements/2026-10-25_nn115_qwen_router_rows_node03.md`). With its experts from the disk and a small cache the next
+layer's experts are read ahead (`experts_ahead`, v0.22.0): with a 3 GB cache 16.4 tokens a second becomes 19.8
+(`measurements/2026-10-28_expert_prediction_node03.md`). The CPU alone with only AVX2 (`SILVANN_CPU_AVX512=0`) read a
+145-position prompt at 17.1 positions a second and answered at 1.8 tokens. In the chat: 72 tokens a second on the RTX
+5060 Ti with its tier, 62.3 on an 8 GB card's room, 69.9 on a 12 GB card's, 30.4 without a tier, 9.2 on the CPU alone.
+
+## Qwen 3.5 122B-A10B
+
+<!-- rates:model Qwen 3.5 122B-A10B -->
+| GPU | RAM | CPU | Disk | Setup | Prefill | Decode | Max context | Version |
+|---|---|---|---|---|---|---|---|---|
+| [8 GB · RTX 5060 Ti, 8 GB held](results.md#an-8-gb-card) | 32 GB | Xeon W-2123 (4 cores) | NVMe, 5 GB/s | `D8E4` · the experts from the disk | 19.0 positions/s | 7.8 tokens/s after 1k | 33,792 | v0.19.0 |
+| [16 GB · RTX 5060 Ti](results.md#a-16-gb-card) | 32 GB | Xeon W-2123 (4 cores) | NVMe array, 5.7 GB/s | `D8E4` · the experts from the disk, a 30 GB cache | 17.6 positions/s | 5.65 tokens/s after 100k | 110,000 | v0.22.0 |
+| [16 GB · RTX 5060 Ti](results.md#a-16-gb-card) | 32 GB | Xeon W-2123 (4 cores) | NVMe, 5 GB/s | `D8E4` · the experts from the disk | 19.0 positions/s | 7.8 tokens/s after 1k | — | v0.19.0 |
+| [16 GB · RTX 5060 Ti](results.md#a-16-gb-card) | 28 GB | Xeon W-2123 (4 cores) | NVMe, 5 GB/s | `D8E4` · the experts from the disk | 18.8 positions/s | 7.5 tokens/s after 1k | — | v0.19.0 |
+| [16 GB · RTX 5060 Ti](results.md#a-16-gb-card) | 61 GB | Xeon W-2123 (4 cores) | — | `D8E4` · the experts in RAM, a 7.75 GB tier | 56.2 positions/s | 15.9 tokens/s after 2k | 32,768 | v0.21.0 |
+| [32 GB · MI50](results.md#a-24-or-32-gb-card) | 251 GB | 2× Xeon E5-2680 v4 (28 cores) | — | `D8E4` · the experts in RAM, no tier | 48-50 positions/s | 12.7-15.4 tokens/s after 2k | — | v0.20.0 |
+| [32 GB · MI50](results.md#a-24-or-32-gb-card) | 80 GB | 2× Xeon E5-2680 v4 (28 cores) | — | `D8E4` · the experts in RAM, a 24 GB tier | 91-94 positions/s | 25.0 tokens/s after 2k | — | v0.20.0 |
+| [32 GB · MI50](results.md#a-24-or-32-gb-card) | 32 GB | 2× Xeon E5-2680 v4 (28 cores) | NVMe, 5 GB/s | `D8E4` · the experts from the disk | 33.4 positions/s | 7.8 tokens/s after 1k | — | v0.20.0 |
+| [32 GB · MI50](results.md#a-24-or-32-gb-card) | 16 GB | 2× Xeon E5-2680 v4 (28 cores) | NVMe, 5 GB/s | `D8E4` · the experts from the disk | 31.2 positions/s | 5.6-5.9 tokens/s after 1k | — | v0.20.0 |
+| [32 GB · MI50, OpenCL 2.0](results.md#an-older-card-or-an-integrated-gpu) | 251 GB | 2× Xeon E5-2680 v4 (28 cores) | — | `D8E4` · the experts in RAM, an 18 GB tier | 49-51 positions/s | 13.5 tokens/s after 2k | — | v0.20.0 |
+<!-- /rates -->
+
+Its `D8E4` rows were measured again with v0.20.0, two runs each (`measurements/2026-10-26_v0200_r730_rows_node03.md`), as
+v0.18.1's were when the `D4E4` pack was retired: the prompts read 11-63% faster, the answers within a few percent. Its
+dense part takes 4.66 GB of a card against the retired `D4E4`'s 2.37, so with its experts in RAM its tier is smaller. With
+62 GB the server reads its experts from the disk unless its config says `"experts_from": "ram"`: they (54 GB), the
+server's own memory beside them and the spare miss what the system has free by under a gigabyte (from the disk 10.0
+tokens a second after a prompt, 9.7 in the chat; from RAM 15.9 and 17.5). From the disk its cache keeps 83-86% of a
+token's experts with 28-32 GB, 72% with 16 GB (249-492 MB read a token). Holding the disk to 5 GB/s did not change its
+answer; to 2.5 GB/s it slowed its prompt by 25%. Through OpenCL 2.0 a card allocates at most 85% of itself at once.
+
+## GLM 5.3 Flash
+
+<!-- rates:model GLM 5.3 Flash -->
+| GPU | RAM | CPU | Disk | Setup | Prefill | Decode | Max context | Version |
+|---|---|---|---|---|---|---|---|---|
+| [none](results.md#no-graphics-card) | 60 GB | 2× Xeon E5-2680 v4 (28 cores) | NVMe array, 6.6 GB/s | `D8E4` · the experts from the disk | 6.4 positions/s | 1.4 tokens/s after 1k | — | v0.21.2 |
+| [none](results.md#no-graphics-card) | 30 GB | 2× Xeon E5-2680 v4 (28 cores) | NVMe array, 6.6 GB/s | `D8E4` · the experts from the disk | 6.8 positions/s | 1.2 tokens/s after 1k | — | v0.21.2 |
+| [16 GB · RTX 5060 Ti](results.md#a-16-gb-card) | 14 GB | Xeon W-2123 (4 cores) | NVMe array, 5.7 GB/s | `D8E4` · the experts from the disk, the next layer's read ahead | 9.1 positions/s | 2.21 tokens/s after 100k | 110,000 | v0.22.0 |
+| [16 GB · RTX 5060 Ti](results.md#a-16-gb-card) | 16 GB | Xeon W-2123 (4 cores) | NVMe array (4 drives) | `D8E4` · the experts from the disk, a 12 GiB cache, the next layer's read ahead | — | 2.31 tokens/s after 256 | 32,768 | v0.22.0 |
+| [16 GB · RTX 5060 Ti](results.md#a-16-gb-card) | 60 GB | Xeon W-2123 (4 cores) | NVMe, 5 GB/s | `D8E4` · the experts from the disk | 10.8 positions/s | 3.1 tokens/s after 1k | — | v0.20.0 |
+| [16 GB · RTX 5060 Ti](results.md#a-16-gb-card) | 32 GB | Xeon W-2123 (4 cores) | NVMe, 5 GB/s | `D8E4` · the experts from the disk | 11.0 positions/s | 2.3 tokens/s after 1k | — | v0.20.0 |
+| [16 GB · RTX 5060 Ti](results.md#a-16-gb-card) | 28 GB | Xeon W-2123 (4 cores) | NVMe, 5 GB/s | `D8E4` · the experts from the disk | 11.1 positions/s | 2.2 tokens/s after 1k | — | v0.20.0 |
+| [16 GB · MI50 held to 16 GiB](results.md#a-16-gb-card) | 150 GB | 2× Xeon E5-2680 v4 (28 cores) | — | `D8E4` · every expert in RAM, a 1.5 GB tier | 49.6 positions/s | 9.2 tokens/s after 1k | 300,000 | v0.20.0 |
+| [32 GB · MI50](results.md#a-24-or-32-gb-card) | 251 GB | 2× Xeon E5-2680 v4 (28 cores) | NVMe array, 9 GB/s | `D8E4` · the experts from the disk, a 30 GB cache, the next layer's read ahead | — | 3.31 tokens/s after 256 | 576 | v0.22.0 |
+| [32 GB · MI50](results.md#a-24-or-32-gb-card) | 251 GB | 2× Xeon E5-2680 v4 (28 cores) | NVMe array, 9 GB/s | `D8E4` · the experts from the disk, an 8 GB cache, the next layer's read ahead | — | 2.18 tokens/s after 256 | 576 | v0.22.0 |
+| [32 GB · MI50](results.md#a-24-or-32-gb-card) | 160 GB | 2× Xeon E5-2680 v4 (28 cores) | — | `D8E4` · every expert in RAM, a 9.5 GB tier | 72.1 positions/s | 9.86 tokens/s after 100k | 1,048,576 | v0.22.0 |
+| [32 GB · MI50](results.md#a-24-or-32-gb-card) | 150 GB | 2× Xeon E5-2680 v4 (28 cores) | — | `D8E4` · every expert in RAM, a 17.75 GB tier | 54 positions/s | 10.8 tokens/s after 1k | 300,000 | v0.20.0 |
+| [32 GB · MI50](results.md#a-24-or-32-gb-card) | 128 GB | 2× Xeon E5-2680 v4 (28 cores) | NVMe, 5 GB/s | `D8E4` · the experts from the disk | 13.2 positions/s | 5.7 tokens/s after 1k | — | v0.3 |
+| [2× 32 GB · MI50](results.md#two-cards-or-more) | 251 GB | 2× Xeon E5-2680 v4 (28 cores) | — | `D8E4` · every layer over both cards, every expert in RAM, a 14 GB tier on each | 54.6-56.4 positions/s | 11.2-11.3 tokens/s after 2k | 1,048,576 | v0.21.0 |
+| [2× 32 GB · MI50](results.md#two-cards-or-more) | 251 GB | 2× Xeon E5-2680 v4 (28 cores) | — | `D8E4` · every layer over both cards, every expert in RAM, a 14 GB tier on each | 74.4 positions/s | 11.2 tokens/s after 100k | 1,048,576 | v0.22.0 |
+| [2× 32 GB · MI50](results.md#two-cards-or-more) | 120 GB | 2× Xeon E5-2680 v4 (28 cores) | — | `D8E4` · every layer over both cards, 114 GB of the experts in RAM, 14 GB exclusive tiers | 36.3 positions/s | 10.1 tokens/s after 2k | 1,048,576 | v0.21.0 |
+| [6× 32 GB · MI50 over two machines](results.md#two-cards-or-more) | — | 2× Xeon E5-2680 v4 (28 cores) and an EPYC | — | `D8E4` · a ring of six, every expert on the cards | — | 20.1 tokens/s after short | 1,048,576 | v0.22.0 |
+<!-- /rates -->
+
+With its experts on the CPU GLM reads a prompt a chunk of 1,024 positions at a time through each layer, so each expert is
+read about once a chunk and runs over every position that picked it. A row from the disk starts cold: reading the
+prompt is also when the experts are first read into memory. Its rate follows how much of a token's experts the RAM
+holds: 58-61% of them with 28-32 GB, 78% with 60 GB, 97% with 128 GB — 2-3 tokens a second until most of them fit, then
+about 10. The next layer's experts read ahead (`experts_ahead`, v0.22.0) are +12-19% there: on a 16 GB machine 1.94
+tokens a second becomes 2.31 (`measurements/2026-10-28_nn138_glm_16gb_precision.md`). A tier starts empty; the prompt
+fills most of it, and the answer climbs as the rest fills. Over two MI50s (`"num_cards": 2`) every layer splits over
+both, and an exclusive tier (`card_exclusive`) keeps each expert on a card or in RAM, never both — 28 GB of RAM given back
+for a little speed (`measurements/2026-10-27_v0210_glm_two_cards_node03.md`). On the CPU alone its dense part takes 9.6 GB
+of the RAM, so 30 GB is its least. In the chat on the RTX 5060 Ti from the disk: 2.4 tokens a second with 28 GB, 2.5 with
+32, 3.25 with 60; over two MI50s 12.7-14.5. Its experts on the cards of six MI50s over two machines answer at 20.1
+(`measurements/2026-10-28_glm_small_kernels_node03.md`).
 
 ## DeepSeek-V4.1-Flash
+
+<!-- rates:model DeepSeek-V4.1-Flash -->
+| GPU | RAM | CPU | Disk | Setup | Prefill | Decode | Max context | Version |
+|---|---|---|---|---|---|---|---|---|
+| [none](results.md#no-graphics-card) | 60 GB | 2× Xeon E5-2680 v4 (28 cores) | NVMe array, 6.6 GB/s | `D8E4` · the experts from the disk | 3.4 positions/s | 1.2 tokens/s after 1k | — | v0.21.2 |
+| [none](results.md#no-graphics-card) | 30 GB | 2× Xeon E5-2680 v4 (28 cores) | NVMe array, 6.6 GB/s | `D8E4` · the experts from the disk | 3.1 positions/s | 0.7 tokens/s after 1k | — | v0.21.2 |
+| [12 GB · MI50 held to 20 GiB](results.md#a-12-gb-card) | 60 GB | 2× Xeon E5-2680 v4 (28 cores) | NVMe array, 6.6 GB/s | `D8E4` · the experts from the disk | 8.2 positions/s | 2.7 tokens/s after 1k | — | v0.21.2 |
+| [12 GB · MI50 held to 20 GiB](results.md#a-12-gb-card) | 30 GB | 2× Xeon E5-2680 v4 (28 cores) | NVMe array, 6.6 GB/s | `D8E4` · the experts from the disk | 7.7 positions/s | 2.4 tokens/s after 1k | — | v0.21.2 |
+| [16 GB · MI50 held to 16 GiB](results.md#a-16-gb-card) | 60 GB | 2× Xeon E5-2680 v4 (28 cores) | NVMe array, 6.6 GB/s | `D8E4` · the experts from the disk | 9.8-11.0 positions/s | 2.3-2.8 tokens/s after 1k | — | v0.21.2 |
+| [16 GB · MI50 held to 16 GiB](results.md#a-16-gb-card) | 30 GB | 2× Xeon E5-2680 v4 (28 cores) | NVMe array, 6.6 GB/s | `D8E4` · the experts from the disk | 7.4-7.6 positions/s | 2.4-2.6 tokens/s after 1k | — | v0.21.2 |
+| [16 GB · MI50 held to 16 GiB](results.md#a-16-gb-card) | 14 GB | 2× Xeon E5-2680 v4 (28 cores) | NVMe array, 6.6 GB/s | `D8E4` · the experts from the disk | 7.1-7.7 positions/s | 1.4-1.8 tokens/s after 1k | — | v0.21.2 |
+| [32 GB · MI50](results.md#a-24-or-32-gb-card) | 251 GB | 2× Xeon E5-2680 v4 (28 cores) | NVMe array, 6.6 GB/s | `D8E4` · the experts from the disk, every byte of RAM the cache | 14.3-14.5 positions/s | 4.7-5.0 tokens/s after 1k | — | v0.21.2 |
+| [2× 32 GB · MI50](results.md#two-cards-or-more) | 251 GB | 2× Xeon E5-2680 v4 (28 cores) | — | `D8E4` · every layer over both cards, every expert in RAM, 22.5 GB exclusive tiers | 31.3 positions/s | 9.72 tokens/s after 100k | 1,048,576 | v0.22.0 |
+| [2× 32 GB · MI50](results.md#two-cards-or-more) | 251 GB | 2× Xeon E5-2680 v4 (28 cores) | — | `D8E4` · every layer over both cards, every expert in RAM, 22.5 GB exclusive tiers | 21.8-23.7 positions/s | 6.5-7.9 tokens/s after 2k | 1,048,576 | v0.21.0 |
+<!-- /rates -->
 
 DeepSeek's model reads text and pictures: its vision tower (32 blocks and the aligner, 464 MB in the pack's
 `vision.pkl`) runs on the card in about 620 MB of it, a picture at most 1,024 tokens. Its routed experts are 272 GB (6.8 GB a layer,
@@ -89,8 +238,22 @@ each token asks for them, so the disk should be an NVMe drive. A conversation re
 1,048,576 positions: past 16,384, layer 20's candidate blocks choose where the later layers look, as DeepSeek's own
 code does. On the R730's two MI50s, with every expert in RAM — 22.5 GB of each card an exclusive tier of them, so
 the rest fit beside 251 GB — it answers in the chat at 10.5-13.7 tokens a second and reads a prompt at 22-24 positions
-a second ([`results.md`](results.md#deepseek-v41-flash)); its options are in
+a second ([`results.md`](results.md#two-cards-or-more)); its options are in
 [`config.md`](config.md#deepseek-v41-flashs-options).
+
+Its routed experts are 272 GB, more than the R730's RAM: over two cards 22.5 GB of each is an exclusive tier of them, the
+most a card holds beside the whole context, so all 40 layers' experts fit beside 251 GB. The config:
+
+```json
+{"max_context": 1048576, "num_cards": 2,
+ "options": {"experts_from": "ram", "card_experts_gb": 22.5, "card_exclusive": true}}
+```
+
+The first answer after a boot is the slowest while the tiers learn which experts are picked; the server boots it in
+about 6.5 minutes (`measurements/2026-10-27_v0210_deepseek_rates_node03.md`). From the disk the R730's drives slowed
+themselves at 79-81 °C in every run, the spread between a row's lowest and highest figure; with the same RAM the disk
+reads a prompt and answers about 7 times as fast as the layers mapped through the system's page cache (v0.21.1's way:
+34 layers in RAM, 6 mapped, 11.0-13.5 positions a second and 5.3-5.8 tokens; `measurements/2026-10-27_nn133_deepseek_disk_node03.md`).
 
 ## The card's tier of experts
 

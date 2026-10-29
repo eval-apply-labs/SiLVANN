@@ -353,10 +353,11 @@ static inline bool ai_z__glm_5_3__layer__zzprivate_moe(uint64_t table, uint64_t*
         && room[AI_Z__GLM_5_3__MOE__SCRATCH] >= AI_Z__GLM_5_3__CARRY(H) + 2u * (2u * H + E + 4u * I + H);
 }
 
-/* `(ai_z__glm_5_3__route streams table hand picks)` -> `hand`. The MoE site to the router: the streams collapsed and
- * normed, the input rotated into the hand, the router's `k` picks into `picks` and their weights after the input. */
+/* `(ai_z__glm_5_3__route streams table hand picks [next guess])` -> `hand`. The MoE site to the router: the streams
+ * collapsed and normed, the input rotated into the hand, the router's `k` picks into `picks` and their weights after the
+ * input — and, given the next MoE layer's table, that layer's router on this input: its likeliest picks into `guess`. */
 static sys__heap_node ai_z__glm_5_3__route__zzabi_apply(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx) {
-    if (argc != 4u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
+    if (argc != 4u && argc != 6u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
     uint64_t streams = 0, s_room = 0, hand = 0, h_room = 0;
     if (!ai_z__glm_5_3__layer__zzprivate_open(argv, &streams, &s_room) || !nn__primitives__room(&argv[2], &hand, &h_room)
      || !sys__heap_node__carries_reference(argv[3].dtype) || !sys__node_array__is(argv[3].args[0]))
@@ -374,10 +375,35 @@ static sys__heap_node ai_z__glm_5_3__route__zzabi_apply(const sys__heap_node* ar
     const nn__doors* doors = nn__doors_for(ctx);
     if (doors == 0) return sys__engine__abi__error(NN__PRIMITIVES__FAULT_NO_DEVICE);
     unsigned int* over = ctx->fault_word;
+    /* WITH THE NEXT MoE LAYER'S TABLE AND A GUESS AFTER THE PICKS (NN-138): that layer's router on this one's input, its
+     *   likeliest picks into the guess, the likeliest first — launched before this layer's own, whose wait covers both */
+    uint64_t gat[AI_Z__GLM_5_3__MOE__TABLE], groom[AI_Z__GLM_5_3__MOE__TABLE], gv[AI_Z__GLM_5_3__MOE__TABLE];
+    float gr[AI_Z__GLM_5_3__MOE__TABLE];
+    const bool guess = argc == 6u;
+    const uint64_t glogits = logits + 2u * E, gweights = glogits + 2u * E;
+    if (guess) {
+        if (!sys__heap_node__carries_reference(argv[4].dtype) || !sys__node_array__is(argv[4].args[0])
+         || !sys__heap_node__carries_reference(argv[5].dtype) || !sys__node_array__is(argv[5].args[0]))
+            return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
+        const uint64_t G = sys__node_array__length(argv[5].args[0]);
+        if (!ai_z__glm_5_3__layer__zzprivate_moe(argv[4].args[0], gat, groom, gv, gr) || gv[AI_Z__GLM_5_3__MOE__EXPERTS] != E
+         || gv[AI_Z__GLM_5_3__MOE__HIDDEN] != H || G == 0u || G > NN__ROUTED__GUESS_MAX || G > E
+         || !nn__primitives__fits(E * H, groom[AI_Z__GLM_5_3__MOE__ROUTER]) || !nn__primitives__fits(E, groom[AI_Z__GLM_5_3__MOE__BIAS])
+         || gweights + 2u * G > at[AI_Z__GLM_5_3__MOE__SCRATCH] + room[AI_Z__GLM_5_3__MOE__SCRATCH])
+            return sys__engine__abi__error(AI_Z__GLM_5_3__LAYER__FAULT_TABLE);
+    }
     ai_z__glm_5_3__layer__zzprivate_collapse(doors, over, at, scratch, streams, xin, h, H, M, v[AI_Z__GLM_5_3__MOE__ITERS],
                                           r[AI_Z__GLM_5_3__MOE__EPS], r[AI_Z__GLM_5_3__MOE__HC_EPS]);
     doors->hadamard_rotate((uint16_t*)(uintptr_t)(hand), (const uint16_t*)(uintptr_t)(h), (const uint16_t*)(uintptr_t)(at[AI_Z__GLM_5_3__MOE__SIGNS]), H, over);
     doors->expert_multiply_fp16((uint16_t*)(uintptr_t)(logits), (const uint16_t*)(uintptr_t)(at[AI_Z__GLM_5_3__MOE__ROUTER]), (const uint16_t*)(uintptr_t)(h), E, H, over);
+    if (guess) {
+        doors->expert_multiply_fp16((uint16_t*)(uintptr_t)glogits, (const uint16_t*)(uintptr_t)gat[AI_Z__GLM_5_3__MOE__ROUTER],
+                                    (const uint16_t*)(uintptr_t)h, E, H, over);
+        const uint64_t gf = nn__routed__guess(ctx, doors, argv[5].args[0], gweights, glogits, gat[AI_Z__GLM_5_3__MOE__BIAS],
+                                              gr[AI_Z__GLM_5_3__MOE__SCALE], E, sys__node_array__length(argv[5].args[0]),
+                                              NN__ROUTED__BIASED);
+        if (gf != 0u) return sys__engine__abi__error(gf);
+    }
     const uint64_t landed = nn__routed__top_k(ctx, doors, argv[3].args[0], hand + 2u * H, logits, at[AI_Z__GLM_5_3__MOE__BIAS],
                                               r[AI_Z__GLM_5_3__MOE__SCALE], E, K, 0);
     if (landed != 0u) return sys__engine__abi__error(landed);
@@ -525,15 +551,24 @@ static uint64_t ai_z__glm_5_3__experts__zzprivate_rows_mask(void* model, sys__en
     return 0u;
 }
 
-/* `(ai_z__glm_5_3__experts hand picks table routed [nn__expert_tier])` -> `routed`: Σ w_j · down_j(swiglu(gate_up_j(x))) over the
- * picks this worker holds, the SwiGLU clamped — as nn runs a position's routed experts (▶ nn's `nn__routed__position`):
- * the ones in memory computed while the rest arrive, a card's tier's picks computed and marked held, and zero where this
- * worker holds none — and the mask added after, where the table carries one. */
+/* `(ai_z__glm_5_3__experts hand picks table routed [nn__expert_tier | guess next count parts])` -> `routed`:
+ * Σ w_j · down_j(swiglu(gate_up_j(x))) over the picks this worker holds, the SwiGLU clamped — as nn runs a position's
+ * routed experts (▶ nn's `nn__routed__position`): the ones in memory computed while the rest arrive, a card's tier's picks
+ * computed and marked held, and zero where this worker holds none — and the mask added after, where the table carries
+ * one. With a guess of the next MoE layer's picks and that layer's table, the guess read ahead (NN-138). */
 static sys__heap_node ai_z__glm_5_3__experts__zzabi_apply(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx) {
-    if (argc != 4u && argc != 5u && argc != 6u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
+    if (argc != 4u && argc != 5u && argc != 6u && argc != 8u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
     /* WITH 1 AFTER THE TIER, ITS VISIT ALONE (NN-99 ④, ▶ ai_qwen_3's experts): the picks marked and the card waited for,
      *   nothing computed — the sockets start on theirs before this card's experts are queued (glm5.py's `card_visit_first`) */
     const bool visit_only = argc == 6u;
+    /* WITH A GUESS, THE NEXT MoE LAYER'S EXPERTS TABLE, A COUNT AND THE PARTS AFTER `routed` (NN-138): this worker's part
+     *   of the guess's likeliest experts not in memory read ahead — `count` of them, or 0 as many as the disk reads while a
+     *   layer computes, an expert `parts` reads (a part on each socket); with no tier */
+    const bool ahead = argc == 8u;
+    if (ahead && (!sys__heap_node__carries_reference(argv[4].dtype) || !sys__node_array__is(argv[4].args[0])
+               || !sys__heap_node__carries_reference(argv[5].dtype) || !sys__node_array__is(argv[5].args[0])
+               || argv[6].dtype != SYS__KIND__VALUE_INT || argv[7].dtype != SYS__KIND__VALUE_INT || argv[7].args[0] == 0u))
+        return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
     if (visit_only && (argv[5].dtype != SYS__KIND__VALUE_INT || argv[5].args[0] != 1u))
         return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
     uint64_t hand = 0, h_room = 0, routed = 0, r_room = 0;
@@ -558,7 +593,7 @@ static sys__heap_node ai_z__glm_5_3__experts__zzabi_apply(const sys__heap_node* 
         return sys__engine__abi__error(AI_Z__GLM_5_3__LAYER__FAULT_TABLE);
     nn__expert_tier tier;
     bool tier_ok = true;
-    const bool holds = ai_z__glm_5_3__experts__zzprivate_tier(argv, argc, 4u, rt.layer, &tier, &tier_ok);
+    const bool holds = !ahead && ai_z__glm_5_3__experts__zzprivate_tier(argv, argc, 4u, rt.layer, &tier, &tier_ok);
     if (!tier_ok) return sys__engine__abi__error(AI_Z__GLM_5_3__LAYER__FAULT_TABLE);
     if (visit_only) {
         if (!holds) return sys__engine__abi__error(AI_Z__GLM_5_3__LAYER__FAULT_TABLE);
@@ -569,6 +604,17 @@ static sys__heap_node ai_z__glm_5_3__experts__zzabi_apply(const sys__heap_node* 
     }
     const nn__doors* doors = nn__doors_for(ctx);
     if (doors == 0) return sys__engine__abi__error(NN__PRIMITIVES__FAULT_NO_DEVICE);
+    nn__routed next;
+    if (ahead) {
+        uint64_t nat[AI_Z__GLM_5_3__EXP__TABLE], nroom[AI_Z__GLM_5_3__EXP__TABLE], nv[AI_Z__GLM_5_3__EXP__TABLE];
+        float nr[AI_Z__GLM_5_3__EXP__TABLE];
+        if (!ai_z__glm_5_3__table__zzpackage_read(argv[5].args[0], AI_Z__GLM_5_3__EXP__PLANES, AI_Z__GLM_5_3__EXP__LIMIT,
+                                                  AI_Z__GLM_5_3__EXP__TABLE, nat, nroom, nv, nr)
+         || !ai_z__glm_5_3__experts__zzprivate_routed(argv[5].args[0], nat, nroom, nv, nr, &next))
+            return sys__engine__abi__error(AI_Z__GLM_5_3__LAYER__FAULT_TABLE);
+        rt.ahead_next = &next; rt.ahead_guess = argv[4].args[0];
+        rt.ahead_count = argv[6].args[0]; rt.ahead_parts = argv[7].args[0];
+    }
     nn__routed__done done;
     uint64_t f = nn__routed__position(ctx, doors, &rt, hand, argv[1].args[0], holds ? &tier : 0, routed, &done);
     if (f == 0u && masked && done.n != 0u)

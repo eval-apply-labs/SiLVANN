@@ -314,16 +314,21 @@ def choose(path, max_context, options=None, silicon=None, fresh=False, log=print
     what each card keeps free (VRAM_MARGIN_MB where it says nothing)."""
     margin_mb = VRAM_MARGIN_MB if margin_mb is None else int(margin_mb)
     options = {k: v for k, v in (options or {}).items() if not (k in PLACEMENT and v == "auto")}
-    # ⚖ 2026-10-14 *"it should be auto sized and just be a yes/no"*: `card_experts` "yes" (the default) has the card's
-    #   tier of experts sized here, "no" has none; `card_experts_gb` pins a size instead
-    if str(options.pop("card_experts", "yes")).lower() in ("no", "false", "0") and "card_experts_gb" not in options:
-        options["card_experts_gb"] = 0
     folder = ModelFolder(path)
     from . import ARCHITECTURES
     arch = ARCHITECTURES.get(folder.architecture)
     if arch is None:
         raise Refused("no runtime for a %r model" % folder.architecture)
     takes = set(inspect.signature(arch.__init__).parameters)
+    # ⚖ 2026-10-14 *"it should be auto sized and just be a yes/no"*: `card_experts` "yes" (the default) has the card's
+    #   tier of experts sized here, "no" has none; `card_experts_gb` pins a size instead. ⛔ A NUMBER, WHERE THE MODEL TAKES
+    #   `card_experts` ITSELF, IS ITS OWN — DeepSeek's experts 0 .. n-1 of every layer kept on the cards — and stays in the
+    #   options: taken as the yes or no it was dropped, and a DeepSeek config's share booted with every expert on the CPU
+    #   (`MEASURED` 2026-10-28: a ring machine's programs composed without it, 78.5 GB resident)
+    share = options.get("card_experts")
+    if not ("card_experts" in takes and isinstance(share, int) and not isinstance(share, bool)):
+        if str(options.pop("card_experts", "yes")).lower() in ("no", "false", "0") and "card_experts_gb" not in options:
+            options["card_experts_gb"] = 0
     # a tier's size, or the CPU's integer arithmetic, named without `experts_on`: the experts on the CPU, where they are
     #   the only place they apply, and the rest chosen around them (a Qwen model's experts default to the card)
     if "experts_on" in takes and "experts_on" not in options and (
@@ -424,6 +429,16 @@ def _least(p, ctx, options):
     return -(-model.TIER_LEAST // int(STEP_GB * 2**30)) * STEP_GB
 
 
+def _takes_card(p, options):
+    """Whether the model takes its experts on the card beside these options — GLM's tensor-parallel group does not, its
+    cards a tier of the experts on the CPU."""
+    try:
+        p.model(MIN_CONTEXT, dict(options, experts_on="card"))
+        return True
+    except Refused:
+        return False
+
+
 def _setup(p, ctx, options, takes, grow=False):
     """The fastest setup the card boots with, as (options, context, why); None when none does. `ctx` is the context —
     or, with `grow`, the most it may be: the context then takes what the card holds beside the model up to it, and a
@@ -467,7 +482,7 @@ def _setup(p, ctx, options, takes, grow=False):
     if options.get("experts_on") == "card":
         got = sized(options)
         return None if got is None else (options, got, "the experts on the card, as the config says")
-    if "experts_on" in takes and "experts_on" not in options:
+    if "experts_on" in takes and "experts_on" not in options and _takes_card(p, options):
         if p.boots(ctx, dict(options, experts_on="card")):
             return dict(options, experts_on="card"), ctx, "the experts on the card"
         # ⚖ 2026-10-17 (NN-93): growing, the experts on the card beat a longer context — they stay there at the longest

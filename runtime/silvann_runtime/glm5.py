@@ -56,10 +56,10 @@ class Glm5(Generates):
     SAMPLES_ON_CARD = True          # `head_sample` — ▶ `sampling`
 
     def __init__(self, folder, machine, max_context=2048, layers=None, grid=True, fused=True, sockets=None, experts_int8=True,
-                 experts_lock=False, experts_register="auto", experts_from="auto", experts_dir=None, chunk=256, experts_ram_gb=None, card_experts_gb=0, card_hot=None,
+                 experts_lock=False, experts_register="auto", experts_from="auto", experts_on="cpu", experts_dir=None, chunk=256, experts_ram_gb=None, card_experts_gb=0, card_hot=None,
                  card_landing="auto", card_line=None, card_exclusive=False, card_free=16, card_duplex_line=1200, card_duplex=None, card_landing_line=3,
                  lend_cache=True, picture_pixels=1 << 22, mtp=False, mtp_hidden="hn", tensor_parallel=1, card_shared="auto", card_visit_first=False,
-                 stream=False, embed_on="auto",
+                 stream=False, embed_on="auto", experts_ahead="auto",
                  ):
         if folder.architecture not in ARCHITECTURES:
             raise Refused("%s is a %r model, not one of %s" % (folder.path, folder.architecture, ARCHITECTURES))
@@ -137,6 +137,26 @@ class Glm5(Generates):
         #   rows), runs all eight picks at that width, and the parts' sums add up to the layer's. `MEASURED` before it,
         #   split by expert: the sockets took 1.08 and 2.95 ms for one layer, as the picks happened to fall.
         #   One worker holding all of them is `sockets=1`, and the words' path takes nothing else.
+        # ⭐ OR EVERY ROUTED EXPERT OF THIS MACHINE'S LAYERS ON THE CARD, `experts_on` "card": each in a slot of its own,
+        #   written there from the pack at boot, and the card computes every pick — no socket, no tier, no RAM for them. A
+        #   whole GLM's 142 GB fits no card; a ring's stage of a few layers does (seven MoE layers, 24 GB, on a 32 GB MI50)
+        if experts_on not in ("cpu", "card"):
+            raise Refused("experts_on is 'cpu' or 'card', not %r" % (experts_on,))
+        self.ON_CARD = experts_on == "card"
+        self.MOE = any(self.moe[l] for l in self.run_layers)
+        if self.ON_CARD:
+            if not fused:
+                raise Refused("the experts on the card run in the fused layer — fused=True")
+            if int(tensor_parallel or 1) > 1:
+                raise Refused("a tensor-parallel group's experts stay on the CPU, its cards a tier of them — experts_on 'cpu'")
+            if float(card_experts_gb or 0) or card_exclusive or card_hot or stream:
+                raise Refused("with the experts on the card there is no tier of them: no card_experts_gb, card_exclusive, "
+                              "card_hot or stream")
+            if mtp:
+                raise Refused("the MTP layer's draft check runs with the experts on the CPU — mtp 'no'")
+            if embed_on == "cpu":
+                raise Refused("embed_on 'cpu' needs a CPU worker, and with the experts on the card there is none")
+            sockets = 1
         if sockets is None:
             sockets = 2 if fused and machine is not None and machine.e.devices("x86_avx2") >= 3 else 1
         if not fused and max_context > self.ITOPK:
@@ -246,7 +266,7 @@ class Glm5(Generates):
         # ⭐ THE PROGRAM IS lisp/glm5.lisp — the fused layer's: a loop over the layers, each its sites over its tables. The
         #   unfused layer, nn's words a layer, is composed here (`_composed_procedures`), for the router's log
         self.SOURCE = fused
-        self.CPUS = [dict(w=self.P + i, dev=(1 + i) if sockets > 1 else 0, part=i) for i in range(sockets)]
+        self.CPUS = [] if self.ON_CARD else [dict(w=self.P + i, dev=(1 + i) if sockets > 1 else 0, part=i) for i in range(sockets)]
         # ⭐ THE EMBEDDING ON THE CPU (as Qwen's, ▶ qwen3_5.py): the first socket keeps the table in its RAM and decodes a
         #   token's row, which the card copies across and un-rotates — where the card's family keeps mapped RAM as a copy on
         #   the card (khronos_opencl1_igpu), so the table neither takes the card's room nor crosses whole each token.
@@ -254,7 +274,8 @@ class Glm5(Generates):
             raise Refused("embed_on is 'auto', 'card' or 'cpu', not %r" % (embed_on,))
         if embed_on == "cpu" and self.P > 1:
             raise Refused("embed_on 'cpu' is one card's: a group's card 0 reads the table in place")
-        self.EMBED_CPU = embed_on == "cpu" or (embed_on == "auto" and self.P == 1 and machine.silicon == "khronos_opencl1_igpu")
+        self.EMBED_CPU = embed_on == "cpu" or (embed_on == "auto" and self.P == 1 and machine.silicon == "khronos_opencl1_igpu"
+                                               and not self.ON_CARD)
         self._plan()
         self.EXPERTS_FROM = experts_file.choose(experts_from, self.cpu_arena, video_ram(folder.config))
         # `experts_lock`: the sockets' experts in RAM locked there, so the system cannot swap them out (▶ `experts_file.lock_check`)
@@ -309,10 +330,30 @@ class Glm5(Generates):
             if self.SLOTS < 3 * 16 + self.TOPK:
                 raise Refused("%d experts a worker is too few for a cache of them — a prompt reads two batches of 16 at once"
                               % self.SLOTS)
+        # ⭐ THE NEXT LAYER'S EXPERTS READ AHEAD (NN-138): from the disk, each MoE layer's router also runs the next MoE
+        #   layer's router on its input — that layer's likeliest picks, `GUESS` of them the likeliest first — and each socket
+        #   reads the first of them it does not hold while the layer computes and the next one's attention runs, which the
+        #   disk otherwise waits through. `experts_ahead`: "auto" as many as the disk reads in that wait (one or two, nn's
+        #   measure), a number that many, "no" none. `MEASURED` the guess holds 0.72 of the next layer's picks, and reading
+        #   its best three or four early is worth +12-20% in a model of the queue
+        #   (measurements/2026-10-28_expert_prediction_node03.md); wider loses to reads no pick wants.
+        self.GUESS = 12
+        if experts_ahead in ("auto", None):
+            self.AHEAD = 0
+        elif str(experts_ahead).lower() in ("no", "false", "0"):
+            self.AHEAD = None
+        elif isinstance(experts_ahead, int) and not isinstance(experts_ahead, bool) and 0 < experts_ahead <= self.GUESS:
+            self.AHEAD = experts_ahead
+        else:
+            raise Refused("experts_ahead is \"auto\", \"no\" or a count of experts from 1 to %d, not %r" % (self.GUESS, experts_ahead))
+        if self.SLOTS is None or not self.FUSED:
+            self.AHEAD = None
         # ⭐ A PROMPT AS ROWS, `chunk` positions at a time through each layer (ai_z__glm_5_3's `…_rows` verbs): a routed expert
         #   is read once for every row of the chunk that picked it. ⛳ `REASONED`: with the experts on the disk the chunk
         #   wants to be large — a chunk's picks reach most of a layer's experts, so each is streamed about once a chunk
         self.CH = max(1, min(chunk, max_context)) if fused else 0
+        # a prompt goes as rows wherever the routed experts have a worker that reads a chunk of them: the CPUs, or the card
+        self.ROWS = bool(self.CH) and (self.EPLAN is not None or self.ON_CARD)
         self.experts_dir = experts_dir or os.path.join(folder.path, "experts")
         self._mask_layout()
         # ⭐ PICTURES ON THE CARD (NN-81): the vision tower's weights in a collection of their own and its scratch in another,
@@ -320,7 +361,7 @@ class Glm5(Generates):
         #   runs on the host, ▶ vision_glm.py) — where the pack carries the tower, a prompt goes as rows (the only way a
         #   picture goes in) and this machine holds the first layers
         self.PICTURE_PIXELS = int(picture_pixels or 0)
-        self.VIS = bool(self.PICTURE_PIXELS and self.CH and self.EPLAN is not None and 0 in self.run_layers and self.P == 1
+        self.VIS = bool(self.PICTURE_PIXELS and self.ROWS and 0 in self.run_layers and self.P == 1
                         and "model.visual.blocks.0.attn.qkv.weight" in g)
         if self.VIS:
             self._vision_plan()
@@ -427,21 +468,24 @@ class Glm5(Generates):
         if moe:
             r = lambda w: b.record(moe[0], EXPERT % (0, w))
             P, g, dn = self.PARTS, r("gate"), r("down")
-            # a part: its inner rows of gate and of up, and its columns of every down row — a rotation block's multiple,
-            # so each part's columns are rotated on their own and a row's one scale serves every part
-            self.PI = self.MINTER // P
-            if self.MINTER % P or self.PI % 512 or dn.row_bytes % P:
-                raise Refused("an expert's inner width %d does not split into %d parts of whole rotation blocks" % (self.MINTER, P))
-            self.EPLAN = NL.SlotPlan(2 * self.PI * g.row_bytes, 2 * self.PI * 2, dn.rows * (dn.row_bytes // P), dn.rows * 2)
             self.E_D = g.d
-        self.cpu_arena = self.EPLAN.slot_bytes * self.EXPERTS * len(moe) * self.PARTS if moe else 0
-        # the card's tier: whole experts — every inner row, every down column — a slot each, a collection after the KV's
+            if not self.ON_CARD:
+                # a part: its inner rows of gate and of up, and its columns of every down row — a rotation block's multiple,
+                # so each part's columns are rotated on their own and a row's one scale serves every part
+                self.PI = self.MINTER // P
+                if self.MINTER % P or self.PI % 512 or dn.row_bytes % P:
+                    raise Refused("an expert's inner width %d does not split into %d parts of whole rotation blocks" % (self.MINTER, P))
+                self.EPLAN = NL.SlotPlan(2 * self.PI * g.row_bytes, 2 * self.PI * 2, dn.rows * (dn.row_bytes // P), dn.rows * 2)
+        self.cpu_arena = self.EPLAN.slot_bytes * self.EXPERTS * len(moe) * self.PARTS if self.EPLAN is not None else 0
+        # the card's tier: whole experts — every inner row, every down column — a slot each, a collection after the KV's;
+        #   with the experts on the card, the same collection holds every one of them
         self.CPLAN, self.T_CEXP, self.CARD_SLOTS = None, None, 0
         self.T_STREAM, self.T_SLICE, self.SLICE = None, None, None
-        if self.CARD_GB and moe:
+        if (self.CARD_GB or self.ON_CARD) and moe:
             self.CPLAN = NL.SlotPlan(2 * self.MINTER * g.row_bytes, 2 * self.MINTER * 2, dn.rows * dn.row_bytes, dn.rows * 2)
             self.T_CEXP = self.T_KV + 1
-            self.CARD_SLOTS = int(self.CARD_GB * (1 << 30)) // self.CPLAN.slot_bytes
+            self.CARD_SLOTS = (self.EXPERTS * len(moe) if self.ON_CARD
+                               else int(self.CARD_GB * (1 << 30)) // self.CPLAN.slot_bytes)
             self.TIER_LEAST = len(moe) * self.CPLAN.slot_bytes             # the least tier it takes: a slot a MoE layer
             if self.CARD_SLOTS < len(moe):
                 raise Refused("%.1f GB holds %d experts, fewer than one a MoE layer" % (self.CARD_GB, self.CARD_SLOTS))
@@ -479,12 +523,12 @@ class Glm5(Generates):
                 self.cpu_arena = self.EPLAN.slot_bytes * self.RAM_PER * len(moe) * self.PARTS
             self.arena += self.CPLAN.slot_bytes * self.CARD_SLOTS
             self.GATE_ROW, self.DOWN_ROW = g.row_bytes, dn.row_bytes
-            if self.EPLAN.at_up_data != 0 or self.CPLAN.at_up_data != 0:
+            if (self.EPLAN is not None and self.EPLAN.at_up_data != 0) or self.CPLAN.at_up_data != 0:
                 raise Refused("a slot's gate-and-up codes are expected at its start")
         # ⭐ WHAT THE TIER MAY BE LENT (NN-93): each MLA layer's latents past those a conversation has written, a region a
         #   layer, `most` slots deep at the most
         self.LEND = None
-        if self.CPLAN is not None and not self.CARD_EXCLUSIVE and self.LEND_ON:
+        if self.CPLAN is not None and not self.CARD_EXCLUSIVE and not self.ON_CARD and self.LEND_ON:
             attn, most = sum(1 for l in run if self.kinds[l] == "f"), self.C_BYTES // self.CPLAN.slot_bytes
             if attn and most:
                 self.LEND = dict(row=self.LAT * 2, regions=attn, most=most)
@@ -668,7 +712,7 @@ class Glm5(Generates):
         m.define_programs(self._procedures)
         if self.CPLAN is not None and self.CH and self.EPLAN is not None:
             self._calibrate_line()
-        if self.CPLAN is not None and ((self.P > 1 and self.CARD_SHARED is None) or self.CARD_LANDING is None):
+        if self.CPLAN is not None and not self.ON_CARD and ((self.P > 1 and self.CARD_SHARED is None) or self.CARD_LANDING is None):
             self._from_speeds()                     # after the line: a visit's landings from its copy reading
         if self.CPLAN is not None and self.CH and self.EPLAN is not None and self.P > 1:
             # the other cards' blocks read the bindings through `names`, taken when the programs were defined: again, so
@@ -786,7 +830,8 @@ class Glm5(Generates):
 
     def _card_experts(self, loader, card=0):
         """Card `card`'s tier, stood at boot: each MoE layer's band of every expert — and, given a router log, its most
-        picked ones written whole into the card's slots, an even share of them a layer. `CARD_HELD` every card's together:
+        picked ones written whole into the card's slots, an even share of them a layer; with the experts on the card
+        (`ON_CARD`), every one of them. `CARD_HELD` every card's together:
         in a group each exclusive tier starts with the slice — the layer's `CARD_SLICE` most picked, or its first ones
         without a log, on every card — and its own share of the rest, card k the k-th."""
         m, b = self.m, self.b
@@ -800,14 +845,16 @@ class Glm5(Generates):
             loader.assign(0, self.T_SLICE, 0, loader.reserve(self.T_SLICE))
         if card == 0:
             self.CARD_HELD = {}
-        if not self.CARD_HOT and not self.CARD_EXCLUSIVE:
+        if not self.CARD_HOT and not self.CARD_EXCLUSIVE and not self.ON_CARD:
             return
         log = np.load(self.CARD_HOT) if self.CARD_HOT else None
         logged = [int(l) for l in log["layers"]] if log is not None else []
         per = self.CARD_PER if self.CARD_EXCLUSIVE else self.CARD_SLOTS // len(moe)
         s = self.CARD_SLICE if self.CARD_EXCLUSIVE else 0
         for l in moe:
-            if log is None:
+            if self.ON_CARD:
+                hot = list(range(self.EXPERTS))          # every one of the layer's experts, each its own slot
+            elif log is None:
                 # exclusive, no router log: the slice and the card's share, until it learns
                 hot = list(range(s)) + list(range(s + card * per, s + (card + 1) * per))
             else:
@@ -978,6 +1025,8 @@ class Glm5(Generates):
                 m.buffer(self.KP * self.ID * 2, "ape%d" % l, _half(ape))
         self.LOGITS_AT = m.buffer(self.VOCAB * 2, "logits_h")
         m.node_array("picks", self.TOPK)
+        if self.AHEAD is not None:
+            m.node_array("guess", self.GUESS)
         if self.CH:
             # a chunk's rows: its streams, the hands and carries of its MoE sites, the routed sums back, its tokens
             CH = self.CH
@@ -1326,7 +1375,7 @@ class Glm5(Generates):
             if self.CPLAN is not None:
                 cp = self.CPLAN
                 # the tier's layer, fed from the sockets' memory where every expert is there (▶ `nn__expert_tier`)
-                if all((l, c["part"]) in self.SRC for c in self.CPUS):
+                if self.CPUS and all((l, c["part"]) in self.SRC for c in self.CPUS):
                     if k == (1 if self.P > 1 else 0):   # every card's tier reads the same sources: the first card to table them makes them
                         self._int_array("src%d" % l, [self.SRC[(l, c["part"])][x] for x in range(self.EXPERTS) for c in self.CPUS])
                     fed[l] = "src%d" % l
@@ -1349,7 +1398,7 @@ class Glm5(Generates):
                         + [c for x in mats for c in pair(l, x)] + [n("signs"), scratch]
                         + head + [self.EXPERTS, self.TOPK, self.MC] + [d(l, x) for x in mats]
                         + [self.EPS, self.HC_EPS, self.RSCALE, self.LIMIT] + self._masked(k, l, "shared"))
-        if self.CPLAN is not None:
+        if self.CPLAN is not None and not self.ON_CARD:
             # ⭐ THE CARD'S TIER, ONE FOR THE CARD: how one of its experts is cut, where the sockets keep every expert's parts
             #   a layer at a time, and the binding `nn__expert_tier` the programs hand the verbs (▶ `expert_tier.bind`)
             exclusive = None
@@ -1379,6 +1428,13 @@ class Glm5(Generates):
                                                      1 if self.EXPERTS_INT8 else 0, self.LIMIT] + self._experts_tail(cpu["w"], l))
             m.act_as(CARD)
 
+    def _next_moe(self, l):
+        """The MoE layer after `l` among the ones this machine runs, where the next layer's experts are read ahead; else None."""
+        if self.AHEAD is None:
+            return None
+        later = [k for k in self.run_layers if k > l and k < self.LAYERS and self.moe[k]]
+        return later[0] if later else None
+
     def _fused_body(self):
         """The fused token's pictures — what each CPU runs of a layer — and its body, a layer after another."""
         m, H = self.m, self.H
@@ -1397,7 +1453,8 @@ class Glm5(Generates):
             if self.moe[l]:
                 # every socket handed its share of the picks, the shared expert on the card meanwhile, the shares summed
                 ws = [(i, c["w"]) for i, c in enumerate(self.CPUS)]
-                layers.append("(ai_z__glm_5_3__route streams mo%d hand picks) " % l
+                before, after = "", ""
+                layers.append(before + "(ai_z__glm_5_3__route streams mo%d hand picks) " % l + after
                               + ("(ai_z__glm_5_3__experts hand picks exk%d routed_k %s) " % (l, expert_tier.BINDING) if self.CPLAN is not None else "")
                               + " ".join("(sys__compute %d names xf%d_%d)" % (w, l, i) for i, w in ws)
                               + " (ai_z__glm_5_3__shared hand mo%d) " % l
@@ -1419,7 +1476,7 @@ class Glm5(Generates):
         indexed by its place in the layers this machine runs, and each socket's worker, buffers and experts tables."""
         m, H, run, K = self.m, self.H, self.run_layers, self.TOPK
         head = lambda at, size: "(nn__expert__plane 0 %d 0 %d %d)" % (self.T_HEAD, at, size)
-        tier = self.CPLAN is not None
+        tier = self.CPLAN is not None and not self.ON_CARD
         m.bind_values(dict(HIDDEN=H, HIDDEN_BYTES=2 * H, MULT=self.MULT, MEAN=1.0 / self.MULT, VOCAB=self.VOCAB, EPS=self.EPS,
                            RUN=len(run) - (1 if self.MTP is not None else 0), EMB_HALVES=self.EMB_ROW_BYTES // 2, EMB_SCALES=self.EMB_DATA_BYTES // 2,
                            EMB_BITS=self.EMB_BITS, STOPS=0, SEEN=sampling.SEEN,
@@ -1427,9 +1484,9 @@ class Glm5(Generates):
                            HEAD_SCALES=head(self.HPLAN.at_down_lut, self.HPLAN.down_lut), HEAD_BITS=self.HEAD_BITS,
                            HAND=self.HAND, HAND_PICKS_AT=self.HAND - 8 * K, HAND_BYTES=2 * (H + K),
                            ROWS_HANDS_BYTES=self.CH * self.HAND, ROWS_BYTES=2 * H * self.CH, ROWS_HALVES=H * self.CH,
-                           CARD_TIER=tier, CARD=CARD, SOCKETS=len(self.CPUS), FIRST_SOCKET=self.P, CARDS=self.P, GROUP=self.GROUP,
+                           CARD_TIER=tier, EXPERTS_ON_CARD=self.ON_CARD, CARD=CARD, SOCKETS=len(self.CPUS), FIRST_SOCKET=self.P, CARDS=self.P, GROUP=self.GROUP,
                            VISIT_FIRST=self.VISIT_FIRST, STREAM=self.T_SLICE is not None, CH=self.CH,
-                           EMBED_ON_CPU=bool(self.EMBED_CPU),
+                           EMBED_ON_CPU=bool(self.EMBED_CPU), AHEAD=self.AHEAD or 0,
                            NOTE_STREAM=expert_tier.NOTE_STREAM))
         if self.T_SLICE is not None:
             m.bind_values(dict({name.upper() + "_S": self._slice_plane(name) for name in ("srows", "hands", "carries", "rrows")},
@@ -1450,14 +1507,20 @@ class Glm5(Generates):
         m.array("LAYER", list(run))
         m.array("AT", ["at%d" % l for l in run])
         m.array("MO", moe("mo%d"))
+        # the next MoE layer's place in RUN, where its experts are read ahead (`experts_ahead`); 0 where none
+        m.array("AHEAD_NEXT", [run.index(self._next_moe(l)) if self._next_moe(l) is not None else 0 for l in run])
         m.array("ML", [0 if self.moe[l] else "ml%d" % l for l in run])
-        if tier:
+        if self.CPLAN is not None:                  # the card's experts tables: its tier's, or every expert's
             m.array("EXK", moe("exk%d"))
             if self.CH:
                 m.array("EXKR", moe("exkr%d"))
             if self.T_SLICE is not None:
                 m.array("EXKS", moe("exks%d"))
         socket = range(len(self.CPUS))
+        if not self.CPUS:                           # the experts on the card: no socket, and nothing of theirs to name
+            m.node_array("HERE", 1)
+            m.node_array("EMB_TOK", 1)
+            return
         m.array("SOCKET", [c["w"] for c in self.CPUS])
         m.array("ROUTED_INTO", ["routed" if i == 0 else "routed%d" % i for i in socket])
         m.array("C_HAND", [self.cn(i, "hand") for i in socket])
@@ -2202,8 +2265,8 @@ class Glm5(Generates):
         """The model's vision tower (▶ `vision_glm.GlmVision`), made when the first picture comes. GLM's attention has no
         rotary part, so a picture's tokens take their places in the cache as text does: they need only their rows."""
         if getattr(self, "_vision", None) is None:
-            if not (self.CH and self.EPLAN is not None):
-                raise Refused("a picture goes in with a prompt read as rows: the experts on the CPU, `fused` on")
+            if not self.ROWS:
+                raise Refused("a picture goes in with a prompt read as rows: `fused` on")
             from .vision_glm import GlmVision
             v = GlmVision(self.folder, card=self if self.VIS else None)
             if v.out != self.H:
@@ -2228,13 +2291,13 @@ class Glm5(Generates):
             self.m.write(self.SROWS_AT + a * M * H * 2, np.repeat(block[:, None, :], M, axis=1).tobytes())
 
     def prefill(self, tokens, first, greedy=True, sample=None, rows=None):
-        """Positions `first ..` for `tokens`: as rows, a chunk at a time, when the experts are the CPU's and there is more
-        than one; then the next token from the last row (greedy), or its logits left for a sampler. A picture's tokens
+        """Positions `first ..` for `tokens`: as rows, a chunk at a time, when the experts' worker reads rows (`ROWS`) and there
+        is more than one; then the next token from the last row (greedy), or its logits left for a sampler. A picture's tokens
         come with `rows` {index in `tokens`: the tower's row, in place of that pad's embedding}."""
         pictures = rows or {}
-        rows = bool(self.CH) and self.EPLAN is not None and len(tokens) >= 2
+        rows = self.ROWS and len(tokens) >= 2
         if pictures and not rows:
-            raise Refused("a picture goes in with a prompt read as rows: the experts on the CPU, two tokens or more")
+            raise Refused("a picture goes in with a prompt read as rows: `fused` on, two tokens or more")
         if not rows:
             out = None
             for i, tok in enumerate(tokens):

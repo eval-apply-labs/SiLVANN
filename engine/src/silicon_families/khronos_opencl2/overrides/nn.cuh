@@ -431,6 +431,93 @@ static void khronos_opencl2__override_index_select_rows(uint32_t* index, uint64_
                         args, sizes, 9u);
 }
 
+/* ⭐ A TOKEN'S SMALL DOORS (▶ kernels.cuh's): each nn's door's work-groups and lanes, so a sum's fold is nn's; whatever a
+ *   kernel does not cover is nn's door, and a driver whose program lacks the kernel too. */
+/* KDA's step a row: a head of 128, `out` and the state apart from the `q`, `k` and `v` the step reads. */
+static void khronos_opencl2__override_kda_step(float* S, const uint16_t* conved, const uint16_t* f, const uint16_t* b, const uint16_t* dt,
+                                               const uint16_t* a_log, const uint16_t* gate, const uint16_t* w, uint16_t* out, uint64_t heads,
+                                               uint64_t head_dim, float lower, float eps, unsigned int* over) {
+    const uint64_t width = heads * head_dim;
+    const uint64_t c0 = (uint64_t)(uintptr_t)conved, c1 = c0 + 3u * width * 2u;
+    const uint64_t o0 = (uint64_t)(uintptr_t)out, o1 = o0 + width * 2u;
+    const uint64_t s0 = (uint64_t)(uintptr_t)S, s1 = s0 + heads * head_dim * head_dim * 4u;
+    const bool apart = (o1 <= c0 || c1 <= o0) && (s1 <= c0 || c1 <= s0) && (s1 <= o0 || o1 <= s0);
+    if (!khronos_opencl2__zzpackage_has_kernel("khronos_opencl2__kda_step") || head_dim != 128u || heads == 0u || !apart) {
+        nn__kda__zzabi_launch_step(S, conved, f, b, dt, a_log, gate, w, out, heads, head_dim, lower, eps, over);
+        return;
+    }
+    void* args[] = { &S, &conved, &f, &b, &dt, &a_log, &gate, &w, &out, &heads, &lower, &eps, &over };
+    const size_t sizes[] = { sizeof S, sizeof conved, sizeof f, sizeof b, sizeof dt, sizeof a_log, sizeof gate, sizeof w, sizeof out,
+                             sizeof heads, sizeof lower, sizeof eps, sizeof over };
+    nn__silicon__launch(0, "khronos_opencl2__kda_step", khronos_opencl2__zzprivate_blocks(heads), 128u, args, sizes, 13u);
+}
+
+/* A site's map's logits, over halves and over floats: any count of streams. */
+static void khronos_opencl2__override_hyper_logits(float* lg, const uint16_t* streams, const uint16_t* fn, uint64_t hidden, uint64_t mult,
+                                                   float norm_eps) {
+    const uint64_t rows = NN__HYPER__MIX(mult);
+    if (!khronos_opencl2__zzpackage_has_kernel("khronos_opencl2__hyper_logits") || rows == 0u || hidden == 0u) {
+        nn__hyper__zzabi_launch_logits(lg, streams, fn, hidden, mult, norm_eps);
+        return;
+    }
+    void* args[] = { &lg, &streams, &fn, &hidden, &mult, &norm_eps };
+    const size_t sizes[] = { sizeof lg, sizeof streams, sizeof fn, sizeof hidden, sizeof mult, sizeof norm_eps };
+    nn__silicon__launch(0, "khronos_opencl2__hyper_logits", khronos_opencl2__zzprivate_blocks(rows), KHRONOS_OPENCL2__ZZPRIVATE_GROUP,
+                        args, sizes, 6u);
+}
+static void khronos_opencl2__override_hyper_logits_fp32(float* lg, const float* streams, const uint16_t* fn, uint64_t hidden, uint64_t mult,
+                                                        float norm_eps) {
+    const uint64_t rows = NN__HYPER__MIX(mult);
+    if (!khronos_opencl2__zzpackage_has_kernel("khronos_opencl2__hyper_logits_fp32") || rows == 0u || hidden == 0u) {
+        nn__hyper__zzabi_launch_logits_fp32(lg, streams, fn, hidden, mult, norm_eps);
+        return;
+    }
+    void* args[] = { &lg, &streams, &fn, &hidden, &mult, &norm_eps };
+    const size_t sizes[] = { sizeof lg, sizeof streams, sizeof fn, sizeof hidden, sizeof mult, sizeof norm_eps };
+    nn__silicon__launch(0, "khronos_opencl2__hyper_logits_fp32", khronos_opencl2__zzprivate_blocks(rows), KHRONOS_OPENCL2__ZZPRIVATE_GROUP,
+                        args, sizes, 6u);
+}
+
+/* The scored router: up to four scores a lane of 256, one to `NN__VECTOR__ROUTER_K_MAX` picks. */
+static void khronos_opencl2__override_vector_top_k_scored(uint64_t* values, uint64_t stride, uint16_t* weights, const uint16_t* x,
+                                                          const uint16_t* bias, uint64_t n, uint64_t k, float scale, uint64_t score) {
+    if (!khronos_opencl2__zzpackage_has_kernel("khronos_opencl2__top_k_scored") || n == 0u || n > 4u * KHRONOS_OPENCL2__ZZPRIVATE_GROUP
+     || k == 0u || k > NN__VECTOR__ROUTER_K_MAX) {
+        nn__vector__zzabi_launch_top_k_scored(values, stride, weights, x, bias, n, k, scale, score);
+        return;
+    }
+    void* args[] = { &values, &stride, &weights, &x, &bias, &n, &k, &scale, &score };
+    const size_t sizes[] = { sizeof values, sizeof stride, sizeof weights, sizeof x, sizeof bias, sizeof n, sizeof k, sizeof scale,
+                             sizeof score };
+    nn__silicon__launch(0, "khronos_opencl2__top_k_scored", 1u, KHRONOS_OPENCL2__ZZPRIVATE_GROUP, args, sizes, 9u);
+}
+
+/* A site's `pre` at four streams, over halves and over floats; any other count is nn's. */
+static void khronos_opencl2__override_hyper_pre(uint16_t* out, float* mix, const uint16_t* streams, const uint16_t* base,
+                                                const uint16_t* scale, uint64_t hidden, uint64_t mult, uint64_t iters, float eps,
+                                                unsigned int* over) {
+    if (!khronos_opencl2__zzpackage_has_kernel("khronos_opencl2__hyper_pre4") || mult != 4u || hidden == 0u) {
+        nn__hyper__zzabi_launch_pre(out, mix, streams, base, scale, hidden, mult, iters, eps, over);
+        return;
+    }
+    void* args[] = { &out, &mix, &streams, &base, &scale, &hidden, &iters, &eps, &over };
+    const size_t sizes[] = { sizeof out, sizeof mix, sizeof streams, sizeof base, sizeof scale, sizeof hidden, sizeof iters, sizeof eps,
+                             sizeof over };
+    nn__silicon__launch(0, "khronos_opencl2__hyper_pre4", khronos_opencl2__zzprivate_blocks((hidden + 255u) / 256u),
+                        KHRONOS_OPENCL2__ZZPRIVATE_GROUP, args, sizes, 9u);
+}
+static void khronos_opencl2__override_hyper_pre_fp32(float* out, float* mix, const float* streams, const uint16_t* base,
+                                                     const uint16_t* scale, uint64_t hidden, uint64_t mult, uint64_t iters, float eps) {
+    if (!khronos_opencl2__zzpackage_has_kernel("khronos_opencl2__hyper_pre4_fp32") || mult != 4u || hidden == 0u) {
+        nn__hyper__zzabi_launch_pre_fp32(out, mix, streams, base, scale, hidden, mult, iters, eps);
+        return;
+    }
+    void* args[] = { &out, &mix, &streams, &base, &scale, &hidden, &iters, &eps };
+    const size_t sizes[] = { sizeof out, sizeof mix, sizeof streams, sizeof base, sizeof scale, sizeof hidden, sizeof iters, sizeof eps };
+    nn__silicon__launch(0, "khronos_opencl2__hyper_pre4_fp32", khronos_opencl2__zzprivate_blocks((hidden + 255u) / 256u),
+                        KHRONOS_OPENCL2__ZZPRIVATE_GROUP, args, sizes, 8u);
+}
+
 static inline void khronos_opencl2__override_doors(nn__doors* doors) {
     doors->turboquant_gemv            = khronos_opencl2__override_turboquant_gemv;
     doors->turboquant_gemv_groups     = khronos_opencl2__override_gemv_groups;
@@ -454,6 +541,12 @@ static inline void khronos_opencl2__override_doors(nn__doors* doors) {
     doors->index_scores_rows             = khronos_opencl2__override_index_scores_rows;
     doors->index_select                  = khronos_opencl2__override_index_select;
     doors->index_select_rows             = khronos_opencl2__override_index_select_rows;
+    doors->kda_step                      = khronos_opencl2__override_kda_step;
+    doors->hyper_logits                  = khronos_opencl2__override_hyper_logits;
+    doors->hyper_logits_fp32             = khronos_opencl2__override_hyper_logits_fp32;
+    doors->hyper_pre                     = khronos_opencl2__override_hyper_pre;
+    doors->hyper_pre_fp32                = khronos_opencl2__override_hyper_pre_fp32;
+    doors->vector_top_k_scored           = khronos_opencl2__override_vector_top_k_scored;
 }
 
 #endif /* SILVANN__SILICON_FAMILIES_KHRONOS_OPENCL2_OVERRIDES_NN_CUH */

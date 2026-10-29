@@ -12,13 +12,16 @@
 ;;                   scales start, its bits
 ;;                   HAND HAND_PICKS_AT HAND_BYTES — a hand row, its picks' place, a position's hand to a socket
 ;;                   ROWS_HANDS_BYTES ROWS_BYTES ROWS_HALVES — a chunk's hands, and its routed rows, to and from a socket
-;;   the settings    CARD_TIER — true where the card holds a tier of the routed experts
+;;   the settings    CARD_TIER — true where the card holds a tier of the routed experts; EXPERTS_ON_CARD — true
+;;                   where it holds every one of them, and no socket runs any; AHEAD — how many of the next layer's
+;;                   experts each socket reads ahead from the disk, 0 as many as the disk reads while a layer computes
 ;;   a layer each    arrays indexed by the layer's place in RUN: KDA (true for a KDA layer), MOE (true where it routes),
 ;;                   LAYER (its number), AT (the attention site's table), MO / ML (the MLP site's, routed or dense),
-;;                   EXK EXKR (the card's tier's experts tables, a position's and a chunk's)
+;;                   EXK EXKR (the card's tier's experts tables, a position's and a chunk's), AHEAD_NEXT (the next MoE
+;;                   layer's place in RUN where its experts are read ahead, 0 where they are not)
 ;;   a socket each   SOCKETS of them: SOCKET (its worker), ROUTED_INTO / RROWS_INTO (where its share lands on the card);
 ;;                   ▶ glm5_cpu.lisp for what each runs
-;;   the buffers     streams xin h hr e u hu hand picks routed hm hn hnr srows hands carries rrows rwork … (▶ `_card_buffers`),
+;;   the buffers     streams xin h hr e u hu hand picks guess routed hm hn hnr srows hands carries rrows rwork … (▶ `_card_buffers`),
 ;;                   PROMPT (a chunk's tokens)
 
 
@@ -137,16 +140,30 @@
                  (ai_z__glm_5_3__experts hand picks (nth EXK i) routed_k nn__expert_tier))
           (begin (ai_z__glm_5_3__experts hand picks (nth EXK i) routed_k nn__expert_tier) (sockets_start i xf)))
       (sockets_start i xf)))
-(defun (moe i)
-  (let ((s 0))
-    (ai_z__glm_5_3__route streams (nth MO i) hand picks)
-    (tier_and_sockets i)
-    (ai_z__glm_5_3__shared hand (nth MO i))
-    (while '(< s SOCKETS) '(begin (sys__result (nth SOCKET s)) (set! s (+ s 1))))
-    (if CARD_TIER (nn__expert_tier__written nn__expert_tier) 0)     ; the CPUs done: an exclusive tier's writes go now
-    (sockets_sum)
-    (if CARD_TIER (nn__vector__add routed routed_k routed HIDDEN) 0)
-    (ai_z__glm_5_3__close streams (nth MO i) routed)))
+;; the router — and, where the experts are read ahead (AHEAD_NEXT, NN-138), the next MoE layer's router on the same input,
+;; its likeliest picks into `guess` for the sockets to read the first of while this layer computes (▶ glm5_cpu.lisp `xf`)
+(defun (route i)
+  (if (< 0 (nth AHEAD_NEXT i))
+      (ai_z__glm_5_3__route streams (nth MO i) hand picks (nth MO (nth AHEAD_NEXT i)) guess)
+      (ai_z__glm_5_3__route streams (nth MO i) hand picks)))
+;; with EXPERTS_ON_CARD every routed expert of these layers is in a slot on the card: the card computes every pick, and
+;; no socket is started or waited for
+(if EXPERTS_ON_CARD
+    (defun (moe i)
+      (begin (ai_z__glm_5_3__route streams (nth MO i) hand picks)
+             (ai_z__glm_5_3__experts hand picks (nth EXK i) routed)
+             (ai_z__glm_5_3__shared hand (nth MO i))
+             (ai_z__glm_5_3__close streams (nth MO i) routed)))
+    (defun (moe i)
+      (let ((s 0))
+        (route i)
+        (tier_and_sockets i)
+        (ai_z__glm_5_3__shared hand (nth MO i))
+        (while '(< s SOCKETS) '(begin (sys__result (nth SOCKET s)) (set! s (+ s 1))))
+        (if CARD_TIER (nn__expert_tier__written nn__expert_tier) 0)     ; the CPUs done: an exclusive tier's writes go now
+        (sockets_sum)
+        (if CARD_TIER (nn__vector__add routed routed_k routed HIDDEN) 0)
+        (ai_z__glm_5_3__close streams (nth MO i) routed))))
 
 (defun (layer i pos)
   (begin (mixer i pos)
@@ -164,17 +181,22 @@
 
 
 ;; ── a layer over a prompt's rows ────────────────────────────────────────────────────────────────────────────────────
-(defun (moe_rows i n)
-  (begin (ai_z__glm_5_3__route_rows srows (nth MO i) hands carries n rwork)
-         ;; the card's tier told of the chunk's picks, so the prompt warms it
-         (if CARD_TIER (nn__expert_tier__note hands nn__expert_tier (nth LAYER i) n HAND HAND_PICKS_AT
-                                              nn__expert_major__vram_promotion_threshold_picks) 0)
-         (sockets_start i xr)
-         ;; the card's share computed while the CPUs compute theirs
-         (if CARD_TIER (ai_z__glm_5_3__experts_rows hands (nth EXKR i) rrows_k n nn__expert_tier) 0)
-         (sockets_sum_rows)
-         (if CARD_TIER (nn__vector__add rrows rrows_k rrows (* n HIDDEN)) 0)
-         (ai_z__glm_5_3__close_rows srows (nth MO i) rrows carries n rwork)))
+(if EXPERTS_ON_CARD
+    (defun (moe_rows i n)
+      (begin (ai_z__glm_5_3__route_rows srows (nth MO i) hands carries n rwork)
+             (ai_z__glm_5_3__experts_rows hands (nth EXKR i) rrows n)
+             (ai_z__glm_5_3__close_rows srows (nth MO i) rrows carries n rwork)))
+    (defun (moe_rows i n)
+      (begin (ai_z__glm_5_3__route_rows srows (nth MO i) hands carries n rwork)
+             ;; the card's tier told of the chunk's picks, so the prompt warms it
+             (if CARD_TIER (nn__expert_tier__note hands nn__expert_tier (nth LAYER i) n HAND HAND_PICKS_AT
+                                                  nn__expert_major__vram_promotion_threshold_picks) 0)
+             (sockets_start i xr)
+             ;; the card's share computed while the CPUs compute theirs
+             (if CARD_TIER (ai_z__glm_5_3__experts_rows hands (nth EXKR i) rrows_k n nn__expert_tier) 0)
+             (sockets_sum_rows)
+             (if CARD_TIER (nn__vector__add rrows rrows_k rrows (* n HIDDEN)) 0)
+             (ai_z__glm_5_3__close_rows srows (nth MO i) rrows carries n rwork))))
 
 (defun (rows_layer i first n)
   (begin (if (nth KDA i)

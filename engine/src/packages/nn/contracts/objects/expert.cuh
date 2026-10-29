@@ -311,7 +311,11 @@ typedef struct nn__expert__backing {
                                                 /* an exclusive group's slice: experts that joined it, card 0's count */
 #define NN__EXPERT__COUNT_IN_PLACE        (NN__EXPERT__COUNT_SLICE_CHANGED + 1u)
                                                 /* promotions copied straight from registered RAM, none staged     */
-#define NN__EXPERT__COUNTS               (NN__EXPERT__COUNT_IN_PLACE + 1u)
+#define NN__EXPERT__COUNT_READ_BUSY_NS   (NN__EXPERT__COUNT_IN_PLACE + 1u)
+                                                /* time a file read was on its way, any of them, ns — the disk's time  */
+#define NN__EXPERT__COUNT_READS_DONE     (NN__EXPERT__COUNT_READ_BUSY_NS + 1u)
+                                                /* ...over how many reads landed: an expert's read costs the quotient */
+#define NN__EXPERT__COUNTS               (NN__EXPERT__COUNT_READS_DONE + 1u)
 
 /* ⭐ AN EXPERT PROMOTED FROM RAM TO A CARD (NN-48). Its bytes are in memory already, so a promotion is a GATHER: a few runs
  * copied into the card's slot in the slot's own layout — through a staging buffer of pinned memory and one write on the

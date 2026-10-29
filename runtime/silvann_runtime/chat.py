@@ -61,7 +61,8 @@ from .model_folder import Refused
 TOOL = {"type": "function", "function": {
     "name": "lisp",
     "description": "A Lisp REPL on the user's machine, in a working folder the user gave it: one form a call, and its "
-                   "value is the answer. Start with (help), which lists the commands; a path is absolute, or relative to "
+                   "value is the answer. It gives you a series of tools, but answer simple queries directly, without a call. "
+                   "Start with (help), which lists the commands; a path is absolute, or relative to "
                    "the working folder. A command that reads elsewhere or writes may be asked of the user first: call it, and the "
                    "answer comes back once the user has allowed it, or refused. To make a command of your own, a skill in Python or "
                    "a program that stays for later conversations, (guide) says how. (whoami) says which model you are.",

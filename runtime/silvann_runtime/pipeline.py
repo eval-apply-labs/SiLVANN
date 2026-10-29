@@ -102,19 +102,38 @@ class Link:
         return what, a, b, c, _exact(self.inn, n)
 
 
-def _hello(model, last):
-    return {"model": model.folder.identity(), "max_context": int(model.max_context), "chunk": chunk_of(model),
-            "last": bool(last)}
+def _hello(model, last, fixed=True):
+    return {"model": model.folder.identity(), "max_context": int(model.max_context), "fixed": bool(fixed),
+            "chunk": chunk_of(model), "last": bool(last)}
 
 
-def stage(model, link, last, say=print):
+def _agree(want, mine):
+    """The ring's one context, from the hello as far as it has come (`want`) and this machine's (`mine`): a config's number
+    is every machine's — the same number in each config that names one, which every machine left to "auto" must hold —
+    and machines all left to "auto" hold the least any of them holds. None where they cannot agree."""
+    a, b = int(want["max_context"]), int(mine["max_context"])
+    fa, fb = want.get("fixed", True), mine.get("fixed", True)
+    if fa and fb:
+        return a if a == b else None
+    if fa or fb:
+        number, held = (a, b) if fa else (b, a)
+        return number if held >= number else None
+    return min(a, b)
+
+
+def stage(model, link, last, say=print, fixed=True):
     """A machine past the first, for as long as the ring stands: each request from the machine before is run through this
     machine's layers and handed on — the last's as the token (`TOKN`), or the logits for a sampler on the first (`LOGT`).
-      HELO   what each machine runs, checked against the first's — the chunk the smallest of all
+      HELO   what each machine runs, checked against the first's — the chunk the smallest of all, the context agreed
+             (▶ `_agree`)
       RSET   a new conversation · SEEN the recent tokens, for the last's sampler · QUIT the ring taken down
       STEP   a position (a, its residual) · ROWS a chunk (a its first position, b its rows) — the head expression the
-             last runs, its `c` bytes, before the rows"""
+             last runs, its `c` bytes, before the rows
+    `fixed`: whether this machine's config names its context (else "auto", what its card holds). Every TIMED positions it
+    says how far apart they came and how much of that it computed, and a prompt's rows the same once its last chunk is
+    through — the ring's slowest machine the one whose own share is the most."""
     link.join(say)
+    clock = _Clock(say)
     while True:
         try:
             what, a, b, c, payload = link.receive()
@@ -123,10 +142,14 @@ def stage(model, link, last, say=print):
             return
         if what == b"HELO":
             want = json.loads(payload)
-            mine = _hello(model, last)
-            if want["model"] != mine["model"] or want["max_context"] != mine["max_context"]:
-                raise Refused("the ring's machines run different models or contexts: %s here, %s on the first"
-                              % ({k: mine[k] for k in ("model", "max_context")}, {k: want[k] for k in ("model", "max_context")}))
+            mine = _hello(model, last, fixed)
+            context = _agree(want, mine)
+            if want["model"] != mine["model"] or context is None:
+                keys = ("model", "max_context", "fixed")
+                raise Refused("the ring's machines run different models or contexts: %s here, %s on the first and the "
+                              "machines between (fixed: the config's number; else \"auto\", what the card holds)"
+                              % ({k: mine[k] for k in keys}, {k: want.get(k, True) for k in keys}))
+            want["max_context"], want["fixed"] = context, want.get("fixed", True) or mine["fixed"]
             want["chunk"] = min(want["chunk"], mine["chunk"])
             want["last"] = want["last"] or last
             link.send(b"HELO", payload=json.dumps(want).encode())
@@ -140,10 +163,14 @@ def stage(model, link, last, say=print):
             link.send(b"SEEN", payload=payload)
         elif what in (b"STEP", b"ROWS"):
             head, x = payload[:c].decode(), payload[c:]
+            t0 = time.perf_counter()
             if what == b"STEP":
-                got = model.forward(a, x=x, head=(head or True) if last else False)
+                # a prompt's position before its last comes with no head: the last machine has no token to draw
+                got = model.forward(a, x=x, head=head if (last and head) else False)
+                clock.position(t0, time.perf_counter() - t0)
             else:
                 got = model.forward_rows(a, xs=x, n=b, head=(head or False) if last else False)
+                clock.rows(b, time.perf_counter() - t0, bool(head))
             if not last:
                 link.send(what, a, b, c, payload[:c] + got)
             elif not head:
@@ -159,25 +186,64 @@ def stage(model, link, last, say=print):
             raise Refused("the ring sent %r, which no machine sends" % (what,))
 
 
+TIMED = 64                       # positions a machine's times are said over
+
+
+class _Clock:
+    """A machine's times in the ring: its positions' arrivals and its own share of each, said every TIMED; a prompt's rows
+    said once its last chunk is through."""
+
+    def __init__(self, say, what="here"):
+        self.say, self.what = say, what
+        self.n = self.own = self.n_rows = self.rows_s = 0
+        self.since = None
+
+    def position(self, t0, own):
+        """A position that arrived at `t0` and took `own` seconds here: TIMED of them said at the next one's arrival."""
+        if self.since is not None and self.n == TIMED:
+            self.say("[pipeline] the last %d positions: %.1f ms apart, %.1f ms of each %s"
+                     % (TIMED, (t0 - self.since) / TIMED * 1e3, self.own / TIMED * 1e3, self.what))
+            self.since, self.n, self.own = None, 0, 0.0
+        if self.since is None:
+            self.since = t0
+        self.n, self.own = self.n + 1, self.own + own
+
+    def rows(self, n, own, last):
+        self.n_rows, self.rows_s = self.n_rows + n, self.rows_s + own
+        if last:
+            self.say("[pipeline] a prompt's %d rows: %.2f ms a row %s"
+                     % (self.n_rows, self.rows_s / max(1, self.n_rows) * 1e3, self.what))
+            self.n_rows, self.rows_s, self.since, self.n, self.own = 0, 0.0, None, 0, 0.0
+
+
 class Pipeline:
     """The ring's first machine as the server's model: its own layers here, the rest round the ring. A model's `reset`,
     `step`, `prefill` and `logits`; the rest is the first machine's own model's (`vision`, `folder`, …)."""
     GENERATES = False                # a token at a time round the ring: no answer loop on one card
     PARKS = False                    # its state is spread over the machines: a conversation brought back reads its tokens again
 
-    def __init__(self, model, link, say=print):
+    def __init__(self, model, link, say=print, fixed=True):
         self.model, self.link = model, link
         link.join(say)
-        link.send(b"HELO", payload=json.dumps(_hello(model, False)).encode())
+        mine = _hello(model, False, fixed)
+        link.send(b"HELO", payload=json.dumps(mine).encode())
         what, _, _, _, payload = link.receive()
         if what != b"HELO":
             raise Refused("the ring answered %r to its hello" % (what,))
         ring = json.loads(payload)
         if not ring["last"]:
             raise Refused("no machine in the ring runs the model's last layer")
+        if _agree(ring, mine) is None:
+            raise Refused("the ring agreed on a context of %d, which this machine's config does not: %d"
+                          % (ring["max_context"], mine["max_context"]))
+        # ⭐ THE RING'S CONTEXT, AGREED: each machine left to "auto" booted with what its card holds, and the conversations
+        #   are held to the least of them here, where they are kept — the others never see a position past it
+        model.max_context = min(int(model.max_context), int(ring["max_context"]))
         self.chunk = ring["chunk"]
         self._logits = None
-        say("[pipeline] the ring answers: chunks of %d rows, the context %d" % (self.chunk, model.max_context))
+        self.clock = _Clock(say, "on this machine, the rest round the ring")
+        say("[pipeline] the ring answers: chunks of %d rows, the context %d%s"
+            % (self.chunk, model.max_context, "" if ring.get("fixed", True) else ", the least its machines hold"))
 
     def __getattr__(self, name):
         return getattr(self.model, name)
@@ -209,18 +275,33 @@ class Pipeline:
             raise Refused("a Qwen model's positions after a picture are read on one machine, not round a ring")
         if pos >= self.model.max_context:
             raise Refused("position %d is past the context of %d" % (pos, self.model.max_context))
+        t0 = time.perf_counter()
         x = self.model.forward(pos, token=token)
+        self.clock.position(t0, time.perf_counter() - t0)
         return self._round(b"STEP", pos, 0, x, self._head(greedy, sample))
 
     def prefill(self, tokens, first, greedy=True, sample=None, positions=None, rows=None):
         if positions is not None:
             raise Refused("a Qwen model's pictures are read on one machine, not round a ring")
         got = None
+        if not hasattr(self.model, "forward_rows"):
+            # a model that reads no prompt as rows (DeepSeek's): its positions round the ring one at a time, the last
+            #   with the head
+            if rows:
+                raise Refused("a picture goes in with a prompt read as rows, which this model does not read round a ring")
+            for i, tok in enumerate(tokens):
+                t0 = time.perf_counter()
+                x = self.model.forward(first + i, token=tok)
+                self.clock.rows(1, time.perf_counter() - t0, i == len(tokens) - 1)
+                got = self._round(b"STEP", first + i, 0, x, self._head(greedy, sample) if i == len(tokens) - 1 else "")
+            return got
         for at in range(0, len(tokens), self.chunk):
             part = tokens[at:at + self.chunk]
             mine = {i - at: r for i, r in (rows or {}).items() if at <= i < at + len(part)}
+            t0 = time.perf_counter()
             xs = self.model.forward_rows(first + at, tokens=part, rows=mine or None)
             last = at + len(part) >= len(tokens)
+            self.clock.rows(len(part), time.perf_counter() - t0, last)
             got = self._round(b"ROWS", first + at, len(part), xs, self._head(greedy, sample) if last else "")
         return got
 

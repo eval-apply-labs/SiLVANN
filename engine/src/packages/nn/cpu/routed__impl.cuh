@@ -6,6 +6,7 @@
 #include "doors.cuh"                          /* nn's doors, launched on the worker's silicon */
 #include <stdlib.h>                           /* a chunk's picks, inverted on the host: malloc, free */
 #include <string.h>                           /* a hand row's picks and weights, taken from the rows read across */
+#include "../../../operating_systems/os.cuh"   /* the clock, for the wait a read ahead fills */
 
 /* ══ A MODEL'S ROUTED EXPERTS, AS nn RUNS THEM — ▶ `routed__header.cuh` ══════════════════════════════════════════════ */
 
@@ -28,9 +29,26 @@ static uint64_t nn__routed__top_k(sys__engine__ctx* ctx, const nn__doors* doors,
     return nn__routed__top_k_scored(ctx, doors, picks, weights, logits, bias, scale, n, k, NN__ROUTED__BIASED, chosen);
 }
 
+static uint64_t nn__routed__zzprivate_top_k(sys__engine__ctx* ctx, const nn__doors* doors, uint64_t picks, uint64_t weights,
+                                            uint64_t logits, uint64_t bias, float scale, uint64_t n, uint64_t k, uint64_t score,
+                                            uint64_t* chosen, bool wait);
 static uint64_t nn__routed__top_k_scored(sys__engine__ctx* ctx, const nn__doors* doors, uint64_t picks, uint64_t weights,
                                          uint64_t logits, uint64_t bias, float scale, uint64_t n, uint64_t k, uint64_t score,
                                          uint64_t* chosen) {
+    return nn__routed__zzprivate_top_k(ctx, doors, picks, weights, logits, bias, scale, n, k, score, chosen, true);
+}
+
+static uint64_t nn__routed__guess(sys__engine__ctx* ctx, const nn__doors* doors, uint64_t picks, uint64_t weights, uint64_t logits,
+                                  uint64_t bias, float scale, uint64_t n, uint64_t k, uint64_t score) {
+    if (k > NN__ROUTED__GUESS_MAX) return NN__PRIMITIVES__FAULT_BOUNDS;
+    return nn__routed__zzprivate_top_k(ctx, doors, picks, weights, logits, bias, scale, n, k, score, 0, false);
+}
+
+/* The router's pick into `picks`' words: on the card's view of the heap, waited for where `wait`; else through a landing,
+ *   always waited for. */
+static uint64_t nn__routed__zzprivate_top_k(sys__engine__ctx* ctx, const nn__doors* doors, uint64_t picks, uint64_t weights,
+                                            uint64_t logits, uint64_t bias, float scale, uint64_t n, uint64_t k, uint64_t score,
+                                            uint64_t* chosen, bool wait) {
     if (k == 0ull || k > NN__VECTOR__TOP_K_MAX || (bias != 0ull && k > NN__VECTOR__ROUTER_K_MAX) || sys__node_array__length(picks) < k)
         return NN__PRIMITIVES__FAULT_BOUNDS;
     /* ⛔ ONLY VALUE WORDS ARE WRITTEN, AND ONLY INTO ELEMENTS THAT HOLD NO REFERENCE: an int is written over, a null
@@ -51,6 +69,7 @@ static uint64_t nn__routed__top_k_scored(sys__engine__ctx* ctx, const nn__doors*
     if (ctx->heap_card != 0 && cells >= ctx->heap_host && (uint64_t)(cells - ctx->heap_host) + k <= ctx->heap_nodes) {
         sys__heap_node* card = ctx->heap_card + (cells - ctx->heap_host);
         nn__routed__zzprivate_pick(doors, &card[0].args[0], words, weights, logits, bias, scale, n, k, score);
+        if (!wait) return 0u;
         if (!sys__gpu__compute_completed(ctx->family)) return NN__PRIMITIVES__FAULT_NO_DEVICE;
         if (chosen != 0) for (uint64_t j = 0u; j < k; ++j) chosen[j] = cells[j].args[0];
         return 0u;
@@ -229,6 +248,91 @@ static uint64_t nn__routed__visit(sys__engine__ctx* ctx, const nn__routed* r, ui
     return 0u;
 }
 
+/* ⭐ THE NEXT LAYER'S EXPERTS READ AHEAD (NN-138). A layer's reads land, it computes, the card runs the next layer's
+ *   attention and router, and only then does the next layer ask for its experts: the disk waits that long. Where the
+ *   program guessed the next layer's picks (`ahead_next`), each worker reads the first few of the guess it does not hold
+ *   once its own layer's reads are queued, so they are on their way through that wait.
+ *   HOW MANY EXPERTS — fixed by `ahead_count`, or 0: as many as the disk starts in the wait, one to
+ *   `NN__ROUTED__AHEAD_MOST` — the wait over an expert's read rounded up, since a read the wait does not finish still lands
+ *   sooner than it would have: `MEASURED` GLM from the disk at 8 GB (node03), one ahead 2.07 tokens/s and two 2.18 against
+ *   1.94 without, the wait ~1.25 experts' reads (measurements/2026-10-28_expert_prediction_node03.md). The wait is measured on each worker, from its layer's reads settled to its next layer's verb
+ *   (a token's first MoE layer, after the head and the embedding, not counted), averaged over the last ones; an expert is
+ *   `ahead_parts` reads — a part on each worker holding one — and a read costs the loader's time with a read on its way
+ *   over the reads landed. Each worker reads its part of the same experts: the first of the guess not in its memory. */
+static uint64_t nn__routed__zzprivate_worker_of[SYS__SILICON__WORKERS_MAX];  /* the worker a row is, its owner id + 1; 0 free */
+static uint64_t nn__routed__zzprivate_settled[SYS__SILICON__WORKERS_MAX];    /* when the worker's last layer settled, ns */
+static uint64_t nn__routed__zzprivate_settled_layer[SYS__SILICON__WORKERS_MAX];
+static uint64_t nn__routed__zzprivate_wait_ns[SYS__SILICON__WORKERS_MAX];    /* the wait, averaged — ⅞ of the last and ⅛ the new */
+
+/* This worker's row of the measures — the loader's owner id is no small number, so a row is claimed by it, once — or
+ * SYS__SILICON__WORKERS_MAX where every row is another's. */
+static uint64_t nn__routed__zzprivate_row(void) {
+    const uint64_t key = nn__expert__zzpackage_owner() + 1u;
+    for (uint64_t i = 0u; i < SYS__SILICON__WORKERS_MAX; ++i) {
+        uint64_t free = 0u;
+        if (__atomic_load_n(&nn__routed__zzprivate_worker_of[i], __ATOMIC_ACQUIRE) == key
+         || __atomic_compare_exchange_n(&nn__routed__zzprivate_worker_of[i], &free, key, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+            return i;
+        if (free == key) return i;
+    }
+    return SYS__SILICON__WORKERS_MAX;
+}
+
+static inline uint64_t nn__routed__zzprivate_now_ns(void) {
+    struct timespec a;
+    sys__os__clock(&a);
+    return (uint64_t)a.tv_sec * 1000000000ull + (uint64_t)a.tv_nsec;
+}
+
+/* The wait since this worker's last layer settled, folded into its average where `layer` follows that one. */
+static void nn__routed__zzprivate_waited(uint64_t layer) {
+    const uint64_t w = nn__routed__zzprivate_row();
+    if (w >= SYS__SILICON__WORKERS_MAX || nn__routed__zzprivate_settled[w] == 0ull || nn__routed__zzprivate_settled_layer[w] + 1u != layer)
+        return;
+    const uint64_t d = nn__routed__zzprivate_now_ns() - nn__routed__zzprivate_settled[w];
+    uint64_t* avg = &nn__routed__zzprivate_wait_ns[w];
+    *avg = *avg == 0ull ? d : (*avg * 7u + d) / 8u;
+}
+
+static void nn__routed__zzprivate_settled_now(uint64_t layer) {
+    const uint64_t w = nn__routed__zzprivate_row();
+    if (w >= SYS__SILICON__WORKERS_MAX) return;
+    nn__routed__zzprivate_settled[w] = nn__routed__zzprivate_now_ns();
+    nn__routed__zzprivate_settled_layer[w] = layer;
+}
+
+/* How many of the guess this worker reads: fixed, or measured (▶ above). */
+static unsigned nn__routed__zzprivate_ahead_count(const nn__routed* r) {
+    uint64_t n = r->ahead_count;
+    if (n == 0u) {
+        const uint64_t w = nn__routed__zzprivate_row(), reads = nn__expert__count(NN__EXPERT__COUNT_READS_DONE);
+        const uint64_t wait = w < SYS__SILICON__WORKERS_MAX ? nn__routed__zzprivate_wait_ns[w] : 0ull;
+        const uint64_t expert = (reads == 0u ? 0u : nn__expert__count(NN__EXPERT__COUNT_READ_BUSY_NS) / reads)
+                              * (r->ahead_parts == 0u ? 1u : r->ahead_parts);
+        n = expert == 0u ? 1u : (wait + expert - 1u) / expert;
+        n = n < 1u ? 1u : n > NN__ROUTED__AHEAD_MOST ? NN__ROUTED__AHEAD_MOST : n;
+    }
+    return (unsigned)(n > NN__ROUTED__GUESS_MAX ? NN__ROUTED__GUESS_MAX : n);
+}
+
+/* The guess's picks this worker holds, in the guess's order and as its collection numbers them, read ahead. */
+static void nn__routed__zzprivate_ahead(sys__engine__ctx* ctx, const nn__routed* r) {
+    const nn__routed* nx = r->ahead_next;
+    if (nx == 0 || nx->backing.file == 0ull || r->ahead_guess == 0ull) return;
+    uint64_t ids[NN__ROUTED__GUESS_MAX];
+    unsigned n = 0u;
+    sys__node_array_walk w;
+    const uint64_t g = sys__node_array__length(r->ahead_guess);
+    if (!sys__node_array__walk(r->ahead_guess, 0ull, &w)) return;
+    for (uint64_t j = 0u; j < g && j < NN__ROUTED__GUESS_MAX; ++j, sys__node_array__next(&w)) {
+        const sys__heap_node* cell = sys__node_array__walk_cell(&w);
+        if (cell == 0 || cell->dtype != SYS__KIND__VALUE_INT) return;
+        const uint64_t id = cell->args[0];
+        if (id >= nx->first && id < nx->first + nx->count) ids[n++] = id - nx->first;
+    }
+    if (n != 0u) (void)nn__expert__read_ahead(ctx->family, nx->layer, nx->type, ids, n, nn__routed__zzprivate_ahead_count(r), &nx->backing);
+}
+
 static uint64_t nn__routed__position(sys__engine__ctx* ctx, const nn__doors* doors, const nn__routed* r, uint64_t hand,
                                      uint64_t picks, const nn__expert_tier* tier, uint64_t routed, nn__routed__done* done) {
     const uint64_t H = r->hidden, I = r->inter, E = r->experts, K = r->top_k, first = r->first, count = r->count;
@@ -288,6 +392,10 @@ static uint64_t nn__routed__position(sys__engine__ctx* ctx, const nn__doors* doo
         if (nn__expert__in_memory(ctx->family, type, at)) { slot[ready] = at; which[ready] = j; ++ready; }
         else { away_slot[n_away] = at; away_id[n_away] = id - first; away[n_away] = j; ++n_away; }
     }
+    if (r->backing.file != 0ull) {
+        nn__routed__zzprivate_waited(layer);
+        nn__routed__zzprivate_ahead(ctx, r);
+    }
     const uint64_t n = ready + n_away;
     const uint64_t gu = r->scratch, act = gu + 4u * K * I, actr = act + 2u * K * I;
     if (done != 0) {
@@ -305,7 +413,10 @@ static uint64_t nn__routed__position(sys__engine__ctx* ctx, const nn__doors* doo
     uint64_t all_slot[NN__TURBOQUANT__GROUPS_MAX], all_which[NN__TURBOQUANT__GROUPS_MAX];
     if (ready != 0u) nn__routed__zzprivate_up(doors, over, r, hand, gu, slot, at_ready, ready);
     for (uint64_t k = 0u; k < ready; ++k) { all_slot[at_ready[k]] = slot[k]; all_which[at_ready[k]] = which[k]; }
-    if (r->backing.file != 0ull && !nn__expert__settle(layer, type)) return NN__ROUTED__FAULT_EXPERT;
+    if (r->backing.file != 0ull) {
+        if (!nn__expert__settle(layer, type)) return NN__ROUTED__FAULT_EXPERT;
+        nn__routed__zzprivate_settled_now(layer);
+    }
     if (n_away != 0u) {
         for (uint64_t k = 0u; k < n_away; ++k) {
             if (r->backing.file != 0ull) {

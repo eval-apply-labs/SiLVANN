@@ -54,7 +54,8 @@ def calibrate(m, card, cpu, copy_to, slot_bytes, hands_at, hand_bytes, weights_a
                     hand = np.zeros(hand_bytes, np.uint8)
                     hand[weights_at:weights_at + 2 * top_k] = np.frombuffer(_half(np.full(top_k, 0.1)), np.uint8)
                     hand[picks_at:picks_at + 8 * top_k] = np.frombuffer(np.asarray(pool[x0:x0 + top_k], dtype="<u8").tobytes(), np.uint8)
-                    x0 = (x0 + top_k) % (len(pool) - top_k)
+                    # an exclusive tier that holds all but `top_k` of a layer's leaves the CPU those alone, read each time
+                    x0 = (x0 + top_k) % (len(pool) - top_k) if len(pool) > top_k else 0
                     m.write(hands_at, np.tile(hand, rows).tobytes())
                     t = _timed(lambda: m.run(rows_text(rows)))
                     best = t if best is None else min(best, t)

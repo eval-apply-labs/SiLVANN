@@ -1,8 +1,8 @@
 #ifndef SILVANN__SILICON_FAMILIES_AMD_ROCM6_WAVE64_OVERRIDES_KDA_CUH
 #define SILVANN__SILICON_FAMILIES_AMD_ROCM6_WAVE64_OVERRIDES_KDA_CUH
 /* ══ KDA's DOORS, RUN FASTER — amd_rocm6_wave64 ═══════════════════════════════════════════════════════════════════════
- * nn's KDA doors, where this family covers them: the steps over a prompt's rows with their decays made before, at a
- * head of 128. */
+ * nn's KDA doors, where this family covers them: the steps over a prompt's rows with their decays made before, and a
+ * decoded position's step, at a head of 128. */
 
 /* What this file needs, named where a reader — and an editor — can follow it. */
 #include <stdint.h>
@@ -98,6 +98,92 @@ static void amd_rocm6_wave64__override_kda_steps_decayed(float* S, const uint16_
                              sizeof eps, sizeof rows, sizeof over };
     nn__silicon__launch((const void*)amd_rocm6_wave64__zzprivate_kda_steps_decayed128, "amd_rocm6_wave64__zzprivate_kda_steps_decayed128",
                         blocks, AMD_ROCM6_WAVE64__ZZPRIVATE_KDA_LANES, args, sizes, 11u);
+}
+
+/* ⭐ ONE KDA STEP AT A HEAD OF 128 — nn's `kda_step`, a decoded position's: the steps above at one row, each state row's
+ *   decay made in place by nn's expressions (▶ nn's `nn__kda__zzprivate_step_head`: `lower · σ(e^{A_log} · (f_i + dt_i))`,
+ *   then its exponential), `f` and `dt` the same for every lane and read by the scalar unit — so a position decoded here
+ *   and the prompt's rows agree to the bit. `MEASURED` with rocprof on a GLM ring machine (node03): nn's body 112 us a
+ *   layer, a lane walking its column through memory an element at a time. */
+static __global__ AMD_ROCM6_WAVE64__ZZPRIVATE_KDA_BOUNDS void amd_rocm6_wave64__zzprivate_kda_step128(
+    float* S, const uint16_t* conved, const uint16_t* f, const uint16_t* b, const uint16_t* dt, const uint16_t* a_log,
+    const uint16_t* gate, const uint16_t* w, uint16_t* out, uint64_t heads, float lower, float eps, unsigned int* over) {
+    const uint32_t D = 128u;
+    const uint32_t j = (uint32_t)nn__silicon__lane();
+    for (uint64_t h = nn__silicon__block(); h < heads; h += nn__silicon__blocks()) {
+        float* Sh = S + h * D * D;
+        const uint16_t* q = conved + h * D;
+        const uint16_t* k = conved + heads * D + h * D;
+        const uint16_t* v = conved + 2ull * heads * D + h * D;
+        const uint16_t* fh = f + h * D;
+        const uint16_t* dh = dt + h * D;
+        const uint32_t at = j * (uint32_t)sizeof(float);
+        const float a = nn__silicon__expf(nn__silicon__half_to_float(a_log[h]));
+        const float beta = 1.0f / (1.0f + nn__silicon__expf(-nn__silicon__half_to_float(b[h])));
+        const float inv_q = 1.0f / nn__silicon__sqrtf(amd_rocm6_wave64__zzpackage_squares128(q) + 1e-6f) / nn__silicon__sqrtf((float)D);
+        const float inv_k = 1.0f / nn__silicon__sqrtf(amd_rocm6_wave64__zzpackage_squares128(k) + 1e-6f);
+        /* ⭐ EACH ROW'S DECAY MADE ONCE A WAVE, NOT ONCE A LANE: a lane makes rows `j % 64` and `j % 64 + 64` — nn's
+         *   expressions — and each row's is read from the lane that made it into a scalar register, as the steps above
+         *   read theirs. Made by every lane for every row (nn's way), the 128 decays stayed alive together and the column
+         *   spilled: 256 registers a lane and 580 bytes of scratch, slower than nn's body */
+        const uint32_t r = j % AMD_ROCM6_WAVE64__ZZPRIVATE_WAVE;
+        const float e_lo = nn__silicon__expf(lower / (1.0f + nn__silicon__expf(-a * (nn__silicon__half_to_float(fh[r])
+                                                                                      + nn__silicon__half_to_float(dh[r])))));
+        const float e_hi = nn__silicon__expf(lower / (1.0f + nn__silicon__expf(-a * (nn__silicon__half_to_float(fh[r + 64u])
+                                                                                      + nn__silicon__half_to_float(dh[r + 64u])))));
+        /* the column read only now, every scalar of the row made: its 128 registers are not live while the norms are summed */
+        float col[128];
+#pragma unroll
+        for (uint32_t i = 0u; i < D; ++i) col[i] = *(const float*)((const char*)(Sh + i * D) + at);
+        float kv = 0.0f;
+#pragma unroll
+        for (uint32_t i = 0u; i < D; ++i) {
+            const float ei = __builtin_bit_cast(float, __builtin_amdgcn_readlane(__builtin_bit_cast(int, i < 64u ? e_lo : e_hi),
+                                                                                 (int)(i % 64u)));
+            col[i] = col[i] * ei;
+            kv += col[i] * amd_rocm6_wave64__zzpackage_scalar_half(k, i) * inv_k;
+        }
+        const float delta = (nn__silicon__half_to_float(v[j]) - kv) * beta;
+        float o = 0.0f;
+#pragma unroll
+        for (uint32_t c0 = 0u; c0 < D; c0 += 32u) {
+            const uint16_t* k2 = amd_rocm6_wave64__zzpackage_afresh(k);
+            const uint16_t* q2 = amd_rocm6_wave64__zzpackage_afresh(q);
+#pragma unroll
+            for (uint32_t i = c0; i < c0 + 32u; ++i) {
+                const float s = col[i] + amd_rocm6_wave64__zzpackage_scalar_half(k2, i) * inv_k * delta;
+                *(float*)((char*)(Sh + i * D) + at) = s;          /* stored as made, as deltanet's step: one row, so final */
+                o += s * amd_rocm6_wave64__zzpackage_scalar_half(q2, i);
+            }
+        }
+        const uint16_t first = nn__kernels__zzabi_to_half(o * inv_q, over);   /* rounded to a half, as nn's readout is */
+        const float oj = nn__silicon__half_to_float(first);
+        const float scale = 1.0f / nn__silicon__sqrtf(nn__silicon__lanes_sum(oj * oj) / (float)D + eps);
+        const float gz = nn__silicon__half_to_float(gate[h * D + j]);
+        out[h * D + j] = nn__kernels__zzabi_to_half(oj * scale * nn__silicon__half_to_float(w[j]) / (1.0f + nn__silicon__expf(-gz)), over);
+    }
+}
+/* A head of 128, `conved`, `f` and `dt` on 4 bytes for the scalar reads, and `out` and the state apart from what the step
+ * reads; anything else is nn's. */
+static void amd_rocm6_wave64__override_kda_step(float* S, const uint16_t* conved, const uint16_t* f, const uint16_t* b, const uint16_t* dt,
+                                                const uint16_t* a_log, const uint16_t* gate, const uint16_t* w, uint16_t* out,
+                                                uint64_t heads, uint64_t head_dim, float lower, float eps, unsigned int* over) {
+    const uint64_t width = heads * head_dim;
+    const uint64_t c0 = (uint64_t)(uintptr_t)conved, c1 = c0 + 3u * width * 2u;
+    const uint64_t f0 = (uint64_t)(uintptr_t)f, f1 = f0 + width * 2u;
+    const uint64_t o0 = (uint64_t)(uintptr_t)out, o1 = o0 + width * 2u;
+    const uint64_t s0 = (uint64_t)(uintptr_t)S, s1 = s0 + heads * head_dim * head_dim * 4u;
+    const bool apart = (o1 <= c0 || c1 <= o0) && (s1 <= c0 || c1 <= s0) && (o1 <= f0 || f1 <= o0) && (s1 <= f0 || f1 <= s0);
+    if (head_dim != 128u || heads == 0u || c0 % 4u != 0u || f0 % 4u != 0u || ((uint64_t)(uintptr_t)dt) % 4u != 0u || !apart) {
+        nn__kda__zzabi_launch_step(S, conved, f, b, dt, a_log, gate, w, out, heads, head_dim, lower, eps, over);
+        return;
+    }
+    const uint32_t blocks = heads < NN__KERNELS__BLOCKS_MAX ? (uint32_t)heads : NN__KERNELS__BLOCKS_MAX;
+    void* args[] = { &S, &conved, &f, &b, &dt, &a_log, &gate, &w, &out, &heads, &lower, &eps, &over };
+    const size_t sizes[] = { sizeof S, sizeof conved, sizeof f, sizeof b, sizeof dt, sizeof a_log, sizeof gate, sizeof w, sizeof out,
+                             sizeof heads, sizeof lower, sizeof eps, sizeof over };
+    nn__silicon__launch((const void*)amd_rocm6_wave64__zzprivate_kda_step128, "amd_rocm6_wave64__zzprivate_kda_step128", blocks,
+                        AMD_ROCM6_WAVE64__ZZPRIVATE_KDA_LANES, args, sizes, 13u);
 }
 
 #endif /* SILVANN__SILICON_FAMILIES_AMD_ROCM6_WAVE64_OVERRIDES_KDA_CUH */

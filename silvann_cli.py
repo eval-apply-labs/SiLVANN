@@ -3,7 +3,7 @@
 written as it comes, its thinking dimmed, the model's tool calls and their values shown, and the tool's asks answered at
 the prompt.
 
-    silvann_cli [--endpoint http://localhost:8765] [--notools] [--nothink] [--max-tokens 2048] [--system "…"]
+    silvann_cli [--endpoint http://localhost:8765] [--notools] [--nothink] [--max-tokens N] [--system "…"]
     venv/bin/python silvann_cli.py …                 # the same, from the release's folder
 
 A new conversation takes the server's defaults — its config's thinking, and the model's tool in the config's mode —
@@ -68,15 +68,19 @@ class Chat:
         else:
             print("%s[the tool: %s]%s" % (DIM, MODES[mode], RESET))
 
+    def _most(self):
+        """The answer's cap where --max-tokens names one; none, and it runs until it ends."""
+        return {} if self.a.max_tokens is None else {"max_new_tokens": self.a.max_tokens}
+
     def say(self, text):
         """A message, its answer, and the asks it stops on, each answered here."""
         self.bind()
-        ask = self.stream("/cartridges/%s/messages" % self.cid, {"text": text, "max_new_tokens": self.a.max_tokens})
+        ask = self.stream("/cartridges/%s/messages" % self.cid, dict({"text": text}, **self._most()))
         while ask:
             choice = self.decide(ask)
             self.bind()
             ask = self.stream("/cartridges/%s/tools/answer" % self.cid,
-                              {"choice": choice, "max_new_tokens": self.a.max_tokens})
+                              dict({"choice": choice}, **self._most()))
         self.line()
 
     # ── the stream ─────────────────────────────────────────────────────────────────────────────────────────────────
@@ -207,7 +211,8 @@ def main():
     ap.add_argument("--endpoint", default="http://localhost:8765", help="the server (default http://localhost:8765)")
     ap.add_argument("--notools", action="store_true", help="no tool for the model, whatever the server's config says")
     ap.add_argument("--nothink", action="store_true", help="no thinking, whatever the server's config says")
-    ap.add_argument("--max-tokens", type=int, default=2048, help="the most tokens an answer runs before a call or an end")
+    ap.add_argument("--max-tokens", type=int, default=None,
+                    help="the most tokens an answer runs (default: until it ends or fills the context; Ctrl-C stops it)")
     ap.add_argument("--system", default=None, help="a system prompt for the conversation")
     ap.add_argument("--user", default="cli-" + uuid.uuid4().hex[:8], help="the session the conversation belongs to")
     a = ap.parse_args()

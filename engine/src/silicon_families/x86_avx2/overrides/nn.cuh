@@ -1739,12 +1739,42 @@ typedef struct x86_avx2__attend_call {
     uint64_t q_heads, kv_heads, head_dim, length, d;
 } x86_avx2__attend_call;
 
-/* Elements `e0 .. e0 + n` of row `row` of a TurboQuant tier into `out`: each `scale · level`, as nn's element is. */
+/* `n` 8-bit codes' levels times `scale` into `out` (whole runs of 32), through the halves' registers (AVX-512, symmetric
+ * levels): the same floats as the table's. */
+static X86_AVX2__ZZPRIVATE_AVX512 void x86_avx2__zzprivate_attend_row8_512(float* out, const uint8_t* codes, float scale, uint64_t n) {
+    __m512i t8[4];
+    const uint16_t* lev = nn__turboquant__zzabi_levels(8u);
+    for (int i = 0; i < 4; ++i) t8[i] = _mm512_loadu_si512((const void*)(lev + 32 * i));
+    const __m512 s = _mm512_set1_ps(scale);
+    for (uint64_t k = 0; k < n; k += 32u) {
+        __m512 lo, hi;
+        x86_avx2__zzprivate_codes8_512(codes + k, t8, &lo, &hi);
+        _mm512_storeu_ps(out + k, _mm512_mul_ps(s, lo));
+        _mm512_storeu_ps(out + k + 16u, _mm512_mul_ps(s, hi));
+    }
+}
+/* Elements `e0 .. e0 + n` of row `row` of a TurboQuant tier into `out`: each `scale · level`, as nn's element is (`e0` and
+ * `n` multiples of 8). 8 bits: the halves' registers where they serve, else the table a code at a time — a gather of
+ * eight is slower here (▶ the 8-bit rows' rates above); 4 bits: the 16 levels in two registers, eight codes a step. */
 static inline void x86_avx2__zzprivate_attend_row_tq(float* out, const x86_avx2__attend_call* c, uint64_t row, uint64_t e0, uint64_t n) {
     const uint8_t* r = c->codes + row * nn__turboquant__row_bytes(c->d, c->head_dim);
     const float scale = _cvtsh_ss(c->scales[row]);
-    if (c->d == 8u) for (uint64_t e = e0; e < e0 + n; ++e) out[e - e0] = scale * x86_avx2__zzprivate_levels8[r[e]];
-    else for (uint64_t e = e0; e < e0 + n; ++e) out[e - e0] = scale * x86_avx2__zzprivate_levels4[(r[e / 2u] >> (4u * (e & 1u))) & 15u];
+    if (c->d == 8u) {
+        if (x86_avx2__zzprivate_wide8 && n % 32u == 0u) { x86_avx2__zzprivate_attend_row8_512(out, r + e0, scale, n); return; }
+        for (uint64_t e = e0; e < e0 + n; ++e) out[e - e0] = scale * x86_avx2__zzprivate_levels8[r[e]];
+        return;
+    }
+    const __m256 lo = _mm256_loadu_ps(x86_avx2__zzprivate_levels4), hi = _mm256_loadu_ps(x86_avx2__zzprivate_levels4 + 8);
+    const __m256 sc = _mm256_set1_ps(scale);
+    const __m256i shift = _mm256_setr_epi32(0, 4, 0, 4, 0, 4, 0, 4), low = _mm256_set1_epi32(15), seven = _mm256_set1_epi32(7);
+    for (uint64_t e = e0; e < e0 + n; e += 8u) {
+        const uint8_t* q = r + e / 2u;
+        const __m128i pairs = _mm_cvtsi32_si128((int)((uint32_t)q[0] | (uint32_t)q[1] << 8 | (uint32_t)q[2] << 16 | (uint32_t)q[3] << 24));
+        const __m256i at = _mm256_and_si256(_mm256_srlv_epi32(_mm256_cvtepu8_epi32(_mm_unpacklo_epi8(pairs, pairs)), shift), low);
+        const __m256 level = _mm256_blendv_ps(_mm256_permutevar8x32_ps(lo, at), _mm256_permutevar8x32_ps(hi, at),
+                                              _mm256_castsi256_ps(_mm256_cmpgt_epi32(at, seven)));
+        _mm256_storeu_ps(out + (e - e0), _mm256_mul_ps(sc, level));
+    }
 }
 /* Row `row` of the fp16 tier into `out`. */
 static inline void x86_avx2__zzprivate_attend_row(float* out, const x86_avx2__attend_call* c, uint64_t row) {
@@ -1817,6 +1847,71 @@ static void x86_avx2__zzprivate_attend_mix(void* a) {
         }
     }
 }
+/* ⭐ THE MIX OVER A LONG CACHE, a block a (kv head, `width` elements): a cache line of a row (64 elements at 8 bits) is
+ *   read by one block, not four, and a tile of `X86_AVX2__ZZPRIVATE_MIX_TILE` rows is decoded once, then its 16-element
+ *   slices summed over the tile in turn — each element's sum still the positions one after another from the first, so
+ *   the bytes are the 16-element mix's. `MEASURED` the motive: the 4B on the CPU alone 116 ms a token after 4,147
+ *   positions, 529 after 32,807 (measurements/2026-10-29_x86_attend_long_precision.md). */
+#define X86_AVX2__ZZPRIVATE_MIX_TILE 32u
+static void x86_avx2__zzprivate_attend_mix_wide(void* a) {
+    const x86_avx2__attend_call* c = (const x86_avx2__attend_call*)a;
+    const uint64_t width = c->d >> 8u, chunks = c->head_dim / width, b = nn__silicon__block(), g = b / chunks, e0 = (b % chunks) * width;
+    const uint64_t d = c->d & 255u, group = c->q_heads / c->kv_heads, w = NN__ATTENTION__RESIDUAL_FLOATS(c->head_dim);
+    float tile[X86_AVX2__ZZPRIVATE_MIX_TILE * 64u] __attribute__((aligned(32)));
+    float acc[4u * 64u] __attribute__((aligned(32)));
+    for (uint64_t h0 = 0; h0 < group; h0 += 4u) {
+        /* four heads' weights; past the group's end a head repeats the last, and its sums are not stored */
+        const float* ph[4];
+        for (uint64_t j = 0; j < 4u; ++j) ph[j] = c->p + (g * group + (h0 + j < group ? h0 + j : group - 1u)) * c->length;
+        for (uint64_t i = 0; i < 4u * 64u; i += 8u) _mm256_store_ps(acc + i, _mm256_setzero_ps());
+        for (uint64_t t0 = 0; t0 < c->length; t0 += X86_AVX2__ZZPRIVATE_MIX_TILE) {
+            const uint64_t t1 = t0 + X86_AVX2__ZZPRIVATE_MIX_TILE < c->length ? t0 + X86_AVX2__ZZPRIVATE_MIX_TILE : c->length;
+            for (uint64_t t = t0; t < t1; ++t) {
+                float* out = tile + (t - t0) * width;
+                if (d) {
+                    const x86_avx2__attend_call at = { 0, 0, 0, 0, c->codes, c->scales, c->q_heads, c->kv_heads, c->head_dim, 0, d };
+                    x86_avx2__zzprivate_attend_row_tq(out, &at, t * c->kv_heads + g, e0, width);
+                } else {
+                    const uint16_t* r = c->kv + (t * c->kv_heads + g) * c->head_dim + e0;
+                    for (uint64_t e = 0; e < width; e += 8u) _mm256_store_ps(out + e, _mm256_cvtph_ps(_mm_loadu_si128((const __m128i*)(r + e))));
+                }
+            }
+            for (uint64_t q = 0; q < width; q += 16u) {
+                __m256 s0 = _mm256_load_ps(acc + q), s1 = _mm256_load_ps(acc + q + 8u);
+                __m256 s2 = _mm256_load_ps(acc + 64u + q), s3 = _mm256_load_ps(acc + 64u + q + 8u);
+                __m256 s4 = _mm256_load_ps(acc + 128u + q), s5 = _mm256_load_ps(acc + 128u + q + 8u);
+                __m256 s6 = _mm256_load_ps(acc + 192u + q), s7 = _mm256_load_ps(acc + 192u + q + 8u);
+                for (uint64_t t = t0; t < t1; ++t) {
+                    const __m256 v0 = _mm256_load_ps(tile + (t - t0) * width + q), v1 = _mm256_load_ps(tile + (t - t0) * width + q + 8u);
+                    const __m256 w0 = _mm256_set1_ps(ph[0][t]), w1 = _mm256_set1_ps(ph[1][t]);
+                    const __m256 w2 = _mm256_set1_ps(ph[2][t]), w3 = _mm256_set1_ps(ph[3][t]);
+                    s0 = _mm256_fmadd_ps(w0, v0, s0); s1 = _mm256_fmadd_ps(w0, v1, s1);
+                    s2 = _mm256_fmadd_ps(w1, v0, s2); s3 = _mm256_fmadd_ps(w1, v1, s3);
+                    s4 = _mm256_fmadd_ps(w2, v0, s4); s5 = _mm256_fmadd_ps(w2, v1, s5);
+                    s6 = _mm256_fmadd_ps(w3, v0, s6); s7 = _mm256_fmadd_ps(w3, v1, s7);
+                }
+                _mm256_store_ps(acc + q, s0); _mm256_store_ps(acc + q + 8u, s1);
+                _mm256_store_ps(acc + 64u + q, s2); _mm256_store_ps(acc + 64u + q + 8u, s3);
+                _mm256_store_ps(acc + 128u + q, s4); _mm256_store_ps(acc + 128u + q + 8u, s5);
+                _mm256_store_ps(acc + 192u + q, s6); _mm256_store_ps(acc + 192u + q + 8u, s7);
+            }
+        }
+        for (uint64_t j = 0; j < 4u && h0 + j < group; ++j)
+            for (uint64_t e = 0; e < width; e += 8u) _mm256_storeu_ps(c->res + (g * group + h0 + j) * w + 2u + e0 + e, _mm256_load_ps(acc + 64u * j + e));
+    }
+}
+/* The mix on the pool: the widest of 64, 32 and 16 elements a block that still gives every thread a block. */
+static inline void x86_avx2__zzprivate_attend_mix_run(x86_avx2__attend_call* c) {
+    const uint64_t threads = x86_avx2__zzpackage_threads();
+    uint64_t width = 64u;
+    while (width > 16u && (c->head_dim % width != 0u || c->kv_heads * (c->head_dim / width) < threads)) width /= 2u;
+    if (width == 16u) {
+        x86_avx2__zzpackage_run((uint32_t)(c->kv_heads * (c->head_dim / 16u)), x86_avx2__zzprivate_attend_mix, c);
+        return;
+    }
+    c->d |= width << 8u;                       /* the block's width rides above the tier's bits */
+    x86_avx2__zzpackage_run((uint32_t)(c->kv_heads * (c->head_dim / width)), x86_avx2__zzprivate_attend_mix_wide, c);
+}
 static inline bool x86_avx2__zzprivate_attend_fit(uint64_t q_heads, uint64_t kv_heads, uint64_t head_dim, uint64_t length, uint64_t d) {
     return kv_heads != 0u && q_heads % kv_heads == 0u && head_dim != 0u && head_dim % 32u == 0u
         && head_dim <= X86_AVX2__ZZPRIVATE_ATTEND_WIDTH && length != 0u && (d == 0u || d == 4u || d == 8u)
@@ -1854,7 +1949,7 @@ static void x86_avx2__override_attention_residual_mix(float* res, const float* p
     }
     x86_avx2__zzpackage_start();
     x86_avx2__attend_call c = { (float*)(uintptr_t)p, res, 0, v, 0, 0, q_heads, kv_heads, head_dim, length, 0u };
-    x86_avx2__zzpackage_run((uint32_t)(kv_heads * (head_dim / 16u)), x86_avx2__zzprivate_attend_mix, &c);
+    x86_avx2__zzprivate_attend_mix_run(&c);
 }
 static void x86_avx2__override_attention_residual_mix_tq(float* res, const float* p, const uint8_t* codes, const uint16_t* scales,
                                                          uint64_t q_heads, uint64_t kv_heads, uint64_t head_dim, uint64_t length,
@@ -1864,7 +1959,7 @@ static void x86_avx2__override_attention_residual_mix_tq(float* res, const float
     }
     x86_avx2__zzpackage_start();
     x86_avx2__attend_call c = { (float*)(uintptr_t)p, res, 0, 0, codes, scales, q_heads, kv_heads, head_dim, length, d };
-    x86_avx2__zzpackage_run((uint32_t)(kv_heads * (head_dim / 16u)), x86_avx2__zzprivate_attend_mix, &c);
+    x86_avx2__zzprivate_attend_mix_run(&c);
 }
 
 /* ══ ⭐⭐ THE PROMPT'S ATTENTION — the grouped causal scores, and every mix of nn's softmax ════════════════════════════

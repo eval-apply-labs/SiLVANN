@@ -271,9 +271,10 @@ SYS__ENGINE__ABI__BRIDGE(ai_qwen_3__moe_n__zzabi_adapter, ai_qwen_3__moe_n__zzab
  *   post_expert   the shared expert's down, its gate, both sums onto the residual
  * What crosses is the hand-off buffer (`AI_QWEN_3__HAND__HALVES`), the picks and the routed sum: a few KB. */
 
-/* `(ai_qwen_3__pre_expert h1 planes hand picks)` -> `hand`. */
+/* `(ai_qwen_3__pre_expert h1 planes hand picks [next guess])` -> `hand` — and, given the next MoE layer's planes, its router on
+ * this input: that layer's likeliest picks into `guess` (NN-138). */
 static sys__heap_node ai_qwen_3__pre_expert__zzabi_apply(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx) {
-    if (argc != 4u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
+    if (argc != 4u && argc != 6u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
     uint64_t h1_at = 0, h1_room = 0, hand = 0, hand_room = 0;
     if (!sys__heap_node__carries_reference(argv[1].dtype) || !sys__node_array__is(argv[1].args[0])
      || !sys__heap_node__carries_reference(argv[3].dtype) || !sys__node_array__is(argv[3].args[0])
@@ -295,6 +296,22 @@ static sys__heap_node ai_qwen_3__pre_expert__zzabi_apply(const sys__heap_node* a
     const uint64_t hm = at[AI_QWEN_3__PRE__SCRATCH], logits = hm + 2u * H, sgu = logits + 2u * E, sact = sgu + 2u * (2u * I + 2u);
     const uint64_t hmrot = hand, w = hand + 2u * H, sactr = w + 2u * AI_QWEN_3__HAND__WEIGHTS;
     const uint64_t signs = at[AI_QWEN_3__PRE__SIGNS];
+    /* WITH THE NEXT MoE LAYER'S TABLE AND A GUESS AFTER THE PICKS (NN-138): that layer's router on this one's normed input,
+     *   its likeliest picks into the guess, the likeliest first — launched before this layer's own, whose wait covers both;
+     *   its logits and weights in the scratch after the shared expert's activation */
+    const bool guess = argc == 6u;
+    uint64_t gat[AI_QWEN_3__PRE__TABLE], groom[AI_QWEN_3__PRE__TABLE], gv[AI_QWEN_3__PRE__TABLE], G = 0u;
+    const uint64_t glogits = sact + 2u * I, gweights = glogits + 2u * E;
+    if (guess) {
+        if (!sys__heap_node__carries_reference(argv[4].dtype) || !sys__node_array__is(argv[4].args[0])
+         || !sys__heap_node__carries_reference(argv[5].dtype) || !sys__node_array__is(argv[5].args[0]))
+            return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
+        G = sys__node_array__length(argv[5].args[0]);
+        if (!ai_qwen_3__table__zzpackage_read(argv[4].args[0], AI_QWEN_3__PRE__HIDDEN, AI_QWEN_3__PRE__TABLE, gat, groom, gv)
+         || gv[AI_QWEN_3__PRE__HIDDEN] != H || gv[AI_QWEN_3__PRE__EXPERTS] != E || G == 0u || G > NN__ROUTED__GUESS_MAX || G > E)
+            return sys__engine__abi__error(AI_QWEN_3__MOE__FAULT_TABLE);
+        if (!nn__primitives__fits(need + E + G, room[AI_QWEN_3__PRE__SCRATCH])) return sys__engine__abi__error(AI_QWEN_3__MOE__FAULT_ROOM);
+    }
     const nn__doors* doors = nn__doors_for(ctx);
     if (doors == 0) return sys__engine__abi__error(NN__PRIMITIVES__FAULT_NO_DEVICE);
     unsigned int* over = ctx->fault_word;
@@ -308,6 +325,13 @@ static sys__heap_node ai_qwen_3__pre_expert__zzabi_apply(const sys__heap_node* a
     doors->turboquant_gemv((uint16_t*)(uintptr_t)logits, (const uint8_t*)(uintptr_t)at[AI_QWEN_3__PRE__ROUTER], room[AI_QWEN_3__PRE__ROUTER],
                            (const uint8_t*)(uintptr_t)at[AI_QWEN_3__PRE__ROUTER_LUT], room[AI_QWEN_3__PRE__ROUTER_LUT],
                            (const uint16_t*)(uintptr_t)normed, v[AI_QWEN_3__PRE__ROUTER_D], E, H, over);
+    if (guess) {
+        doors->turboquant_gemv((uint16_t*)(uintptr_t)glogits, (const uint8_t*)(uintptr_t)gat[AI_QWEN_3__PRE__ROUTER], groom[AI_QWEN_3__PRE__ROUTER],
+                               (const uint8_t*)(uintptr_t)gat[AI_QWEN_3__PRE__ROUTER_LUT], groom[AI_QWEN_3__PRE__ROUTER_LUT],
+                               (const uint16_t*)(uintptr_t)normed, gv[AI_QWEN_3__PRE__ROUTER_D], E, H, over);
+        const uint64_t gf = nn__routed__guess(ctx, doors, argv[5].args[0], gweights, glogits, 0u, 1.0f, E, G, 0u);
+        if (gf != 0u) return sys__engine__abi__error(gf);
+    }
     uint64_t chosen[AI_QWEN_3__TOP_K_MAX];
     const uint64_t landed = nn__routed__top_k(ctx, doors, argv[3].args[0], w, logits, 0u, 1.0f, E, K, chosen);
     if (landed != 0u) return sys__engine__abi__error(landed);
@@ -380,16 +404,26 @@ static uint64_t ai_qwen_3__moe__zzprivate_mask_picks(sys__engine__ctx* ctx, cons
     return 0u;
 }
 
-/* `(ai_qwen_3__experts hand picks planes routed [nn__expert_tier [1]])` -> `routed`: Σ_j w[j] · down_j(swiglu(gate_up_j(hm))),
- * as nn runs a position's routed experts (▶ nn's `nn__routed__position`): an expert not in memory read while the others
- * compute, a card's tier's picks computed and marked held — and the mask added after, where the table carries one.
+/* `(ai_qwen_3__experts hand picks planes routed [nn__expert_tier [1] | guess next count parts])` -> `routed`:
+ * Σ_j w[j] · down_j(swiglu(gate_up_j(hm))), as nn runs a position's routed experts (▶ nn's `nn__routed__position`): an
+ * expert not in memory read while the others compute, a card's tier's picks computed and marked held — and the mask added
+ * after, where the table carries one. With a guess of the next MoE layer's picks and that layer's table, the guess read
+ * ahead (NN-138).
  * ⭐ WITH 1 AFTER THE TIER, ITS VISIT ALONE (▶ nn's `nn__routed__visit`): the picks marked and the card waited for — the
  *   hand `pre_expert` queued is whole — and nothing computed; the next call without it computes the card's picks. In
  *   between the CPUs start on theirs, so they run beside the card's (▶ lisp/qwen3_5.lisp ⑤). */
 static sys__heap_node ai_qwen_3__experts__zzabi_apply(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx) {
-    if (argc != 4u && argc != 5u && argc != 6u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
+    if (argc != 4u && argc != 5u && argc != 6u && argc != 8u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
     const bool visit_only = argc == 6u;
     if (visit_only && (argv[5].dtype != SYS__KIND__VALUE_INT || argv[5].args[0] != 1u))
+        return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
+    /* WITH A GUESS, THE NEXT MoE LAYER'S EXPERTS TABLE, A COUNT AND THE PARTS AFTER `routed` (NN-138): the guess's likeliest
+     *   experts not in memory read ahead — `count` of them, or 0 as many as the disk reads while a layer computes, an expert
+     *   `parts` reads; with no tier */
+    const bool ahead = argc == 8u;
+    if (ahead && (!sys__heap_node__carries_reference(argv[4].dtype) || !sys__node_array__is(argv[4].args[0])
+               || !sys__heap_node__carries_reference(argv[5].dtype) || !sys__node_array__is(argv[5].args[0])
+               || argv[6].dtype != SYS__KIND__VALUE_INT || argv[7].dtype != SYS__KIND__VALUE_INT || argv[7].args[0] == 0u))
         return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
     uint64_t hand = 0, hand_room = 0, routed = 0, routed_room = 0;
     if (!sys__heap_node__carries_reference(argv[1].dtype) || !sys__node_array__is(argv[1].args[0])
@@ -423,8 +457,17 @@ static sys__heap_node ai_qwen_3__experts__zzabi_apply(const sys__heap_node* argv
     /* ⭐ A CARD'S TIER: the picks it holds computed here and marked held; the CPU's skip them */
     nn__expert_tier tier;
     bool tier_ok = true;
-    const bool holds = ai_qwen_3__moe__zzprivate_tier(argv, argc, 4u, r.layer, &tier, &tier_ok);
+    const bool holds = !ahead && ai_qwen_3__moe__zzprivate_tier(argv, argc, 4u, r.layer, &tier, &tier_ok);
     if (!tier_ok || (holds && masked)) return sys__engine__abi__error(AI_QWEN_3__MOE__FAULT_TABLE);
+    nn__routed next;
+    if (ahead) {
+        uint64_t nat[AI_QWEN_3__EXP__TABLE], nroom[AI_QWEN_3__EXP__TABLE], nv[AI_QWEN_3__EXP__TABLE];
+        if (!ai_qwen_3__table__zzpackage_read(argv[5].args[0], AI_QWEN_3__EXP__LAYER, AI_QWEN_3__EXP__BACKING, nat, nroom, nv)
+         || !ai_qwen_3__moe__zzprivate_routed(argv[5].args[0], nat, nroom, nv, int8, &next))
+            return sys__engine__abi__error(AI_QWEN_3__MOE__FAULT_TABLE);
+        r.ahead_next = &next; r.ahead_guess = argv[4].args[0];
+        r.ahead_count = argv[6].args[0]; r.ahead_parts = argv[7].args[0];
+    }
     if (visit_only) {
         if (!holds) return sys__engine__abi__error(AI_QWEN_3__MOE__FAULT_TABLE);
         const uint64_t f = nn__routed__visit(ctx, &r, argv[1].args[0], &tier);

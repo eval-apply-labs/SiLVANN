@@ -5,9 +5,15 @@
 ;; each socket's own buffers.
 
 (worker 1
+  ;;   and where the card guessed the next MoE layer's picks (AHEAD_NEXT, NN-138), this socket's part of the first of the
+  ;;   guess it does not hold read ahead from the disk — AHEAD experts, or as many as the disk reads while a layer computes,
+  ;;   an expert a part on each of the SOCKETS
   (picture xf (let ((s (- (sys__worker) FIRST_SOCKET)))
                 (nn__buffer__copy hand CARD (nth C_HAND s) HAND_BYTES)
-                (ai_z__glm_5_3__experts (nth C_HAND s) picks (nth (nth EX s) (nth HERE 0)) (nth C_ROUTED s))))
+                (if (< 0 (nth AHEAD_NEXT (nth HERE 0)))
+                    (ai_z__glm_5_3__experts (nth C_HAND s) picks (nth (nth EX s) (nth HERE 0)) (nth C_ROUTED s)
+                                            guess (nth (nth EX s) (nth AHEAD_NEXT (nth HERE 0))) AHEAD SOCKETS)
+                    (ai_z__glm_5_3__experts (nth C_HAND s) picks (nth (nth EX s) (nth HERE 0)) (nth C_ROUTED s)))))
   ;; the card's tier visited and the card waited for (▶ glm5.lisp `tier_and_sockets`, VISIT_FIRST): the hand read beside
   ;;   the card's experts
   (picture xf_ready (let ((s (- (sys__worker) FIRST_SOCKET)))
@@ -21,5 +27,5 @@
                 (nn__turboquant__decode (nn__vector__range c_embedding (* tok EMB_HALVES) EMB_HALVES)
                                         (nn__vector__range c_embedding (+ EMB_SCALES tok) 1) c_emb 1 HIDDEN EMB_BITS))))
 
-;; what a socket's block sees: the pictures, the tables, the card's hand and picks — the bindings as they stand
+;; what a socket's block sees: the pictures, the tables, the card's hand, picks and guess — the bindings as they stand
 (view names)

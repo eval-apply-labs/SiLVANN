@@ -280,21 +280,20 @@ class Client:
         r.raise_for_status()
         return r.json()
 
-    async def stream_answer(self, cart_id: str, choice: str, max_new_tokens: int):
+    async def stream_answer(self, cart_id: str, choice: str):
         """The user's answer to the model's ask, then the rest of the answer — as `stream_message` yields it."""
-        async for kind, payload in self._stream(f"{self.endpoint}/cartridges/{cart_id}/tools/answer",
-                                                {"choice": choice, "max_new_tokens": max_new_tokens}, cart_id):
+        async for kind, payload in self._stream(f"{self.endpoint}/cartridges/{cart_id}/tools/answer", {"choice": choice}, cart_id):
             yield kind, payload
 
-    async def stream_message(self, cart_id: str, text: str, max_new_tokens: int,
-                              images: Optional[list] = None):
+    async def stream_message(self, cart_id: str, text: str, images: Optional[list] = None):
         """Yield (event_kind, payload_dict) tuples from the server's SSE stream until done|error.
 
         `images` is an optional list of image_ids previously uploaded via
         `upload_image`; the server splices their cached embeddings into the prefill
-        stream and pops them after a successful turn."""
+        stream and pops them after a successful turn. The answer runs until it ends, the
+        stop button stops it, or it fills the conversation's context."""
         url = f"{self.endpoint}/cartridges/{cart_id}/messages"
-        body = {"text": text, "max_new_tokens": max_new_tokens}
+        body = {"text": text}
         if images:
             body["images"] = list(images)
         async for kind, payload in self._stream(url, body, cart_id):
@@ -743,7 +742,7 @@ class ModelDownloads:
     the disk under MODELS_DIR has less room than the model still needs, and 1 GB."""
 
     def __init__(self):
-        self.known: Optional[list] = None   # [{name, repo, size}], read once from silvann_core.py
+        self.known: Optional[list] = None   # [{name, repo, size, base}], read once from silvann_core.py
         self.proc: Optional[subprocess.Popen] = None
         self.name: Optional[str] = None
         self.total = 0
@@ -758,7 +757,7 @@ class ModelDownloads:
                                text=True, cwd=str(REPO_ROOT), timeout=300)
             if r.returncode != 0:
                 raise RuntimeError("silvann_core.py list-models failed: " + (r.stderr or r.stdout)[-500:])
-            self.known = [{k: m[k] for k in ("name", "repo", "size")}
+            self.known = [{k: m.get(k) for k in ("name", "repo", "size", "base")}
                           for m in json.loads(r.stdout.strip().splitlines()[-1])]
         return [dict(m, here=model_present(m["name"])) for m in self.known]
 
@@ -1293,7 +1292,6 @@ async def page():
             attach_btn.set_visibility(False)       # shown when the server's model reads pictures or files (its /health)
             input_box = ui.textarea(placeholder="Type a message — Enter to send, Shift+Enter for newline"
                                     ).classes("flex-grow").props("autogrow outlined")
-            max_in = ui.number(label="max tokens", value=2048, min=1, max=16384).classes("w-32")
             send_btn = ui.button(icon="send")
 
         def _cart_pending() -> list:
@@ -1382,7 +1380,9 @@ async def page():
                 # collapsed once a model is here: downloading is the first visit's work, starting a server every visit's
                 with ui.expansion("Download models", icon="download", value=not list_models()).classes("w-full"):
                     ui.label(f"Downloaded from Hugging Face into {MODELS_DIR}. Help → Running SiLVANN says what "
-                             f"each needs; one larger than the card runs its experts on the CPU."
+                             f"each needs; one larger than the card runs its experts on the CPU. A pack's name opens "
+                             f"its page on Hugging Face, and 'made from' the original model's — its makers' card and "
+                             f"the license the pack carries."
                              ).classes("text-xs opacity-70 max-w-2xl whitespace-normal")
 
                     # the Hugging Face token: faster downloads than a client that is not signed in, and the repositories
@@ -1438,9 +1438,17 @@ async def page():
                             ui.label("reading the list of models…").classes("text-xs opacity-70")
                             return
                         ui.label(f"{_free_bytes() / 1e9:.0f} GB free on this disk").classes("text-xs opacity-70")
-                        with ui.grid(columns="auto auto auto").classes("items-center gap-x-6 gap-y-1"):
+                        with ui.grid(columns="auto auto auto auto").classes("items-center gap-x-6 gap-y-1"):
+                            for head in ("pack", "made from", "size", ""):
+                                ui.label(head).classes("text-xs opacity-70")
                             for m in DOWNLOADS.catalogue():
-                                ui.label(m["name"]).classes("font-mono text-sm")
+                                ui.link(m["name"], "https://huggingface.co/" + m["repo"], new_tab=True
+                                        ).classes("font-mono text-sm")
+                                if m["base"]:
+                                    ui.link(m["base"], "https://huggingface.co/" + m["base"], new_tab=True
+                                            ).classes("text-sm")
+                                else:
+                                    ui.label("")
                                 ui.label(m["size"]).classes("text-sm")
                                 if m["here"]:
                                     ui.label("here").classes("text-sm text-green-700")
@@ -1987,13 +1995,18 @@ async def page():
             if state["streaming"]:
                 ui.label("…").classes("opacity-50 self-center animate-pulse")
             elif state.get("ask"):                       # the model's command waits on the user
-                with ui.card().classes("self-start bg-amber-50 border border-amber-300"):
+                with ui.card().classes("self-start bg-amber-50 border border-amber-300") as ask_card:
                     ui.label("The model asks to %s" % state["ask"]["question"]).classes("text-sm font-mono")
                     with ui.row().classes("gap-2"):
                         for choice in state["ask"]["choices"]:
                             ui.button(ASK_LABELS.get(choice, choice),
                                       on_click=lambda _, c=choice: answer_ask(c)
                                       ).props("dense " + ("flat color=negative" if choice == "refuse" else "color=primary"))
+                # ⛳ the ask brought into view once the browser has drawn it: a scroll in the same update as the card runs
+                #   before the card has a height, and stops at the bottom of what was there — the ask out of sight below
+                ui.timer(0.2, lambda: (chat_scroll.scroll_to(percent=1.0),
+                                       ui.run_javascript("getHtmlElement(%d).scrollIntoView({block: 'end'})" % ask_card.id)),
+                         once=True)
         chat_scroll.scroll_to(percent=1.0)
 
     def add_messages(start: int):
@@ -2556,9 +2569,7 @@ async def page():
         n_tokens = 0
         speed_label.text = "queued…" if waiting else "…"
         try:
-            async for kind, payload in client.stream_message(
-                    state["active_id"], txt, int(max_in.value or 2048),
-                    images=image_ids):
+            async for kind, payload in client.stream_message(state["active_id"], txt, images=image_ids):
                 if kind == "waiting":                      # the card is serving another turn; asked again in 5 s
                     if not waiting:
                         waiting = True
@@ -2664,7 +2675,7 @@ async def page():
             state["history"].append({"role": "assistant", "content": ""})
         render_chat()
         try:
-            async for kind, payload in client.stream_answer(state["active_id"], choice, int(max_in.value or 2048)):
+            async for kind, payload in client.stream_answer(state["active_id"], choice):
                 if kind == "token":
                     state["history"][-1]["content"] += payload.get("text", "")
                     if "used" in payload:

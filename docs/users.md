@@ -2,9 +2,52 @@
 
 This is a **developer preview**: what it is tested on is in the [README](../README.md#platforms). If something does not
 build or run on your machine, you are expected to be able to read the error and the source. On Linux the recommended way
-to run it is a container ([`docker/README.md`](../docker/README.md)); this guide is for installing it.
+to run it is a container ([below](#on-linux-a-container-recommended)); installed, it runs the same, and installing is the
+way on Windows.
 
-## 1. Build
+## 1. Set it up
+
+### On Linux: a container (recommended)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/eval-apply-labs/SiLVANN/HEAD/docker/setup.sh | bash
+```
+
+The script finds Podman (or Docker) and the card — AMD, NVIDIA, or none — and checks what the machine needs: where
+something is missing (the card's driver, NVIDIA's container toolkit, your `video` and `render` groups for an AMD card) it
+says which command fixes it, and stops ([`docker/README.md`](../docker/README.md#what-the-machine-needs)). It makes the
+folder `~/SiLVANN`, asks for a Brave Search API key so the model can search the web (Enter skips it), and starts SiLVANN
+at http://silvann.localhost:8080 — or the first free port after 8080 — and prints the address. In **Options**,
+**Download models** fetches a model and **start** runs it ([`ui.md`](ui.md)).
+
+**Why a container.** The model's tool reads files, runs commands and fetches web pages. In a rootless container it
+reaches the container and `~/SiLVANN`, and nothing else of the machine ([`local_ai.md`](local_ai.md#container-first));
+the models run as fast as an install runs them.
+
+**`~/SiLVANN` is the data folder** this guide speaks of — `/data` inside the container: the models (`models/`), the
+conversations (`user_sessions/`), your skills (`skills/`), the tools file (`tools/`) and the model's workspace
+(`workspace/`), where you put the files it should read and find the ones it makes. The rest of this guide holds in the
+container — the UI, the model's tool, a model's settings (§4) — with these differences:
+
+- The UI is the way in, and it starts the model's server itself: §3's `silvann serve` and `silvann ui` are not needed.
+  The `silvann` command is inside the container — `podman exec -it silvann silvann list`, `… silvann download <model>` —
+  and so is the chat in a terminal, `podman exec -it silvann silvann_cli`, once a model runs.
+- Updating, stopping and starting:
+
+  ```bash
+  curl -fsSL https://raw.githubusercontent.com/eval-apply-labs/SiLVANN/HEAD/docker/setup.sh | bash -s -- update
+  podman stop -t 300 silvann       # it saves the conversations first
+  podman start silvann             # the model it ran last starts with it
+  ```
+
+  An update keeps the models, the conversations and the settings.
+- MP4 and other video files need PyAV, which the image leaves out: `docker/install_nonfree.sh`, once
+  ([`docker/README.md`](../docker/README.md#what-the-image-leaves-out)).
+- The chat listens on this machine alone, and has no login.
+
+The commands by hand, Docker instead of Podman, and Ubuntu 22.04's older Podman: [`docker/README.md`](../docker/README.md).
+
+### On Linux: installed
 
 **The quickest way** — in a terminal, in the folder you want SiLVANN under:
 
@@ -91,9 +134,10 @@ upgraded from Windows 10, or one where it is off, is not affected.
 **What differs from Linux:** a model's experts are never mapped from their file — `experts_from` `"mapped"` is refused,
 and `"disk"` reads them as they are wanted; the processors count as one NUMA node; the model's tool has `(powershell …)`
 beside `(bash …)`, bash being Git for Windows' ([`tools.md`](tools.md)). It has run on one PC — an RTX 5070 Ti, a Ryzen
-7 5800X, 32 GB of RAM — built from source with CUDA 13.4: Ministral 3 14B `D4` on the card answered in the chat at 58
-tokens a second. The prebuilt libraries, the CPU alone, the experts on the CPU or read from the disk, and AMD's and
-Intel's GPUs have not run on Windows yet: tell us in Discussions how they do.
+7 5800X, 32 GB of RAM: built from source with CUDA 13.4, Ministral 3 14B `D4` on the card answered in the chat at 58
+tokens a second (v0.12.0); with v0.21.2, Qwen 3.6 35B-A3B `D8E4` — its experts on the CPU beside the card — at 48. The
+CPU alone, the experts read from the disk, and AMD's and Intel's GPUs have not run on Windows yet: tell us in Discussions
+how they do.
 
 **A model larger than the card, on Windows.** NVIDIA's Windows driver lets a program use more memory than the card has,
 the rest in the PC's RAM ("shared GPU memory" in Task Manager), so a model too large for the card starts on it all the
@@ -126,7 +170,7 @@ from the PC's boot menu, the Windows disk untouched:
 3. **The card's driver:** NVIDIA's from Ubuntu's *Additional Drivers* (570 or newer for an RTX 50 card), then CUDA 12's
    toolkit from developer.nvidia.com/cuda-downloads; for an MI50, ROCm 6.1.3 with `amdgpu-dkms` (and the README's note
    on kernel updates). The CPU alone needs neither.
-4. **SiLVANN:** the one line above.
+4. **SiLVANN:** the container's line [above](#on-linux-a-container-recommended), or the install's.
 
 **WSL2 — possible, and untested.** WSL2, the Linux that runs inside Windows 10 (21H2 or later) and 11, should run it on
 an NVIDIA card or the CPU alone: `wsl --install` in PowerShell as administrator; NVIDIA's Windows driver (no Linux
@@ -136,6 +180,9 @@ machine's RAM for a model with its experts in RAM; the UI at `http://localhost:8
 tried it yet: tell us in Discussions if you do. ROCm inside WSL supports recent Radeon cards only, not the MI50.
 
 ## 2. Get a model
+
+In the container, **Download models** in the UI's Options, or `podman exec -it silvann silvann download <model>`.
+Installed:
 
 ```bash
 silvann list                                          # the models this release can fetch
@@ -157,6 +204,8 @@ first.
 
 ## 3. Serve it, and chat
 
+In the container the UI is already running: **start** in its Options runs a model. Installed:
+
 ```bash
 silvann serve silvann_tq_D8E4_qwen3.6_35b_a3b       # the server, on port 8765; it keeps running
 silvann ui                                          # in another terminal: the chat, at http://localhost:8090
@@ -176,7 +225,9 @@ an answer. `--endpoint` names another server (`http://localhost:8765` by default
 
 **In the browser** ([`ui.md`](ui.md) goes through the UI, view by view; it is the first document in its Help), a model
 with no conversation saved opens one as its server starts, and a message typed brings the
-open conversation online, as **Activate** does. While the model thinks the answer says "thinking…"; **show thinking**
+open conversation online, as **Activate** does. An answer runs until the model is done, you stop it (the send button
+becomes a stop button), or the conversation reaches its context; a command the model asks to run brings its card into
+view below the answer. While the model thinks the answer says "thinking…"; **show thinking**
 shows the thought itself, in a section of its own. A run of the model's tool calls is a section, "tool · 3 calls", closed
 until you open it. The top bar shows how full the conversation is: its tokens of the most the model takes (its
 `max_context`), as "4,210 / 32,768" beside a bar that turns amber at three quarters and red at nine tenths.
@@ -222,6 +273,9 @@ answered `503` with `Retry-After: 5`, and the UI retries. The card holds one con
 the card, the one on it is kept in RAM — or, when RAM has no room for two conversations at the full context beside 500
 MB, put away to its folder, as one is when the UI or client that opened it has been gone for two minutes, and
 **Activate** brings it back.
+
+Which model suits a machine — the card, the RAM, the CPU — and how fast each answers there:
+[`results.md`](results.md#which-model-for-your-machine).
 
 On a machine with no card the model runs on the CPU's own cores (the `x86_avx2` family, which needs AVX2, FMA and F16C:
 Intel from Haswell, 2013, AMD from Excavator, 2015; an older processor has no family to run on). The pack for it is
@@ -379,7 +433,14 @@ split over two CPU sockets — they are written once, at the first start, to `mo
 when a token picks it, so the disk's speed is the answer's speed. On our test machine GLM 5.3 Flash answered at
 5.7 tokens a second with 128 GB of RAM from a disk that reads 5 GB/s. Keep the disk cool: a hot NVMe drive slows itself down. Every measurement: [`results.md`](results.md). The engine keeps as many experts
 as the memory there is allows — the process's own limit when it has one — less a quarter of it for everything else,
-at least 3 GB and at most 8 GB.
+at least 3 GB and at most 8 GB: a machine where the server may hold 32 GB keeps about 24 GB of experts.
+
+**The next layer's experts read ahead** (`experts_ahead`, `"auto"` by default — the Qwen MoE models and GLM 5.3 Flash):
+each layer's router also guesses the next layer's picks, and the experts it guesses best that are not in memory are read
+while the layer computes, rather than after the next layer asks for them. `"auto"` reads one or two a layer — as many as
+the disk starts while a layer computes — and the answer is the same either way. GLM 5.3 Flash on a 16 GB card held to
+16 GB of RAM went from 1.94 to 2.31 tokens a second; the 35B-A3B with 3 GB of its experts in memory from 16.4 to 19.8
+([`config.md`](config.md), `experts_ahead`).
 
 DeepSeek-V4.1-Flash reads its experts from the disk the same way, where RAM does not hold all 272 GB of them (chosen at
 boot from v0.21.2): straight from its pack, which lays each expert out as the engine holds it, nothing written beside it.
@@ -400,12 +461,14 @@ its server the same way; its config (`configs/default.json`) says its part:
 | `pipeline_parallelism_layers` | this machine's run of the layers, first-last — GLM has 45 (0-44), the 122B 48, the 35B 40, the 27B 64 |
 | `pipeline_parallelism_next` | the machine after this one, `host:port`; the last machine names the first |
 | `pipeline_parallelism_port` | where this machine listens for the one before it, 8766 by default |
-| `max_context` | the same number on every machine (not `"auto"`) |
+| `max_context` | the same number on every machine, or `"auto"` on every machine: each then holds what its card holds beside its layers, and the ring holds the least of them |
 | `card` | which of the machine's cards to run on (`0`, `1`, …), `"auto"` the first, `"cpu"` none — its CPU and RAM. Two cards in one PC are two machines of the ring, on ports of their own; so are a card and the CPU beside it. Two on one card boot one after the other, and the first takes what its setup chooses of it: give each its share, `card_experts_gb` in its options |
 
 The machine whose layers begin at 0 is the first: it answers the UI and holds the conversations. The one whose layers end
 at the model's last runs its head, draws the next token there, and hands it back to the first. Each machine chooses its
-own setup for its layers (▶ section 4) — where its experts sit, its card's tier. For GLM over two machines:
+own setup for its layers (▶ section 4) — where its experts sit, its card's tier. A machine whose card holds every expert of
+its layers keeps them all there (GLM's `experts_on` `"card"`, chosen at boot): seven of GLM's MoE layers are 24 GB, which
+a 32 GB card holds, so six such cards hold the whole model with nothing of it in RAM. For GLM over two machines:
 ```
   PC A (192.0.2.2):  "pipeline_parallelism": "yes", "pipeline_parallelism_layers": "0-22",  "pipeline_parallelism_next": "192.0.2.3:8766"
   PC B (192.0.2.3):  "pipeline_parallelism": "yes", "pipeline_parallelism_layers": "23-44", "pipeline_parallelism_next": "192.0.2.2:8766"
@@ -414,3 +477,8 @@ Start both servers (in either order: each waits for the other); the UI talks to 
 of numbers a position (GLM's 32 KB) — a gigabit link is enough. Text, files and GLM's pictures and videos go round the
 ring; a Qwen model's pictures are read on one machine only, for now. A conversation's caches are spread over the
 machines, so one taken up again after another ran reads its tokens again.
+
+Every 64 positions of an answer each machine's server says how far apart they came and how much of each it computed
+(`the last 64 positions: … ms apart, … ms of each here`), and a prompt's rows the same once it is through: a
+position goes round the machines one after another, so its time is every machine's share added up, and the machine with
+the largest share is the one to give fewer layers.

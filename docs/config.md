@@ -57,7 +57,7 @@ and every option is explained here.
 | `image` | the picture model's own | The settings of a picture the REPL draws, as a picture model's config has them (below). |
 | `image_model`, `image_card` | — | Older keys for the tools file's `image` settings `model` and `card`, still read: one a config sets, other than `"auto"` and `null`, is used over the tools file's for this model. `image_model: "no"` turns pictures off for it. |
 | `workers` | `[]` | Other SiLVANN servers, `"host:port"`, that a subagent of another model runs on ([`tools.md`](tools.md#subagents)), before the servers a registry lists ([`tools.md`](tools.md#servers-found-through-a-registry)). With none free, this machine lends its card. |
-| `pipeline_parallelism` | `"no"` | `"yes"` runs the model over several machines in a ring, each with a run of its layers ([`users.md` §6](users.md#6-a-model-over-several-machines)). |
+| `pipeline_parallelism` | `"no"` | `"yes"` runs the model over several machines in a ring, each with a run of its layers ([`users.md` §6](users.md#6-a-model-over-several-machines)). Each machine's `max_context` is the same number, or `"auto"` on every machine: each then holds what its card holds beside its layers, and the ring the least of them. |
 | `pipeline_parallelism_layers` | — | This machine's run of the layers, first-last, as `"0-23"`. Needed with `pipeline_parallelism` `"yes"`. |
 | `pipeline_parallelism_next` | — | The machine after this one, `host:port`. The last machine names the first. |
 | `pipeline_parallelism_port` | `8766` | Where this machine listens for the one before it. |
@@ -174,6 +174,7 @@ These options apply to Qwen 3.6 35B-A3B, Qwen 3.8 27B, and Qwen 3.5 122B-A10B an
 | `experts_on` | `"card"`, `"cpu"` | The routed experts on the card, or on the CPU (for a card too small to hold them). It is chosen at boot when the config does not say. |
 | `experts_from` | `"auto"`, `"ram"`, `"disk"`, `"mapped"` | With the experts on the CPU, where they are read from. `ram` copies them into RAM. `disk` reads them from a file as they are needed and keeps the ones used in the engine's memory (`experts_ram_gb` sets how much). `mapped` leaves that to the system's page cache, and is slower. `auto` chooses by the memory there is. |
 | `experts_ram_gb` | gigabytes | With `experts_from: "disk"`, how much RAM keeps the experts used. By default, what the process may hold less a quarter of it (at least 3 GB, at most 8 GB) kept for everything else. |
+| `experts_ahead` | `"auto"` by default, `"no"`, or a number | With `experts_from: "disk"`, how many of the next layer's experts are read before it asks for them: each layer's router also guesses the next layer's picks, and the experts it guesses best that are not in memory are read while the layer computes. `auto` reads as many as the disk starts in that time, one or two. The answer is the same either way. |
 | `card_experts` | `"yes"` by default, or `"no"` | With the experts on the CPU from RAM, whether the card keeps its own tier of them, sized at boot ([`users.md`](users.md#the-cards-tier-of-experts)). |
 | `card_experts_gb` | gigabytes | The tier's size, rather than the size chosen at boot. Named alone, it puts the experts on the CPU. |
 | `card_landing` | `"auto"` by default, or a number | The most experts a layer copies onto the card while the CPU computes the picks the card does not hold. `"auto"` times one CPU expert and one expert's upload at boot and takes as many uploads as fit in the CPU expert's time, to the nearest whole number and at least 1. `MEASURED` on node-01 (an MI50 beside a Xeon E5-2680 v4): the 35B 0.08 ms against 0.42, GLM 0.21–0.24 ms against 2.9–3.3 — 1 for both. |
@@ -249,8 +250,10 @@ four.
 
 | option | values | what it sets |
 |---|---|---|
+| `experts_on` | `"cpu"`, `"card"` | Where the routed experts of the layers this machine runs are. `cpu`: in the CPUs' memory (`experts_from`), the card a tier of them (`card_experts_gb`). `card`: every one of them on the card, written there at boot, the card computing every pick — no RAM for them, no tier, no warming up. A whole GLM's 142 GB fits no card; a ring's machine running a few layers does — seven MoE layers are 24 GB, which a 32 GB card holds. Chosen at boot when the config does not say: the card wherever it holds them beside the context — with `max_context` `"auto"`, beside 32,768 positions or more. Not with a group of cards (`num_cards`), `card_experts_gb`, `stream` or `mtp`. |
 | `experts_from` | `"auto"`, `"ram"`, `"disk"`, `"mapped"` | Where its routed experts (142 GB) are read from. `ram` holds them in RAM. `disk` reads them from a file as they are needed and keeps the ones used in the engine's memory (`experts_ram_gb` sets how much). `mapped` leaves that to the system's page cache. `auto` puts them in RAM when the available memory holds them with about 3 GB to spare, which is about 145 GB. |
 | `experts_ram_gb` | gigabytes | With `experts_from: "disk"`, how much RAM keeps the experts used. |
+| `experts_ahead` | `"auto"` by default, `"no"`, or a number | With `experts_from: "disk"`, how many of the next MoE layer's experts are read before it asks for them: each MoE layer's router also guesses the next one's picks, and the experts it guesses best that are not in memory are read while the layer computes. `auto` reads as many as the disk starts in that time, one or two: from a 9 GB/s array with 8 GB of experts in RAM, two, and the answer 12% faster. The answer is the same either way. |
 | `chunk` | positions, default 256 | How many positions of a prompt go through a layer at once. With the experts on the disk 1024 reads a prompt faster, and is chosen at boot. |
 | `experts_dir` | a folder | As the Qwen models'. |
 | `sockets` | `1`, `2` | The CPU sockets the experts are split over. By default, all of them. |
@@ -319,8 +322,12 @@ It reads pictures, not videos. Its options for measuring, whose defaults are the
 
 ## Ministral 3 14B's options
 
-Ministral takes no options. Its cache is every position in halves, about 625 positions a 100 MB of the card, so
-`"auto"` gives it what the card holds beside it: on a 16 GB card about 32,000 positions beside its D4.
+Ministral's cache is every position in halves, about 625 positions a 100 MB of the card, so `"auto"` gives it what the
+card holds beside it: on a 16 GB card about 32,000 positions beside its D4. It takes one option:
+
+| option | values | what it sets |
+|---|---|---|
+| `embed_on` | `"auto"` by default, `"card"` or `"cpu"` | As the Qwen models': `"cpu"` has a CPU worker of its own decode a token's row of the embedding, and the card copies the row across. `"auto"` chooses `"cpu"` through `khronos_opencl1_igpu`, where the card would otherwise copy the whole table (671 MB, in both packs at 8 bits) across PCIe both ways every token, and `"card"` elsewhere. It needs the pack's `lisp/mistral3_cpu.lisp`; with a pack fetched before it, `"auto"` keeps the table on the card. |
 
 ## Examples
 

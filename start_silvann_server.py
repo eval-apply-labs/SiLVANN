@@ -83,7 +83,7 @@ class CreateConvReq(BaseModel):
 
 class MessageReq(BaseModel):
     text: str
-    max_new_tokens: int = 256
+    max_new_tokens: Optional[int] = None    # the most tokens the answer runs; none: until it ends, is stopped or fills the context
     images: list[str] = []
 
 
@@ -96,7 +96,7 @@ class UpdateReq(BaseModel):
 
 class AnswerReq(BaseModel):
     choice: str                             # one of the ask's choices: "folder", "once", "refuse"
-    max_new_tokens: int = 2048
+    max_new_tokens: Optional[int] = None    # as a message's
 
 
 class SaveReq(BaseModel):
@@ -380,9 +380,8 @@ def _boot(args):
         layers = pipeline.layers_of(cfg.get("pipeline_parallelism_layers", ""), total)
         if not cfg.get("pipeline_parallelism_next"):
             raise SR.Refused("pipeline_parallelism_next names the machine after this one in the ring, as host:port")
-        if asked == "max":
-            raise SR.Refused("a ring's machines share one context: max_context is the same number in each one's config, "
-                             "not \"auto\"")
+        # a ring's machines share one context: the same number in each config that names one, and every machine left to
+        #   "auto" boots with what its card holds beside its layers — the ring then holds the least of them (▶ `pipeline._agree`)
         options["layers"] = layers
     with _one_boot_at_a_time():
         named = options                                   # the config's own: what a second choice is made around
@@ -412,11 +411,12 @@ def _boot(args):
         if layers[0] != 0:
             say("a stage of the ring: layers %d-%d of %d%s" % (layers[0], layers[-1], total,
                                                                 ", the head" if layers[-1] == total - 1 else ""))
-            pipeline.stage(S.model, link, layers[-1] == total - 1, say)
+            pipeline.stage(S.model, link, layers[-1] == total - 1, say, fixed=asked != "max")
             S.model.m.shutdown()
             raise SystemExit(0)
         say("the first machine of the ring: layers %d-%d of %d" % (layers[0], layers[-1], total))
-        S.model = pipeline.Pipeline(S.model, link, say)
+        S.model = pipeline.Pipeline(S.model, link, say, fixed=asked != "max")
+        max_context = S.model.max_context                 # the ring's, agreed
     S.setup = dict(folder=str(folder), lora=cfg.get("lora"), max_context=max_context, options=options, ring=ring)
     S.runtime = Runtime(S.model)
     S.chat = Chat(S.model.folder)
@@ -1664,7 +1664,7 @@ class _Answer:
         self.opened = S.chat.opened(new)       # the stretch begins inside the think block its prompt opened
         while True:
             try:
-                t = S.runtime.turn(self.c, new, min(self.budget, room), sampler=_sampler(), stop=self.stop,
+                t = S.runtime.turn(self.c, new, room if self.budget is None else min(self.budget, room), sampler=_sampler(), stop=self.stop,
                                    on_token=self._on_token, images=images)
                 break
             except Busy:
@@ -1715,9 +1715,10 @@ class _Answer:
                 t = self._turn(S.chat.tool_response(self.answers, self.thinking), retry=True)
             while True:
                 t.wait()
-                self.budget -= len(self.answer)
+                if self.budget is not None:
+                    self.budget -= len(self.answer)
                 forms = S.chat.tool_calls(self.answer) if self.declared and not t.cancelled else []
-                if not forms or self.budget <= 0:
+                if not forms or (self.budget is not None and self.budget <= 0):
                     if self.held:              # a call never made, shown as the model wrote it
                         self._show("token", (self.opened + S.chat.decode(self.answer))[len(self.shown):], token_id=-1)
                     break

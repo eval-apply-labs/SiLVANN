@@ -87,6 +87,10 @@ static sys__os__thread  nn__loader__zzprivate_threads[NN__EXPERT__LOADERS_MAX];
 static unsigned         nn__loader__zzprivate_started = 0u;
 static bool             nn__loader__zzprivate_stopping = false;
 static uint64_t         nn__loader__zzprivate_count[NN__EXPERT__COUNTS];
+/* the file reads on their way now, and since when one has been: their time is the disk's (COUNT_READ_BUSY_NS) */
+static unsigned         nn__loader__zzprivate_reading;
+static uint64_t         nn__loader__zzprivate_reading_since;
+static inline uint64_t nn__loader__zzprivate_now_ns(void);
 static uint64_t         nn__loader__zzprivate_seq = 1ull << 62;       /* the queue's clock, under the lock */
 static uint64_t         nn__loader__zzprivate_front = 0ull;           /* the clock of the jobs taken ahead (▶ `nn__expert__ahead`),
                                                                        * below every other job's */
@@ -296,6 +300,8 @@ static void* nn__loader__zzprivate_run(void* unused) {
         const bool slices = (job->job == NN__LOADER__JOB_READ && !job->gather) || gather;
         if (job->state == NN__LOADER__QUEUED) {
             job->state = NN__LOADER__READING;
+            if (job->job == NN__LOADER__JOB_READ && !job->gather && nn__loader__zzprivate_reading++ == 0u)
+                nn__loader__zzprivate_reading_since = nn__loader__zzprivate_now_ns();
             if (slices) {
                 job->slices_all = 0u; job->slices_taken = 0u; job->slices_landed = 0u; job->slices_failed = false;
                 if (gather) {
@@ -336,6 +342,12 @@ static void* nn__loader__zzprivate_run(void* unused) {
             const bool last = job->slices_landed == job->slices_all;
             if (last) {
                 job->state = job->slices_failed ? NN__LOADER__FAILED : NN__LOADER__DONE;
+                if (!gather) {
+                    ++nn__loader__zzprivate_count[NN__EXPERT__COUNT_READS_DONE];
+                    if (nn__loader__zzprivate_reading != 0u && --nn__loader__zzprivate_reading == 0u)
+                        nn__loader__zzprivate_count[NN__EXPERT__COUNT_READ_BUSY_NS] += nn__loader__zzprivate_now_ns()
+                                                                                     - nn__loader__zzprivate_reading_since;
+                }
                 if (gather && !job->slices_failed) {
                     if (job->in_place) ++nn__loader__zzprivate_count[NN__EXPERT__COUNT_IN_PLACE];
                     nn__expert_tier__zzprivate_gathered(job);
@@ -524,6 +536,28 @@ static __device__ inline int nn__expert__request(sys__silicon_family__id family,
     sys__os__condition_wake_one(&nn__loader__zzprivate_work);
     sys__os__lock_give(&nn__loader__zzprivate_lock);
     return NN__EXPERT__ARRIVING;
+}
+
+/* ⭐ A GUESS READ AHEAD (NN-138) — `ids`, a layer's likeliest picks the likeliest first (numbered as this worker's
+ *   collection numbers them): the first `want` that are neither in memory nor on their way queued as a prediction's reads,
+ *   each taking a slot as a pick's read does, the guess's others pinned; the ones in memory it passes touched, so they are
+ *   not the next to go. How many it queued. */
+static __device__ inline unsigned nn__expert__read_ahead(sys__silicon_family__id family, uint64_t layer, uint64_t type, const uint64_t* ids,
+                                                         unsigned n, unsigned want, const nn__expert__backing* backing) {
+    const uint64_t owner = nn__expert__zzpackage_owner();
+    unsigned queued = 0u;
+    for (unsigned i = 0u; i < n && queued < want; ++i) {
+        sys__heap_node me;
+        if (!nn__expert__slot(layer, type, ids[i], &me)) continue;
+        if (me.args[NN__EXPERT__SLOT_AT] != 0ull) { (void)nn__expert__touch(layer, type, ids[i]); continue; }
+        sys__os__lock_take(&nn__loader__zzprivate_lock);
+        const bool coming = nn__loader__zzprivate_find(owner, layer, type, ids[i]) != 0;
+        sys__os__lock_give(&nn__loader__zzprivate_lock);
+        if (coming) continue;
+        if (nn__expert__request(family, layer, type, ids[i], backing, true, ids, n, 0) != NN__EXPERT__ARRIVING) break;
+        ++queued;
+    }
+    return queued;
 }
 
 /* ⭐ A WAIT FOR A READ, TIMED — the lock held, as `pthread_cond_wait` needs it: the time is what a layer spent waiting on

@@ -1017,4 +1017,269 @@ __kernel void khronos_opencl2__index_select_rows(ulong index__address, uint64_t 
 
 #endif /* __OPENCL_C_VERSION__ */
 
+/* ══ ⭐⭐ A TOKEN'S SMALL DOORS — GLM's AND DeepSeek's: THE STEP, THE SITES' MAPS, THE ROUTER ══════════════════════════
+ * The doors a decoded token meets between its GEMVs (▶ khronos_opencl1_igpu's, which these are, in OpenCL C 2.0; the ROCm
+ * family's `kda.cuh`, `hyper.cuh` and `vector.cuh`). On the MI50 through nn's generic bodies they were 36 to 126 us each
+ * alone (`MEASURED`, test/src_gemv_27b_bench.cpp, BENCH_ATTENTION_ONLY / ROWS_ONLY / DEEPSEEK_ONLY).
+ * ⭐ EACH OUTPUT IS nn's GENERIC KERNEL's, BIT FOR BIT, ON THE SAME DEVICE: the same products added in the same order as
+ *   nn's body, every sum across a work-group a `work_group_reduce_add` (or `_max`) — nn's `lanes_sum` in this family — over
+ *   nn's door's lanes, or over fewer where nn's door gives the rest zeros. What is the family's own:
+ *   · KDA's step a row — a lane's column of the state in its registers between the step's two passes
+ *   · a site's map's logits — a lane's sixteen reads in flight together
+ *   · a site's `pre` at four streams — the mix's Sinkhorn iterations sixteen lanes an entry each
+ *   · the scored router — each score made once and kept, where nn's body makes every score again each round
+ * ⛳ THREE STAY nn's, no faster here as the other families write them (`MEASURED` on the MI50, back to back): the norm of
+ *   a row of halves, a lane's sixteen reads in flight (a row of 5,120 22.9 -> 25.0 us, every width slower), and of floats
+ *   (within the noise of nn's door), and `vector_sum`, eight halves a lane (5.6 -> 6.9 us), its parts this device's own.
+ * ⛳ NO SUB-GROUPS, so these are outside the guard above: an Intel card or iGPU without `cl_khr_subgroups` gets them too.
+ *   nn's macros are gone from the text this joins (it is preprocessed before), so the few these need are written here. */
+#if defined(__OPENCL_C_VERSION__)
+#define KHRONOS_OPENCL2__ZZPRIVATE_RUN            16u   /* a lane's reads in flight */
+#define KHRONOS_OPENCL2__ZZPRIVATE_MULT           4u    /* the streams of a site's `pre` here */
+#define KHRONOS_OPENCL2__ZZPRIVATE_SCORE_SIGMOID  1ul   /* nn's `NN__VECTOR__SCORE_SIGMOID` */
+#define KHRONOS_OPENCL2__ZZPRIVATE_SCORE_SOFTPLUS 2ul   /* nn's `NN__VECTOR__SCORE_SQRT_SOFTPLUS` */
+#define KHRONOS_OPENCL2__ZZPRIVATE_ROUTER_MOST    16u   /* nn's `NN__VECTOR__ROUTER_K_MAX`, which the door holds `k` to */
+
+/* ⭐ KDA's STEP A ROW AT A HEAD OF 128 — nn's `kda_step`: a work-group a head and a lane a column, its column of the state
+ *   read once into registers and written once, where nn's body reads and writes it in memory in both passes. Each row's
+ *   decay is nn's expression, made by every lane as nn's lane makes it. */
+__kernel void khronos_opencl2__kda_step(ulong S__address, ulong conved__address, ulong f__address, ulong b__address, ulong dt__address,
+                                        ulong a_log__address, ulong gate__address, ulong w__address, ulong out__address, uint64_t heads,
+                                        float lower, float eps, ulong over__address) {
+    __global float* S = (__global float*)S__address;
+    __global const uint16_t* conved = (__global const uint16_t*)conved__address;
+    __global const uint16_t* f = (__global const uint16_t*)f__address;
+    __global const uint16_t* b = (__global const uint16_t*)b__address;
+    __global const uint16_t* dt = (__global const uint16_t*)dt__address;
+    __global const uint16_t* a_log = (__global const uint16_t*)a_log__address;
+    __global const uint16_t* gate = (__global const uint16_t*)gate__address;
+    __global const uint16_t* w = (__global const uint16_t*)w__address;
+    __global uint16_t* out = (__global uint16_t*)out__address;
+    __global unsigned int* over = (__global unsigned int*)over__address;
+    const uint32_t D = 128u, j = (uint32_t)get_local_id(0);
+    const uint64_t width = heads * D;
+    for (uint64_t h = get_group_id(0); h < heads; h += get_num_groups(0)) {
+        __global float* Sh = S + h * D * D;
+        __global const uint16_t* q = conved + h * D;
+        __global const uint16_t* k = conved + width + h * D;
+        __global const uint16_t* v = conved + 2ul * width + h * D;
+        __global const uint16_t* fh = f + h * D;
+        __global const uint16_t* dth = dt + h * D;
+        const float a = nn__silicon__expf(nn__silicon__half_to_float(a_log[h]));
+        const float beta = 1.0f / (1.0f + nn__silicon__expf(-nn__silicon__half_to_float(b[h])));
+        const float qi = nn__silicon__half_to_float(q[j]), ki = nn__silicon__half_to_float(k[j]);
+        float qq = 0.0f, kk = 0.0f;
+        qq += qi * qi;
+        kk += ki * ki;
+        const float inv_q = 1.0f / nn__silicon__sqrtf(nn__silicon__lanes_sum(qq) + 1e-6f) / nn__silicon__sqrtf((float)D);
+        const float inv_k = 1.0f / nn__silicon__sqrtf(nn__silicon__lanes_sum(kk) + 1e-6f);
+        float col[128];
+#pragma unroll
+        for (uint32_t i = 0u; i < D; ++i) col[i] = Sh[i * D + j];
+        float kv = 0.0f;
+        for (uint32_t i = 0u; i < D; ++i) {
+            const float gi = lower / (1.0f + nn__silicon__expf(-a * (nn__silicon__half_to_float(fh[i]) + nn__silicon__half_to_float(dth[i]))));
+            col[i] *= nn__silicon__expf(gi);
+            kv += col[i] * nn__silicon__half_to_float(k[i]) * inv_k;
+        }
+        const float delta = (nn__silicon__half_to_float(v[j]) - kv) * beta;
+        float o = 0.0f;
+#pragma unroll
+        for (uint32_t i = 0u; i < D; ++i) {
+            const float s = col[i] + nn__silicon__half_to_float(k[i]) * inv_k * delta;
+            Sh[i * D + j] = s;
+            o += s * nn__silicon__half_to_float(q[i]);
+        }
+        const float oj = nn__silicon__half_to_float(nn__kernels__zzabi_to_half(o * inv_q, over));   /* rounded, as nn's readout is */
+        float oo = 0.0f;
+        oo += oj * oj;
+        const float scale = 1.0f / nn__silicon__sqrtf(nn__silicon__lanes_sum(oo) / (float)D + eps);
+        const float gz = nn__silicon__half_to_float(gate[h * D + j]);
+        out[h * D + j] = nn__kernels__zzabi_to_half(oj * scale * nn__silicon__half_to_float(w[j]) / (1.0f + nn__silicon__expf(-gz)), over);
+    }
+}
+
+/* ⭐ A SITE'S MAP'S LOGITS — nn's `hyper_logits` and `hyper_logits_fp32`: a work-group a logit and a lane a stride of the
+ *   streams, a lane's squares and products element by element, then the work-group's fold — nn's sums in nn's order; a
+ *   lane's elements read sixteen at a time, all in flight together, where nn's body waits for each before the next.
+ *   `half_streams` says which the streams are: GLM's halves or DeepSeek's floats. */
+static inline float khronos_opencl2__zzprivate_stream(__global const void* streams, uint64_t i, bool half_streams) {
+    return half_streams ? nn__silicon__half_to_float(((__global const uint16_t*)streams)[i]) : ((__global const float*)streams)[i];
+}
+static inline void khronos_opencl2__zzprivate_hyper_logits(__global float* lg, __global const void* streams, __global const uint16_t* fn,
+                                                           uint64_t hidden, uint64_t mult, float norm_eps, bool half_streams) {
+    const uint64_t lane = get_local_id(0), lanes = get_local_size(0), n = mult * hidden, rows = (2u + mult) * mult;
+    const uint64_t RUN = KHRONOS_OPENCL2__ZZPRIVATE_RUN;
+    for (uint64_t r = get_group_id(0); r < rows; r += get_num_groups(0)) {
+        __global const uint16_t* row = fn + r * n;
+        float sq = 0.0f, dot = 0.0f;
+        uint64_t c = lane;
+        for (; c + (RUN - 1u) * lanes < n; c += RUN * lanes) {
+            float v[16], g[16];
+            for (uint64_t u = 0u; u < RUN; ++u) {
+                v[u] = khronos_opencl2__zzprivate_stream(streams, c + u * lanes, half_streams);
+                g[u] = nn__silicon__half_to_float(row[c + u * lanes]);
+            }
+            for (uint64_t u = 0u; u < RUN; ++u) {
+                sq += v[u] * v[u];
+                dot += g[u] * v[u];
+            }
+        }
+        for (; c < n; c += lanes) {
+            const float v = khronos_opencl2__zzprivate_stream(streams, c, half_streams);
+            sq += v * v;
+            dot += nn__silicon__half_to_float(row[c]) * v;
+        }
+        const float inv = 1.0f / nn__silicon__sqrtf(nn__silicon__lanes_sum(sq) / (float)n + norm_eps);
+        const float got = nn__silicon__lanes_sum(dot) * inv;
+        if (lane == 0u) lg[r] = got;
+    }
+}
+__kernel void khronos_opencl2__hyper_logits(ulong lg__address, ulong streams__address, ulong fn__address, uint64_t hidden, uint64_t mult,
+                                            float norm_eps) {
+    khronos_opencl2__zzprivate_hyper_logits((__global float*)lg__address, (__global const void*)streams__address,
+                                            (__global const uint16_t*)fn__address, hidden, mult, norm_eps, true);
+}
+__kernel void khronos_opencl2__hyper_logits_fp32(ulong lg__address, ulong streams__address, ulong fn__address, uint64_t hidden,
+                                                 uint64_t mult, float norm_eps) {
+    khronos_opencl2__zzprivate_hyper_logits((__global float*)lg__address, (__global const void*)streams__address,
+                                            (__global const uint16_t*)fn__address, hidden, mult, norm_eps, false);
+}
+
+/* ⭐ THE SCORED ROUTER — nn's `top_k_scored`: nn's `k` rounds of the work-group's two folds, each round's largest score + bias
+ *   and the first index holding it, so nn's picks and nn's weights. A lane makes each of its scores once — an exponential, a
+ *   logarithm and a root for √softplus — and keeps them; a pick leaves its lane's list. Up to four scores a lane of 256. */
+static inline float khronos_opencl2__zzprivate_score(float x, uint64_t score) {   /* nn's `zzprivate_score` */
+    if (score == KHRONOS_OPENCL2__ZZPRIVATE_SCORE_SIGMOID) return 1.0f / (1.0f + nn__silicon__expf(-x));
+    if (score == KHRONOS_OPENCL2__ZZPRIVATE_SCORE_SOFTPLUS) return nn__silicon__sqrtf(x > 20.0f ? x : nn__silicon__logf(1.0f + nn__silicon__expf(x)));
+    return x;
+}
+__kernel void khronos_opencl2__top_k_scored(ulong values__address, uint64_t stride, ulong weights__address, ulong x__address,
+                                            ulong bias__address, uint64_t n, uint64_t k, float scale, uint64_t score) {
+    if (get_group_id(0) != 0u) return;
+    __global uint64_t* values = (__global uint64_t*)values__address;
+    __global uint16_t* weights = (__global uint16_t*)weights__address;
+    __global const uint16_t* x = (__global const uint16_t*)x__address;
+    __global const uint16_t* bias = (__global const uint16_t*)bias__address;
+    const uint64_t lane = get_local_id(0), lanes = get_local_size(0);
+    float v[4];
+    bool live[4];
+    for (uint64_t j = 0u; j < 4u; ++j) {
+        const uint64_t i = lane + j * lanes;
+        v[j] = i < n ? khronos_opencl2__zzprivate_score(nn__silicon__half_to_float(x[i]), score) + nn__silicon__half_to_float(bias[i]) : 0.0f;
+        live[j] = i < n && v[j] == v[j];
+    }
+    uint64_t chosen[KHRONOS_OPENCL2__ZZPRIVATE_ROUTER_MOST];
+    for (uint64_t r = 0u; r < k; ++r) {
+        uint64_t best_i = n;
+        float best_v = -INFINITY;
+        for (uint64_t j = 0u; j < 4u; ++j)
+            if (live[j] && (best_i == n || v[j] > best_v)) { best_v = v[j]; best_i = lane + j * lanes; }
+        const float top = nn__silicon__lanes_max(best_v);
+        const float first = nn__silicon__lanes_max(best_i != n && best_v == top ? -(float)(uint32_t)best_i : -INFINITY);
+        chosen[r] = first == -INFINITY ? n : (uint64_t)(-first);
+        for (uint64_t j = 0u; j < 4u; ++j)
+            if (lane + j * lanes == chosen[r]) live[j] = false;
+    }
+    if (lane != 0u) return;
+    float s[KHRONOS_OPENCL2__ZZPRIVATE_ROUTER_MOST], sum = 0.0f;
+    for (uint64_t r = 0u; r < k; ++r) {
+        s[r] = chosen[r] < n ? khronos_opencl2__zzprivate_score(nn__silicon__half_to_float(x[chosen[r]]), score) : 0.0f;
+        sum += s[r];
+    }
+    for (uint64_t r = 0u; r < k; ++r) {
+        values[r * stride] = chosen[r];
+        weights[r] = nn__kernels__zzabi_to_half(s[r] / (sum + 1e-20f) * scale, 0);   /* nn's router raises no overflow either */
+    }
+}
+
+/* ⭐ A SITE'S `pre` AT FOUR STREAMS — nn's `hyper_pre` and `hyper_pre_fp32`: nn's body's first lane works the mix's Sinkhorn
+ *   iterations out of memory, one lane's chain of divisions, while the rest collapse — 111 us of the call on the MI50, where
+ *   the collapse is a few (`MEASURED`, the bench; one lane in registers still 75). Here the first work-group's sixteen
+ *   lanes hold an entry of the 4×4 mix each, and a row's or a column's sum is read from the work-group's local memory,
+ *   each lane adding its row's or its column's four in nn's order: each entry nn's expression in nn's order (▶ nn's
+ *   `nn__hyper__zzprivate_weights`; the ROCm family's, which reads the sums by shuffles OpenCL 2.0 lacks). A half-step
+ *   writes one of two places and waits once, every lane of the work-group reaching each wait — the category of nn's fold
+ *   here, a `work_group_reduce_add`. The collapse is nn's loop. */
+static inline void khronos_opencl2__zzprivate_hyper_mix4(__global float* mix, __global const float* lg, const float* pre,
+                                                         __global const uint16_t* base, float s1, float s2, uint64_t iters, float eps,
+                                                         __local float* sh) {
+    const uint32_t M = KHRONOS_OPENCL2__ZZPRIVATE_MULT, lane = (uint32_t)get_local_id(0), l = lane % (M * M), i = l / M, j = l % M;
+    float row[4], top = -INFINITY, sum = 0.0f;                  /* this lane's row: a softmax over its columns, plus eps */
+    for (uint32_t c = 0u; c < M; ++c) {
+        const uint32_t k = 2u * M + i * M + c;
+        row[c] = lg[k] * s2 + nn__silicon__half_to_float(base[k]);
+        if (row[c] > top) top = row[c];
+    }
+    for (uint32_t c = 0u; c < M; ++c) { row[c] = nn__silicon__expf(row[c] - top); sum += row[c]; }
+    float v = row[j] / sum + eps;
+    uint32_t at = 0u;
+    for (uint64_t it = 0u; it < iters; ++it) {                  /* the columns, then — past the first — rows and columns */
+        if (it != 0u) {
+            if (lane < M * M) sh[at * 16u + l] = v;
+            barrier(CLK_LOCAL_MEM_FENCE);
+            float rs = 0.0f;
+            for (uint32_t c = 0u; c < M; ++c) rs += sh[at * 16u + i * M + c];
+            v /= rs + eps;
+            at ^= 1u;
+        }
+        if (lane < M * M) sh[at * 16u + l] = v;
+        barrier(CLK_LOCAL_MEM_FENCE);
+        float cs = 0.0f;
+        for (uint32_t r = 0u; r < M; ++r) cs += sh[at * 16u + r * M + j];
+        v /= cs + eps;
+        at ^= 1u;
+    }
+    if (lane < M * M) mix[2u * M + l] = v;
+    if (lane < M) {
+        mix[lane] = pre[lane];
+        mix[M + lane] = 2.0f / (1.0f + nn__silicon__expf(-(lg[M + lane] * s1 + nn__silicon__half_to_float(base[M + lane]))));
+    }
+}
+/* nn's `pre` — the weights every lane collapses with — and, by the first work-group alone, the mix. */
+static inline void khronos_opencl2__zzprivate_hyper_pre4(float* pre, __global float* mix, __global const uint16_t* base,
+                                                         __global const uint16_t* scale, uint64_t iters, float eps, __local float* sh) {
+    const uint64_t M = KHRONOS_OPENCL2__ZZPRIVATE_MULT;
+    __global const float* lg = mix + (2u + M) * M;
+    const float s0 = nn__silicon__half_to_float(scale[0]), s1 = nn__silicon__half_to_float(scale[1]);
+    const float s2 = nn__silicon__half_to_float(scale[2]);
+    for (uint64_t i = 0u; i < M; ++i)
+        pre[i] = 1.0f / (1.0f + nn__silicon__expf(-(lg[i] * s0 + nn__silicon__half_to_float(base[i])))) + eps;
+    if (get_group_id(0) == 0u) khronos_opencl2__zzprivate_hyper_mix4(mix, lg, pre, base, s1, s2, iters, eps, sh);
+}
+/* GLM's, the streams halves: the collapse nn's sum in nn's order, rounded to a half as nn rounds it, its overflow in the
+ *   same fault word. */
+__kernel void khronos_opencl2__hyper_pre4(ulong out__address, ulong mix__address, ulong streams__address, ulong base__address,
+                                          ulong scale__address, uint64_t hidden, uint64_t iters, float eps, ulong over__address) {
+    __local float sh[32];
+    __global uint16_t* out = (__global uint16_t*)out__address;
+    __global const uint16_t* streams = (__global const uint16_t*)streams__address;
+    __global unsigned int* over = (__global unsigned int*)over__address;
+    float pre[4];
+    khronos_opencl2__zzprivate_hyper_pre4(pre, (__global float*)mix__address, (__global const uint16_t*)base__address,
+                                          (__global const uint16_t*)scale__address, iters, eps, sh);
+    for (uint64_t e = get_global_id(0); e < hidden; e += get_global_size(0)) {
+        float sum = 0.0f;
+        for (uint64_t i = 0u; i < KHRONOS_OPENCL2__ZZPRIVATE_MULT; ++i) sum += pre[i] * nn__silicon__half_to_float(streams[i * hidden + e]);
+        out[e] = nn__kernels__zzabi_to_half(sum, over);
+    }
+}
+/* DeepSeek's, the streams floats. */
+__kernel void khronos_opencl2__hyper_pre4_fp32(ulong out__address, ulong mix__address, ulong streams__address, ulong base__address,
+                                               ulong scale__address, uint64_t hidden, uint64_t iters, float eps) {
+    __local float sh[32];
+    __global float* out = (__global float*)out__address;
+    __global const float* streams = (__global const float*)streams__address;
+    float pre[4];
+    khronos_opencl2__zzprivate_hyper_pre4(pre, (__global float*)mix__address, (__global const uint16_t*)base__address,
+                                          (__global const uint16_t*)scale__address, iters, eps, sh);
+    for (uint64_t e = get_global_id(0); e < hidden; e += get_global_size(0)) {
+        float sum = 0.0f;
+        for (uint64_t i = 0u; i < KHRONOS_OPENCL2__ZZPRIVATE_MULT; ++i) sum += pre[i] * streams[i * hidden + e];
+        out[e] = sum;
+    }
+}
+
+#endif /* __OPENCL_C_VERSION__ */
+
 #endif /* SILVANN__SILICON_FAMILIES_KHRONOS_OPENCL2_OVERRIDES_KERNELS_CUH */

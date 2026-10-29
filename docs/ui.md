@@ -63,7 +63,8 @@ A run of the model's calls to its tool is folded in a section headed "tool · N 
 under it. A long line there, or in the thinking, wraps; in an answer, code keeps its lines and scrolls sideways. Every
 block of code has a **copy** button in its top corner.
 When a call needs your answer, a card below the messages says what the model asks to do, with **allow once** and
-**refuse**; for a read also **allow the folder**, after which every conversation reads there without asking.
+**refuse**; for a read also **allow the folder**, after which every conversation reads there without asking. The chat
+scrolls to the card when it appears.
 
 Below the messages:
 
@@ -71,8 +72,8 @@ Below the messages:
   model. A picture or a video needs a model that reads them: the Qwen models and GLM 5.3 Flash. The server reads it when
   it is attached, a chip shows it, and the message carries it. It stays in the conversation and is saved with it.
 - **The message box**: **Enter** sends, **Shift+Enter** is a new line.
-- **max tokens** caps an answer, up to 16,384. The model stops sooner when it is done.
-- **The send button** becomes a stop button while an answer streams, and stops it.
+- **The send button** becomes a stop button while an answer streams, and stops it. An answer runs until the model is
+  done, you stop it, or the conversation reaches its context.
 
 One conversation is answered at a time. A message sent while another is being answered waits ("⏳ waiting my turn…")
 and then streams.
@@ -94,7 +95,8 @@ file and the skills again, gives each skill installed since its entry in the fil
 needs — after you install a skill, start a SearXNG or change a setting. Every open conversation has the result at its
 next call: a tool switched off answers so, and the model's `(help)` says it.
 
-**Download models** lists the models this release can fetch, their sizes and which are here.
+**Download models** lists the models this release can fetch, their sizes and which are here. A pack's name opens its
+page on Hugging Face, and **made from** the original model's: its makers' card, and the license the pack carries.
 - **download** fetches one from Hugging Face into the data folder's `models/`, with its progress. One downloads at a
   time. A download is refused when the disk has less room than the model needs; stopped and started again, it keeps the
   files it finished.

@@ -29,6 +29,12 @@ typedef struct nn__routed {
     uint64_t hand_bytes, picks_at;              /* a hand row's width and where its picks are in it, in bytes       */
     uint64_t batch;                             /* a prompt's experts a batch where the slots are a cache           */
     nn__expert__backing backing;                /* where the slots are a cache, the file they are read from; 0 none */
+    /* ⭐ THE NEXT LAYER'S EXPERTS READ AHEAD (NN-138): where the program guessed the next layer's picks, its experts as this
+     *   worker holds them and the guess (a node array, the likeliest first); how many of it to read early — 0 as many as
+     *   the disk reads while a layer computes (▶ routed__impl's `ahead`), up to NN__ROUTED__AHEAD_MOST — and the reads an
+     *   expert is (the workers holding a part of every expert, each reading its own). `ahead_next` 0: none. */
+    const struct nn__routed* ahead_next;
+    uint64_t ahead_guess, ahead_count, ahead_parts;
 } nn__routed;
 
 /* What a position's routine leaves for a model's own addition after it — a mask over the routed downs: the picks
@@ -47,6 +53,8 @@ typedef uint64_t (*nn__routed__rows_mask)(void* model, sys__engine__ctx* ctx, ui
                                           uint64_t actr, uint64_t weights, uint64_t down_pairs, uint64_t sums);
 
 #define NN__ROUTED__BATCH_MAX    32u            /* a prompt's experts a batch, at the most                          */
+#define NN__ROUTED__AHEAD_MOST   2u             /* the next layer's experts read ahead when the count is measured   */
+#define NN__ROUTED__GUESS_MAX    16u            /* a guess's picks, at the most                                     */
 #define NN__ROUTED__FAULT_EXPERT 0x4E4E5245ull  /* "NNRE" — a pick is not an expert in memory                       */
 #define NN__ROUTED__FAULT_ROOM   0x4E4E5252ull  /* "NNRR" — the scratch is too small for the shapes                 */
 #define NN__ROUTED__FAULT_SHAPE  0x4E4E5253ull  /* "NNRS" — a shape or a setting the routine does not take          */

@@ -93,6 +93,24 @@ CUDA's and AMD's are. `MEASURED` on the RTX 5060 Ti: the 35B's head 1.32 ms (385
 310 µs → 29, a rotation 27-58 µs → 4.1 at every width; the 35B D8E4 against HF 6/0 at 37.7 ms a token, against 83.0 with
 nn's bodies (▶ `measurements/2026-10-26_nn96_opencl1_gemv_precision.md`).
 
+**GLM's small doors and the sampler's top k (NN-137, 2026-10-28),** each nn's card body to the bit. A site's `pre` at four
+streams (halves and floats), its mix's Sinkhorn steps in the first lane's registers where nn's body sizes its arrays by
+the streams it is handed; the map's logits, a lane's sixteen reads in flight; KDA's step a row, a lane's column in its
+private memory between the step's two passes. The sampler's top `k` over a vocabulary: each lane's largest, a bar that
+`k` lanes' largest reach (sixteen folds bisecting the halves), each lane's values at or above it, then nn's rounds over
+those alone, where nn's body makes `k` passes over every logit on one block. MLA's one-query scores (GLM's and DeepSeek's
+latent): a tile of one, two or four positions an item where nn's is eight, as many items as fill the card, at a decode's
+short context. MLA's expand a run of 32 lanes an output (nn's fold's first three steps in a lane, its last five the
+run's), and the norm of a row of halves a lane's sixteen reads in flight (▶ `measurements/2026-10-28_opencl1_expand_norm_precision.md`:
+the expand at decode 133 → 75 us, the norm 13.5 → 7.6 us in GLM, nn's bytes). `MEASURED` on the RTX 5060 Ti, the bench:
+`hyper_pre` 39.6 → 11.8 us, `hyper_pre_fp32` 41.2 → 11.7, `hyper_logits` 18.9 → 12.0, `kda_step` 39.2 → 29.7, `top_k`
+over 248,320 logits 7.2 ms → 143 us (top 64: 86 ms → 197 us), MLA's scores at 37 positions 108 → 36 us; every output the same bytes as nn's bodies
+(▶ `measurements/2026-10-28_opencl1_glm_doors_precision.md`).
+
+**The GEMV two or four rows a run (2026-10-28):** a lane reads `x`'s halves once for its run's rows' codes, each row's
+sum the one-row kernel's bytes; four from 2,048 rows, two from 768. `MEASURED` on the RTX 5060 Ti: GLM's attention
+output 150 → 87 us, the 27B D4 14.6 → 17.3 tokens/s (▶ `measurements/2026-10-28_opencl1_gemv_rows_precision.md`).
+
 **Two shapes, an integrated GPU's and a discrete card's.** An integrated GPU shares the host's memory and its bandwidth,
 so there each load serves twice as many outputs (sixteen rows, pools or heads against eight). The doors take the
 integrated shape where the device says `CL_DEVICE_HOST_UNIFIED_MEMORY`; `SILVANN_OPENCL1_SHAPE=igpu` or `=discrete`

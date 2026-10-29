@@ -206,6 +206,10 @@ static __device__ inline bool nn__expert__place(uint64_t type, uint64_t* address
 static __device__ inline int nn__expert__request(sys__silicon_family__id family, uint64_t layer, uint64_t type, uint64_t expert,
                                                  const nn__expert__backing* backing, bool predicted,
                                                  const uint64_t* pinned, unsigned npinned, uint64_t* at);
+/* The first `want` of a guess's `ids` (the likeliest first) not in memory nor on their way, read as predictions — the
+ * ones in memory touched (NN-138). How many it queued. */
+static __device__ inline unsigned nn__expert__read_ahead(sys__silicon_family__id family, uint64_t layer, uint64_t type, const uint64_t* ids,
+                                                         unsigned n, unsigned want, const nn__expert__backing* backing);
 static __device__ inline bool nn__expert__settle(uint64_t layer, uint64_t type);
 /* `settle` for one expert: waits for its read alone, if one is on the way, and admits it — so a verb can compute an
  * expert that has arrived while the reads it asked for after it are still arriving. */

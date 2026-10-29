@@ -408,6 +408,9 @@ class DeepSeek4(Generates):
                               % (self.CARD_GB, len(ram)))
             self.RAM_PER = self.EXPERTS - self.CARD_SLICE - self.P * self.CARD_PER
         self.cpu_slots = sum(self.RAM_PER if l in ram else self.EXPERTS for l in run)
+        # every expert on the cards leaves the CPU none, and a section's collection of no slot is refused at boot: one,
+        #   which nothing reads
+        self.cpu_slots = max(1, self.cpu_slots)
         self.SLOTS = None
         if self.EXPERTS_FROM == "disk":
             # ⛳ THE CACHE HOLDS TWO OF A PROMPT'S BATCHES BESIDE WHAT IT KEEPS: nn reads the next batch of a chunk's experts
@@ -1124,6 +1127,11 @@ class DeepSeek4(Generates):
         #   is queued; the CPU starts after it, and the writes a promotion held back go once the CPU is done
         tier = "(ai_deepseek_4__experts hand picks exk%d routed_k %s) " % (l, expert_tier.BINDING) if self.CARD_GB else ""
         written = " (nn__expert_tier__written %s)" % expert_tier.BINDING if self.CARD_GB else ""
+        # ⭐ EVERY EXPERT ON THE CARDS (`card_experts` all of them): the cards' sum is the layer's, and the CPU — which holds
+        #   none — is not started and waited for at every layer
+        if self.NK == self.EXPERTS:
+            return (engram + "(ai_deepseek_4__attention streams at%d pos%s) (ai_deepseek_4__route streams mo%d hand picks) %s"
+                    "(ai_deepseek_4__shared hand mo%d) (ai_deepseek_4__close streams mo%d routed_k%s)" % (l, tp, l, mine, l, l, tp))
         return (engram + "(ai_deepseek_4__attention streams at%d pos%s) (ai_deepseek_4__route streams mo%d hand picks) %s"
                 "(sys__compute %d names xf%d_0) %s(ai_deepseek_4__shared hand mo%d) (sys__result %d)%s "
                 "(nn__buffer__copy c_routed %d routed %d)%s (ai_deepseek_4__close streams mo%d routed%s)"

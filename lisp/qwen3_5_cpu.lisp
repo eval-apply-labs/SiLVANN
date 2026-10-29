@@ -3,8 +3,13 @@
 ;; which is the CPU worker's own: EXPERTS_CPU a position's, EXPERTS_CPU_ROWS a chunk's.
 
 (worker 1                                     ; the CPU: a tensor-parallel group's boot moves it after its cards
+  ;;   and where the card guessed the next layer's picks (AHEAD_NEXT, NN-138), the first of the guess the CPU does not hold
+  ;;   read ahead from the disk — AHEAD experts, or as many as the disk starts while a layer computes
   (picture xq (begin (nn__buffer__copy hand CARD c_hand HAND_BYTES)
-                     (ai_qwen_3__experts c_hand picks (nth EXPERTS_CPU (nth HERE 0)) c_routed)))
+                     (if (< 0 (nth AHEAD_NEXT (nth HERE 0)))
+                         (ai_qwen_3__experts c_hand picks (nth EXPERTS_CPU (nth HERE 0)) c_routed
+                                             guess (nth EXPERTS_CPU (nth AHEAD_NEXT (nth HERE 0))) AHEAD 1)
+                         (ai_qwen_3__experts c_hand picks (nth EXPERTS_CPU (nth HERE 0)) c_routed))))
   ;; the card's tier visited and the card waited for (▶ qwen3_5.lisp ⑤): the hand read beside the card's experts
   (picture xq_ready (begin (nn__buffer__copy hand CARD c_hand HAND_BYTES 1)
                            (ai_qwen_3__experts c_hand picks (nth EXPERTS_CPU (nth HERE 0)) c_routed)))

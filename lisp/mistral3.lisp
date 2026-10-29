@@ -13,7 +13,8 @@
 ;;                   halves, where the scales begin, the rows' width · HEAD_CODES HEAD_SCALES HEAD_BITS
 ;;                   CS_K CS_Q CS_HALVES — a position's cosines then sines, fp32, a row each position: the keys', and the
 ;;                   queries' with their scale in them; a row's halves
-;;                   OUT STOP STOPS SEEN — `generate`'s (▶ generate.lisp)
+;;                   OUT STOP STOPS SEEN — `generate`'s (▶ generate.lisp) · EMBED_ON_CPU CARD CPU, and EMB_TOK where the
+;;                   CPU worker holds the table: the token it decodes, a chunk's count
 ;;                   KV_TYPE KEYS_AT VALUES_AT KV_ROW_BYTES CACHE_BYTES — the cache, a slot a layer: its keys in the up
 ;;                   half, its values in the down, [position][kv head][head dim] in halves
 ;;                   Q_BITS K_BITS V_BITS O_BITS GATE_BITS UP_BITS DOWN_BITS — a matrix's width, the same in every layer
@@ -39,24 +40,46 @@
 
 ;; ── the token's row of the embedding, un-rotated (Rᵀu = S ⊙ H·u), into the residual ───────────────────────────────
 ;; EMBEDDING is a table in RAM the card reads a row of in place: every token's packed row (EMB_HALVES halves each), then
-;; every token's scale from EMB_SCALES on — only a row crosses.
-(defun (embed_into tok into)
-  (begin (nn__turboquant__decode (nn__vector__range EMBEDDING (* tok EMB_HALVES) EMB_HALVES)
-                                 (nn__vector__range EMBEDDING (+ EMB_SCALES tok) 1) u 1 HIDDEN EMB_BITS)
-         (nn__hadamard__rotate u ones512 hu HIDDEN)
-         (nn__vector__pointwise_mul hu signs_row into HIDDEN)
-         (type x)))
+;; every token's scale from EMB_SCALES on — only a row crosses. With EMBED_ON_CPU the table is the CPU worker's
+;; (c_embedding) and the CPU decodes the row (▶ mistral3_cpu.lisp `xe`), the card copying it across: where the card's
+;; family keeps mapped RAM as a copy of its own, the table neither crosses nor takes the card's room.
+(if EMBED_ON_CPU
+    (defun (embed_into tok into)
+      (begin (sys__node_array__set EMB_TOK 0 tok)
+             (sys__compute CPU names xe) (sys__result CPU)
+             (nn__buffer__copy c_emb CPU u HIDDEN_BYTES)
+             (nn__hadamard__rotate u ones512 hu HIDDEN)
+             (nn__vector__pointwise_mul hu signs_row into HIDDEN)
+             (type x)))
+    (defun (embed_into tok into)
+      (begin (nn__turboquant__decode (nn__vector__range EMBEDDING (* tok EMB_HALVES) EMB_HALVES)
+                                     (nn__vector__range EMBEDDING (+ EMB_SCALES tok) 1) u 1 HIDDEN EMB_BITS)
+             (nn__hadamard__rotate u ones512 hu HIDDEN)
+             (nn__vector__pointwise_mul hu signs_row into HIDDEN)
+             (type x))))
 
 (defun (embed tok)
   (embed_into tok x))
 
-;; a prompt's `n` tokens, PROMPT's first `n`, a row of xs each
-(defun (embed_rows n)
-  (let ((i 0) (at 0))
-    (while '(< i n)
-           '(begin (embed_into (nth PROMPT i) (nn__vector__range xs at HIDDEN))
-                   (set! at (+ at HIDDEN)) (set! i (+ i 1))))
-    (type xs)))
+;; a prompt's `n` tokens, PROMPT's first `n`, a row of xs each — with the table the CPU's, its `n` rows in one hand-off
+;; (▶ mistral3_cpu.lisp `xer`) and one copy into h1s, free until the layers, then each row un-rotated into xs
+(if EMBED_ON_CPU
+    (defun (embed_rows n)
+      (let ((i 0) (at 0))
+        (sys__node_array__set EMB_TOK 1 n)
+        (sys__compute CPU names xer) (sys__result CPU)
+        (nn__buffer__copy c_embs CPU h1s (* n HIDDEN_BYTES))
+        (while '(< i n)
+               '(begin (nn__hadamard__rotate (nn__vector__range h1s at HIDDEN) ones512 hu HIDDEN)
+                       (nn__vector__pointwise_mul hu signs_row (nn__vector__range xs at HIDDEN) HIDDEN)
+                       (set! at (+ at HIDDEN)) (set! i (+ i 1))))
+        (type xs)))
+    (defun (embed_rows n)
+      (let ((i 0) (at 0))
+        (while '(< i n)
+               '(begin (embed_into (nth PROMPT i) (nn__vector__range xs at HIDDEN))
+                       (set! at (+ at HIDDEN)) (set! i (+ i 1))))
+        (type xs))))
 
 
 ;; ── a layer ─────────────────────────────────────────────────────────────────────────────────────────────────────────

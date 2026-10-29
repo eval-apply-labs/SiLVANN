@@ -10,7 +10,7 @@ gate on the attention, no norm on its queries and keys. So no package of its own
 The PROGRAM is Lisp, written by hand — `lisp/mistral3.lisp`, which the model folder carries and the boot reads — `layers`
 a loop over the layers; a token is one short program, `(begin (position tok pos) (head))`, and an answer is `generate`
 (▶ `generate`), the same a token at a time on the card until an end token. The embedding is a table in RAM the card
-reads a row of: only a row crosses.
+reads a row of: only a row crosses — or, `embed_on` "cpu", the CPU worker's table, the CPU decoding the row.
 
 ⭐ YaRN, WORKED OUT BY THE HOST AT BOOT: the rotary's frequencies are YaRN's (the 14B: factor 16 over an original 16,384,
 θ 10⁹), which `nn__rope__angles` does not compute — so the boot writes every position's 64 cosines and 64 sines, 512
@@ -32,7 +32,7 @@ from .generate import Generates
 from .model_folder import NL, Refused
 
 ARCHITECTURES = ("ministral3",)
-CARD = 0
+CARD, CPU = 0, 1
 
 
 def _half(a):
@@ -68,10 +68,10 @@ def yarn_inv_freq(head_dim, rope):
 
 
 class Ministral3(Generates):
-    PROGRAM = ("mistral3", "sampling", "generate")        # the model folder's lisp/ files (▶ `ModelFolder.program`)
+    PROGRAM = ("mistral3", "mistral3_cpu", "sampling", "generate")        # the model folder's lisp/ files (▶ `ModelFolder.program`)
     SAMPLES_ON_CARD = True          # `head_sample` — ▶ `sampling`
 
-    def __init__(self, folder, machine, max_context=8192, layers=None):
+    def __init__(self, folder, machine, max_context=8192, layers=None, embed_on="auto"):
         if folder.architecture not in ARCHITECTURES:
             raise Refused("%s is a %r model, not one of %s" % (folder.path, folder.architecture, ARCHITECTURES))
         c, b = folder.config, folder.bundle
@@ -100,6 +100,15 @@ class Ministral3(Generates):
         self.CHUNK = min(256, self.max_context)
         self.SCORES_ROWS = max(self.QH * self.max_context * 4, 32 << 20)
         self.MOE = False
+        # ⭐ THE EMBEDDING ON THE CPU, as Qwen's (▶ qwen3_5.py `embed_on`): a token's row decoded by the CPU worker from its
+        #   own RAM and copied across, HIDDEN halves, so the table never reaches the card. Through khronos_opencl1_igpu the
+        #   card's reading its row in place keeps the table twice and crosses it whole each token, both ways — the 14B's
+        #   is 8-bit, 671 MB. `"auto"`: the CPU there alone.
+        if embed_on not in ("auto", "card", "cpu"):
+            raise Refused("embed_on is 'auto', 'card' or 'cpu', not %r" % (embed_on,))
+        #   A folder whose lisp/ predates mistral3_cpu.lisp keeps the table where it was under "auto".
+        self.EMBED_CPU = embed_on == "cpu" or (embed_on == "auto" and machine.silicon == "khronos_opencl1_igpu"
+                                               and os.path.isfile(os.path.join(folder.path, "lisp", "mistral3_cpu.lisp")))
         self.run_layers = list(range(self.LAYERS)) if layers is None else sorted(layers)
         g = pickle.load(open(os.path.join(folder.path, "global.pkl"), "rb"))
         self.global_ = g
@@ -154,7 +163,7 @@ class Ministral3(Generates):
         big = max(8 << 20, self.QH * self.max_context * 4, self.VOCAB * 2, self.MLP_SCRATCH, self.ATT_SCRATCH, self.SCORES_ROWS)
         types = "".join("nn__expert__type%d__up_bytes:%d\nnn__expert__type%d__down_bytes:%d\nnn__expert__type%d__slots:%d\n"
                         % (t, p.up_bytes, t, p.down_bytes, t, n) for t, p, n in self.collections)
-        return ("nn__buffer_resid__size_bytes:2097152\nnn__buffer_resid__qty:8\n"
+        card = ("nn__buffer_resid__size_bytes:2097152\nnn__buffer_resid__qty:8\n"
                 "nn__buffer_main__size_bytes:4194304\nnn__buffer_main__qty:4\n"
                 "nn__buffer_attn_out__size_bytes:1048576\nnn__buffer_attn_out__qty:64\n"
                 "nn__buffer_logits__size_bytes:%d\nnn__buffer_logits__qty:7\n"
@@ -171,10 +180,33 @@ class Ministral3(Generates):
                 "nn__ram_buffer_experts__size_bytes:64\nnn__ram_buffer_experts__qty:1\n"
                 "nn__ram_buffer_table__size_bytes:%d\nnn__ram_buffer_table__qty:1\n"
                 % (big, (self.arena + (256 << 20)) >> 20, self.LAYERS, "f" * self.LAYERS, len(self.collections), types,
-                   self.TABLE_BYTES))
+                   256 if self.EMBED_CPU else self.TABLE_BYTES))
+        if not self.EMBED_CPU:
+            return card
+        # the CPU worker's section, the embedding's alone: its table, a token's row and a chunk's, and a collection of one
+        # small slot, which nn asks of every section
+        cpu = ("nn__buffer_resid__size_bytes:2097152\nnn__buffer_resid__qty:8\n"
+               "nn__buffer_main__size_bytes:4194304\nnn__buffer_main__qty:1\n"
+               "nn__buffer_attn_out__size_bytes:1048576\nnn__buffer_attn_out__qty:16\n"
+               "nn__buffer_logits__size_bytes:%d\nnn__buffer_logits__qty:5\n"
+               "nn__buffer_partials__size_bytes:1048576\nnn__buffer_partials__qty:8\n"
+               "nn__expert_cache_l1__size_mb:256\n"
+               "nn__cartridge_sink__tokens:1\nnn__cartridge_sink__bytes_per_token_layer:64\n"
+               "nn__cartridge_tq4__tokens:1\nnn__cartridge_tq4__bytes_per_token_layer:64\n"
+               "nn__cartridge_tq6__tokens:1\nnn__cartridge_tq6__bytes_per_token_layer:64\n"
+               "nn__cartridge_fp32__tokens:1\nnn__cartridge_fp32__bytes_per_token_layer:64\n"
+               "nn__model__kv_cache_layers_fullattn:%d\nnn__model__kv_cache_layers_deltanet:0\n"
+               "nn__conversation__text_size_kb:4\nnn__deltanet_state__bytes_per_layer:64\n"
+               "nn__model__layer_types:%s\nnn__expert__types:1\n"
+               "nn__expert__type0__up_bytes:4096\nnn__expert__type0__down_bytes:4096\nnn__expert__type0__slots:1\n"
+               "nn__ram_buffer_result__size_bytes:64\nnn__ram_buffer_result__qty:1\n"
+               "nn__ram_buffer_experts__size_bytes:64\nnn__ram_buffer_experts__qty:1\n"
+               "nn__ram_buffer_table__size_bytes:%d\nnn__ram_buffer_table__qty:1\n"
+               % (max(1 << 20, self.CHUNK * self.H * 2), self.LAYERS, "f" * self.LAYERS, self.TABLE_BYTES))
+        return {CARD: card, CPU: cpu}
 
     def workers(self):
-        return [(self.m.silicon, 0)]
+        return [(self.m.silicon, 0)] + ([("x86_avx2", 0)] if self.EMBED_CPU else [])
 
     # ── ② the load ───────────────────────────────────────────────────────────────────────────────────────────
     def load(self, progress=None):
@@ -210,9 +242,15 @@ class Ministral3(Generates):
         m = self.m
         loader.layer_width(0, self.T_HEAD, 1)
         loader.load_bytes(self.HPLAN, self.T_HEAD, 0, self.head_data, self.head_lut)
-        self.EMB_AT = m.buffer(self.TABLE_BYTES, "EMBEDDING", ram=True)
+        if self.EMBED_CPU:                          # the CPU worker's own (▶ `__init__`), with a token's row and a chunk's
+            m.act_as(CPU)
+        self.EMB_AT = m.buffer(self.TABLE_BYTES, "c_embedding" if self.EMBED_CPU else "EMBEDDING", ram=True)
         m.write(self.EMB_AT, self.emb_data)
         m.write(self.EMB_AT + self.EMB_DATA_BYTES, self.emb_lut)
+        if self.EMBED_CPU:
+            m.buffer(self.H * 2, "c_emb")
+            m.buffer(self.CHUNK * self.H * 2, "c_embs")
+            m.act_as(CARD)
         for name in ("lm_head.weight", "model.language_model.embed_tokens.weight"):
             del self.global_[name]
         self.head_rec = self.emb_rec = None
@@ -282,7 +320,8 @@ class Ministral3(Generates):
                       HEAD_CODES=head(self.HPLAN.at_up_data, self.HPLAN.up_data),
                       HEAD_SCALES=head(self.HPLAN.at_down_lut, self.HPLAN.down_lut), HEAD_BITS=self.HEAD_BITS,
                       KV_TYPE=self.T_KV, KEYS_AT=self.KVPLAN.at_up_data, VALUES_AT=self.KVPLAN.at_down_data,
-                      KV_ROW_BYTES=self.KVW * 2, CACHE_BYTES=self.max_context * self.KVW * 2)
+                      KV_ROW_BYTES=self.KVW * 2, CACHE_BYTES=self.max_context * self.KVW * 2,
+                      EMBED_ON_CPU=bool(self.EMBED_CPU), CARD=CARD, CPU=CPU, HIDDEN_BYTES=2 * H)
         for short, n in self.MATRICES:
             bits = {int(b.record(l, n).d) for l in run}
             if len(bits) != 1:
@@ -290,6 +329,8 @@ class Ministral3(Generates):
             values[short + "_BITS"] = bits.pop()
         values["MLP_WORDS"] = 16 in (values["GATE_BITS"], values["UP_BITS"], values["DOWN_BITS"])
         m.bind_values(values)
+        if self.EMBED_CPU:
+            m.node_array("EMB_TOK", 2)          # the token the CPU decodes the row of, and a prompt chunk's count
         m.array("LAYER", list(run))
         m.array("INPUT_NORM", [self.plane(l, "input_layernorm.weight", "data") for l in run])
         m.array("POST_NORM", [self.plane(l, "post_attention_layernorm.weight", "data") for l in run])
@@ -319,10 +360,12 @@ class Ministral3(Generates):
             m.array("ATTENTION", ["at%d" % l for l in run])
 
     def _procedures(self):
-        """The program: `lisp/mistral3.lisp`, the sampler's and `generate`."""
+        """The program: `lisp/mistral3.lisp`, the sampler's and `generate` — and, the embedding on the CPU, its pictures."""
         self.m.load_source(self.folder.program("mistral3"))
         self.m.load_source(self.folder.program("sampling"))
         self.m.load_source(self.folder.program("generate"))
+        if self.EMBED_CPU:
+            self.m.load_source(self.folder.program("mistral3_cpu"))
 
     # ── ④ running ─────────────────────────────────────────────────────────────────────────────────────────────
     def reset(self):
@@ -338,8 +381,15 @@ class Ministral3(Generates):
         if pos >= self.max_context:
             raise Refused("position %d is past the context of %d" % (pos, self.max_context))
         head = head or sample or ("(head)" if greedy else "(head_logits)")
-        got = self.m.must("(begin (position %d %d) %s)" % (token, pos, head), "position %d" % pos)
+        got = self._run("(begin (position %d %d) %s)" % (token, pos, head), "position %d" % pos)
         return got if greedy or sample else None
+
+    def _run(self, text, what):
+        """A program's answer. ⛳ With the embedding on the CPU it runs with every block standing — it hands the CPU's work
+        (`sys__compute`) — and a program that does not would find the CPU's block never started."""
+        if self.EMBED_CPU:
+            return self.m.grid(text)[1]
+        return self.m.must(text, what)
 
     def _prompt(self, tokens):
         """A prompt chunk's tokens into PROMPT, which `embed_rows` reads — sixty-four to a program, as a program is one
@@ -361,8 +411,8 @@ class Ministral3(Generates):
         for at in range(0, len(tokens), self.CHUNK):
             chunk = tokens[at:at + self.CHUNK]
             self._prompt(chunk)
-            self.m.must("(begin (embed_rows %d) (rows %d %d) (type xs))" % (len(chunk), first + at, len(chunk)),
-                        "the rows from %d" % (first + at))
+            self._run("(begin (embed_rows %d) (rows %d %d) (type xs))" % (len(chunk), first + at, len(chunk)),
+                      "the rows from %d" % (first + at))
             last = len(chunk) - 1
         head = sample or ("(head)" if greedy else "(head_logits)")
         got = self.m.must("(begin (nn__vector__add (nn__vector__range xs %d %d) zero_h x %d) %s)"

@@ -15,15 +15,22 @@ import sys
 
 from .model_folder import Refused
 
+# a pack's name: its repository, its size, and the model it was made from — the makers' own repository, whose license
+#   the pack carries and whose page the UI links to beside the pack's
 KNOWN = {
-    "silvann_tq_D8E4_qwen3.6_35b_a3b": ("eval-apply/silvann_tq_D8E4_qwen3.6_35b_a3b", "20 GB"),
-    "silvann_tq_D8E4_qwen3.5_122b_a10b": ("eval-apply/silvann_tq_D8E4_qwen3.5_122b_a10b", "67 GB"),
-    "silvann_tq_D4_qwen3.8_27b": ("eval-apply/silvann_tq_D4_qwen3.8_27b", "16 GB"),
-    "silvann_tq_D8E4_glm_5.3_flash": ("eval-apply/silvann_tq_D8E4_glm_5.3_flash", "166 GB"),
-    "silvann_tq_D8E4_deepseek_v4.1_flash_1017": ("eval-apply/silvann_tq_D8E4_deepseek_v4.1_flash_1017", "492 GB"),
-    "silvann_tq_D4_ministral_3_14b": ("eval-apply/silvann_tq_D4_ministral_3_14b", "7.4 GB"),
-    "silvann_tq_D8_ministral_3_14b": ("eval-apply/silvann_tq_D8_ministral_3_14b", "13.5 GB"),
-    "silvann_tq_D8_qwen_image_2.1": ("eval-apply/silvann_tq_D8_qwen_image_2.1", "18 GB"),
+    "silvann_tq_D8E4_qwen3.6_35b_a3b": ("eval-apply/silvann_tq_D8E4_qwen3.6_35b_a3b", "20 GB", "Qwen/Qwen3.6-35B-A3B"),
+    "silvann_tq_D8E4_qwen3.5_122b_a10b": ("eval-apply/silvann_tq_D8E4_qwen3.5_122b_a10b", "67 GB", "Qwen/Qwen3.5-122B-A10B"),
+    "silvann_tq_D4_qwen3.5_4b": ("eval-apply/silvann_tq_D4_qwen3.5_4b", "3.5 GB", "Qwen/Qwen3.5-4B"),
+    "silvann_tq_D8_qwen3.5_4b": ("eval-apply/silvann_tq_D8_qwen3.5_4b", "5.3 GB", "Qwen/Qwen3.5-4B"),
+    "silvann_tq_D4_qwen3.8_27b": ("eval-apply/silvann_tq_D4_qwen3.8_27b", "16 GB", "Qwen/Qwen3.8-27B"),
+    "silvann_tq_D8E4_glm_5.3_flash": ("eval-apply/silvann_tq_D8E4_glm_5.3_flash", "166 GB", "zai-org/GLM-5.3-Flash"),
+    "silvann_tq_D8E4_deepseek_v4.1_flash_1017": ("eval-apply/silvann_tq_D8E4_deepseek_v4.1_flash_1017", "492 GB",
+                                                 "deepseek-ai/DeepSeek-V4.1-Flash-1017"),
+    "silvann_tq_D4_ministral_3_14b": ("eval-apply/silvann_tq_D4_ministral_3_14b", "7.4 GB",
+                                      "mistralai/Ministral-3-14B-Instruct-2512"),
+    "silvann_tq_D8_ministral_3_14b": ("eval-apply/silvann_tq_D8_ministral_3_14b", "13.5 GB",
+                                      "mistralai/Ministral-3-14B-Instruct-2512"),
+    "silvann_tq_D8_qwen_image_2.1": ("eval-apply/silvann_tq_D8_qwen_image_2.1", "18 GB", "Qwen/Qwen-Image-2.1"),
 }
 
 
@@ -62,7 +69,7 @@ def ensure_model(path, repo=None, ask=input, yes=False):
         if yes or _lacks_program(path):
             _program(path, repo or KNOWN.get(name, (None, None))[0], ask, yes)
         return path
-    repo, size = (repo, "several GB") if repo else KNOWN.get(name, (None, None))
+    repo, size = (repo, "several GB") if repo else KNOWN.get(name, (None, None))[:2]
     if repo is None:
         raise Refused("%s is not a model folder, and %r is not a model this release knows how to fetch — known: %s"
                       % (path, name, ", ".join(sorted(KNOWN))))

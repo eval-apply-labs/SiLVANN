@@ -177,8 +177,8 @@ class Bundle:
         FAR IS THE HARDEST KIND TO FIND WRONG. `None` here makes `gain_offset` REFUSE rather than guess.
         ⛳ THE PREDICATE IS THE FAMILIES' (`ZERO_CENTERED`): Qwen 3.5's and Qwen3-Next's, not Qwen 3's or Qwen3-VL's.
         ⛔⛔ AND THE CONFIG IS THE BUNDLE'S OWN FIRST — the model's files are carried into it (`nn_pack_model.py`) — and the
-        raw model's only when the bundle has none. `source.path` names a folder on the machine that packed it: it does not
-        exist where a bundle is downloaded to, and is gone here once the raw weights are deleted, and reading only it
+        raw model's only when the bundle has none. `source.path` names the model's Hugging Face repository, or a folder on
+        the machine that packed it: neither is a folder where a bundle is downloaded to, and reading only it
         refused every Qwen and GLM bundle on any other machine (`MEASURED`: the 35B, its raw folder deleted, `None`)."""
         src = (self.manifest.get("source") or {}).get("path")
         for cfg in [os.path.join(self.path, "config.json")] + ([os.path.join(src, "config.json")] if src else []):

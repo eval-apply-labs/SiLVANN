@@ -12,8 +12,10 @@
 #include "expert.cuh"
 #include "conv.cuh"
 #include "vector.cuh"
+#include "primitives.cuh"
 #include "index.cuh"
 #include "kda.cuh"
+#include "hyper.cuh"
 
 /* Into nn's table, once, when the family is first asked for it. */
 static inline void nvidia_cuda12__override_doors(nn__doors* doors) {
@@ -46,7 +48,15 @@ static inline void nvidia_cuda12__override_doors(nn__doors* doors) {
     doors->expert_groups        = nvidia_cuda12__override_expert_groups;
     doors->unfold_rows          = nvidia_cuda12__override_unfold_rows;
     doors->vector_top_k         = nvidia_cuda12__override_vector_top_k;
+    doors->vector_top_k_scored  = nvidia_cuda12__override_vector_top_k_scored;
+    doors->vector_sum           = nvidia_cuda12__override_vector_sum;
+    doors->rmsnorm_fp32         = nvidia_cuda12__override_rmsnorm_fp32;
     doors->kda_steps_decayed             = nvidia_cuda12__override_kda_steps_decayed;
+    doors->kda_step                      = nvidia_cuda12__override_kda_step;
+    doors->hyper_logits                  = nvidia_cuda12__override_hyper_logits;
+    doors->hyper_logits_fp32             = nvidia_cuda12__override_hyper_logits_fp32;
+    doors->hyper_pre                     = nvidia_cuda12__override_hyper_pre;
+    doors->hyper_pre_fp32                = nvidia_cuda12__override_hyper_pre_fp32;
     doors->index_scores                  = nvidia_cuda12__override_index_scores;
     doors->index_scores_rows             = nvidia_cuda12__override_index_scores_rows;
     doors->index_select                  = nvidia_cuda12__override_index_select;

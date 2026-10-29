@@ -13,13 +13,16 @@
 ;;                   PROMPT — a prompt chunk's tokens (OUT STOP STOPS SEEN, `generate`'s: ▶ generate.lisp)
 ;;                   HEAD_CODES HEAD_SCALES HEAD_BITS — the head's two planes
 ;;   the settings    ROTATED (the pack keeps its residual rotated) · TIERED (the attention cache in tiers) · ROUTED (the
-;;                   model has routed experts) · FUSED (the MoE as one word) · EXPERTS_ON_CPU · CARD_TIER — true or false
+;;                   model has routed experts) · FUSED (the MoE as one word) · EXPERTS_ON_CPU · CARD_TIER — true or false;
+;;                   AHEAD — how many of the next layer's experts the CPU reads ahead from the disk, 0 as many as it starts
+;;                   while a layer computes
 ;;   a layer each    arrays indexed by the layer's place in RUN: DELTANET (true for a DeltaNet layer), LAYER (its number),
 ;;                   MIXER and MIXER_ROWS (its mixer's table, a position's and a chunk's), and the MLP's tables — MLP and
 ;;                   MLP_ROWS (dense), MOE (the fused MoE's), PRE POST EXPERTS (the MoE in three), EXPERTS_TIER and
-;;                   EXPERTS_TIER_ROWS (the card's tier). A table is a node array of planes and integers; the cells each
+;;                   EXPERTS_TIER_ROWS (the card's tier), AHEAD_NEXT (the next layer's place in RUN where its experts are
+;;                   read ahead, 0 where they are not). A table is a node array of planes and integers; the cells each
 ;;                   verb reads are named in its package's contracts/objects/ — ai_qwen_3's, and nn's for the dense MLP.
-;;   the buffers     x h h1 hand picks routed xs h1s hands rrows logits_h res … (▶ qwen3_5.py `_buffers`)
+;;   the buffers     x h h1 hand picks guess routed xs h1s hands rrows logits_h res … (▶ qwen3_5.py `_buffers`)
 
 
 ;; ── the token: its row of the embedding, decoded where it is wanted ─────────────────────────────────────────────────
@@ -119,6 +122,12 @@
 ;; ① dense · ② the MoE as one word · ③ the MoE in three on the card · ④ the routed experts on the CPU · ⑤ and a card's
 ;; tier of them beside the CPU's. With the experts on the CPU the card routes into `hand`, the CPU worker runs the
 ;; picture `xq` over the layer named in HERE (▶ qwen3_5_cpu.lisp), and the card closes the layer with the routed sum.
+;; the router into `hand` — and, where the experts are read ahead from the disk (AHEAD_NEXT, NN-138), the next layer's
+;; router on the same input, its likeliest picks into `guess` for the CPU to read the first of (▶ qwen3_5_cpu.lisp `xq`)
+(defun (route i)
+  (if (< 0 (nth AHEAD_NEXT i))
+      (ai_qwen_3__pre_expert h1 (nth PRE i) hand picks (nth PRE (nth AHEAD_NEXT i)) guess)
+      (ai_qwen_3__pre_expert h1 (nth PRE i) hand picks)))
 (if ROUTED
     (if EXPERTS_ON_CPU
         (if CARD_TIER
@@ -137,7 +146,7 @@
                      (type x)))
             (defun (layer i pos)                       ; ④
               (begin (mixer i pos h1)
-                     (ai_qwen_3__pre_expert h1 (nth PRE i) hand picks)
+                     (route i)
                      (sys__node_array__set HERE 0 i)
                      (sys__compute CPU names xq) (sys__result CPU)
                      (nn__buffer__copy c_routed CPU routed HIDDEN_BYTES)

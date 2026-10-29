@@ -48,7 +48,7 @@ class Qwen35(Generates):
                  experts_from="auto", experts_dir=None, layers=None, chunk=256, experts_ram_gb=None, card_experts_gb=0,
                  card_landing="auto", card_line=None, card_shared="auto", experts_int8=False, experts_lock=False, experts_register="auto", picture_pixels=1 << 22,
                  picture_weights="auto", tensor_parallel=1, lend_cache=True, mtp="no", mtp_rows=False, mtp_pairs=True,
-                 stream=False, embed_on="auto"):
+                 stream=False, embed_on="auto", experts_ahead="auto"):
         if folder.architecture not in ARCHITECTURES:
             raise Refused("%s is a %r model, not one of %s" % (folder.path, folder.architecture, ARCHITECTURES))
         c, b = folder.config, folder.bundle
@@ -308,6 +308,21 @@ class Qwen35(Generates):
             if self.SLOTS < 4 * self.TOPK:
                 raise Refused("%d experts is too few for a cache of them" % self.SLOTS)
             self.cpu_arena = self.SLOTS * self.EPLAN.slot_bytes
+        # ⭐ THE NEXT LAYER'S EXPERTS READ AHEAD (NN-138), as glm5.py's: from the disk, each layer's router also runs the next
+        #   layer's on its input — its likeliest picks, `GUESS` of them the likeliest first — and the CPU worker reads the first
+        #   of them it does not hold while the layer computes and the next one's mixer runs. `experts_ahead`: "auto" as many as
+        #   the disk starts in that wait (one or two, nn's measure), a number that many, "no" none.
+        self.GUESS = 12
+        if experts_ahead in ("auto", None):
+            self.AHEAD = 0
+        elif str(experts_ahead).lower() in ("no", "false", "0"):
+            self.AHEAD = None
+        elif isinstance(experts_ahead, int) and not isinstance(experts_ahead, bool) and 0 < experts_ahead <= self.GUESS:
+            self.AHEAD = experts_ahead
+        else:
+            raise Refused("experts_ahead is \"auto\", \"no\" or a count of experts from 1 to %d, not %r" % (self.GUESS, experts_ahead))
+        if self.SLOTS is None or self.CPLAN is not None:
+            self.AHEAD = None
 
     # ── tensor parallel: how card `s` cuts a matrix ───────────────────────────────────────────────────────────────
     def _cut(self, n, s):
@@ -1088,6 +1103,8 @@ class Qwen35(Generates):
             # between the rows verbs and while a position runs
             m.buffer(2 * (H + 16 + self.INTER), "hand")
             m.node_array("picks", self.TOPK + (1 if self.CARDS > 1 and self.CPLAN is not None else 0))
+            if self.AHEAD is not None:
+                m.node_array("guess", self.GUESS)
             m.buffer(131072, "exp_scratch")
         if self.MTP is not None:
             self._mtp_buffers()
@@ -1492,7 +1509,7 @@ class Qwen35(Generates):
                       ROTATED=bool(self.ROTATED), TIERED=bool(self.TIERED), ROUTED=bool(self.MOE),
                       FUSED=bool(self.MOE and self.FUSED), EXPERTS_ON_CPU=bool(self.CPU_EXPERTS), EMBED_ON_CPU=bool(self.EMBED_CPU),
                       EMBED_ROWS_ON_CPU=bool(self.EMBED_CPU and self.ROTATED),
-                      CARD_TIER=self.CPLAN is not None, CARD=CARD, CPU=self.CPU)
+                      CARD_TIER=self.CPLAN is not None, CARD=CARD, CPU=self.CPU, AHEAD=self.AHEAD or 0)
         if self.CPU_EXPERTS:
             values.update(HAND_BYTES=2 * (H + 16), HANDS_BYTES=self.CHUNK * self.HAND_ROW, ROWS_BYTES=self.CHUNK * H * 2,
                           ROWS_HALVES=self.CHUNK * H, HAND_ROW=self.HAND_ROW, HAND_PICKS_AT=self.HAND_ROW - 8 * self.TOPK)
@@ -1519,6 +1536,9 @@ class Qwen35(Generates):
             return
         m.array("PRE", ["pre%d" % l for l in run])
         m.array("POST", ["post%d" % l for l in run])
+        # the next layer's place in RUN, where its experts are read ahead (`experts_ahead`); 0 where none — the last, the MTP
+        last = len(run) - (1 if self.MTP is not None else 0)
+        m.array("AHEAD_NEXT", [i + 1 if self.AHEAD is not None and i + 1 < last else 0 for i in range(len(run))])
         if not self.CPU_EXPERTS:
             m.array("MOE", ["mr%d" % l for l in run])
             m.array("EXPERTS", ["ex%d" % l for l in run])
