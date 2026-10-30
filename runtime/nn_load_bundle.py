@@ -300,9 +300,9 @@ class Bundle:
         out of its layers into RAM held both — GLM 5.3 Flash's 150 GB of layers beside its 143 GB of experts, 254 GB on a
         251 GB box — and the kernel swapped experts out to keep the files. `MEASURED` 2026-10-21 on the ML350: 8 GB
         swapped during the load, then up to 110k pages a second swapped back in by the sockets as they decoded, one
-        socket's layer stalled ~15 ms at a time (NN-99 ④). A map something still holds a view of stays open — its pages
-        are still dropped, and come back as they are read. Returns the layers kept mapped so, empty when all were let go
-        — a slice left bound (a loop's last `piece`) is enough to keep one."""
+        socket's layer stalled ~15 ms at a time (NN-99 ④). A map something still holds a view of stays open, and its pages
+        with it. Returns the layers kept mapped so, empty when all were let go — a slice left bound (a loop's last
+        `piece`) is enough to keep one."""
         layers = list(self._blob) if layer is None else [self._store(layer)]
         kept = []
         if layer is None and self.overlay is not None:
@@ -311,14 +311,19 @@ class Bundle:
             if l not in self._blob:
                 continue
             f, m = self._blob[l]
-            try:
-                os.posix_fadvise(f.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)
-            except (AttributeError, OSError):
-                pass                                    # not on this system: the pages age out as they would have
+            # ⛔ THE MAP CLOSED BEFORE THE DROP: the kernel drops no page a mapping still holds, so a drop asked while the
+            #   file was mapped dropped nothing, and every layer's pages stayed. `MEASURED` 2026-10-30 on the DL380 (188
+            #   GB, two nodes of 96): GLM's load swapped 19.2 GB of its experts out, its first request ran at 4.49
+            #   tokens/s and its decode stalled on them coming back (measurements/2026-10-30_nn146_swappiness_dl380.md).
             try:
                 m.close()
             except BufferError:
                 kept.append(l)                          # a view still reads it: kept mapped
+            try:
+                os.posix_fadvise(f.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)
+            except (AttributeError, OSError):
+                pass                                    # not on this system: the pages age out as they would have
+            if l in kept:
                 continue
             f.close()
             del self._blob[l]

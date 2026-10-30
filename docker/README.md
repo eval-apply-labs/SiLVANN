@@ -10,6 +10,8 @@ rootless container it reaches the container and one folder of yours, and nothing
 curl -fsSL https://raw.githubusercontent.com/eval-apply-labs/SiLVANN/HEAD/docker/setup.sh | bash
 ```
 
+Where there is no `curl` (Debian's netinstall has only `wget`): `wget -qO- https://raw.githubusercontent.com/eval-apply-labs/SiLVANN/HEAD/docker/setup.sh | bash`.
+
 The script finds Podman (or Docker) and your card — AMD, NVIDIA, or none — and checks what the machine needs; where
 something is missing, it says which command fixes it, and stops. It makes the folder `~/SiLVANN`, asks for a Brave
 Search API key so the model can search the web (Enter skips it), and starts SiLVANN on port 8080 — or on the first
@@ -50,9 +52,11 @@ The script checks each of these and says what to run where one is missing.
   Docker works too.
 - **An AMD card** of the gfx906 generation (Instinct MI50, MI60): its driver (ROCm 6's `amdgpu-dkms`), and you in the
   `video` and `render` groups: `sudo usermod -aG video,render $USER`, then log out and in again.
-- **An NVIDIA card:** its driver and NVIDIA's container toolkit, then once
-  `sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml`. Podman needs to be 4.1 or later for this (Ubuntu 24.04,
-  Debian 12 and later); on Ubuntu 22.04 use Docker.
+- **An NVIDIA card:** its driver and NVIDIA's container toolkit, then
+  `sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml` — once, and again after every driver update. Podman needs
+  to be 4.1 or later for this (Ubuntu 24.04, Debian 12 and later); on Ubuntu 22.04 use Docker. A card older than the CUDA
+  family takes (compute capability below 7.5: a GTX 10x0) runs through OpenCL 1.2 in the same image, the toolkit handing
+  in the driver's OpenCL — not yet checked on such a card.
 - **No card:** nothing more; the CPU runs the models.
 
 ## Web search

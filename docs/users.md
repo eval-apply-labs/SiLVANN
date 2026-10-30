@@ -13,6 +13,8 @@ way on Windows.
 curl -fsSL https://raw.githubusercontent.com/eval-apply-labs/SiLVANN/HEAD/docker/setup.sh | bash
 ```
 
+Where there is no `curl` (Debian's netinstall has only `wget`): `wget -qO- https://raw.githubusercontent.com/eval-apply-labs/SiLVANN/HEAD/docker/setup.sh | bash`.
+
 The script finds Podman (or Docker) and the card — AMD, NVIDIA, or none — and checks what the machine needs: where
 something is missing (the card's driver, NVIDIA's container toolkit, your `video` and `render` groups for an AMD card) it
 says which command fixes it, and stops ([`docker/README.md`](../docker/README.md#what-the-machine-needs)). It makes the

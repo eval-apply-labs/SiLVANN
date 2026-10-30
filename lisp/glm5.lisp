@@ -92,6 +92,10 @@
     (while '(< s SOCKETS) '(begin (sys__compute (nth SOCKET s) names picture) (set! s (+ s 1))))
     (type hand)))
 
+(defun (sockets_wait)
+  (let ((s 0))
+    (while '(< s SOCKETS) '(begin (sys__result (nth SOCKET s)) (set! s (+ s 1))))))
+
 (defun (sockets_sum)
   (let ((s 0))
     (while '(< s SOCKETS)
@@ -99,6 +103,27 @@
                    (if (< 0 s) (nn__vector__add routed (nth ROUTED_INTO s) routed HIDDEN) 0)
                    (set! s (+ s 1))))
     (type routed)))
+
+;; ⛳ TWO SOCKETS WRITTEN OUT — a two-socket machine's layer starts, waits for and sums its sockets without the loops'
+;;   own steps (a counter, its test, its increment, each an apply on the card's path), in the loops' order. MEASURED
+;;   2026-10-30, debian01 (the DL380), GLM on one card, no tier: the card's applies 5,072 -> 2,930 a token, its
+;;   evaluator's own 7.65 -> 5.22 ms, 12.02 and 11.85 tokens/s against 12.30 and 12.24, the same tokens
+;;   (measurements/2026-10-30_nn146_threads_floaters_dl380.md)
+(if (eq? SOCKETS 2)
+    (begin
+      (defun (sockets_start i picture)
+        (begin (sys__node_array__set HERE 0 i)
+               (sys__compute (nth SOCKET 0) names picture)
+               (sys__compute (nth SOCKET 1) names picture)
+               (type hand)))
+      (defun (sockets_wait)
+        (begin (sys__result (nth SOCKET 0)) (sys__result (nth SOCKET 1))))
+      (defun (sockets_sum)
+        (begin (nn__buffer__copy (nth C_ROUTED 0) (nth SOCKET 0) (nth ROUTED_INTO 0) HIDDEN_BYTES)
+               (nn__buffer__copy (nth C_ROUTED 1) (nth SOCKET 1) (nth ROUTED_INTO 1) HIDDEN_BYTES)
+               (nn__vector__add routed (nth ROUTED_INTO 1) routed HIDDEN)
+               (type routed))))
+    0)
 
 ;; ⛳ A CHUNK'S SHARES ARE WAITED FOR WITHOUT A BOUND: `sys__result` gives up after ~15 s, and a chunk's experts read from
 ;;   the disk can take longer — so the card asks `sys__completed` until a socket says so, then collects
@@ -155,11 +180,11 @@
              (ai_z__glm_5_3__shared hand (nth MO i))
              (ai_z__glm_5_3__close streams (nth MO i) routed)))
     (defun (moe i)
-      (let ((s 0))
+      (begin
         (route i)
         (tier_and_sockets i)
         (ai_z__glm_5_3__shared hand (nth MO i))
-        (while '(< s SOCKETS) '(begin (sys__result (nth SOCKET s)) (set! s (+ s 1))))
+        (sockets_wait)
         (if CARD_TIER (nn__expert_tier__written nn__expert_tier) 0)     ; the CPUs done: an exclusive tier's writes go now
         (sockets_sum)
         (if CARD_TIER (nn__vector__add routed routed_k routed HIDDEN) 0)

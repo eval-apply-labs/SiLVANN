@@ -19,6 +19,7 @@ with every model measured on that kind of machine, and the model's own page.
 | [16 GB](results.md#a-16-gb-card) | 32 GB | 4 cores | NVMe, 5.7 GB/s | [Qwen 3.5 122B-A10B](models.md#qwen-35-122b-a10b) `D8E4` | the experts from the disk, ~30 GB of them in RAM | 17.6 positions/s | 5.65 tokens/s after 100k | 110,000 | GLM 5.3 Flash from the disk |
 | [16 GB](results.md#a-16-gb-card) | 14 GB | 4 cores | NVMe, 5.7 GB/s | [GLM 5.3 Flash](models.md#glm-53-flash) `D8E4` | the experts from the disk | 9.1 positions/s | 2.21 tokens/s after 100k | 110,000 | — |
 | [16 GB](results.md#a-16-gb-card) | 16 GB | 4 cores | — | [Qwen 3.8 27B](models.md#qwen-38-27b) `D4` | on the card | 221.3 positions/s | 14.32 tokens/s after 35k | 35,840 | — |
+| [2× 16 GB](results.md#two-cards-or-more) | 62 GB | 28 cores | — | [Qwen 3.6 35B-A3B](models.md#qwen-36-35b-a3b) `D8E4` | every layer over both cards, a tier on each | 85.3 positions/s | 30.5 tokens/s after 100k | 262,144 | the 35B on one card, faster after a short prompt |
 | [32 GB](results.md#a-24-or-32-gb-card) | 160 GB | 28 cores | — | [GLM 5.3 Flash](models.md#glm-53-flash) `D8E4` | every expert in RAM, a tier on the card | 72.1 positions/s | 9.86 tokens/s after 100k | 1,048,576 | DeepSeek-V4.1-Flash over two cards |
 | [2× 32 GB](results.md#two-cards-or-more) | 251 GB | 28 cores | — | [DeepSeek-V4.1-Flash](models.md#deepseek-v41-flash) `D8E4` | every expert in RAM, exclusive tiers | 31.3 positions/s | 9.72 tokens/s after 100k | 1,048,576 | GLM 5.3 Flash on one card |
 <!-- /rates -->
@@ -29,6 +30,9 @@ with every model measured on that kind of machine, and the model's own page.
 - **The middle** — a gaming PC, a 16 GB card and 32 GB of RAM: Qwen 3.5 122B-A10B, its experts read from the disk into
   about 30 GB of RAM; or GLM 5.3 Flash from the disk, slower, with as little as 14 GB.
 - **The card alone**: Qwen 3.8 27B, the whole model on a 16 GB card.
+- **Two 16 GB cards**: Qwen 3.6 35B-A3B, every layer over both and a tier of its experts on each — faster than one of
+  the cards at a long context (after 100k, 30.5 tokens a second against 25.9), slower by about a tenth after a short
+  prompt.
 - **The top end** — RAM for every expert: GLM 5.3 Flash on one 32 GB card, DeepSeek-V4.1-Flash over two.
 
 ## By machine
@@ -93,6 +97,8 @@ The CPU alone: the model in RAM, or its experts read from the disk.
 | [Qwen 3.6 35B-A3B](models.md#qwen-36-35b-a3b) `D8E4` | 16 GB · RTX 5060 Ti | 62 GB | Xeon W-2123 (4 cores) | — | the experts in RAM, no tier | 61.3 positions/s | 29.4 tokens/s after 2k | — | v0.20.0 |
 | [Qwen 3.6 35B-A3B](models.md#qwen-36-35b-a3b) `D8E4` | 16 GB · RTX 5070 Ti | 32 GB | Ryzen 7 5800X (8 cores) | — | the experts in RAM, an 11 GB tier | 155 positions/s | 68.3 tokens/s after 2k | — | v0.11.0 |
 | [Qwen 3.6 35B-A3B](models.md#qwen-36-35b-a3b) `D8E4` | 16 GB · RTX 5070 Ti, natively on Windows | 32 GB | Ryzen 7 5800X (8 cores) | — | the server's setup | — | 48 tokens/s in the chat | — | v0.21.2 |
+| [Qwen 3.6 35B-A3B](models.md#qwen-36-35b-a3b) `D8E4` | 16 GB · MI50 | 62 GB | 2× Xeon E5-2680 v4 (28 cores) | — | the experts in RAM, a 10 GB tier | 65.8 positions/s | 25.9 tokens/s after 100k | 262,144 | v0.23.0 |
+| [Qwen 3.6 35B-A3B](models.md#qwen-36-35b-a3b) `D8E4` | 16 GB · MI50 | 62 GB | 2× Xeon E5-2680 v4 (28 cores) | — | the experts in RAM, a 10 GB tier | 236-239 positions/s | 47.9-51.6 tokens/s after 2k | 262,144 | v0.23.0 |
 | [Qwen 3.5 122B-A10B](models.md#qwen-35-122b-a10b) `D8E4` | 16 GB · RTX 5060 Ti | 32 GB | Xeon W-2123 (4 cores) | NVMe array, 5.7 GB/s | the experts from the disk, a 30 GB cache | 17.6 positions/s | 5.65 tokens/s after 100k | 110,000 | v0.22.0 |
 | [Qwen 3.5 122B-A10B](models.md#qwen-35-122b-a10b) `D8E4` | 16 GB · RTX 5060 Ti | 32 GB | Xeon W-2123 (4 cores) | NVMe, 5 GB/s | the experts from the disk | 19.0 positions/s | 7.8 tokens/s after 1k | — | v0.19.0 |
 | [Qwen 3.5 122B-A10B](models.md#qwen-35-122b-a10b) `D8E4` | 16 GB · RTX 5060 Ti | 28 GB | Xeon W-2123 (4 cores) | NVMe, 5 GB/s | the experts from the disk | 18.8 positions/s | 7.5 tokens/s after 1k | — | v0.19.0 |
@@ -148,6 +154,8 @@ A model's every layer split over the cards of one machine (`num_cards`), or its 
 |---|---|---|---|---|---|---|---|---|---|
 | [Qwen 3.8 27B](models.md#qwen-38-27b) `D4` | 4× 32 GB · MI50, 155 W | — | EPYC 7532 (32 cores) | — | every layer over 4 cards | 194 positions/s | 37.2 tokens/s after 2k | — | v0.11.0 |
 | [Qwen 3.8 27B](models.md#qwen-38-27b) `D4` | 2× 32 GB · MI50, 155 W | — | EPYC 7532 (32 cores) | — | every layer over 2 cards | 158 positions/s | 38.4 tokens/s after 2k | — | v0.11.0 |
+| [Qwen 3.6 35B-A3B](models.md#qwen-36-35b-a3b) `D8E4` | 2× 16 GB · MI50 | 62 GB | 2× Xeon E5-2680 v4 (28 cores) | — | every layer over both cards, the experts in RAM, a 12.5 GB tier on each | 85.3 positions/s | 30.5 tokens/s after 100k | 262,144 | v0.23.0 |
+| [Qwen 3.6 35B-A3B](models.md#qwen-36-35b-a3b) `D8E4` | 2× 16 GB · MI50 | 62 GB | 2× Xeon E5-2680 v4 (28 cores) | — | every layer over both cards, the experts in RAM, a 12.5 GB tier on each | 226-228 positions/s | 42.9-45.6 tokens/s after 2k | 262,144 | v0.23.0 |
 | [GLM 5.3 Flash](models.md#glm-53-flash) `D8E4` | 2× 32 GB · MI50 | 251 GB | 2× Xeon E5-2680 v4 (28 cores) | — | every layer over both cards, every expert in RAM, a 14 GB tier on each | 54.6-56.4 positions/s | 11.2-11.3 tokens/s after 2k | 1,048,576 | v0.21.0 |
 | [GLM 5.3 Flash](models.md#glm-53-flash) `D8E4` | 2× 32 GB · MI50 | 251 GB | 2× Xeon E5-2680 v4 (28 cores) | — | every layer over both cards, every expert in RAM, a 14 GB tier on each | 74.4 positions/s | 11.2 tokens/s after 100k | 1,048,576 | v0.22.0 |
 | [GLM 5.3 Flash](models.md#glm-53-flash) `D8E4` | 2× 32 GB · MI50 | 120 GB | 2× Xeon E5-2680 v4 (28 cores) | — | every layer over both cards, 114 GB of the experts in RAM, 14 GB exclusive tiers | 36.3 positions/s | 10.1 tokens/s after 2k | 1,048,576 | v0.21.0 |

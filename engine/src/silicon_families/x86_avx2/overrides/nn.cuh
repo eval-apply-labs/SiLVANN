@@ -966,14 +966,60 @@ static void x86_avx2__zzprivate_quantise_rows(void* a) {
             c->xs[r * per + k] = x86_avx2__zzprivate_quantise256(c->x + (c->x0 + r) * c->cols + k * NN__EXPERT__INT8_BLOCK,
                                                                    c->xq + r * c->cols + k * NN__EXPERT__INT8_BLOCK);
 }
-/* One matrix row against its pairs: the codes to int8 levels once, then the pairs four at a time. */
+/* One or two pairs — an expert one or two of a chunk's rows picked: the row's levels made in a register and used at once,
+ * not kept in `w8`, with the four-pair loop's lanes, its integer sums a block, its float step a block and its sum, so its
+ * bytes; the row two ahead — `cols` bytes on — fetched into L2 as it is read. `MEASURED`
+ * (measurements/2026-10-30_nn145_int8_bodies_dl380.md): GLM's gate+up at a row an expert through `expert_groups_int8` on
+ * one core of an E5-2680 v4, 4.5 -> 5.9 GB/s. ▶ `row_few_i8_512`. */
+static inline void x86_avx2__zzprivate_row_few_i8(const uint8_t* row, float scale, const int8_t* xq, const float* xs, uint64_t x0,
+                                                  const uint32_t* rows, const uint16_t* w, uint64_t count, uint64_t cols,
+                                                  uint64_t out_rows, uint64_t r, uint16_t* out, float* acc, unsigned int* over,
+                                                  __m256i t8) {
+    const __m128i fifteen = _mm_set1_epi8(15);
+    const __m256i ones = _mm256_set1_epi16(1);
+    const uint64_t per = cols / NN__EXPERT__INT8_BLOCK;
+    const int8_t* xr[2] = { xq, xq };
+    const float* sr[2] = { xs, xs };
+    for (uint64_t q = 0; q < count; ++q) {
+        const uint64_t xrow = (uint64_t)rows[2u * q] - x0;
+        xr[q] = xq + xrow * cols; sr[q] = xs + xrow * per;
+    }
+    __m256 f[2] = {_mm256_setzero_ps(), _mm256_setzero_ps()};
+    for (uint64_t B = 0; B < per; ++B) {
+        __m256i s[2] = {_mm256_setzero_si256(), _mm256_setzero_si256()};
+        for (uint64_t k = B * NN__EXPERT__INT8_BLOCK; k < (B + 1u) * NN__EXPERT__INT8_BLOCK; k += 32u) {
+            _mm_prefetch((const char*)(row + k / 2u + cols), _MM_HINT_T1);
+            const __m128i v = _mm_loadu_si128((const __m128i*)(row + k / 2u));
+            const __m128i lo = _mm_and_si128(v, fifteen), hi = _mm_and_si128(_mm_srli_epi16(v, 4), fifteen);
+            const __m256i wv = _mm256_shuffle_epi8(t8, _mm256_set_m128i(_mm_unpackhi_epi8(lo, hi), _mm_unpacklo_epi8(lo, hi)));
+            const __m256i aw = _mm256_abs_epi8(wv);
+            for (uint64_t q = 0; q < count; ++q)
+                s[q] = _mm256_add_epi32(s[q], _mm256_madd_epi16(_mm256_maddubs_epi16(aw, _mm256_sign_epi8(
+                                           _mm256_loadu_si256((const __m256i*)(xr[q] + k)), wv)), ones));
+        }
+        for (uint64_t q = 0; q < count; ++q) f[q] = _mm256_fmadd_ps(_mm256_cvtepi32_ps(s[q]), _mm256_set1_ps(sr[q][B]), f[q]);
+    }
+    for (uint64_t q = 0; q < count; ++q) {
+        const float v = x86_avx2__zzprivate_hsum(f[q]) * scale / 127.0f;
+        const uint64_t at = (uint64_t)rows[2u * q + 1u] * out_rows + r;
+        if (out) out[at] = nn__kernels__zzabi_to_half(v, over);
+        else acc[at] += v * _cvtsh_ss(w[rows[2u * q]]);
+    }
+}
+/* One matrix row against its pairs: the codes to int8 levels once, then the pairs four at a time — one or two of them
+ * `row_few_i8`'s. */
 static inline void x86_avx2__zzprivate_row_pairs_i8(const uint8_t* row, float scale, const int8_t* xq, const float* xs, uint64_t x0,
                                                     const uint32_t* rows, const uint16_t* w, uint64_t count, uint64_t cols,
                                                     uint64_t out_rows, uint64_t r, uint16_t* out, float* acc, unsigned int* over,
                                                     __m256i t8) {
+    if (count <= 2u) {
+        x86_avx2__zzprivate_row_few_i8(row, scale, xq, xs, x0, rows, w, count, cols, out_rows, r, out, acc, over, t8);
+        return;
+    }
     int8_t w8[cols] __attribute__((aligned(32)));
     const __m128i fifteen = _mm_set1_epi8(15);
     for (uint64_t k = 0; k < cols; k += 32u) {
+        _mm_prefetch((const char*)(row + k / 2u + cols), _MM_HINT_T1);
         const __m128i v = _mm_loadu_si128((const __m128i*)(row + k / 2u));
         const __m128i lo = _mm_and_si128(v, fifteen), hi = _mm_and_si128(_mm_srli_epi16(v, 4), fifteen);
         _mm256_store_si256((__m256i*)(w8 + k), _mm256_shuffle_epi8(t8, _mm256_set_m128i(_mm_unpackhi_epi8(lo, hi), _mm_unpacklo_epi8(lo, hi))));
@@ -1298,13 +1344,18 @@ static X86_AVX2__ZZPRIVATE_AVX512 void x86_avx2__zzprivate_groups_sum_512(void* 
 }
 
 /* ── the int8 gemvs ── */
-/* One 4-bit row against `x` quantised in blocks of 32. */
+/* One 4-bit row against `x` quantised in blocks of 32 — a decoded position's experts (`groups_i8_512`, `groups_sum_i8_512`).
+ * The row two ahead — `cols` bytes on, a row being `cols / 2` — is fetched into L2 as this one is read: a prefetch never
+ * faults, so past a thread's last row or a matrix's it costs nothing, and the arithmetic is untouched. `MEASURED`
+ * (measurements/2026-10-30_nn145_threads_dl380.md, a Gold 6132 socket, GLM's gate+up over memory no call has read): one
+ * core 7.8 -> 12.1 GB/s, as fast as a plain read; seven 54 -> 72; fourteen 78 either way, the socket's memory. */
 static X86_AVX2__ZZPRIVATE_AVX512 inline float x86_avx2__zzprivate_dot_i8_4_512(const uint8_t* row, const int8_t* xq, const float* xs, uint64_t cols,
                                                                                 __m512i t8) {
     const __m512i nibbles = _mm512_set1_epi16(0x0F0F), ones = _mm512_set1_epi16(1);
     __m512 acc = _mm512_setzero_ps();
     uint64_t k = 0;
     for (; k + 64u <= cols; k += 64u) {
+        _mm_prefetch((const char*)(row + k / 2u + cols), _MM_HINT_T1);
         const __m512i u = _mm512_cvtepu8_epi16(_mm256_loadu_si256((const __m256i*)(row + k / 2u)));
         /* (u | u << 4) & 0x0F0F: the low nibble in the word's first byte, the high one in its second — the columns' order */
         const __m512i idx = _mm512_ternarylogic_epi32(u, _mm512_slli_epi16(u, 4), nibbles, 0xA8);
@@ -1662,14 +1713,61 @@ static X86_AVX2__ZZPRIVATE_AVX512 inline void x86_avx2__zzprivate_pairs_i8_512(c
     }
     for (uint64_t q = 0; q < n; ++q) v[q] = _mm512_reduce_add_ps(f[q]);
 }
+/* One or two pairs — an expert one or two of a chunk's rows picked: the row's levels made in a register and used at once,
+ * not kept in `w8`, with `pairs_i8_512`'s lanes, its integer sums a block, its float step a block and its reduction, so its
+ * bytes; the row two ahead fetched into L2. `MEASURED` (measurements/2026-10-30_nn145_int8_bodies_dl380.md): GLM's gate+up
+ * at a row an expert through `expert_groups_int8` on one core of a Gold 6132, 6.1 -> 8.9 GB/s, GLM's logits the same bit
+ * for bit. */
+static X86_AVX2__ZZPRIVATE_AVX512 inline void x86_avx2__zzprivate_row_few_i8_512(const uint8_t* row, float scale, const int8_t* xq,
+                                                                                 const float* xs, uint64_t x0, const uint32_t* rows,
+                                                                                 const uint16_t* w, uint64_t count, uint64_t cols,
+                                                                                 uint64_t out_rows, uint64_t r, uint16_t* out, float* acc,
+                                                                                 unsigned int* over, __m512i t8) {
+    const __m512i nibbles = _mm512_set1_epi16(0x0F0F), ones = _mm512_set1_epi16(1);
+    const uint64_t per = cols / NN__EXPERT__INT8_BLOCK;
+    const int8_t* xr[2] = { xq, xq };
+    const float* sr[2] = { xs, xs };
+    for (uint64_t q = 0; q < count; ++q) {
+        const uint64_t xrow = (uint64_t)rows[2u * q] - x0;
+        xr[q] = xq + xrow * cols; sr[q] = xs + xrow * per;
+    }
+    __m512 f[2] = {_mm512_setzero_ps(), _mm512_setzero_ps()};
+    for (uint64_t B = 0; B < per; ++B) {
+        __m512i s[2] = {_mm512_setzero_si512(), _mm512_setzero_si512()};
+        for (uint64_t k = B * NN__EXPERT__INT8_BLOCK; k < (B + 1u) * NN__EXPERT__INT8_BLOCK; k += 64u) {
+            _mm_prefetch((const char*)(row + k / 2u + cols), _MM_HINT_T1);
+            const __m512i u = _mm512_cvtepu8_epi16(_mm256_loadu_si256((const __m256i*)(row + k / 2u)));
+            const __m512i wv = _mm512_shuffle_epi8(t8, _mm512_ternarylogic_epi32(u, _mm512_slli_epi16(u, 4), nibbles, 0xA8));
+            const __m512i aw = _mm512_abs_epi8(wv);
+            const __mmask64 neg = _mm512_movepi8_mask(wv);
+            for (uint64_t q = 0; q < count; ++q) {
+                const __m512i xv = _mm512_loadu_si512((const void*)(xr[q] + k));
+                s[q] = _mm512_add_epi32(s[q], _mm512_madd_epi16(_mm512_maddubs_epi16(
+                           aw, _mm512_mask_sub_epi8(xv, neg, _mm512_setzero_si512(), xv)), ones));
+            }
+        }
+        for (uint64_t q = 0; q < count; ++q) f[q] = _mm512_fmadd_ps(_mm512_cvtepi32_ps(s[q]), _mm512_set1_ps(sr[q][B]), f[q]);
+    }
+    for (uint64_t q = 0; q < count; ++q) {
+        const float val = _mm512_reduce_add_ps(f[q]) * scale / 127.0f;
+        const uint64_t at = (uint64_t)rows[2u * q + 1u] * out_rows + r;
+        if (out) out[at] = nn__kernels__zzabi_to_half(val, over);
+        else acc[at] += val * _cvtsh_ss(w[rows[2u * q]]);
+    }
+}
 static X86_AVX2__ZZPRIVATE_AVX512 inline void x86_avx2__zzprivate_row_pairs_i8_512(const uint8_t* row, float scale, const int8_t* xq,
                                                                                    const float* xs, uint64_t x0, const uint32_t* rows,
                                                                                    const uint16_t* w, uint64_t count, uint64_t cols,
                                                                                    uint64_t out_rows, uint64_t r, uint16_t* out, float* acc,
                                                                                    unsigned int* over, __m512i t8) {
+    if (count <= 2u) {
+        x86_avx2__zzprivate_row_few_i8_512(row, scale, xq, xs, x0, rows, w, count, cols, out_rows, r, out, acc, over, t8);
+        return;
+    }
     int8_t w8[cols] __attribute__((aligned(64)));
     const __m512i nibbles = _mm512_set1_epi16(0x0F0F);
     for (uint64_t k = 0; k < cols; k += 64u) {
+        _mm_prefetch((const char*)(row + k / 2u + cols), _MM_HINT_T1);
         const __m512i u = _mm512_cvtepu8_epi16(_mm256_loadu_si256((const __m256i*)(row + k / 2u)));
         _mm512_store_si512((void*)(w8 + k), _mm512_shuffle_epi8(t8, _mm512_ternarylogic_epi32(u, _mm512_slli_epi16(u, 4), nibbles, 0xA8)));
     }

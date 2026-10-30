@@ -172,7 +172,7 @@ These options apply to Qwen 3.6 35B-A3B, Qwen 3.8 27B, and Qwen 3.5 122B-A10B an
 | `tiers` | `[sink, hot, warm]` | The tiers' sizes; `warm` may be `"rest"`. The default is `[256, 4096, "rest"]`. `[256, 4096, N]` keeps the `N` positions before the latest 4,096 at 8 bits and the older ones at 4 bits, for small cards. |
 | `chunk` | 1 to 256, default 256 | How many positions of a prompt go through a layer at once. |
 | `experts_on` | `"card"`, `"cpu"` | The routed experts on the card, or on the CPU (for a card too small to hold them). It is chosen at boot when the config does not say. |
-| `experts_from` | `"auto"`, `"ram"`, `"disk"`, `"mapped"` | With the experts on the CPU, where they are read from. `ram` copies them into RAM. `disk` reads them from a file as they are needed and keeps the ones used in the engine's memory (`experts_ram_gb` sets how much). `mapped` leaves that to the system's page cache, and is slower. `auto` chooses by the memory there is. |
+| `experts_from` | `"auto"`, `"ram"`, `"disk"`, `"mapped"` | With the experts on the CPU, where they are read from. `ram` copies them into RAM. `disk` reads them from a file as they are needed and keeps the ones used in the engine's memory (`experts_ram_gb` sets how much). `mapped` leaves that to the system's page cache, and is slower. `auto` chooses by the memory there is. With no card (the CPU alone) name `experts_on: "cpu"` too: without it the CPU is the model's card, and every expert is loaded into RAM whatever this says. |
 | `experts_ram_gb` | gigabytes | With `experts_from: "disk"`, how much RAM keeps the experts used. By default, what the process may hold less a quarter of it (at least 3 GB, at most 8 GB) kept for everything else. |
 | `experts_ahead` | `"auto"` by default, `"no"`, or a number | With `experts_from: "disk"`, how many of the next layer's experts are read before it asks for them: each layer's router also guesses the next layer's picks, and the experts it guesses best that are not in memory are read while the layer computes. `auto` reads as many as the disk starts in that time, one or two. The answer is the same either way. |
 | `card_experts` | `"yes"` by default, or `"no"` | With the experts on the CPU from RAM, whether the card keeps its own tier of them, sized at boot ([`users.md`](users.md#the-cards-tier-of-experts)). |
@@ -197,7 +197,8 @@ These options apply to Qwen 3.6 35B-A3B, Qwen 3.8 27B, and Qwen 3.5 122B-A10B an
 machine's first cards — the runtime's `tensor_parallel`. It runs three kinds of model:
 
 - **a dense model** (the 27B), with every layer on the cards;
-- **a Qwen MoE** (the 35B, the 122B, the 397B), with its experts on the CPU (`experts_on: "cpu"`). A
+- **a Qwen MoE** (the 35B, the 122B, the 397B), with its experts on the CPU (`experts_on: "cpu"`, chosen at boot
+  where the config does not say). A
   `card_experts_gb` tier is then that many gigabytes on each card, and a position's experts go to the cards that
   hold them, the rest to the CPU;
 - **GLM**, with its experts in RAM. Each card keeps its own tier of experts, and `card_shared` of a card's slots are

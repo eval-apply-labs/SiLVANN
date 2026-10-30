@@ -127,12 +127,16 @@ prompt a position at a time; through CUDA the same card answers 1.3 to 2.6 times
 | [16 GB · RTX 5060 Ti](results.md#a-16-gb-card) | 62 GB | Xeon W-2123 (4 cores) | — | `D8E4` · the experts in RAM, no tier | 61.3 positions/s | 29.4 tokens/s after 2k | — | v0.20.0 |
 | [16 GB · RTX 5070 Ti](results.md#a-16-gb-card) | 32 GB | Ryzen 7 5800X (8 cores) | — | `D8E4` · the experts in RAM, an 11 GB tier | 155 positions/s | 68.3 tokens/s after 2k | — | v0.11.0 |
 | [16 GB · RTX 5070 Ti, natively on Windows](results.md#a-16-gb-card) | 32 GB | Ryzen 7 5800X (8 cores) | — | `D8E4` · the server's setup | — | 48 tokens/s in the chat | — | v0.21.2 |
+| [16 GB · MI50](results.md#a-16-gb-card) | 62 GB | 2× Xeon E5-2680 v4 (28 cores) | — | `D8E4` · the experts in RAM, a 10 GB tier | 65.8 positions/s | 25.9 tokens/s after 100k | 262,144 | v0.23.0 |
+| [16 GB · MI50](results.md#a-16-gb-card) | 62 GB | 2× Xeon E5-2680 v4 (28 cores) | — | `D8E4` · the experts in RAM, a 10 GB tier | 236-239 positions/s | 47.9-51.6 tokens/s after 2k | 262,144 | v0.23.0 |
 | [32 GB · MI50](results.md#a-24-or-32-gb-card) | 251 GB | 2× Xeon E5-2680 v4 (28 cores) | — | `D8E4` · on the card | 379 positions/s | 88 tokens/s after 2k | — | v0.21.0 |
 | [32 GB · MI50](results.md#a-24-or-32-gb-card) | 251 GB | 2× Xeon E5-2680 v4 (28 cores) | — | `D8E4` · on the card | 132 positions/s | 54.8 tokens/s after 32k | — | v0.21.0 |
 | [32 GB · MI50](results.md#a-24-or-32-gb-card) | 251 GB | 2× Xeon E5-2680 v4 (28 cores) | — | `D8E4` · the experts in RAM, no tier | 116 positions/s | 32.1-32.8 tokens/s after 2k | — | v0.20.0 |
 | [32 GB · MI50](results.md#a-24-or-32-gb-card) | 251 GB | 2× Xeon E5-2680 v4 (28 cores) | — | `D8E4` · the experts in RAM, a 4 GB tier, the prompt streamed | 450 positions/s | 37.6 tokens/s after 2k | — | v0.20.0 |
 | [32 GB · MI50](results.md#a-24-or-32-gb-card) | 8 GB | 2× Xeon E5-2680 v4 (28 cores) | NVMe, 5 GB/s | `D8E4` · the experts from the disk | 32 positions/s | 11.9 tokens/s after 1k | — | v0.3 |
 | [32 GB · MI50](results.md#a-24-or-32-gb-card) | 6 GB | 2× Xeon E5-2680 v4 (28 cores) | NVMe, 5 GB/s | `D8E4` · the experts from the disk | 31 positions/s | 10.2 tokens/s after 1k | — | v0.3 |
+| [2× 16 GB · MI50](results.md#two-cards-or-more) | 62 GB | 2× Xeon E5-2680 v4 (28 cores) | — | `D8E4` · every layer over both cards, the experts in RAM, a 12.5 GB tier on each | 85.3 positions/s | 30.5 tokens/s after 100k | 262,144 | v0.23.0 |
+| [2× 16 GB · MI50](results.md#two-cards-or-more) | 62 GB | 2× Xeon E5-2680 v4 (28 cores) | — | `D8E4` · every layer over both cards, the experts in RAM, a 12.5 GB tier on each | 226-228 positions/s | 42.9-45.6 tokens/s after 2k | 262,144 | v0.23.0 |
 | [16 GB · RTX 5060 Ti, OpenCL 1.2](results.md#an-older-card-or-an-integrated-gpu) | 62 GB | Xeon W-2123 (4 cores) | — | `D8E4` · the experts in RAM, no tier | 37.1 positions/s | 23.0 tokens/s after 2k | — | v0.20.0 |
 <!-- /rates -->
 
@@ -148,6 +152,9 @@ layer's experts are read ahead (`experts_ahead`, v0.22.0): with a 3 GB cache 16.
 (`measurements/2026-10-28_expert_prediction_node03.md`). The CPU alone with only AVX2 (`SILVANN_CPU_AVX512=0`) read a
 145-position prompt at 17.1 positions a second and answered at 1.8 tokens. In the chat: 72 tokens a second on the RTX
 5060 Ti with its tier, 62.3 on an 8 GB card's room, 69.9 on a 12 GB card's, 30.4 without a tier, 9.2 on the CPU alone.
+Over two 16 GB MI50s (`"num_cards": 2`, a 12.5 GB tier on each) it reads a 100,000-token prompt 1.30 times as fast as
+one of them alone with its 10 GB tier, and answers after it 1.18 times as fast; after a 2,000-token prompt the one card
+is the faster, by about 10% (`measurements/2026-10-29_qwen36_35b_two_16gb_mi50_node03.md`).
 
 ## Qwen 3.5 122B-A10B
 

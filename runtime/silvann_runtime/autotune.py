@@ -474,6 +474,11 @@ def _setup(p, ctx, options, takes, grow=False):
         got = sized(placed)
         return None if got is None else (placed, got, why + " (%.1f GB a layer, %.0f GB this process may hold)"
                                          % (a_layer / 2**30, held / 2**30))
+    # a model that refuses its experts on the card beside these options — a Qwen MoE over a group of cards (`num_cards`),
+    #   whose experts are the card's by default — is tried with them on the CPU, its cards a tier of them
+    if "experts_on" in takes and "experts_on" not in options and int(options.get("tensor_parallel") or 1) > 1 \
+            and not _takes_card(p, options):
+        options = dict(options, experts_on="cpu")
     first = p.model(MIN_CONTEXT if grow else ctx, options)
     moe = bool(getattr(first, "MOE", False)) or "experts_on" not in takes and "card_experts_gb" in takes
     if not moe:

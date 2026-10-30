@@ -3,6 +3,8 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/eval-apply-labs/SiLVANN/HEAD/docker/setup.sh | bash
 #
+# (or `wget -qO- … | bash` where there is no curl, as on Debian's netinstall)
+#
 # It finds Podman (or Docker) and the card — an AMD card, an NVIDIA card, or none — checks what the host needs and says
 # what is missing, makes the folder SiLVANN keeps everything in (~/SiLVANN), asks for a Brave Search API key for the
 # model's web search (Enter skips), pulls the image and starts it; then the chat is at http://localhost:8080.
@@ -83,11 +85,30 @@ fi
 
 # ── the port: 8080, or the first free one after it ──────────────────────────────────────────────────────────────────
 busy() { if command -v ss >/dev/null; then ss -Htln "( sport = :$1 )" 2>/dev/null | grep -q .; else (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; fi; }
+# whether the chat answers on a port — through curl, or wget where there is no curl (Debian's netinstall), or a bare connect
+answers() { if command -v curl >/dev/null; then curl -sf -o /dev/null "http://127.0.0.1:$1/"
+            elif command -v wget >/dev/null; then wget -q -T 5 -t 1 -O /dev/null "http://127.0.0.1:$1/"
+            else (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; fi; }
+if command -v curl >/dev/null; then FETCH="curl -fsSL"; else FETCH="wget -qO-"; fi
 published() { "$ENGINE" port "$NAME" 8080 2>/dev/null | head -1 | sed 's/.*://'; }
 address() { echo "http://silvann.localhost:$1  (or http://localhost:$1)"; }
 
 # ── stop, start ───────────────────────────────────────────────────────────────────────────────────────────────────
 exists() { "$ENGINE" container inspect "$NAME" >/dev/null 2>&1; }
+# the container started — one made with an NVIDIA card is handed it by the toolkit's description of the card (CDI),
+#   which a driver update leaves stale: Podman's own word for that, and what to run
+start_it() {
+    local err
+    if [ $DRY = 1 ]; then run "$ENGINE" start "$NAME"; return; fi
+    err=$("$ENGINE" start "$NAME" 2>&1 >/dev/null) && return 0
+    case "$err" in
+        *CDI*) stop_here "$NAME would not start: $ENGINE cannot see the NVIDIA card it was made with." \
+                   "1. NVIDIA's container toolkit: https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html" \
+                   "2. Run:  sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml   (again after every driver update)" \
+                   "Then run this again — or make the container again on the CPU: this same line with 'bash -s -- update --card cpu'." ;;
+        *) stop_here "$NAME would not start:" "$err" ;;
+    esac
+}
 if [ "$ACTION" = stop ]; then
     exists || stop_here "There is no container called $NAME."
     say "Stopping $NAME (up to five minutes, while it saves the conversations)…"
@@ -95,11 +116,11 @@ if [ "$ACTION" = stop ]; then
 fi
 if [ "$ACTION" = start ]; then
     exists || stop_here "There is no container called $NAME: run this script without 'start' to set it up."
-    run "$ENGINE" start "$NAME" >/dev/null; say "Started: the chat is at $(address "$(published)")"; exit 0
+    start_it; say "Started: the chat is at $(address "$(published)")"; exit 0
 fi
 if [ "$ACTION" = setup ] && exists; then
     say "SiLVANN is set up already (container $NAME)."
-    if [ "$("$ENGINE" container inspect -f '{{.State.Running}}' "$NAME" 2>/dev/null)" != true ]; then run "$ENGINE" start "$NAME" >/dev/null; fi
+    if [ "$("$ENGINE" container inspect -f '{{.State.Running}}' "$NAME" 2>/dev/null)" != true ]; then start_it; fi
     note "The chat: $(address "$(published)")"
     note "Newest version: run this again with 'update'.   Stop: with 'stop'."
     exit 0
@@ -179,6 +200,9 @@ elif [ "$CARD" = nvidia ]; then
     else
         FLAGS+=(--gpus all)
     fi
+    # a card older than CUDA's family takes (compute capability 7.5 on) — Pascal's GTX 10x0 — runs through OpenCL 1.2
+    old=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | awk -F. '$1 * 10 + $2 < 75' | sort -u | paste -sd ',' || true)
+    [ -n "$old" ] && note "compute capability $old: older than CUDA's family takes (7.5 and newer) — that card runs through OpenCL 1.2"
     IMAGE=$IMAGE_BASE:0-nvidia
 else
     IMAGE=$IMAGE_BASE:0-amd           # either image runs on the CPU alone
@@ -258,8 +282,8 @@ fi
 say "Starting SiLVANN…"
 run "$ENGINE" run -d --name "$NAME" "${FLAGS[@]}" -p "127.0.0.1:$PORT:8080" -v "$VOLUME" "$IMAGE" >/dev/null
 if [ $DRY = 0 ]; then
-    for i in $(seq 1 90); do curl -sf -o /dev/null "http://127.0.0.1:$PORT/" && break; sleep 2; done
-    curl -sf -o /dev/null "http://127.0.0.1:$PORT/" || stop_here "SiLVANN did not answer on port $PORT." \
+    for i in $(seq 1 90); do answers "$PORT" && break; sleep 2; done
+    answers "$PORT" || stop_here "SiLVANN did not answer on port $PORT." \
         "Its log says why:  $ENGINE logs $NAME"
 fi
 echo
@@ -270,4 +294,4 @@ note "Put files for the model in $DATA/workspace."
 note "Stop: $ENGINE stop -t 300 $NAME     Start again: $ENGINE start $NAME"
 note "Newest version: this same line with 'bash -s -- update' in place of 'bash'."
 note "To read MP4 and other video files (PyAV, which the image leaves out), once:"
-note "  curl -fsSL https://raw.githubusercontent.com/eval-apply-labs/SiLVANN/HEAD/docker/install_nonfree.sh | bash"
+note "  $FETCH https://raw.githubusercontent.com/eval-apply-labs/SiLVANN/HEAD/docker/install_nonfree.sh | bash"

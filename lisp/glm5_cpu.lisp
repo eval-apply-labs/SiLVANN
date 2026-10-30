@@ -8,8 +8,12 @@
   ;;   and where the card guessed the next MoE layer's picks (AHEAD_NEXT, NN-138), this socket's part of the first of the
   ;;   guess it does not hold read ahead from the disk — AHEAD experts, or as many as the disk reads while a layer computes,
   ;;   an expert a part on each of the SOCKETS
+  ;; ⛳ THE HAND READ BESIDE THE CARD'S QUEUE (`1`): the router read its picks back before the sockets were started, so the
+  ;;   hand is whole. Read after the queue instead, each socket waited for the shared expert queued behind the start, and
+  ;;   the card's launches for it waited behind their copies — MEASURED 2026-10-30, debian01 (the DL380), GLM on one card,
+  ;;   no tier: 11.42 and 11.44 tokens/s against 12.10 and 12.02, the same tokens (measurements/2026-10-30_nn146_verbs_dl380.md)
   (picture xf (let ((s (- (sys__worker) FIRST_SOCKET)))
-                (nn__buffer__copy hand CARD (nth C_HAND s) HAND_BYTES)
+                (nn__buffer__copy hand CARD (nth C_HAND s) HAND_BYTES 1)
                 (if (< 0 (nth AHEAD_NEXT (nth HERE 0)))
                     (ai_z__glm_5_3__experts (nth C_HAND s) picks (nth (nth EX s) (nth HERE 0)) (nth C_ROUTED s)
                                             guess (nth (nth EX s) (nth AHEAD_NEXT (nth HERE 0))) AHEAD SOCKETS)

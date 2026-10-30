@@ -1,6 +1,6 @@
 # SiLVANN
 
-> **Developer preview, v0.22.0.** It runs the models below well on the hardware it was tested on, and it is shared
+> **Developer preview, v0.23.0.** It runs the models below well on the hardware it was tested on, and it is shared
 > for people who can find their way around a build and a stack trace. NVIDIA cards are tested on two, a GeForce
 > RTX 5060 Ti and an RTX 5070 Ti; Windows natively on one PC; macOS is not supported.
 
@@ -27,6 +27,7 @@ measured on, how fast it reads a prompt and answers after one:
 | [16 GB](docs/results.md#a-16-gb-card) | 32 GB | 4 cores | NVMe, 5.7 GB/s | [Qwen 3.5 122B-A10B](docs/models.md#qwen-35-122b-a10b) `D8E4` | the experts from the disk, ~30 GB of them in RAM | 17.6 positions/s | 5.65 tokens/s after 100k | 110,000 | GLM 5.3 Flash from the disk |
 | [16 GB](docs/results.md#a-16-gb-card) | 14 GB | 4 cores | NVMe, 5.7 GB/s | [GLM 5.3 Flash](docs/models.md#glm-53-flash) `D8E4` | the experts from the disk | 9.1 positions/s | 2.21 tokens/s after 100k | 110,000 | — |
 | [16 GB](docs/results.md#a-16-gb-card) | 16 GB | 4 cores | — | [Qwen 3.8 27B](docs/models.md#qwen-38-27b) `D4` | on the card | 221.3 positions/s | 14.32 tokens/s after 35k | 35,840 | — |
+| [2× 16 GB](docs/results.md#two-cards-or-more) | 62 GB | 28 cores | — | [Qwen 3.6 35B-A3B](docs/models.md#qwen-36-35b-a3b) `D8E4` | every layer over both cards, a tier on each | 85.3 positions/s | 30.5 tokens/s after 100k | 262,144 | the 35B on one card, faster after a short prompt |
 | [32 GB](docs/results.md#a-24-or-32-gb-card) | 160 GB | 28 cores | — | [GLM 5.3 Flash](docs/models.md#glm-53-flash) `D8E4` | every expert in RAM, a tier on the card | 72.1 positions/s | 9.86 tokens/s after 100k | 1,048,576 | DeepSeek-V4.1-Flash over two cards |
 | [2× 32 GB](docs/results.md#two-cards-or-more) | 251 GB | 28 cores | — | [DeepSeek-V4.1-Flash](docs/models.md#deepseek-v41-flash) `D8E4` | every expert in RAM, exclusive tiers | 31.3 positions/s | 9.72 tokens/s after 100k | 1,048,576 | GLM 5.3 Flash on one card |
 <!-- /rates -->
@@ -36,7 +37,7 @@ every machine one model was measured on, its packs and its notes: [`docs/models.
 names no setup chooses its own when the server starts, by trying it on the card: where its experts go, how much of the
 card holds the ones used most, the context the card has room for ([`docs/config.md`](docs/config.md)).
 
-**New in v0.22.0**, and in every release before it: [`release_logs/v0.md`](release_logs/v0.md).
+**New in v0.23.0**, and in every release before it: [`release_logs/v0.md`](release_logs/v0.md).
 
 ## Platforms
 
@@ -60,6 +61,8 @@ Three ways in; each ends with the chat in your browser.
 ```bash
 curl -fsSL https://raw.githubusercontent.com/eval-apply-labs/SiLVANN/HEAD/docker/setup.sh | bash
 ```
+
+Where there is no `curl` (Debian's netinstall has only `wget`): `wget -qO- https://raw.githubusercontent.com/eval-apply-labs/SiLVANN/HEAD/docker/setup.sh | bash`.
 
 It sets SiLVANN up in a rootless container for your card — AMD, NVIDIA, or none — says what the machine is missing if
 anything is, asks for a Brave Search API key so the model can search the web (Enter skips it), and starts it. Then open

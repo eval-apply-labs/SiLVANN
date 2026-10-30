@@ -1,7 +1,8 @@
 # syntax=docker/dockerfile:1.7
 # SiLVANN's image: the release installed by install.sh — the one line a Linux machine runs — with the families for
-# every NVIDIA card nvidia_cuda12 lists and for the CPU (x86_avx2), then copied onto a plain Ubuntu 22.04 that holds no
-# compiler. The models and the conversations live in a folder of yours at /data; the UI is the app, on port 8080.
+# every NVIDIA card nvidia_cuda12 lists, for an older one OpenCL 1.2's (khronos_opencl1_igpu: compute capability below
+# 7.5, a GTX 10x0) and for the CPU (x86_avx2), then copied onto a plain Ubuntu 22.04 that holds no compiler. The models
+# and the conversations live in a folder of yours at /data; the UI is the app, on port 8080.
 #
 #   from the release's folder:
 #   podman build -f docker/Dockerfile -t silvann .                                   GitHub's default branch
@@ -40,12 +41,13 @@ ARG SILVANN_COMMIT=
 COPY install.sh /tmp/install.sh
 RUN SILVANN_DIR=/opt/silvann SILVANN_BIN=/usr/local/bin \
     SILVANN_SOURCE=${SILVANN_SOURCE} SILVANN_REF=${SILVANN_REF} \
-    SILVANN_SILICON_FAMILIES="x86_avx2 nvidia_cuda12" SILVANN_NONFREE=0 \
+    SILVANN_SILICON_FAMILIES="x86_avx2 nvidia_cuda12 khronos_opencl1_igpu" SILVANN_NONFREE=0 \
     SILVANN_NVCC=/usr/local/cuda/bin/nvcc \
     bash /tmp/install.sh \
  && cd /opt/silvann \
  && test -f lib/silicon_families/libsilvann_nvidia_cuda12.so \
  && test -f lib/silicon_families/libsilvann_x86_avx2.so \
+ && test -f lib/silicon_families/libsilvann_khronos_opencl1_igpu.so \
  && commit=$(git rev-parse HEAD) \
  && { [ -z "${SILVANN_COMMIT}" ] || [ "$commit" = "${SILVANN_COMMIT}" ] \
       || { echo "SILVANN_REF is at $commit, not SILVANN_COMMIT ${SILVANN_COMMIT}"; exit 1; }; } \
@@ -59,9 +61,12 @@ RUN SILVANN_DIR=/opt/silvann SILVANN_BIN=/usr/local/bin \
 # ── the image: Python, the release, no compiler ──────────────────────────────────────────────────────────────────────
 FROM ${UBUNTU}
 ARG DEBIAN_FRONTEND=noninteractive
+# the OpenCL loader, and NVIDIA's OpenCL named to it: `--gpus all` hands in the driver's libnvidia-opencl but not its
+#   .icd, which CDI's description mounts over this one
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates git python3 tini \
+ && apt-get install -y --no-install-recommends ca-certificates git python3 tini ocl-icd-libopencl1 \
  && rm -rf /var/lib/apt/lists/* \
+ && mkdir -p /etc/OpenCL/vendors && echo libnvidia-opencl.so.1 > /etc/OpenCL/vendors/nvidia.icd \
  && useradd --uid 1000 --create-home --shell /bin/bash silvann \
  && mkdir -p /data && chown silvann:silvann /data
 COPY --from=build /opt/silvann /opt/silvann
@@ -75,7 +80,7 @@ RUN ln -s /opt/silvann/silvann /usr/local/bin/silvann \
  && /opt/silvann/venv/bin/python /opt/silvann/docker/image_notices.py > /opt/silvann/IMAGE_NOTICES.md \
  && /opt/silvann/venv/bin/python -c "import site, sys; open(site.getsitepackages()[0] + '/silvann-data.pth', 'w').write('/data/python/%d.%d\n' % sys.version_info[:2])"
 
-# the container toolkit hands in the driver's compute libraries and nvidia-smi
+# the container toolkit hands in the driver's compute libraries — CUDA's and OpenCL's — and nvidia-smi
 ENV NVIDIA_VISIBLE_DEVICES=all \
     NVIDIA_DRIVER_CAPABILITIES=compute,utility \
     SILVANN_DATA=/data \
