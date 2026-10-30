@@ -104,6 +104,9 @@
                    (set! s (+ s 1))))
     (type routed)))
 
+;; ⛔ A TOP-LEVEL `if` ANSWERS TRUE ON EITHER ARM: the boot defines it as it defines a `defun` (▶ machine.py `defun`), and
+;;   refuses any other answer — an arm of `0` stopped GLM's boot wherever SOCKETS is not 2, a one-socket machine or the
+;;   experts on the card (the host engine on node03, 2026-10-30: the form answered an integer, kind 8)
 ;; ⛳ TWO SOCKETS WRITTEN OUT — a two-socket machine's layer starts, waits for and sums its sockets without the loops'
 ;;   own steps (a counter, its test, its increment, each an apply on the card's path), in the loops' order. MEASURED
 ;;   2026-10-30, debian01 (the DL380), GLM on one card, no tier: the card's applies 5,072 -> 2,930 a token, its
@@ -123,7 +126,7 @@
                (nn__buffer__copy (nth C_ROUTED 1) (nth SOCKET 1) (nth ROUTED_INTO 1) HIDDEN_BYTES)
                (nn__vector__add routed (nth ROUTED_INTO 1) routed HIDDEN)
                (type routed))))
-    0)
+    (< 0 1))
 
 ;; ⛳ A CHUNK'S SHARES ARE WAITED FOR WITHOUT A BOUND: `sys__result` gives up after ~15 s, and a chunk's experts read from
 ;;   the disk can take longer — so the card asks `sys__completed` until a socket says so, then collects
