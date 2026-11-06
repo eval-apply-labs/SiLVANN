@@ -34,13 +34,13 @@
     (if ROTATED
         (defun (embed_into tok into)
           (begin (sys__node_array__set EMB_TOK 0 tok)
-                 (sys__compute CPU names xe) (sys__result CPU)
+                 (sys__scheduler__add CPU names xe) (sys__wait CPU)
                  (nn__buffer__copy c_emb CPU into HIDDEN_BYTES)
                  (type x)))
         (defun (embed_into tok into)
           (let ((u (nn__buffer__getnew HIDDEN_BYTES)) (hu (nn__buffer__getnew HIDDEN_BYTES)))
             (sys__node_array__set EMB_TOK 0 tok)
-            (sys__compute CPU names xe) (sys__result CPU)
+            (sys__scheduler__add CPU names xe) (sys__wait CPU)
             (nn__buffer__copy c_emb CPU u HIDDEN_BYTES)
             (nn__hadamard__rotate u ones512 hu HIDDEN)
             (nn__vector__pointwise_mul hu signs_row into HIDDEN)
@@ -72,7 +72,7 @@
 (if EMBED_ROWS_ON_CPU                                   ; EMBED_ON_CPU and ROTATED
     (defun (embed_rows n)
       (begin (sys__node_array__set EMB_TOK 1 n)
-             (sys__compute CPU names xer) (sys__result CPU)
+             (sys__scheduler__add CPU names xer) (sys__wait CPU)
              (nn__buffer__copy c_embs CPU xs (* n HIDDEN_BYTES))
              (type xs)))
     (defun (embed_rows n)
@@ -137,9 +137,9 @@
                      ;; the tier's visit first, so the CPU starts on its picks beside the card's, not after them
                      (ai_qwen_3__experts hand picks (nth EXPERTS_TIER i) routed_k nn__expert_tier 1)
                      (sys__node_array__set HERE 0 i)
-                     (sys__compute CPU names xq_ready)
+                     (sys__scheduler__add CPU names xq_ready)
                      (ai_qwen_3__experts hand picks (nth EXPERTS_TIER i) routed_k nn__expert_tier)
-                     (sys__result CPU)
+                     (sys__wait CPU)
                      (nn__buffer__copy c_routed CPU routed HIDDEN_BYTES)
                      (nn__vector__add routed routed_k routed HIDDEN)
                      (ai_qwen_3__post_expert h1 hand routed (nth POST i) x)
@@ -148,7 +148,7 @@
               (begin (mixer i pos h1)
                      (route i)
                      (sys__node_array__set HERE 0 i)
-                     (sys__compute CPU names xq) (sys__result CPU)
+                     (sys__scheduler__add CPU names xq) (sys__wait CPU)
                      (nn__buffer__copy c_routed CPU routed HIDDEN_BYTES)
                      (ai_qwen_3__post_expert h1 hand routed (nth POST i) x)
                      (type x))))
@@ -166,7 +166,7 @@
 
 ;; a prompt's: with the experts on the CPU, the card routes every row into its hand row, the CPU runs each expert once
 ;; over the rows that picked it, the card closes every row — waited for without a bound, as a chunk's experts read from
-;; the disk can outlast `sys__result`'s wait. A card's tier takes its share of the chunk first and computes it while
+;; the disk can outlast `sys__wait`'s wait. A card's tier takes its share of the chunk first and computes it while
 ;; the CPU computes the rest.
 (if ROUTED
     (if EXPERTS_ON_CPU
@@ -177,10 +177,10 @@
                      (nn__expert_tier__note hands nn__expert_tier (nth LAYER i) n HAND_ROW HAND_PICKS_AT
                                             nn__expert_major__vram_promotion_threshold_picks)
                      (sys__node_array__set HERE 0 i) (sys__node_array__set nrows 0 n)
-                     (sys__compute CPU names xr)
+                     (sys__scheduler__add CPU names xr)
                      (ai_qwen_3__experts_rows hands (nth EXPERTS_TIER_ROWS i) rrows_k n nn__expert_tier)
-                     (while '(eq? (sys__completed CPU) (< 1 0)) '(< 0 1))
-                     (sys__result CPU)
+                     (while '(eq? (sys__result CPU) (< 1 0)) '(< 0 1))
+                     (sys__wait CPU)
                      (nn__buffer__copy c_rrows CPU rrows ROWS_BYTES)
                      (nn__vector__add rrows rrows_k rrows ROWS_HALVES)
                      (ai_qwen_3__post_expert_rows h1s hands rrows (nth POST i) xs n)
@@ -189,9 +189,9 @@
               (begin (mixer_rows i first n)
                      (ai_qwen_3__pre_expert_rows h1s (nth PRE i) hands n)
                      (sys__node_array__set HERE 0 i) (sys__node_array__set nrows 0 n)
-                     (sys__compute CPU names xr)
-                     (while '(eq? (sys__completed CPU) (< 1 0)) '(< 0 1))
-                     (sys__result CPU)
+                     (sys__scheduler__add CPU names xr)
+                     (while '(eq? (sys__result CPU) (< 1 0)) '(< 0 1))
+                     (sys__wait CPU)
                      (nn__buffer__copy c_rrows CPU rrows ROWS_BYTES)
                      (ai_qwen_3__post_expert_rows h1s hands rrows (nth POST i) xs n)
                      (type xs))))
@@ -270,3 +270,40 @@
 ;; a token's position: its embedding, the angles, the layers
 (defun (position tok pos)
   (begin (embed tok) (nn__rope__angles cs pos THETA ROTARY) (layers pos)))
+
+
+;; ── a seat's position as a chain of steps, a layer's experts between two (CHAIN: the model holds seats) ──────────────
+;; ④'s layer cut where it waits: a step runs a layer's mixer and router, hands the CPU the layer's experts, and ends
+;; continued on the CPU's answer (▶ sys's `sys__scheduler__continue`); the next step, once that answer is filled, closes
+;; the layer and asks the next one's experts. So the card's block is free while the CPU computes, and another seat's
+;; step runs meanwhile. Each seat runs in a view of its own (▶ qwen3_5.py `load`): the program's names bound to that
+;; seat's buffers, its state its slot of every layer's, `names` the view the CPU computes its experts in. HERE is what
+;; its steps carry between them: 0 the layer, 1 the position, 2 how the position ends (▶ `ends`). The rotary position
+;; comes from the host — `rpos`, the position less the seat's lag after a picture — so no seat reads another's LAG.
+;; ⛔ A PARAMETER IS A NAME LIKE ANY OTHER, bound while its procedure runs: hence `ending`, not `e`
+(if CHAIN
+    (begin
+      (defun (ends ending) (if (eq? ending 1) (head) (begin (if (eq? ending 2) (head_logits) (type x)) 0)))
+      (defun (chain_ask i)
+        (begin (mixer i (nth HERE 1) h1)
+               (route i)
+               (sys__node_array__set HERE 0 i)
+               (let ((r (sys__scheduler__add CPU names xq)))
+                 (sys__scheduler__continue CARD 0 c_close '(r)))))
+      (defun (chain_close)
+        (let ((i (nth HERE 0)))
+          (nn__buffer__copy c_routed CPU routed HIDDEN_BYTES)
+          (ai_qwen_3__post_expert h1 hand routed (nth POST i) x)
+          (if (< (+ i 1) RUN) (chain_ask (+ i 1)) (ends (nth HERE 2)))))
+      ;; the position's first step: its token in, its angles at its rotary position, the first layer's experts asked
+      (defun (chain_position tok pos rpos ending)
+        (begin (sys__node_array__set HERE 1 pos)
+               (sys__node_array__set HERE 2 ending)
+               (embed tok)
+               (nn__rope__angles cs rpos THETA ROTARY)
+               (chain_ask 0))))
+    (< 0 1))
+
+;; what a seat's step continues as: the layer's close and the next one's ask — a top-level form, the machine's (▶
+;; machine.py `load_source`), frozen whether or not the model holds seats and run only where it does
+(picture c_close (chain_close))

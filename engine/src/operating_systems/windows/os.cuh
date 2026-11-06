@@ -82,6 +82,10 @@ static inline void sys__os__condition_init(sys__os__condition* condition) { Init
 static inline void sys__os__condition_wait(sys__os__condition* condition, sys__os__lock* lock) {
     (void)SleepConditionVariableSRW(condition, lock, INFINITE, 0);
 }
+static inline void sys__os__condition_wait_for(sys__os__condition* condition, sys__os__lock* lock, uint64_t ns) {
+    const uint64_t ms = (ns + 999999ull) / 1000000ull;            /* at least a millisecond: Win32 counts in them */
+    (void)SleepConditionVariableSRW(condition, lock, (DWORD)(ms > 0xFFFFFFFEull ? 0xFFFFFFFEull : ms), 0);
+}
 static inline void sys__os__condition_wake_one(sys__os__condition* condition) { WakeConditionVariable(condition); }
 static inline void sys__os__condition_wake_all(sys__os__condition* condition) { WakeAllConditionVariable(condition); }
 

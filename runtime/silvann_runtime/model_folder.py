@@ -14,16 +14,85 @@ another.
 import hashlib
 import json
 import os
+import re
 import sys
 
 _PY = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _PY not in sys.path:
     sys.path.insert(0, _PY)
 import nn_load_bundle as NL                                         # noqa: E402
+from .version import RELEASE, parse                                 # noqa: E402
 
 
 class Refused(Exception):
     pass
+
+
+# ⭐ THE WORDS A PUBLISHED PROGRAM CAN NAME THAT THIS ENGINE DOES NOT HAVE, each with the word that does its work. A pack's
+#   lisp/ travels with the pack, so a pack downloaded for an older release keeps that release's program; one that names
+#   such a word is refused at the boot with how to fetch the pack's own again, where it would otherwise stop at its
+#   first token on a word the evaluator does not know. A program that defines the word itself (a `defun` of it) answers
+#   it, and boots.
+RETIRED_WORDS = {"sys__compute": "(sys__scheduler__add cu names program [answer]), its value by (sys__wait answer)",
+                 "sys__completed": "(sys__result answer), which answers #t once the answer is filled"}
+_RETIRED = re.compile(r"(?<![\w-])(%s)(?![\w-])" % "|".join(RETIRED_WORDS))
+
+
+def retired_words(text):
+    """The retired words a program's text names and does not define, in the order it first names them — its `;`
+    comments left out, so a comment that mentions one refuses nothing."""
+    text = re.sub(r";[^\n]*", "", text)
+    named = []
+    for m in _RETIRED.finditer(text):
+        word = m.group(1)
+        if word not in named and not re.search(r"\(defun\s*\(\s*%s[\s)]" % re.escape(word), text):
+            named.append(word)
+    return named
+
+
+# ⭐ A PACK CARRIES A PROGRAM FOR EACH RELEASE WHOSE PROGRAM CHANGED, `lisp/v<X.Y.Z>/`, and a boot reads the one of the
+#   highest release at or below its own: an older release keeps reading the program written for its words, so a pack
+#   an older engine reads never needs a `defun` of a word a newer one retired. ⚖ 2026-11-06 *"lisp would have
+#   subfolders and you only pick ones with your version number or lower … this way we dont need to backport older verbs
+#   as defun either"*. `lisp/dev/` — a development box's, the tree's files (▶ scripts/model_lisp.py) — comes before
+#   them all; a `lisp/` with neither holds its files itself, a pack's layout before v0.24.0.
+DEV = "dev"
+
+
+def choose(names, release=None):
+    """Of a `lisp/`'s subfolder names, the `v<X.Y.Z>` of the highest release at or below `release` (this one's,
+    `version.RELEASE`); None when none is."""
+    top = parse(release or RELEASE)
+    found = [(parse(n), n) for n in names if n.startswith("v") and parse(n) is not None and parse(n) <= top]
+    return max(found)[1] if found else None
+
+
+def newer(names, release=None):
+    """Of a `lisp/`'s subfolder names, those of a release above `release` (this one's), oldest first: programs for a
+    later engine than this."""
+    top = parse(release or RELEASE)
+    return [n for _, n in sorted((parse(n), n) for n in names
+                                 if n.startswith("v") and parse(n) is not None and parse(n) > top)]
+
+
+def program_dir(lisp, release=None):
+    """The folder within a `lisp/` whose files this engine reads as the program: `dev/` when there is one, else the
+    `v<X.Y.Z>/` of the highest release at or below this one's, else `lisp/` itself."""
+    if os.path.isdir(os.path.join(lisp, DEV)):
+        return os.path.join(lisp, DEV)
+    names = [n for n in os.listdir(lisp) if os.path.isdir(os.path.join(lisp, n))] if os.path.isdir(lisp) else []
+    chosen = choose(names, release)
+    return os.path.join(lisp, chosen) if chosen else lisp
+
+
+def architecture_of(path):
+    """A model folder's architecture, read from its config.json alone — what `ModelFolder.architecture` answers, for a
+    caller deciding a boot's options before the bundle is opened."""
+    cfg = os.path.join(os.path.abspath(path), "config.json")
+    if not os.path.isfile(cfg):
+        raise Refused("%s has no config.json" % os.path.abspath(path))
+    whole = json.load(open(cfg))
+    return whole.get("text_config", whole).get("model_type", "")
 
 
 class ModelFolder:
@@ -50,15 +119,34 @@ class ModelFolder:
     def architecture(self):
         return self.config.get("model_type", "")
 
+    @property
+    def lisp(self):
+        """The folder this engine reads the model's program from (▶ `program_dir`): `lisp/dev/`, `lisp/v<X.Y.Z>/` or
+        `lisp/`."""
+        return program_dir(os.path.join(self.path, "lisp"))
+
+    def has_program(self, name):
+        """Whether the program this engine reads has the file `<name>.lisp` — a part a release before it did not have."""
+        return os.path.isfile(os.path.join(self.lisp, name + ".lisp"))
+
     def program(self, name):
-        """`lisp/<name>.lisp` in this folder — a file of the model's program, which travels with the model: the boot
-        reads it and the evaluator runs it. Refused when the folder has none."""
-        path = os.path.join(self.path, "lisp", name + ".lisp")
+        """`<name>.lisp` of the program this engine reads in this folder (▶ `lisp`) — a file of the model's program,
+        which travels with the model: the boot reads it and the evaluator runs it. Refused when the folder has none."""
+        path = os.path.join(self.lisp, name + ".lisp")
+        shown = os.path.relpath(path, self.path)
+        model = os.path.basename(self.path.rstrip(os.sep))
         if not os.path.isfile(path):
-            raise Refused("%s has no lisp/%s.lisp — a file of the model's program. `silvann download %s` fetches the "
-                          "pack's lisp/ afresh, whole; a pack that does not carry the file is its uploader's to fix. A "
-                          "folder of your own takes its family's files from the release's lisp/"
-                          % (self.path, name, os.path.basename(self.path.rstrip(os.sep))))
+            raise Refused("%s has no %s — a file of the model's program. `silvann download %s` fetches what the folder "
+                          "lacks of its pack, this release's program with it; a pack that does not carry the file is its "
+                          "uploader's to fix. A folder of your own takes its family's files from the release's lisp/"
+                          % (self.path, shown, model))
+        with open(path, encoding="utf-8", errors="replace") as f:
+            named = retired_words(f.read())
+        if named:
+            raise Refused("%s's %s names %s, which this engine does not have: the program was written for an older "
+                          "release. `silvann download %s` fetches this release's program from the pack; a program of "
+                          "your own uses %s" % (self.path, shown, ", ".join(named), model,
+                                                "; ".join("%s for %s" % (RETIRED_WORDS[w], w) for w in named)))
         return path
 
     def loras(self):

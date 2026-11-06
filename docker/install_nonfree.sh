@@ -46,10 +46,10 @@ VOLUME="$DATA:/data"
 if command -v getenforce >/dev/null && [ "$(getenforce 2>/dev/null)" = Enforcing ]; then VOLUME="$VOLUME:Z"; fi
 
 printf '\033[1m%s\033[0m\n' "PyAV (MP4 and other video files) into $DATA/python, from PyPI — FFmpeg's libraries, LGPL and GPL…"
-"$ENGINE" run --rm "${FLAGS[@]}" -v "$VOLUME" --entrypoint /opt/silvann/venv/bin/python "$IMAGE" -c "import subprocess, sys
+"$ENGINE" run --rm "${FLAGS[@]}" -v "$VOLUME" --entrypoint /opt/silvann/venv/bin/python "$IMAGE" -c "import os, subprocess, sys
 target = '/data/python/%d.%d' % sys.version_info[:2]
 sys.exit(subprocess.call([sys.executable, '-m', 'pip', 'install', '--quiet', '--upgrade', '--target', target,
-                          '-r', '/opt/silvann/requirements-nonfree.txt']))" \
+                          '-r', next(p for p in ('/opt/silvann/scripts/requirements-nonfree.txt', '/opt/silvann/requirements-nonfree.txt') if os.path.exists(p))]))" \
     || stop_here "pip could not install it (the lines above). SiLVANN runs without it: a video file other than an animated picture is refused."
 
 printf '\033[1m%s\033[0m\n' "Restarting SiLVANN (up to five minutes, while it saves the conversations)…"

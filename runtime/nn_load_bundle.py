@@ -93,14 +93,16 @@ GAIN_EXEMPT = ("linear_attn.norm.weight",)      # the gated norm — plain `w`, 
 # ⭐ THE FAMILIES WHOSE NORMS ARE ZERO-CENTERED — Qwen 3.5's and Qwen3-Next's `(1 + w)·x` (`Qwen3_5RMSNorm`,
 # `Qwen3NextRMSNorm`); Qwen 3's and Qwen3-VL's are `w·x` (`Qwen3RMSNorm`, `Qwen3VLTextRMSNorm`), so `qwen3` alone as a
 # prefix would take in both. `MEASURED` 2026-10-15 from transformers' modeling files: Qwen3-VL's text model read with
-# `1 + w` answered its first layer 66× too large (Qwen-Image's encoder, NN-89).
-ZERO_CENTERED = ("qwen3_5", "qwen3_next")
+# `1 + w` answered its first layer 66× too large (Qwen-Image's encoder, NN-89). Qwen3.8-Flash-Next's `qwen4_exp` is
+# Qwen 3.5's (`Qwen4ExpTextRMSNorm`: `output * (1.0 + weight)`, its weights zero at init; its gated norm plain, exempt).
+ZERO_CENTERED = ("qwen3_5", "qwen3_next", "qwen4_exp")
 
 
 def is_norm(short_name):
-    """Whether a tensor is an RMSNorm gain at all. ⛳ Both spellings, because `q_norm`/`k_norm` do not
-    end in `norm.weight`."""
-    return short_name.endswith("norm.weight") or "_norm.weight" in short_name
+    """Whether a tensor is an RMSNorm gain at all. ⛳ Three spellings: `q_norm`/`k_norm` do not end in `norm.weight`, and
+    Flash-Next's n-gram layer names its three `norm_key`, `norm_query`, `norm_conv`."""
+    return (short_name.endswith("norm.weight") or "_norm.weight" in short_name
+            or re.search(r"(^|\.)norm_(key|query|conv)\.weight$", short_name) is not None)
 
 
 class Refused(Exception):

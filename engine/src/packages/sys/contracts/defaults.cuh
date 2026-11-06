@@ -119,18 +119,30 @@
 #define SYS__HEAP_OBJECT__LOCK_BACKOFF_CYCLES 10u
 #endif
 
-/* How long a carousel taker waits for the adder that reserved the slot before it to finish writing, and
- * how long each of those waits is.
- *
- * ⛳ THE WAIT DOES NOT VARY BY BLOCK, WHICH IS THE DIFFERENCE FROM THE LOCK'S BACK-OFF ABOVE. That one adds
- * the block id because its contenders share ONE WORD and two that retry in step retry in step forever.
- * Nobody is contending here: the taker owns its slot outright and is waiting for ONE adder to finish a
- * store it has already committed to. */
-#ifndef SYS__CAROUSEL__WAIT_TRIES
-#define SYS__CAROUSEL__WAIT_TRIES 64u
+/* How many times a SHARED object's lock is tried before the wait raises — a list several blocks append to and
+ * one takes from (`sys__list__shared_*`). ⛳ NOT THE 64 ABOVE: that one is sized for a stack, which one block
+ * owns; a shared list is contended by design, by runner threads the system may deschedule while one of them
+ * holds it. The C fixed stack's bound, for the C fixed stack's reason (`MEASURED` there: at 64 a descheduled
+ * holder failed the two-card test one run in two). */
+#ifndef SYS__HEAP_OBJECT__SHARED_LOCK_TRIES
+#define SYS__HEAP_OBJECT__SHARED_LOCK_TRIES 1048576u
 #endif
-#ifndef SYS__CAROUSEL__WAIT_CYCLES
-#define SYS__CAROUSEL__WAIT_CYCLES 10u
+
+/* How many times a C fixed stack's push or pop tries for its lock, and how long it backs off between two
+ * tries — plus its block id, for the reason the object lock's back-off above adds it: the contenders share
+ * one word, and two that retry in step retry in step forever.
+ * ⛔ THE TRIES ARE MANY BECAUSE A HOLDER CAN STOP RUNNING. The hold is a few instructions, but the heap's
+ * free stack is held by the host's runner threads, which share the cores with the CPU family's own, so a
+ * holder can be descheduled or interrupted inside it; a waiter then waits until it runs again. 1,048,576
+ * tries of 10+ pauses is about 45 ms on node03's Broadwell (a pause ~10 cycles) and ~0.6 s where a pause
+ * is ~140 cycles — `REASONED` from the documented pause latencies, not timed. `MEASURED` at 64, about
+ * 3 µs here: the two-card test failed 2 of 4 runs on a give-up, at 16,777,216 it passed 3 of 3
+ * (measurements/2026-11-02_heap_free_stack_node03.md). */
+#ifndef SYS__C_FIXED_STACK__LOCK_TRIES
+#define SYS__C_FIXED_STACK__LOCK_TRIES 1048576u
+#endif
+#ifndef SYS__C_FIXED_STACK__LOCK_BACKOFF_CYCLES
+#define SYS__C_FIXED_STACK__LOCK_BACKOFF_CYCLES 10u
 #endif
 
 #endif /* SILVANN__PACKAGES_SYS_CONTRACTS_DEFAULTS_CUH */

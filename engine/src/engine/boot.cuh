@@ -33,8 +33,8 @@
  * ⛔ AND `blocks` IS BOUNDED TWICE, THOUGH ONLY ONE OF THE TWO REFUSES BY NAME. The floor further down
  * asks whether the chunks can seat the blocks and answers ENG__BOOT__POOL_TOO_SMALL when they cannot.
  * The other bound is the reserved tail: the table of computing bases is placed into one chunk-wide slot
- * and takes a head plus one node per block, so the slot seats `SYS__HEAP__CHUNK_NODES -
- * SYS__CHUNK__FIRST - 1` of them, which is 509 today. Nothing asks that question, so a larger grid
+ * and takes a head plus one node per block and one for the host after them, so the slot seats
+ * `SYS__HEAP__CHUNK_NODES - SYS__CHUNK__FIRST - 1` of them, 508 blocks and the host's today. Nothing asks that question, so a larger grid
  * writes past the allocation instead of being told. `REASONED`, from `reserved_nodes` and the
  * `bases_room` offset at the foot of this file and from `sys__node_array__zzpackage_place`, which
  * writes `elements + 1` nodes. ⇒ ★ A BOUND NOTHING ASKS ABOUT IS ONE THE CALLER FINDS BY CORRUPTING
@@ -104,7 +104,7 @@ static inline const char* eng__boot__why(int status) {
  * There are two different numbers here and reading them as one is the mistake to avoid.
  *
  *   THE FLOOR is what lets a launch START: every block holds two chunks at once, one for what lasts and
- *   one for what churns, and chunk zero never enters the free ring — so a pool of n offers n-1 and the
+ *   one for what churns, and chunk zero never enters the free stack — so a pool of n offers n-1 and the
  *   floor is two per block plus the one that is never offered. Under it the allocator does not run
  *   slowly, it refuses. That number is the allocator's and it checks it itself.
  *
@@ -191,15 +191,15 @@ static void eng__boot__publish__run(const void* at) {
  * one is placed by hand, in a chunk chosen from outside, and everything after it is ordinary.
  *
  * ⛔⛔ THE FIRST BLOCK IS HANDED ITS ROOM AND EVERY OTHER ONE TAKES ITS OWN, AND WHICH CHUNK IS SAFE TO
- * HAND OVER IS THE WHOLE OF THE REASON. Chunk zero is never offered to the free ring, so it is the one
+ * HAND OVER IS THE WHOLE OF THE REASON. Chunk zero is never offered to the free stack, so it is the one
  * chunk this side can give away knowing nothing else will be given it too. Every other chunk in the pool
- * is in that ring and could be handed to an allocation a moment later — so a block after the first has to
+ * is on that stack and could be handed to an allocation a moment later — so a block after the first has to
  * TAKE one, from inside, where taking is the allocator's own business. That is what `start_own_block` is,
  * and it is why this kernel names two entries rather than passing a different chunk to one.
  *
- * ⭐ AND THAT IS ALSO WHY THEY ALL RUN AT ONCE RATHER THAN IN TURN. The ring is compare-and-swapped at
- * both cursors, so blocks reaching for a chunk in the same instant is the case it was built for; nothing
- * here orders them and nothing needs to. */
+ * ⭐ AND THAT IS ALSO WHY THEY ALL RUN AT ONCE RATHER THAN IN TURN. The free stack takes its lock for
+ * each claim, so blocks reaching for a chunk in the same instant are served one at a time; nothing here
+ * orders them and nothing needs to. */
 /* ⛔ THE STATUS WORD IS KNOWN GOOD ON THE WAY IN, WHICH IS WHAT LETS ONLY FAILURES WRITE IT. The host runs
  * this only after the launch before it reported success, so what is in the word is that success — and a
  * block that starts correctly has nothing to add to it. A failing block swaps the word from good to its
@@ -269,7 +269,7 @@ static void eng__boot__start_blocks__run(const void* at) {
 
 /* ── AND TAKING THE MACHINE DOWN, WHICH IS A THING THE PACKAGES DO ───────────────────────────────────
  * ⛔⛔ FREEING THE MEMORY IS NOT SHUTTING THE ENGINE DOWN. Everything the packages publish — where the
- * pool is, where the register is, which ring is the free list — lives in package statics, and freeing
+ * pool is, where the register is, which stack is the free list — lives in package statics, and freeing
  * the memory reaches none of them. Without this, a machine whose memory has gone on answering "published" to
  * every question it is asked, holding a base that is an offset into a pool somebody else owns; the next
  * boot then finds a register already standing and every block looks for its computing base through that

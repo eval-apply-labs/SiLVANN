@@ -79,7 +79,7 @@ NOT_A_CARD = ("x86_avx2", "host", "khronos_opencl1_igpu")   # silicon whose pool
 TIER_MAX_GB = 128        # the binary search's ceiling, past any card's memory
 DISK_CHUNK = 1024        # GLM's prompt rows a step with its experts on the disk (Qwen's chunk is at most 256)
 FREED_GB = 1             # a card this much emptier than when a kept choice was made chooses again (`_freed`)
-RULES = 8                # the rules' version, in what a kept choice was made for: a change to them chooses again
+RULES = 9                # the rules' version, in what a kept choice was made for: a change to them chooses again
 REGISTER_TABLES = 512    # registered RAM over the card memory that maps it: an 8-byte page-table entry a 4 KiB page.
                          # MEASURED node03 2026-10-26: GLM's 142 GiB registered took 281 MiB more of the MI50 at its peak
                          # (measurements/2026-10-26_v0200_r730_rows_node03.md, vram_register.sh); held beside the margin,

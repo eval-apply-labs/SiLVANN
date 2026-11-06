@@ -6,7 +6,7 @@
 #include "turboquant.cuh"   /* the gemvs: exact, int8, 16-bit, over several matrices, and wide */
 #include "hadamard.cuh"     /* the rotations */
 #include "attention.cuh"    /* the scores, the mix and two residuals' merge */
-#include "deltanet.cuh"     /* the step, a position and a prompt's rows */
+#include "deltanet.cuh"     /* the step, a position and a prompt's rows, and the gates */
 #include "expert.cuh"       /* the expert-major GEMM */
 #include "primitives.cuh"   /* rmsnorm */
 #include "result.cuh"       /* argmax */
@@ -14,6 +14,7 @@
 #include "hyper.cuh"        /* a site's pre over streams of floats */
 #include "index.cuh"        /* the indexer's top k */
 #include "kda.cuh"          /* KDA's steps over a prompt's rows */
+#include "gated.cuh"        /* the gated residual's rank (its activation and rotation in a block) and mean */
 #include "doors.cuh"        /* into nn's table */
 
 /* ⛳ `kernels.cuh` FIRST, since every file uses it, and `doors.cuh` LAST, since it names every door. The groups between

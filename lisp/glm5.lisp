@@ -34,7 +34,7 @@
 (if EMBED_ON_CPU
     (defun (embed_e tok)                               ; the token's row into e, decoded by the first socket
       (begin (sys__node_array__set EMB_TOK 0 tok)
-             (sys__compute (nth SOCKET 0) names xe) (sys__result (nth SOCKET 0))
+             (sys__scheduler__add (nth SOCKET 0) names xe) (sys__wait (nth SOCKET 0))
              (nn__buffer__copy c_emb (nth SOCKET 0) u HIDDEN_BYTES)
              (nn__hadamard__rotate u ones512 hu HIDDEN)
              (nn__vector__pointwise_mul hu signs_row e HIDDEN)))
@@ -89,12 +89,12 @@
 (defun (sockets_start i picture)
   (let ((s 0))
     (sys__node_array__set HERE 0 i)
-    (while '(< s SOCKETS) '(begin (sys__compute (nth SOCKET s) names picture) (set! s (+ s 1))))
+    (while '(< s SOCKETS) '(begin (sys__scheduler__add (nth SOCKET s) names picture) (set! s (+ s 1))))
     (type hand)))
 
 (defun (sockets_wait)
   (let ((s 0))
-    (while '(< s SOCKETS) '(begin (sys__result (nth SOCKET s)) (set! s (+ s 1))))))
+    (while '(< s SOCKETS) '(begin (sys__wait (nth SOCKET s)) (set! s (+ s 1))))))
 
 (defun (sockets_sum)
   (let ((s 0))
@@ -116,11 +116,11 @@
     (begin
       (defun (sockets_start i picture)
         (begin (sys__node_array__set HERE 0 i)
-               (sys__compute (nth SOCKET 0) names picture)
-               (sys__compute (nth SOCKET 1) names picture)
+               (sys__scheduler__add (nth SOCKET 0) names picture)
+               (sys__scheduler__add (nth SOCKET 1) names picture)
                (type hand)))
       (defun (sockets_wait)
-        (begin (sys__result (nth SOCKET 0)) (sys__result (nth SOCKET 1))))
+        (begin (sys__wait (nth SOCKET 0)) (sys__wait (nth SOCKET 1))))
       (defun (sockets_sum)
         (begin (nn__buffer__copy (nth C_ROUTED 0) (nth SOCKET 0) (nth ROUTED_INTO 0) HIDDEN_BYTES)
                (nn__buffer__copy (nth C_ROUTED 1) (nth SOCKET 1) (nth ROUTED_INTO 1) HIDDEN_BYTES)
@@ -128,13 +128,13 @@
                (type routed))))
     (< 0 1))
 
-;; ⛳ A CHUNK'S SHARES ARE WAITED FOR WITHOUT A BOUND: `sys__result` gives up after ~15 s, and a chunk's experts read from
-;;   the disk can take longer — so the card asks `sys__completed` until a socket says so, then collects
+;; ⛳ A CHUNK'S SHARES ARE WAITED FOR WITHOUT A BOUND: `sys__wait` gives up after ~15 s, and a chunk's experts read from
+;;   the disk can take longer — so the card asks `sys__result` until a socket says so, then collects
 (defun (sockets_sum_rows)
   (let ((s 0))
     (while '(< s SOCKETS)
-           '(begin (while '(eq? (sys__completed (nth SOCKET s)) (< 1 0)) '(< 0 1))
-                   (sys__result (nth SOCKET s))
+           '(begin (while '(eq? (sys__result (nth SOCKET s)) (< 1 0)) '(< 0 1))
+                   (sys__wait (nth SOCKET s))
                    (set! s (+ s 1))))
     (if CARD_TIER (nn__expert_tier__written nn__expert_tier) 0)
     (set! s 0)
@@ -206,6 +206,103 @@
 ;; a token's position: its row of the embedding into the streams, then the layers
 (defun (position tok pos)
   (begin (embed tok) (layers_f pos)))
+
+
+;; ── two seats: two conversations on one card, the card on one while the sockets compute the other's experts ─────────
+;; A seat is a conversation's cartridge on the card: its streams, its hand and picks, its attention tables over its own
+;; state and its MLP tables over its own scratch (the MoE site's carry lives there from the router to the close). The
+;; weights are the same for both. A section runs on seat `k` inside a `let` binding that seat's names — STREAMS_OF HAND_OF
+;; PICKS_OF AT_OF MO_OF, each seat's by seat — so the sites above run unchanged, and the names are unbound when it ends.
+;; The sockets read the names as they stood when the programs were defined: they are told the seat in HERE's second cell
+;; (▶ glm5_cpu.lisp `xf2`), each seat its own hand and routed share on each of them. A seat stepped a position at a time
+;; — `position` inside its `let`, which binds SEAT as well — hands its sockets the same way.
+;; The pair's step: seat 1 half a layer behind seat 0. A MoE layer runs seat 0's attention and router while the sockets
+;; finish seat 1's previous experts, then seat 0's experts while the card runs seat 1's attention and router, then seat
+;; 1's while the card runs seat 0's next layer — the card and the sockets each on one seat while the other works. A seat's
+;; experts collected, the other's start before the first's are summed and closed: each seat's share lands in its own
+;; buffers on the sockets, so the sockets wait only for the hand-off.
+(if (< 1 SEATS)
+    (begin
+      ;; a seat's attention and router: its picks read back
+      (defun (seat_front k i pos)
+        (let ((streams (nth STREAMS_OF k)) (hand (nth HAND_OF k)) (picks (nth PICKS_OF k)) (AT (nth AT_OF k)) (MO (nth MO_OF k)))
+          (mixer i pos)
+          (route i)
+          (type streams)))
+      ;; the sockets handed a seat's picks
+      (defun (seat_start k i)
+        (let ((s 0))
+          (sys__node_array__set HERE 0 i)
+          (sys__node_array__set HERE 1 k)
+          (while '(< s SOCKETS) '(begin (sys__scheduler__add (nth SOCKET s) names xf2) (set! s (+ s 1))))
+          (type hand)))
+      ;; the card's shared expert on a seat's hand
+      (defun (seat_shared k i)
+        (let ((hand (nth HAND_OF k)) (MO (nth MO_OF k)))
+          (ai_z__glm_5_3__shared hand (nth MO i))))
+      ;; a seat's shares copied off the sockets and summed into routed
+      (defun (seat_sum k)
+        (let ((s 0))
+          (while '(< s SOCKETS)
+                 '(begin (nn__buffer__copy (nth (nth C_ROUTED_OF k) s) (nth SOCKET s) (nth ROUTED_INTO s) HIDDEN_BYTES)
+                         (if (< 0 s) (nn__vector__add routed (nth ROUTED_INTO s) routed HIDDEN) 0)
+                         (set! s (+ s 1))))
+          (type routed)))
+      ;; a seat's experts, collected, summed and closed into its streams
+      (defun (seat_finish k i)
+        (let ((streams (nth STREAMS_OF k)) (MO (nth MO_OF k)))
+          (seat_sum k)
+          (ai_z__glm_5_3__close streams (nth MO i) routed)
+          (type streams)))
+      (defun (seat_back k i)
+        (begin (sockets_wait) (seat_finish k i)))
+      ;; a position at a time on seat SEAT: `moe`'s sockets told the seat and summed from its buffers (no tier with seats)
+      (defun (tier_and_sockets i)
+        (let ((s 0))
+          (sys__node_array__set HERE 0 i)
+          (sys__node_array__set HERE 1 SEAT)
+          (while '(< s SOCKETS) '(begin (sys__scheduler__add (nth SOCKET s) names xf2) (set! s (+ s 1))))
+          (type hand)))
+      (defun (sockets_sum)
+        (seat_sum SEAT))
+      ;; a dense layer on a seat
+      (defun (seat_dense k i pos)
+        (let ((streams (nth STREAMS_OF k)) (AT (nth AT_OF k)))
+          (mixer i pos)
+          (ai_z__glm_5_3__mlp streams (nth ML i))
+          (type streams)))
+      ;; every layer for two seats, seat `ka` at `pa` and seat `kb` at `pb`, `kb` the one behind; `out` while `kb`'s
+      ;; experts of layer `behind` are on the sockets
+      (defun (pair_layers ka pa kb pb)
+        (let ((i 0) (behind 0) (out (< 1 0)))
+          (while '(< i RUN)
+                 '(begin
+                    (if (nth MOE i)
+                        (begin (seat_front ka i pa)
+                               (if out
+                                   (begin (sockets_wait) (seat_start ka i) (seat_finish kb behind))
+                                   (seat_start ka i))
+                               (seat_shared ka i)
+                               (seat_front kb i pb)
+                               (sockets_wait)
+                               (seat_start kb i)
+                               (seat_finish ka i)
+                               (seat_shared kb i)
+                               (set! behind i)
+                               (set! out (< 0 1)))
+                        (begin (if out (begin (seat_back kb behind) (set! out (< 1 0))) 0)
+                               (seat_dense ka i pa)
+                               (seat_dense kb i pb)))
+                    (set! i (+ i 1))))
+          (if out (seat_back kb behind) 0)
+          (type streams)))
+      ;; two seats' tokens in and every layer; each seat's head is the runtime's, inside the seat's `let`
+      ;; (▶ glm5.py `pair_step`)
+      (defun (seat_embed k tok)
+        (let ((streams (nth STREAMS_OF k))) (embed tok)))
+      (defun (pair_position ka ta pa kb tb pb)
+        (begin (seat_embed ka ta) (seat_embed kb tb) (pair_layers ka pa kb pb))))
+    (< 0 1))
 
 
 ;; ── a layer over a prompt's rows ────────────────────────────────────────────────────────────────────────────────────

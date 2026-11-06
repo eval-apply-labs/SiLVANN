@@ -2,7 +2,7 @@
 #define SILVANN__SILICON_FAMILIES_AMD_ROCM6_WAVE64_OVERRIDES_DELTANET_CUH
 /* ══ deltanet's DOORS, RUN FASTER — amd_rocm6_wave64 ══════════════════════════════════════════════════════════════════
  * nn's deltanet doors (`nn/cpu/opcodes/deltanet__abi.cuh`), where this family covers them: the step at a head of
- * 128, over a prompt's rows and one position at a time. */
+ * 128, over a prompt's rows and one position at a time, its output gated by silu(z) or, where the door names it, σ(z). */
 
 /* What this file needs, named where a reader — and an editor — can follow it. */
 #include <stdint.h>
@@ -25,9 +25,9 @@
  *   below, at one row and over many positions with `conved` rewritten between them. */
 #define AMD_ROCM6_WAVE64__ZZPRIVATE_STEP_LANES  128u     /* a lane a column of a head of 128 */
 #define AMD_ROCM6_WAVE64__ZZPRIVATE_STEP_BOUNDS __launch_bounds__(AMD_ROCM6_WAVE64__ZZPRIVATE_STEP_LANES)
-static __global__ AMD_ROCM6_WAVE64__ZZPRIVATE_STEP_BOUNDS void amd_rocm6_wave64__zzprivate_deltanet_step128(
+static __device__ inline void amd_rocm6_wave64__zzprivate_deltanet_step128_body(
     float* S, const uint16_t* conved, const uint16_t* z, const uint16_t* beta, const uint16_t* g, const uint16_t* w, uint16_t* out,
-    uint64_t k_heads, uint64_t v_heads, unsigned int* over) {
+    uint64_t k_heads, uint64_t v_heads, unsigned int gate, unsigned int* over) {
     const uint32_t D = 128u;
     const uint32_t j = (uint32_t)nn__silicon__lane();
     const uint64_t rep = v_heads / k_heads;
@@ -64,8 +64,24 @@ static __global__ AMD_ROCM6_WAVE64__ZZPRIVATE_STEP_BOUNDS void amd_rocm6_wave64_
         const float scale = 1.0f / nn__silicon__sqrtf(nn__silicon__lanes_sum(oj * oj) / (float)D + 1e-6f);
         const float zr = nn__silicon__half_to_float(z[h * D + j]);
         const float zc = (zr < -88.0f) ? -88.0f : ((zr > 88.0f) ? 88.0f : zr);
-        oh[j] = nn__kernels__zzabi_to_half(oj * scale * nn__silicon__half_to_float(w[j]) * (zc / (1.0f + nn__silicon__expf(-zc))), over);
+        const float gz = gate == NN__DELTANET__GATE_SIGMOID ? 1.0f / (1.0f + nn__silicon__expf(-zc))
+                                                            : zc / (1.0f + nn__silicon__expf(-zc));
+        oh[j] = nn__kernels__zzabi_to_half(oj * scale * nn__silicon__half_to_float(w[j]) * gz, over);
     }
+}
+static __global__ AMD_ROCM6_WAVE64__ZZPRIVATE_STEP_BOUNDS void amd_rocm6_wave64__zzprivate_deltanet_step128(
+    float* S, const uint16_t* conved, const uint16_t* z, const uint16_t* beta, const uint16_t* g, const uint16_t* w, uint16_t* out,
+    uint64_t k_heads, uint64_t v_heads, unsigned int* over) {
+    amd_rocm6_wave64__zzprivate_deltanet_step128_body(S, conved, z, beta, g, w, out, k_heads, v_heads, NN__DELTANET__GATE_SILU, over);
+}
+/* ⭐ …WITH THE OUTPUT GATE NAMED, AT ONE ROW — a call of the rows doors below at one row runs here: the rows kernel holds
+ *   the column across rows and spills, which one position pays without a row to share it with. `MEASURED` 2026-11-01
+ *   node03 (rocprof over a decode, measurements/2026-11-01_deltanet_step_node03.md): Flash-Next's 48 heads 34.0 -> 18.0 µs
+ *   a position, every output and state the bytes the rows kernel wrote. */
+static __global__ AMD_ROCM6_WAVE64__ZZPRIVATE_STEP_BOUNDS void amd_rocm6_wave64__zzprivate_deltanet_step128_gate(
+    float* S, const uint16_t* conved, const uint16_t* z, const uint16_t* beta, const uint16_t* g, const uint16_t* w, uint16_t* out,
+    uint64_t k_heads, uint64_t v_heads, unsigned int gate, unsigned int* over) {
+    amd_rocm6_wave64__zzprivate_deltanet_step128_body(S, conved, z, beta, g, w, out, k_heads, v_heads, gate, over);
 }
 /* A head of 128, whole key groups, `conved` on 4 bytes for the scalar reads, and `out` and the state apart from what the
  * step reads; anything else is nn's. */
@@ -95,9 +111,9 @@ static void amd_rocm6_wave64__override_deltanet_step(float* S, const uint16_t* c
  *   (315 registers, 1,212 bytes a lane: 15.7 us a row at any number of heads). `MEASURED` gtasanandrea 2026-10-16
  *   (BENCH_DELTANET_ONLY=1 BENCH_BURST=20 scripts/src_gemv_27b_bench.sh): a 256-row call at the 27B's 48 heads 4.03 ->
  *   2.10 ms, at 12 1.92; every output the same bytes. It still spills 44 registers in the state's update. */
-static __global__ AMD_ROCM6_WAVE64__ZZPRIVATE_STEP_BOUNDS void amd_rocm6_wave64__zzprivate_deltanet_steps128(
+static __device__ inline void amd_rocm6_wave64__zzprivate_deltanet_steps128_body(
     float* S, const uint16_t* conved, const uint16_t* z, const uint16_t* beta, const uint16_t* g, const uint16_t* w, uint16_t* out,
-    uint64_t k_heads, uint64_t v_heads, uint64_t rows, unsigned int* over) {
+    uint64_t k_heads, uint64_t v_heads, uint64_t rows, unsigned int gate, unsigned int* over) {
     const uint32_t D = 128u;
     const uint32_t j = (uint32_t)nn__silicon__lane();
     const uint64_t rep = v_heads / k_heads, ch = (2ull * k_heads + v_heads) * D, vd = v_heads * D;
@@ -137,12 +153,28 @@ static __global__ AMD_ROCM6_WAVE64__ZZPRIVATE_STEP_BOUNDS void amd_rocm6_wave64_
             const float scale = 1.0f / nn__silicon__sqrtf(nn__silicon__lanes_sum(oj * oj) / (float)D + 1e-6f);
             const float zr = nn__silicon__half_to_float(z[t * vd + h * D + j]);
             const float zc = (zr < -88.0f) ? -88.0f : ((zr > 88.0f) ? 88.0f : zr);
-            out[t * vd + h * D + j] =
-                nn__kernels__zzabi_to_half(oj * scale * nn__silicon__half_to_float(w[j]) * (zc / (1.0f + nn__silicon__expf(-zc))), over);
+            const float gz = gate == NN__DELTANET__GATE_SIGMOID ? 1.0f / (1.0f + nn__silicon__expf(-zc))
+                                                                : zc / (1.0f + nn__silicon__expf(-zc));
+            out[t * vd + h * D + j] = nn__kernels__zzabi_to_half(oj * scale * nn__silicon__half_to_float(w[j]) * gz, over);
         }
 #pragma unroll
         for (uint32_t i = 0u; i < D; ++i) *(float*)((char*)(Sh + i * D) + at) = col[i];
     }
+}
+static __global__ AMD_ROCM6_WAVE64__ZZPRIVATE_STEP_BOUNDS void amd_rocm6_wave64__zzprivate_deltanet_steps128(
+    float* S, const uint16_t* conved, const uint16_t* z, const uint16_t* beta, const uint16_t* g, const uint16_t* w, uint16_t* out,
+    uint64_t k_heads, uint64_t v_heads, uint64_t rows, unsigned int* over) {
+    amd_rocm6_wave64__zzprivate_deltanet_steps128_body(S, conved, z, beta, g, w, out, k_heads, v_heads, rows, NN__DELTANET__GATE_SILU,
+                                                       over);
+}
+/* ⭐ …AND WITH THE OUTPUT GATE NAMED — nn's `deltanet_steps_gate`: σ(z), Flash-Next's, where silu(z) is Qwen 3.5's; the
+ *   rest of the step the kernel above's. Every Flash-Next DeltaNet layer, a position's and a prompt's rows, ran nn's body
+ *   without it — `MEASURED` 2026-11-01 node03 (rocprof, measurements/2026-11-01_flash_next_card_side_node03.md): 36 a
+ *   token, 109 µs each, 3.9 ms of the card's 37.6. */
+static __global__ AMD_ROCM6_WAVE64__ZZPRIVATE_STEP_BOUNDS void amd_rocm6_wave64__zzprivate_deltanet_steps128_gate(
+    float* S, const uint16_t* conved, const uint16_t* z, const uint16_t* beta, const uint16_t* g, const uint16_t* w, uint16_t* out,
+    uint64_t k_heads, uint64_t v_heads, uint64_t rows, unsigned int gate, unsigned int* over) {
+    amd_rocm6_wave64__zzprivate_deltanet_steps128_body(S, conved, z, beta, g, w, out, k_heads, v_heads, rows, gate, over);
 }
 /* A head of 128, whole key groups, `conved` on 4 bytes for the scalar reads, and `out` and the state apart from what the
  * rows read; anything else is nn's. */
@@ -158,11 +190,85 @@ static void amd_rocm6_wave64__override_deltanet_steps(float* S, const uint16_t* 
         return;
     }
     const uint32_t blocks = v_heads < NN__KERNELS__BLOCKS_MAX ? (uint32_t)v_heads : NN__KERNELS__BLOCKS_MAX;
+    if (rows == 1u) {
+        void* one[] = { &S, &conved, &z, &beta, &g, &w, &out, &k_heads, &v_heads, &over };
+        const size_t one_sizes[] = { sizeof S, sizeof conved, sizeof z, sizeof beta, sizeof g, sizeof w, sizeof out, sizeof k_heads,
+                                     sizeof v_heads, sizeof over };
+        nn__silicon__launch((const void*)amd_rocm6_wave64__zzprivate_deltanet_step128, "amd_rocm6_wave64__zzprivate_deltanet_step128",
+                            blocks, AMD_ROCM6_WAVE64__ZZPRIVATE_STEP_LANES, one, one_sizes, 10u);
+        return;
+    }
     void* args[] = { &S, &conved, &z, &beta, &g, &w, &out, &k_heads, &v_heads, &rows, &over };
     const size_t sizes[] = { sizeof S, sizeof conved, sizeof z, sizeof beta, sizeof g, sizeof w, sizeof out, sizeof k_heads,
                              sizeof v_heads, sizeof rows, sizeof over };
     nn__silicon__launch((const void*)amd_rocm6_wave64__zzprivate_deltanet_steps128, "amd_rocm6_wave64__zzprivate_deltanet_steps128", blocks,
                         AMD_ROCM6_WAVE64__ZZPRIVATE_STEP_LANES, args, sizes, 11u);
+}
+/* The same fits as the rows above, the gate one nn names; anything else is nn's. */
+static void amd_rocm6_wave64__override_deltanet_steps_gate(float* S, const uint16_t* conved, const uint16_t* z, const uint16_t* beta,
+                                                           const uint16_t* g, const uint16_t* w, uint16_t* out, uint64_t k_heads,
+                                                           uint64_t v_heads, uint64_t head_dim, uint64_t rows, unsigned int gate,
+                                                           unsigned int* over) {
+    const uint64_t c0 = (uint64_t)(uintptr_t)conved, c1 = c0 + rows * (2u * k_heads + v_heads) * head_dim * 2u;
+    const uint64_t o0 = (uint64_t)(uintptr_t)out, o1 = o0 + rows * v_heads * head_dim * 2u;
+    const uint64_t s0 = (uint64_t)(uintptr_t)S, s1 = s0 + v_heads * head_dim * head_dim * 4u;
+    const bool apart = (o1 <= c0 || c1 <= o0) && (s1 <= c0 || c1 <= s0);
+    if (head_dim != 128u || k_heads == 0u || v_heads % k_heads != 0u || ((uint64_t)(uintptr_t)conved) % 4u != 0u || !apart
+     || (gate != NN__DELTANET__GATE_SILU && gate != NN__DELTANET__GATE_SIGMOID)) {
+        nn__deltanet__zzabi_launch_steps_gate(S, conved, z, beta, g, w, out, k_heads, v_heads, head_dim, rows, gate, over);
+        return;
+    }
+    const uint32_t blocks = v_heads < NN__KERNELS__BLOCKS_MAX ? (uint32_t)v_heads : NN__KERNELS__BLOCKS_MAX;
+    if (rows == 1u) {
+        void* one[] = { &S, &conved, &z, &beta, &g, &w, &out, &k_heads, &v_heads, &gate, &over };
+        const size_t one_sizes[] = { sizeof S, sizeof conved, sizeof z, sizeof beta, sizeof g, sizeof w, sizeof out, sizeof k_heads,
+                                     sizeof v_heads, sizeof gate, sizeof over };
+        nn__silicon__launch((const void*)amd_rocm6_wave64__zzprivate_deltanet_step128_gate,
+                            "amd_rocm6_wave64__zzprivate_deltanet_step128_gate", blocks, AMD_ROCM6_WAVE64__ZZPRIVATE_STEP_LANES, one,
+                            one_sizes, 11u);
+        return;
+    }
+    void* args[] = { &S, &conved, &z, &beta, &g, &w, &out, &k_heads, &v_heads, &rows, &gate, &over };
+    const size_t sizes[] = { sizeof S, sizeof conved, sizeof z, sizeof beta, sizeof g, sizeof w, sizeof out, sizeof k_heads,
+                             sizeof v_heads, sizeof rows, sizeof gate, sizeof over };
+    nn__silicon__launch((const void*)amd_rocm6_wave64__zzprivate_deltanet_steps128_gate,
+                        "amd_rocm6_wave64__zzprivate_deltanet_steps128_gate", blocks, AMD_ROCM6_WAVE64__ZZPRIVATE_STEP_LANES, args,
+                        sizes, 12u);
+}
+
+/* ⭐ THE GATES OVER ROWS — nn's `deltanet_gates_rows`, β = σ(b) and g = −exp(A_log)·softplus(a + dt_bias), a lane an
+ *   element as nn's body, its six roundings through the family's `to_half` (nn's conversion's bits and fault word,
+ *   ▶ kernels.cuh) where nn's body takes its branches. */
+static __global__ AMD_ROCM6_WAVE64__ZZPRIVATE_BOUNDS void amd_rocm6_wave64__zzprivate_deltanet_gates_rows(uint16_t* beta, uint16_t* g, const uint16_t* a,
+                                                                                                         const uint16_t* b, const uint16_t* a_log,
+                                                                                                         const uint16_t* dt_bias, uint64_t heads,
+                                                                                                         uint64_t rows, unsigned int* over) {
+    const uint64_t n = heads * rows, stride = (uint64_t)nn__silicon__blocks() * nn__silicon__lanes();
+    for (uint64_t i = (uint64_t)nn__silicon__block() * nn__silicon__lanes() + nn__silicon__lane(); i < n; i += stride) {
+        const uint64_t h = i % heads;
+        beta[i] = amd_rocm6_wave64__zzpackage_to_half(1.0f / (1.0f + nn__silicon__expf(-nn__silicon__half_to_float(b[i]))), over);
+        const float sum = nn__silicon__half_to_float(amd_rocm6_wave64__zzpackage_to_half(
+                              nn__silicon__half_to_float(a[i]) + nn__silicon__half_to_float(dt_bias[h]), over));
+        const float mag = (sum < 0.0f) ? -sum : sum, top = (sum > 0.0f) ? sum : 0.0f;
+        const float sp = nn__silicon__half_to_float(amd_rocm6_wave64__zzpackage_to_half(
+                             top + nn__silicon__logf(1.0f + nn__silicon__expf(-mag)), over));
+        const float ea = nn__silicon__half_to_float(amd_rocm6_wave64__zzpackage_to_half(
+                             nn__silicon__expf(nn__silicon__half_to_float(a_log[h])), over));
+        const float prod = nn__silicon__half_to_float(amd_rocm6_wave64__zzpackage_to_half(sp * ea, over));
+        g[i] = amd_rocm6_wave64__zzpackage_to_half(prod * -1.0f, over);
+    }
+}
+/* nn's launch's lanes and the same arguments: every call is this family's. */
+static void amd_rocm6_wave64__override_deltanet_gates_rows(uint16_t* beta, uint16_t* g, const uint16_t* a, const uint16_t* b,
+                                                           const uint16_t* a_log, const uint16_t* dt_bias, uint64_t heads, uint64_t rows,
+                                                           unsigned int* over) {
+    const uint32_t threads = AMD_ROCM6_WAVE64__ZZPRIVATE_ROWS * AMD_ROCM6_WAVE64__ZZPRIVATE_WAVE;
+    const uint64_t want = (heads * rows + threads - 1u) / threads;
+    const uint32_t blocks = want < NN__KERNELS__BLOCKS_MAX ? (uint32_t)want : NN__KERNELS__BLOCKS_MAX;
+    void* args[] = { &beta, &g, &a, &b, &a_log, &dt_bias, &heads, &rows, &over };
+    const size_t sizes[] = { sizeof beta, sizeof g, sizeof a, sizeof b, sizeof a_log, sizeof dt_bias, sizeof heads, sizeof rows, sizeof over };
+    nn__silicon__launch((const void*)amd_rocm6_wave64__zzprivate_deltanet_gates_rows, "amd_rocm6_wave64__zzprivate_deltanet_gates_rows",
+                        blocks, threads, args, sizes, 9u);
 }
 
 #endif /* SILVANN__SILICON_FAMILIES_AMD_ROCM6_WAVE64_OVERRIDES_DELTANET_CUH */

@@ -46,7 +46,7 @@
 (if EMBED_ON_CPU
     (defun (embed_into tok into)
       (begin (sys__node_array__set EMB_TOK 0 tok)
-             (sys__compute CPU names xe) (sys__result CPU)
+             (sys__scheduler__add CPU names xe) (sys__wait CPU)
              (nn__buffer__copy c_emb CPU u HIDDEN_BYTES)
              (nn__hadamard__rotate u ones512 hu HIDDEN)
              (nn__vector__pointwise_mul hu signs_row into HIDDEN)
@@ -67,7 +67,7 @@
     (defun (embed_rows n)
       (let ((i 0) (at 0))
         (sys__node_array__set EMB_TOK 1 n)
-        (sys__compute CPU names xer) (sys__result CPU)
+        (sys__scheduler__add CPU names xer) (sys__wait CPU)
         (nn__buffer__copy c_embs CPU h1s (* n HIDDEN_BYTES))
         (while '(< i n)
                '(begin (nn__hadamard__rotate (nn__vector__range h1s at HIDDEN) ones512 hu HIDDEN)

@@ -5,21 +5,19 @@
  * ⚖ *"do the rearrangement, sys and the evaluator go host."*
  *
  * The engine's kernels are functions the host runs, one runner thread per block, and every launch goes
- * through one of the four macros below. This file is that seam, so what a launch means is stated in ONE
+ * through one of the three macros below. This file is that seam, so what a launch means is stated in ONE
  * place rather than at every site. The sites are counted, not written down here — outside this file,
- * `grep -rn 'ENG__LAUNCH_\(ONE\|MANY\|RESIDENT\|HERE\)(' engine` — and the claim gate's
+ * `grep -rn 'ENG__LAUNCH_\(ONE\|MANY\|RESIDENT\)(' engine` — and the claim gate's
  * `launch_width` rule counts the same thing and fails a launch that bypasses the seam.
  *
  * ⛔⛔ **AND THE SHAPES ARE NOT THE SAME TRANSLATION, WHICH IS THE WHOLE REASON THERE ARE SEVERAL
  * MACROS.** One block doing one thing is a FUNCTION CALL. Many blocks are not a loop:
  * ```
- *   eng__abi__k_grid   block 0  runs the program, then writes `stop`
- *                      block N  parks in `eng__opcodes__await_instructions` until `stop` is written
+ *   eng__abi__k_reside   every block parks in `eng__opcodes__await_instructions`, running what its queue is
+ *                        given, until `stop` is written
  * ```
- * ⇒ ★★ **RUNNING THOSE SEQUENTIALLY DEADLOCKS** (`REASONED`, from `eng__abi__k_grid`). Called in order,
- * block 0 runs first, and a program that schedules work on block 1 waits for a runner that will not
- * start until block 0 returns; called in any other order, a parked block waits for a `stop` that only
- * block 0 writes. The blocks are CONCURRENT PARTICIPANTS, not iterations, so the host form of a
+ * ⇒ ★★ **RUNNING THOSE SEQUENTIALLY DEADLOCKS** (`REASONED`). Called in order, block 0 runs first and never
+ * returns, and a program on it that schedules work on block 1 waits for a runner that will not start. The blocks are CONCURRENT PARTICIPANTS, not iterations, so the host form of a
  * many-block launch is a THREAD POOL.
  * ⛳ AND NOTHING WOULD SAY SO: a parked block's wait on the stop word is unbounded, so nothing in the
  * engine detects or breaks a runner that never starts — the process hangs forever with no suspect.
@@ -201,16 +199,6 @@ static inline void eng__launch__zzprivate_fresh(unsigned int n, eng__launch__run
         sys__silicon__host_set_runner_count(1u);                                                       \
         sys__silicon__host_become_runner(0u);                                                          \
         kernel(__VA_ARGS__);                                                                           \
-    } while (0)
-/* ⭐ AND A STATEMENT RUN THE SAME WAY — `ENG__LAUNCH_ONE` for work that is one statement and answers its
- * caller directly. The machine is the host's, so a door that needs one runner does not write a kernel and
- * pass its answer through a slot in the machine's memory: it becomes runner zero and runs the statement
- * where it stands, writing into its own locals. */
-#define ENG__LAUNCH_HERE(...)                                                                          \
-    do {                                                                                               \
-        sys__silicon__host_set_runner_count(1u);                                                       \
-        sys__silicon__host_become_runner(0u);                                                          \
-        __VA_ARGS__;                                                                                   \
     } while (0)
 #define ENG__LAUNCH_MANY(run, n, args)       eng__launch__spread((unsigned int)(n), (run), (args))
 

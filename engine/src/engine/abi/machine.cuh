@@ -60,18 +60,11 @@ static sys__heap_node*  eng__abi__zzpackage_answer  = 0;
 static void*           eng__abi__zzpackage_channel = 0;
 static sys__heap_node* eng__abi__zzpackage_landing = 0;
 
-/* ── AND WHETHER THERE IS A LAUNCH OUT THERE THAT IS NOT GOING TO END ────────────────────────────────
- * ⭐⭐ EVERY OTHER DOOR IN `abi/` RUNS WORK ON THE MACHINE, AND WHILE A RESIDENT LAUNCH IS UP EVERY BLOCK
- *   ALREADY HAS A RUNNER. A door that ran work then would be a second runner zero, or a second pool over
- *   blocks already taken — carving from arenas whose own runners are live and resetting the runner count
- *   they read. `REASONED` from `engine/launch.cuh`: nothing detects that race, so the flag exists to turn
- *   it into a refusal, and that is its whole job.
- * ⛳ IT GATES READING AS WELL AS RUNNING. Reading a string's text or a name runs `sys` on a runner the
- *   same way, and is refused the same way. What stays open is what runs nothing: the side channel — the
- *   three scheduling doors — and `sys`'s own looking-inside doors such as `sys_abi_peek`, i.e. the entire
- *   vocabulary a caller needs while the engine is working.
- * ⛔ A FAULT IS STILL VISIBLE, WHICH IS WHY REFUSING TO READ THE CHANNEL IS AFFORDABLE: a computation
- *   that failed leaves its base at ERROR with the word in the result row, and `poll` answers both. */
+/* ── AND WHETHER THE BLOCKS ARE RESIDENT ─────────────────────────────────────────────────────────────
+ * ⭐⭐ THEY ARE FROM THE END OF THE BOOT TO THE SHUTDOWN (⚖ 2026-11-04, the resident machine), every block a runner
+ *   in its waiting loop. So no door runs work as a runner: a door builds as the host, a caller of its own beside
+ *   them (▶ `ENG__ABI__AS_THE_HOST`), and runs a program by queueing it on a block (▶ `abi/running.cuh`). The
+ *   flag says the runners are out there, which the shutdown's stand-down reads before it gives the pool back. */
 static int             eng__abi__zzpackage_resident = 0;
 static unsigned int*   eng__abi__zzpackage_stop     = 0;
 
@@ -80,9 +73,24 @@ static inline bool eng__abi__zzpackage_up(void) {
         && eng__abi__zzpackage_channel != 0     && eng__abi__zzpackage_landing != 0;
 }
 
+/* ⛔ AND A PANICKED MACHINE IS NOT FREE TO LAUNCH ANYTHING: an evaluation stopped where it stood and left
+ * the heap holding what it abandoned, so every door that runs or builds refuses until a shutdown and a boot
+ * publish the heap again (▶ `eng__eval`'s "A STOP IS A PANIC"). The shutdown is not gated, and `eng_abi_panic`
+ * says which word it was. */
 static inline bool eng__abi__zzpackage_free_to_launch(void) {
-    return eng__abi__zzpackage_up() && eng__abi__zzpackage_resident == 0;
+    return eng__abi__zzpackage_up() && eng__abi__zzpackage_resident == 0 && eng__eval__panicked() == 0u;
 }
+
+/* ⭐⭐ WHETHER A DOOR MAY BUILD OR RUN: the machine up, its blocks resident and nothing panicked. ⚖ 2026-11-04 the
+ * resident machine — the blocks stay up from the end of the boot to the shutdown, so a door builds as the host (▶
+ * `ENG__ABI__AS_THE_HOST`) and runs a program by queueing it on a block and taking the answer. The launch guard above
+ * is the boot's own, for the launches that stand the machine up before its blocks reside. */
+static inline bool eng__abi__zzpackage_live(void) {
+    return eng__abi__zzpackage_up() && eng__abi__zzpackage_resident != 0 && eng__eval__panicked() == 0u;
+}
+
+/* The blocks into their waiting loops, at the end of the boot (▶ `engine/abi/residency.cuh`). */
+static bool eng__abi__zzpackage_reside(void);
 
 /* Tell a resident launch to end, and wait for it. ⛔ IT IS A HELPER AND NOT ONE OF THE DOORS BECAUSE
  * SHUTTING THE ENGINE DOWN OWES THE SAME ACT: giving the pool back while its runners are still reading
@@ -99,6 +107,7 @@ static inline bool eng__abi__zzpackage_stand_down(void) {
                                         sizeof(unsigned int), eng__abi__zzpackage_channel))
         return false;
     if (!sys__gpu__compute_completed(eng__abi__zzpackage_machine.family)) return false;
+    sys__scheduler__zzengine_ring_all(eng__abi__zzpackage_machine.blocks);   /* a dozing block wakes to read it */
     /* ⛳ THE WAIT IS THE JOIN. The stop word is written, so every runner leaves its park once it has
      * finished whatever it is running, and this returns when the last one has — as long as the longest
      * computation still in flight and not one instant longer. The stop word is given back only after,
@@ -370,16 +379,29 @@ static void eng__abi__k_stand_up_packages__run(const void* at) {
 #undef ENG__ABI__INIT_CALL
 #undef ENG__ABI__ROOM_ROW
 
-/* ⭐⭐ ONE PIECE OF WORK ON THE MACHINE, FROM THE DOOR THAT ASKS FOR IT. The machine is this process, so a door
- * that needs one runner runs the work itself — reading the caller's cells and bytes where they are and
- * answering into its own locals — instead of copying them into the machine's memory, launching a kernel
- * and reading an answer back out of a slot: that round trip was the shape of a machine on a card.
- * ⛳ WHAT IT STILL OWES IS WHAT EVERY RUNNER OWES: it is runner zero, the block its allocations are carved
- *   for (`ENG__LAUNCH_HERE`), and the carve is armed before the work and its watermark flushed after —
- *   the pairing `arm_then_flush` holds every runner to, checked here on this macro and on every use of it.
- * ⛔ SO THE WORK MUST NOT `return`: that would leave the door with the carve still armed. */
-#define ENG__ABI__ON_THE_MACHINE(...)                                                                  \
-    ENG__LAUNCH_HERE(sys__heap__forget_base(); __VA_ARGS__; sys__heap__stop_carving())
+/* ⭐⭐ THE HOST, A SLOT OF ITS OWN — ⚖ 2026-11-04 *"fixing the host doors"*. A door that puts work on a running block or
+ * reads its answer acts as the slot past the runners (`sys__computing_base__host`): its own base to carve from —
+ * answers among what it carves — started at its first door. So it
+ * runs sys's code beside the runners without being one of them — a grid's or a resident launch's — and the one way
+ * work reaches a block is its queue. The runners' count is left as it is: the doors run inside a launch.
+ * ⛔ ONE THREAD AT A TIME acts as it — the host's lock, taken for the length of the door: a base is one carver's.
+ * ⛔ SO THE WORK MUST NOT `return`, as on the machine above: the carve would stay armed and the lock held. */
+static sys__os__lock eng__abi__zzprivate_host_lock = SYS__OS__LOCK_INIT;
+static inline bool eng__abi__zzprivate_host_base(uint32_t host) {
+    return sys__computing_base__get(host) != 0 || sys__heap__start_own_block() != 0;
+}
+#define ENG__ABI__AS_THE_HOST(...)                                                                     \
+    do {                                                                                               \
+        sys__os__lock_take(&eng__abi__zzprivate_host_lock);                                            \
+        const unsigned int eng_was_ = sys__silicon__block_id();                                        \
+        const uint32_t eng_host_ = sys__computing_base__host();                                        \
+        sys__silicon__host_become_runner(eng_host_);                                                   \
+        sys__heap__forget_base();                                                                      \
+        if (eng_host_ != 0u && eng__abi__zzprivate_host_base(eng_host_)) { __VA_ARGS__; }             \
+        sys__heap__stop_carving();                                                                     \
+        sys__silicon__host_become_runner(eng_was_);                                                    \
+        sys__os__lock_give(&eng__abi__zzprivate_host_lock);                                            \
+    } while (0)
 
 /* The answer a launch of several runners leaves in the machine's answer slot, once the work is done. */
 static inline bool eng__abi__zzpackage_collect_answer(void* into, size_t bytes) {
@@ -669,6 +691,9 @@ int eng_abi_boot_with(unsigned int blocks, unsigned int chunks, unsigned int chu
         sys__gpu__memory_free(eng__abi__zzpackage_machine.family, slices); slices = 0;
         sys__gpu__memory_free(eng__abi__zzpackage_machine.family, reported);
     }
+    /* ⭐ AND THE BLOCKS RESIDE, from here to the shutdown: every door after this one builds as the host and runs a
+     * program on a block's queue. */
+    if (packaged == ENG__BOOT__OK && !eng__abi__zzpackage_reside()) packaged = ENG__BOOT__LAUNCH_FAILED;
     if (packaged != ENG__BOOT__OK) {
         eng__abi__zzprivate_give_rooms_back();
         /* A machine whose packages did not stand up is not a machine to hand back. It comes down the
@@ -725,6 +750,11 @@ void eng_abi_shutdown(void) {
 }
 
 const char* eng_abi_status_text(int status) { return eng__boot__why(status); }
+
+/* The four-letter word the machine panicked with — an evaluator stop (▶ `eng__eval`'s "A STOP IS A PANIC") — or 0.
+ * ⛳ NOT GATED, AND THAT IS ITS POINT: it is what a caller reads when every other door refuses, and the answer to
+ * it is a shutdown and a boot. */
+unsigned int eng_abi_panic(void) { return eng__eval__panicked(); }
 
 /* What the boot settled on, so a caller can report the machine it actually got rather than the one it
  * asked for. Zero BLOCKS when nothing is up, and a machine that is up has at least one, so that is the

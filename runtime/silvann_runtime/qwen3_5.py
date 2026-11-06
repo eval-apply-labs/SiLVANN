@@ -18,10 +18,12 @@ A conversation's STATE is the DeltaNet layers' recurrent state and conv window a
 values up to its length — `state_regions` says where, so a conversation can be put away and brought back; `state_read`
 and `state_write` take it whole, in one card's form however many cards hold it.
 """
+import contextlib
 import json
 import re
 import os
 import pickle
+import threading
 
 import numpy as np
 
@@ -29,6 +31,7 @@ from . import experts_file, expert_tier, sampling
 from .autotune import card_memory
 from .vision import video_ram
 from .generate import GENERATE_MOST, Generates
+from .machine import EngineError
 from .model_folder import NL, Refused
 
 GU, DN = NL.GATE_UP, NL.DOWN
@@ -48,7 +51,7 @@ class Qwen35(Generates):
                  experts_from="auto", experts_dir=None, layers=None, chunk=256, experts_ram_gb=None, card_experts_gb=0,
                  card_landing="auto", card_line=None, card_shared="auto", experts_int8=False, experts_lock=False, experts_register="auto", picture_pixels=1 << 22,
                  picture_weights="auto", tensor_parallel=1, lend_cache=True, mtp="no", mtp_rows=False, mtp_pairs=True,
-                 stream=False, embed_on="auto", experts_ahead="auto"):
+                 stream=False, embed_on="auto", experts_ahead="auto", seats=1, cards=None):
         if folder.architecture not in ARCHITECTURES:
             raise Refused("%s is a %r model, not one of %s" % (folder.path, folder.architecture, ARCHITECTURES))
         c, b = folder.config, folder.bundle
@@ -199,7 +202,7 @@ class Qwen35(Generates):
         #   one every runtime runs; a folder without it reads text, and refuses pictures (▶ `vision`). Decided at the boot,
         #   as a boot that reads `programs.lisp` never calls `_procedures`; the file is in that file's key, so what it
         #   holds was composed with the pictures exactly when the folder has them
-        self.PICTURES = os.path.isfile(os.path.join(folder.path, "lisp", "qwen3_5_pictures.lisp"))
+        self.PICTURES = folder.has_program("qwen3_5_pictures")
         # ⭐ PICTURES ON THE CARD (NN-78): the vision tower's weights in a collection of their own and its scratch in another,
         #   sized for pictures of up to `picture_pixels` (0: none, and none of the card's memory for them) — where the
         #   folder has the program's pictures file, the pack the tower, the model M-RoPE, and this machine the first layers
@@ -280,6 +283,55 @@ class Qwen35(Generates):
             raise Refused("a card's tier of experts is beside the CPU's — experts_on='cpu'")
         if self.CARD_GB and b.mask is not None:
             raise Refused("a card's tier of experts does not take a mask yet")
+        # ⭐ SEATS (NN-155 ②, as Flash-Next's): `seats` conversations held on the card at once, each its own state — its slot
+        #   of every layer's state (▶ `_plan`, `state`) — its own buffers alive across a step's end, and a view its
+        #   programs run in (▶ `load`, `on_seat`); the weights one. A seat's position is a chain of steps (▶ qwen3_5.lisp's
+        #   chain): its layer's experts handed to the CPU between two, so the card runs another seat's step while the CPU
+        #   computes. Held only where that is the overlap: the routed experts on the CPU, none on the card, one card.
+        if not isinstance(seats, int) or isinstance(seats, bool) or not 1 <= seats <= self.SEATS_MOST:
+            raise Refused("seats is a count from 1 to %d, not %r" % (self.SEATS_MOST, seats))
+        self.CARD_SEATS = seats                  # a card's seats (▶ `cards` below: every seat, SEATS)
+        self.BINDINGS += 256 * (seats - 1)        # each other seat's mixers, buffers and arrays are names too
+        if seats > 1:
+            why = [w for w, on in (("routed experts", not self.MOE), ("the experts on the CPU (experts_on 'cpu')",
+                                                                       not self.CPU_EXPERTS),
+                                   ("no card tier (card_experts_gb 0)", bool(self.CARD_GB)), ("no draft (mtp 'no')",
+                                                                                           self.MTP is not None),
+                                   ("one card", self.CARDS > 1), ("no slice (stream false)", self.STREAM_ON),
+                                   ("the embedding on the card", self.EMBED_CPU), ("no rank-1 mask", b.mask is not None))
+                   if on]
+            if why:
+                raise Refused("seats above 1 take %s" % ", ".join(why))
+            self.SAMPLES_ON_CARD = False    # the sampler's buffers are one: a seat's token is drawn on the host
+        # ⭐ A CONVERSATION A CARD (`cards`, the boot's num_cards with multi_user "yes", ▶ `with_cards`), as Flash-Next's:
+        #   each card the whole dense model and its own seat, the CPU worker after the cards the routed experts of every
+        #   card's — a card a worker. Card k's program is card 0's, its buffers, tables and values bound under the
+        #   program's own names and frozen in its seat's views, each card's over the one after's and card 0's last (▶
+        #   `_load_seat_cards`); the CPU holds the experts once and a hand-off of its own for each card (▶ `_cpu_hand_off`).
+        #   A group of cards (`tensor_parallel`) is one conversation over them; this is one a card.
+        cards = [0] if cards is None else list(cards)
+        if not cards or len(set(cards)) != len(cards) \
+                or not all(isinstance(c, int) and not isinstance(c, bool) and c >= 0 for c in cards):
+            raise Refused("cards is a list of one or more cards, each once, not %r" % (cards,))
+        self.CARD_IDS, self.NCARDS = cards, len(cards)
+        if self.NCARDS > 1:
+            why = [w for w, on in (("routed experts", not self.MOE),
+                                   ("the experts on the CPU (experts_on 'cpu')", not self.CPU_EXPERTS),
+                                   ("no card tier (card_experts_gb 0)", bool(self.CARD_GB)),
+                                   ("no draft (mtp 'no')", self.MTP is not None),
+                                   ("no group (tensor_parallel 1)", self.CARDS > 1), ("a seat a card (seats 1)", seats > 1),
+                                   ("no slice (stream false)", self.STREAM_ON), ("the embedding on the card", self.EMBED_CPU),
+                                   ("no LoRA or mask", b.lora is not None or b.mask is not None)) if on]
+            if why:
+                raise Refused("a conversation a card takes %s" % ", ".join(why))
+            self.VIS = False                        # the tower is one card's: not with a conversation a card yet
+            self.CPU = self.NCARDS                  # the CPU worker after the cards
+            self.BINDINGS += 512 * (self.NCARDS - 1)  # every card's tables and buffers are names in the one environment
+            self.SAMPLES_ON_CARD = False
+        self.SEATS = self.NCARDS * self.CARD_SEATS   # every seat: card k's seat s is seat k·CARD_SEATS + s
+        self._card_k = 0                             # the card whose names a load binds (▶ `_bindings`' CARD)
+        # a prompt's rows are a card's: one seat's prompt at a time on it (▶ `prefill`)
+        self._card_locks = [threading.Lock() for _ in cards]
         self._plan()
         if self.CPU_EXPERTS:
             self.EXPERTS_FROM = experts_file.choose(experts_from, self.cpu_arena, video_ram(folder.config))
@@ -290,6 +342,8 @@ class Qwen35(Generates):
         if self.CARD_GB and self.EXPERTS_FROM != "ram":
             raise Refused("a card's tier of experts is copied from the experts in RAM — experts_from 'ram', not %r"
                           % self.EXPERTS_FROM)
+        if self.SEATS > 1 and self.EXPERTS_FROM == "disk":
+            raise Refused(experts_file.SEATED_FROM_DISK)
         # `experts_lock`: the CPU's experts in RAM locked there, so the system cannot swap them out (▶ `experts_file.lock_check`)
         self.EXPERTS_LOCK, self.LOCKED_GB = bool(experts_lock), 0.0
         experts_file.lock_check(self.EXPERTS_LOCK, self.EXPERTS_FROM if self.CPU_EXPERTS else "card", self.cpu_arena)
@@ -432,8 +486,8 @@ class Qwen35(Generates):
                 coll.append((self.T_EXPERT, self.EPLAN, self.EXPERTS * len(run)))
             else:
                 self.cpu_arena = self.EPLAN.slot_bytes * self.EXPERTS * len(run)
-        coll += [(self.T_HEAD, self.HPLAN, 1), (self.T_STATE, self.SPLAN, max(n_d, 1)),
-                 (self.T_KV, self.KVPLAN, len(run) - n_d)]
+        coll += [(self.T_HEAD, self.HPLAN, 1), (self.T_STATE, self.SPLAN, max(n_d, 1) * self.CARD_SEATS),
+                 (self.T_KV, self.KVPLAN, (len(run) - n_d) * self.CARD_SEATS)]     # a layer's state a slot a seat
         after = self.T_KV + 1
         if self.VIS:
             self.T_VIS, self.T_VSCR = after, after + 1
@@ -536,8 +590,8 @@ class Qwen35(Generates):
                 "nn__ram_buffer_table__size_bytes:%d\nnn__ram_buffer_table__qty:1\n"
                 % (big, 6 + (self.MASK_BYTES[CARD] > 0) + tier, (self.arena + (256 << 20)) >> 20, len(self.kinds) - n_d, n_d,
                    self._layer_types(), len(self.collections), types, 256 if self.EMBED_CPU else self.TABLE_BYTES))
-        card = self._pools(card, self._mtp_asks())
-        cards = {k: card for k in range(self.CARDS)}          # every card the same collections, each its own part
+        card = self._pools(card, self._mtp_asks() + self._seat_asks())
+        cards = {k: card for k in range(max(self.CARDS, self.NCARDS))}   # every card the same collections, each its own part
         if not self.CPU_WORKER:
             return cards if self.CARDS > 1 else card
         # the CPU worker's section: its one collection, the experts, and small pools for the hand-off's buffers — and a
@@ -573,7 +627,11 @@ class Qwen35(Generates):
                     "nn__ram_buffer_experts__size_bytes:64\nnn__ram_buffer_experts__qty:1\n"
                     "nn__ram_buffer_table__size_bytes:%d\nnn__ram_buffer_table__qty:1\n" % self.TABLE_BYTES)
         cpu = self._pools(cpu, ([2 * (self.H + 16), self.H * 2] if self.MTP is not None else [])     # c_hand2, c_routed2
-                          + ([self.H * 2, self.CHUNK * self.H * 2] if self.EMBED_CPU else []))      # c_emb, c_embs
+                          + ([self.H * 2, self.CHUNK * self.H * 2] if self.EMBED_CPU else [])       # c_emb, c_embs
+                          + [2 * (self.H + 16), self.H * 2] * ((self.CARD_SEATS - 1) * self.NCARDS)  # a seat's c_hand, c_routed
+                          + ([1024, self.H * 2, 2 * (self.H + 16), self.H * 2, 131072, self.CHUNK * self.HAND_ROW,
+                              self.CHUNK * self.H * 2, self.RSCRATCH] * (self.NCARDS - 1) if self.CPU_EXPERTS else []))
+        # ▲ each card past the first its own hand-off on the CPU (▶ `_cpu_hand_off`)
         return {**cards, self.CPU: cpu}
 
     def _index_layers(self):
@@ -603,6 +661,12 @@ class Qwen35(Generates):
                                  section, count=1)
         return section
 
+    def _seat_asks(self):
+        """The bytes of each card buffer the seats past the first make (▶ SEAT_BUFS, `_buffers`)."""
+        H = self.H
+        one = [H * 2, H * 2, H * 2, self.ROT * 4, self.VOCAB * 2] + ([2 * (H + 16 + self.INTER)] if self.MOE else [])
+        return one * (self.CARD_SEATS - 1)
+
     def _mtp_asks(self):
         """The bytes of each card buffer the MTP layer and a draft's check make (▶ `_buffers`)."""
         if self.MTP is None:
@@ -616,12 +680,16 @@ class Qwen35(Generates):
         group, worker `k` device `k`."""
         if self.CARDS > 1:
             return [(self.m.silicon, k) for k in range(self.CARDS)] + ([("x86_avx2", 0)] if self.CPU_EXPERTS else [])
+        if self.NCARDS > 1:                                # a conversation a card: the cards, then the CPU
+            return [(self.m.silicon, c) for c in self.CARD_IDS] + [("x86_avx2", 0)]
         return [(self.m.silicon, 0)] + ([("x86_avx2", 0)] if self.CPU_WORKER else [])
 
     # ── ② the load ───────────────────────────────────────────────────────────────────────────────────────────
     def load(self, progress=None):
         if self.CARDS > 1:
             return self._load_cards(progress)
+        if self.NCARDS > 1:
+            return self._load_seat_cards(progress)
         m, b = self.m, self.b
         loader = m.loader()
         self._head_and_embedding(loader)
@@ -633,6 +701,7 @@ class Qwen35(Generates):
             self._vision_load(loader)
         self.state_at = {}
         self.state_of = [self.state_at]          # each card's states, where a group's cards each hold their part
+        self.seat_state_at = {}                  # seat -> layer -> its state's slot (▶ `seat_state_regions`)
         self.slot_at = {}              # (layer, name) -> the slot a dense matrix lives in, for a LoRA swap
         for i, l in enumerate(self.run_layers):
             for n in b.names(l):
@@ -646,9 +715,12 @@ class Qwen35(Generates):
                 for x in range(self.EXPERTS):
                     loader.load_expert(b, self.EPLAN, self.T_EXPERT, l, x, self.EXPERTS)
             t = self.T_STATE if self.kinds[l] == "d" else self.T_KV
-            loader.layer_width(l, t, 1)
-            self.state_at[l] = loader.reserve(t)
-            loader.assign(l, t, 0, self.state_at[l])
+            loader.layer_width(l, t, self.CARD_SEATS)
+            for seat in range(self.CARD_SEATS):             # seat k's state its layer's slot k
+                at = loader.reserve(t)
+                loader.assign(l, t, seat, at)
+                self.seat_state_at.setdefault(seat, {})[l] = at
+            self.state_at[l] = self.seat_state_at[0][l]
             if progress:
                 progress(i + 1, len(self.run_layers))
         if self.CPLAN is not None:                     # the card's tier, every layer's band of it, empty at boot
@@ -662,6 +734,7 @@ class Qwen35(Generates):
         if loader.handed() != 0:
             raise Refused("%d slots were reserved and never published" % loader.handed())
         self._buffers()
+        self.SEAT_AT_OF = {0: self.SEAT_AT}       # card -> its seats' buffers (▶ `_at`)
         self.MASK_CELLS = {}
         self._mask_buffers(cpu=False)
         self._tables()
@@ -676,6 +749,8 @@ class Qwen35(Generates):
         if self.VIS:
             self._vision_bindings()
         m.define_programs(self._procedures)
+        if self.SEATS > 1:
+            self._seat_views(0)
         if self.CPLAN is not None:
             self.CALIBRATION = expert_tier.calibrate(
                 m, CARD, self.CPU, self.KRS_AT, self.EPLAN.slot_bytes, self.C_HANDS_AT, self.HAND_ROW, 2 * self.H,
@@ -688,11 +763,65 @@ class Qwen35(Generates):
         self.global_ = None                         # what was left of global.pkl, read by the buffers
         self.b.release()                            # every layer's file let go (▶ `Bundle.release`)
 
+    def _load_seat_cards(self, progress=None):
+        """⭐ A CONVERSATION A CARD (`cards`): each card, the last first, its head and embedding, its whole dense model and
+        its seat's state into its own collections, its buffers and tables, and its values bound under the program's names
+        — its CARD among them — the programs defined over the first card loaded, each card's views frozen over its own
+        (▶ `_seat_views`); the CPU worker the experts once, with the first card loaded, and a hand-off for each card (▶
+        `_cpu_hand_off`). Card 0's come last, so the bindings as they stand are card 0's."""
+        m, b = self.m, self.b
+        self.state_at, self.seat_state_at, self.slot_at, self.SEAT_AT_OF = {}, {}, {}, {}
+        self.state_of = [self.state_at]
+        self.MASK_CELLS = {}
+        for k in reversed(range(self.NCARDS)):
+            m.act_as(k)
+            self._card_k = k
+            loader = m.loader()
+            self._head_and_embedding(loader, last=k == 0)
+            for i, l in enumerate(self.run_layers):
+                for n in b.names(l):
+                    if n in (GU, DN):
+                        continue
+                    key = self.KEY[(l, n)]
+                    loader.layer_width(l, self.TYPE[key], 1)
+                    at = loader.load_dense(b, self.PLAN[key], self.TYPE[key], n, l)
+                    if k == 0:
+                        self.slot_at[(l, n)] = at
+                t = self.T_STATE if self.kinds[l] == "d" else self.T_KV
+                loader.layer_width(l, t, self.CARD_SEATS)
+                for local in range(self.CARD_SEATS):        # card k's seat s its layer's slot s on card k
+                    at = loader.reserve(t)
+                    loader.assign(l, t, local, at)
+                    self.seat_state_at.setdefault(k * self.CARD_SEATS + local, {})[l] = at
+                if progress and k == self.NCARDS - 1:
+                    progress(i + 1, len(self.run_layers))
+            if loader.handed() != 0:
+                raise Refused("%d slots were reserved and never published on card %d" % (loader.handed(), k))
+            self._buffers()
+            self.SEAT_AT_OF[k] = self.SEAT_AT
+            self._tables()
+            if k == self.NCARDS - 1:
+                self._cpu_experts(progress)             # the experts once, and the first card's hand-off
+            else:
+                self._cpu_hand_off()
+            m.act_as(k)
+            self._bindings()
+            if k == self.NCARDS - 1:
+                m.define_programs(self._procedures)
+            self._seat_views(k)
+        self.state_at.update(self.seat_state_at[0])
+        self._card_k = 0
+        m.act_as(CARD)
+        self.active_lora, self._lora_cache = self.folder.lora, {}
+        self.global_ = None                         # what was left of global.pkl, read by the buffers
+        self.b.release()                            # every layer's file let go (▶ `Bundle.release`)
+
     def _load_cards(self, progress=None):
         """Tensor parallel: each card its part of every layer, its buffers and its tables, as that card's worker; card 0
         the head and the embedding as well. Then every card joins the group — refused when two of them cannot reach each
         other's memory: ⚖ "tensor parallelism requires DMA" — and the program is bound and read once, as card 0."""
         m, b, P = self.m, self.b, self.CARDS
+        m.join_group(self.GROUP, P)                   # the cards' group first: refused before a weight is read
         self.state_of, self.slot_at = [{} for _ in range(P)], {}
         for k in range(P):
             m.act_as(k)
@@ -725,11 +854,7 @@ class Qwen35(Generates):
             self._buffers(k)
             self.MASK_CELLS = {}
             self._tables(k)
-        fan = min(4, P)
-        for k in range(P):
-            m.act_as(k)
-            m.must("(nn__partials__join %d %d %d %d)" % (self.GROUP, k, P, fan), "card %d joining the group" % k,
-                   "sys__value_true")
+        m.join_group(self.GROUP, P)
         if self.CPU_EXPERTS:
             self._cpu_experts(progress)
         if self.CPLAN is not None:
@@ -739,6 +864,7 @@ class Qwen35(Generates):
             expert_tier.bind(m, {k: self._named("tier_card", k) for k in range(P)}, len(self.workers()))
         m.act_as(-1)
         self.state_at = self.state_of[0]
+        self.SEAT_AT_OF = {0: self.SEAT_AT}       # the group's one conversation: card 0's buffers (▶ `_at`)
         self._bindings()
         m.define_programs(self._procedures)
         if self.CPLAN is not None:          # a prompt's rows through card 0's tier: its line, as one card's (▶ `load`)
@@ -912,7 +1038,7 @@ class Qwen35(Generates):
         out = m.read(base + self.VSCR["out"][0], (n // M) * vc["out_hidden_size"] * 2)
         return np.frombuffer(out, dtype="<f2").reshape(n // M, -1).astype(np.float32)
 
-    def _head_and_embedding(self, loader):
+    def _head_and_embedding(self, loader, last=True):
         """The head into its slot and the embedding into its RAM buffer, before any layer — then the program lets go of
         its own copies of them: global.pkl's two records and the bytes made of them. The layers then load beside the
         engine's copy alone, so the load holds one tensor at a time above the model, not the two tables.
@@ -930,6 +1056,8 @@ class Qwen35(Generates):
         m.write(self.EMB_AT + self.EMB_DATA_BYTES, self.emb_lut)
         if self.EMBED_CPU:
             m.act_as(CARD)
+        if not last:                                # another card loads them after this one (▶ `_load_seat_cards`)
+            return
         for name in ("lm_head.weight", "model.language_model.embed_tokens.weight"):
             self.global_.pop(name, None)
         self.head_rec = self.emb_rec = None
@@ -980,13 +1108,28 @@ class Qwen35(Generates):
                     self.SRC.setdefault(l, []).append(loader.placed[-1][3])
             if loader.handed() != 0:
                 raise Refused("%d expert slots were reserved and never published" % loader.handed())
+        self._backing = backing
+        self._cpu_hand_off()
+        self.LOCKED_GB = experts_file.lock_experts(self.EXPERTS_LOCK, [a for xs in self.SRC.values() for a in xs], e.slot_bytes)
+        self.REGISTERED_GB = experts_file.register_experts(m, self.EXPERTS_REGISTER, range(self.CARDS),
+                                                           [a for xs in self.SRC.values() for a in xs], e.slot_bytes,
+                                                           self.REGISTER_REQUIRED)
+        m.act_as(CARD)
+
+    def _cpu_hand_off(self):
+        """A card's hand-off on the CPU worker: its copies of the card's hand and rows, its routed sums, its scratch, and
+        each layer's experts tables over them and the experts the CPU holds once — a conversation a card has one a card
+        (▶ `_load_seat_cards`), bound under the program's names as the card's are."""
+        m, H, e = self.m, self.H, self.EPLAN
+        layers, backing = self.run_layers, self._backing
         m.act_as(self.CPU)
         signs = 1.0 - 2.0 * np.unpackbits(np.frombuffer(self.global_["__signs__"]["plane"], dtype=np.uint8),
                                           bitorder="little").astype(np.float64)
         m.buffer(1024, "c_signs", _half(signs[:512]))
         m.buffer(H * 2, "c_zero", _half(np.zeros(H)))
-        m.buffer(2 * (H + 16), "c_hand")
-        m.buffer(H * 2, "c_routed")
+        for seat in range(self.CARD_SEATS):         # a seat's copy of its hand, and its routed sum (▶ SEAT_NAMES)
+            m.buffer(2 * (H + 16), self.seat_name("c_hand", seat))
+            m.buffer(H * 2, self.seat_name("c_routed", seat))
         if self.MTP is not None:                       # a draft's check: the second position's hand and sum
             m.buffer(2 * (H + 16), "c_hand2")
             m.buffer(H * 2, "c_routed2")
@@ -1011,10 +1154,6 @@ class Qwen35(Generates):
                                    backing.get((self.CPU, l), 0)] + self._masked(l, "moe", 16, 14))
         m.array("EXPERTS_CPU", ["exc%d" % l for l in layers])
         m.array("EXPERTS_CPU_ROWS", ["exrc%d" % l for l in layers])
-        self.LOCKED_GB = experts_file.lock_experts(self.EXPERTS_LOCK, [a for xs in self.SRC.values() for a in xs], e.slot_bytes)
-        self.REGISTERED_GB = experts_file.register_experts(m, self.EXPERTS_REGISTER, range(self.CARDS),
-                                                           [a for xs in self.SRC.values() for a in xs], e.slot_bytes,
-                                                           self.REGISTER_REQUIRED)
         m.act_as(CARD)
 
     def _named(self, name, card):
@@ -1068,11 +1207,18 @@ class Qwen35(Generates):
         m.buffer(64, "one", _half(np.ones(32)))
         m.buffer(H * 2, "signs_row", _half(np.tile(signs[:512], H // 512)))
         m.buffer(H * 2, "fnw", _half(1.0 + final_w))           # the `1 + w` convention
-        self.X_AT = m.buffer(H * 2, "x")
+        self.SEAT_AT = {}
+
+        def own(nbytes, name):
+            """Seat 0's buffer `name` and each other seat's beside it (▶ SEAT_BUFS): seat 0's address."""
+            for seat in range(self.CARD_SEATS):
+                self.SEAT_AT[self.seat_name(name, seat)] = m.buffer(nbytes, self.seat_name(name, seat))
+            return self.SEAT_AT[name]
+        self.X_AT = own(H * 2, "x")
         for nm in ("h", "h1", "routed"):
-            m.buffer(H * 2, nm)
+            (own if nm in self.SEAT_BUFS else m.buffer)(H * 2, nm)
         m.buffer(H * 2, "zero_h", _half(np.zeros(H)))
-        m.buffer(self.ROT * 4, "cs")
+        own(self.ROT * 4, "cs")
         m.buffer(self.QH * self.max_context * 4, "scores")
         if self.TIERED:
             rw = 4 * self.QH * (self.AH + 2)
@@ -1080,7 +1226,7 @@ class Qwen35(Generates):
         m.buffer(262144, "mix_scratch")
         m.node_array("PROMPT", self.CHUNK)          # a prompt chunk's tokens
         self._answer_buffers()                      # what `generate` made, the end tokens it watches for
-        self.LOGITS_AT = m.buffer(self.VOCAB * 2, "logits_h")
+        self.LOGITS_AT = own(self.VOCAB * 2, "logits_h")
         m.buffer(64, "res")
         sampling.buffers(m)
         # ⭐ A PROMPT'S ROWS — every model reads its prompt as rows: the scratch, the angles, the rows and their h1s, and
@@ -1101,8 +1247,9 @@ class Qwen35(Generates):
             # the router's hand and its picks, and the experts verb's scratch — the MoE in three reads them on the card as
             # the CPU's experts read the hand and the picks; the router's scratch is the prompt rows' (`pf_scratch`), idle
             # between the rows verbs and while a position runs
-            m.buffer(2 * (H + 16 + self.INTER), "hand")
-            m.node_array("picks", self.TOPK + (1 if self.CARDS > 1 and self.CPLAN is not None else 0))
+            own(2 * (H + 16 + self.INTER), "hand")
+            for seat in range(self.CARD_SEATS):
+                m.node_array(self.seat_name("picks", seat), self.TOPK + (1 if self.CARDS > 1 and self.CPLAN is not None else 0))
             if self.AHEAD is not None:
                 m.node_array("guess", self.GUESS)
             m.buffer(131072, "exp_scratch")
@@ -1154,20 +1301,21 @@ class Qwen35(Generates):
         at, size = (p.at_up_data, p.up_data) if which == "data" else (p.at_down_lut, p.down_lut)
         return "(nn__expert__plane %d %d 0 %d %d)" % (l, self.TYPE[k], at, size)
 
-    def tier(self, l, which, half):
-        """A tier of an attention layer's cache, keys (`up`) or values (`down`)."""
+    def tier(self, l, which, half, seat=0):
+        """A tier of an attention layer's cache, keys (`up`) or values (`down`) — seat `seat`'s."""
         at, size = self.TIER[which]
         base = self.KVPLAN.at_up_data if half == "up" else self.KVPLAN.at_down_data
-        return "(nn__expert__plane %d %d 0 %d %d)" % (l, self.T_KV, base + at, size)
+        return "(nn__expert__plane %d %d %d %d %d)" % (l, self.T_KV, seat, base + at, size)
 
-    def state(self, l, which):
+    def state(self, l, which, seat=0):
+        """A layer's state, its up or down half — seat `seat`'s: that seat's slot of the layer's."""
         t, p = (self.T_STATE, self.SPLAN) if self.kinds[l] == "d" else (self.T_KV, self.KVPLAN)
         at, size = (p.at_up_data, p.up_bytes) if which == "up" else (p.at_down_data, p.down_bytes)
-        return "(nn__expert__plane %d %d 0 %d %d)" % (l, t, at, size)
+        return "(nn__expert__plane %d %d %d %d %d)" % (l, t, seat, at, size)
 
-    def _mixer_cells(self, l, scratch, cs="cs", scores="scores", card=0):
+    def _mixer_cells(self, l, scratch, cs="cs", scores="scores", card=0, seat=0):
         """A mixer's plane table over the scratch named: the DeltaNet's or the attention's, as its verbs read it — on card
-        `card` of a tensor-parallel group, its buffers and its share of the heads."""
+        `card` of a tensor-parallel group, its buffers and its share of the heads; over seat `seat`'s state."""
         pl, d = self.plane, (lambda l_, n: self.b.record(l_, n).d)
         signs, minus1 = self._named("signs", card), self._named("minus1", card)
         if self.kinds[l] == "d":
@@ -1177,25 +1325,27 @@ class Qwen35(Generates):
                     + [pl(l, "linear_attn.conv1d.weight", "data"), pl(l, "linear_attn.A_log", "data"),
                        pl(l, "linear_attn.dt_bias", "data"), pl(l, "linear_attn.norm.weight", "data"),
                        pl(l, "linear_attn.out_proj.weight", "data"), pl(l, "linear_attn.out_proj.weight", "lut"),
-                       self.state(l, "up"), self.state(l, "down"), signs, minus1, scratch,
+                       self.state(l, "up", seat), self.state(l, "down", seat), signs, minus1, scratch,
                        self.H, self.KH, self.VH, self.LH] + [d(l, n) for n in ns] + [d(l, "linear_attn.out_proj.weight")])
         ns = ["self_attn.q_proj.weight", "self_attn.k_proj.weight", "self_attn.v_proj.weight", "self_attn.o_proj.weight"]
         return ([pl(l, "input_layernorm.weight", "data")] + [c for n in ns for c in (pl(l, n, "data"), pl(l, n, "lut"))]
                 + [pl(l, "self_attn.q_norm.weight", "data"), pl(l, "self_attn.k_norm.weight", "data"),
-                   self.state(l, "up"), self.state(l, "down"), cs, scores, signs, scratch,
+                   self.state(l, "up", seat), self.state(l, "down", seat), cs, scores, signs, scratch,
                    self.H, self.QH, self.KVH, self.AH, self.ROT] + [d(l, n) for n in ns])
 
-    def _tiered_cells(self, l, card=0):
-        """An attention layer's tiered table: the one-cache cells with the sink in the cache's place, then the tiers."""
+    def _tiered_cells(self, l, card=0, seat=0):
+        """An attention layer's tiered table: the one-cache cells with the sink in the cache's place, then the tiers —
+        seat `seat`'s, over its angles."""
         nm = lambda n: self._named(n, card)
-        cells = self._mixer_cells(l, nm("mix_scratch"), nm("cs"), nm("scores"), card)
-        cells[11], cells[12] = self.tier(l, "sink", "up"), self.tier(l, "sink", "down")
+        cells = self._mixer_cells(l, nm("mix_scratch"), self.seat_name(nm("cs"), seat), nm("scores"), card, seat)
+        t = lambda which, half: self.tier(l, which, half, seat)                             # noqa: E731
+        cells[11], cells[12] = t("sink", "up"), t("sink", "down")
         return (cells + [self.THETA, 1 if self.ROTATED else 0]
-                + [self.tier(l, "hot", "up"), self.tier(l, "hot", "down"),
-                   self.tier(l, "warm_c", "up"), self.tier(l, "warm_s", "up"),
-                   self.tier(l, "warm_c", "down"), self.tier(l, "warm_s", "down"),
-                   self.tier(l, "cold_c", "up"), self.tier(l, "cold_s", "up"),
-                   self.tier(l, "cold_c", "down"), self.tier(l, "cold_s", "down"),
+                + [t("hot", "up"), t("hot", "down"),
+                   t("warm_c", "up"), t("warm_s", "up"),
+                   t("warm_c", "down"), t("warm_s", "down"),
+                   t("cold_c", "up"), t("cold_s", "up"),
+                   t("cold_c", "down"), t("cold_s", "down"),
                    nm("tier_scratch"), self.SINK, self.HOT, self.WARM])
 
     # ── the rank-1 mask, when the folder's LoRA is one (▶ `nn_rank1_mask.py`, the `rank1_*` doors) ─────────────────
@@ -1279,6 +1429,23 @@ class Qwen35(Generates):
                 m.table("dr%d" % l, mk(self._mixer_cells(l, "pf_scratch") + flag, 30))
             elif not self.TIERED:
                 m.table("ar%d" % l, mk(self._mixer_cells(l, "pf_scratch", "cs_rows", "scores_rows") + [self.THETA] + flag, 48))
+            # each other seat's mixers: the same, over its slot of the layer's state and its own angles (▶ `state`)
+            for seat in range(1, self.CARD_SEATS):
+                sn = lambda n, seat=seat: self.seat_name(n, seat)                         # noqa: E731
+                if self.kinds[l] == "d":
+                    m.table(sn("mx%d" % l), mk(self._mixer_cells(l, "mix_scratch", seat=seat)
+                                                + ([1] if self.ROTATED else []), 30))
+                    m.table(sn("dr%d" % l), mk(self._mixer_cells(l, "pf_scratch", seat=seat) + flag, 30))
+                elif self.TIERED:
+                    tiered = self._tiered_cells(l, seat=seat)
+                    m.table(sn("mx%d" % l), mk(tiered, 48))
+                    m.table(sn("atr%d" % l), mk(tiered + ["pf_scratch", "cs_rows", "win_k", "win_v", "rows_res",
+                                                          "window_scores"], 48))
+                else:
+                    m.table(sn("mx%d" % l), mk(self._mixer_cells(l, "mix_scratch", cs=sn("cs"), seat=seat)
+                                                + ([self.THETA, 1] if self.ROTATED else []), 48))
+                    m.table(sn("ar%d" % l), mk(self._mixer_cells(l, "pf_scratch", "cs_rows", "scores_rows", seat=seat)
+                                                + [self.THETA] + flag, 48))
             if not self.MOE:
                 ms = ["mlp.gate_proj.weight", "mlp.up_proj.weight", "mlp.down_proj.weight"]
                 for name, scratch in (("ml%d", "mix_scratch"), ("mlr%d", "pf_scratch")):     # a position's, and the rows'
@@ -1509,7 +1676,8 @@ class Qwen35(Generates):
                       ROTATED=bool(self.ROTATED), TIERED=bool(self.TIERED), ROUTED=bool(self.MOE),
                       FUSED=bool(self.MOE and self.FUSED), EXPERTS_ON_CPU=bool(self.CPU_EXPERTS), EMBED_ON_CPU=bool(self.EMBED_CPU),
                       EMBED_ROWS_ON_CPU=bool(self.EMBED_CPU and self.ROTATED),
-                      CARD_TIER=self.CPLAN is not None, CARD=CARD, CPU=self.CPU, AHEAD=self.AHEAD or 0)
+                      CARD_TIER=self.CPLAN is not None, CARD=self._card_k, CPU=self.CPU, AHEAD=self.AHEAD or 0,
+                      CHAIN=self.SEATS > 1)
         if self.CPU_EXPERTS:
             values.update(HAND_BYTES=2 * (H + 16), HANDS_BYTES=self.CHUNK * self.HAND_ROW, ROWS_BYTES=self.CHUNK * H * 2,
                           ROWS_HALVES=self.CHUNK * H, HAND_ROW=self.HAND_ROW, HAND_PICKS_AT=self.HAND_ROW - 8 * self.TOPK)
@@ -1526,8 +1694,10 @@ class Qwen35(Generates):
             m.node_array("EMB_TOK", 2)          # the token the CPU decodes the row of, and a prompt chunk's rows
         m.array("DELTANET", [self.kinds[l] == "d" for l in run])
         m.array("LAYER", list(run))
-        m.array("MIXER", ["mx%d" % l for l in run])
-        m.array("MIXER_ROWS", [("dr%d" if self.kinds[l] == "d" else "atr%d" if self.TIERED else "ar%d") % l for l in run])
+        rows = lambda l: ("dr%d" if self.kinds[l] == "d" else "atr%d" if self.TIERED else "ar%d") % l    # noqa: E731
+        for seat in range(self.CARD_SEATS):         # seat k's mixers over its state: its view binds them as MIXER
+            m.array(self.seat_name("MIXER", seat), [self.seat_name("mx%d" % l, seat) for l in run])
+            m.array(self.seat_name("MIXER_ROWS", seat), [self.seat_name(rows(l), seat) for l in run])
         if not self.MOE:
             m.array("MLP", ["ml%d" % l for l in run])
             m.array("MLP_ROWS", ["mlr%d" % l for l in run])
@@ -1543,7 +1713,8 @@ class Qwen35(Generates):
             m.array("MOE", ["mr%d" % l for l in run])
             m.array("EXPERTS", ["ex%d" % l for l in run])
         else:
-            m.node_array("HERE", 1)             # the layer a CPU picture runs (▶ lisp/qwen3_5_cpu.lisp)
+            for seat in range(self.CARD_SEATS):  # the layer a CPU picture runs (▶ lisp/qwen3_5_cpu.lisp), and a seat's
+                m.node_array(self.seat_name("HERE", seat), 3)   # chain its position and its ending (▶ the chain)
         if self.CPLAN is not None:
             m.array("EXPERTS_TIER", ["exk%d" % l for l in run])
             m.array("EXPERTS_TIER_ROWS", ["exkr%d" % l for l in run])
@@ -1669,12 +1840,12 @@ class Qwen35(Generates):
             if not self.MOE:
                 ffn = "(nn__mlp__apply %s ml%d %s) (nn__mlp__apply %s ml%d %s)" % (h1, l, x, h12, l, x2)
             elif rows2:
-                ffn = ("(ai_qwen_3__pre_expert_rows h1s pre%d hands 2) (sys__node_array__set HERE 0 %d) (sys__compute CPU names xr2) "
-                       "(sys__result CPU) (nn__buffer__copy c_rrows CPU rrows %d) (ai_qwen_3__post_expert_rows h1s hands rrows post%d xs 2)"
+                ffn = ("(ai_qwen_3__pre_expert_rows h1s pre%d hands 2) (sys__node_array__set HERE 0 %d) (sys__scheduler__add CPU names xr2) "
+                       "(sys__wait CPU) (nn__buffer__copy c_rrows CPU rrows %d) (ai_qwen_3__post_expert_rows h1s hands rrows post%d xs 2)"
                        % (l, i, 4 * H, l))
             elif self.CPU_EXPERTS:
                 ffn = ("(ai_qwen_3__pre_expert %s pre%d hand picks) (ai_qwen_3__pre_expert %s pre%d hand2 picks2) "
-                       "(sys__node_array__set HERE 0 %d) (sys__compute CPU names xqb) (sys__result CPU) "
+                       "(sys__node_array__set HERE 0 %d) (sys__scheduler__add CPU names xqb) (sys__wait CPU) "
                        "(nn__buffer__copy c_routed CPU routed HIDDEN_BYTES) (nn__buffer__copy c_routed2 CPU routed2 HIDDEN_BYTES) "
                        "(ai_qwen_3__post_expert %s hand routed post%d %s) (ai_qwen_3__post_expert %s hand2 routed2 post%d %s)"
                        % (h1, l, h12, l, i, h1, l, x, h12, l, x2))
@@ -1710,20 +1881,104 @@ class Qwen35(Generates):
         m.defun("(defun (restore) (begin %s (type x)))" % " ".join(back))
 
     # ── ④ running ─────────────────────────────────────────────────────────────────────────────────────────────
+    # ── seats (NN-155 ②, ▶ `seats` in the setup) ───────────────────────────────────────────────────────────────
+    SEATS_MOST = 4
+    SEATS_ON_A_CARD = True              # multi_user "yes" on one card seats two (▶ `with_cards`); a dense model one
+    CONVERSATION_A_CARD = True          # multi_user "yes" over several cards a conversation a card (`cards`); "no" a group
+    # ⭐ EVERY SEAT STEPS ON ITS OWN: a seat's position and prompt run on the card's block in its own view (`step`,
+    #   `prefill`), so the session drives each seat from a thread of its own (▶ session's `ALONE`)
+    ALONE = True
+    # what a seat's view binds (▶ `load`): the names its programs read a conversation by and carry across a step's end —
+    #   its residual, the mixer's output, the router's hand and picks, the routed sum, its angles, the logits its head
+    #   leaves, what its chain carries, its mixers over its state, and the CPU's copy of its hand and its routed sum. The
+    #   scratch a step uses and leaves is every seat's (a card's block runs one step at a time); a prompt's rows are its
+    #   card's, under its lock (▶ `prefill`)
+    SEAT_NAMES = ("x", "h1", "hand", "picks", "routed", "cs", "logits_h", "HERE", "MIXER", "MIXER_ROWS", "c_hand",
+                  "c_routed")
+    SEAT_BUFS = ("x", "h1", "routed", "cs", "logits_h", "hand")      # the buffers among them, a seat's own
+
+    @property
+    def SEAT(self):
+        """The seat `on_seat` chose on this thread, 0 where it chose none: each seat's thread steps its own."""
+        return getattr(self.__dict__.setdefault("_seat_thread", threading.local()), "seat", 0)
+
+    @SEAT.setter
+    def SEAT(self, seat):
+        self.__dict__.setdefault("_seat_thread", threading.local()).seat = seat
+
+    @staticmethod
+    def seat_name(name, seat):
+        """Seat `seat`'s own name for a buffer, a table or an array: seat 0's is the name itself."""
+        return name if seat == 0 else "%s_s%d" % (name, seat)
+
+    @staticmethod
+    def view_of(seat):
+        """The view seat `seat`'s steps run in (▶ `load`)."""
+        return "names_s%d" % seat
+
+    def _seat_names(self, seat, enter):
+        """Seat `seat`'s own names bound over the program's — or left again — for its views (▶ `load`)."""
+        m = self.m
+        if enter:
+            text = " ".join("(sys__add_bindings %d '%s %s)" % (m.env, n, self.seat_name(n, seat)) for n in self.SEAT_NAMES)
+        else:
+            text = " ".join("(sys__remove_bindings %d '%s)" % (m.env, n) for n in self.SEAT_NAMES)
+        m.must("(begin %s (< 0 1))" % text, "seat %d's names" % seat, "sys__value_true")
+
+    def _seat_views(self, card):
+        """⭐ A SEAT'S NAMES ARE THE PROGRAM'S OWN: each seat past the first has its own bound over the program's, its two
+        views frozen — `names`, the one the CPU computes its experts in, and `names_s<seat>`, the one its steps run in,
+        which holds that `names` — and left again; seat 0's are made last, so the bindings as they stand, and `names`,
+        are seat 0's (▶ lisp/qwen3_5_cpu.lisp). A view is a snapshot, which nothing bound after it reaches."""
+        for seat in reversed(range(self.CARD_SEATS)):          # card `card`'s seats, bound over its names
+            if seat:
+                self._seat_names(seat, True)
+            self.m.view("names")
+            self.m.view(self.view_of(card * self.CARD_SEATS + seat))
+            if seat:
+                self._seat_names(seat, False)
+
+    def place(self, seat):
+        """Seat `seat`'s card — its worker — and its seat on that card."""
+        return divmod(seat, self.CARD_SEATS)
+
+    def _at(self, name, seat=None):
+        """The address of seat `seat`'s own buffer `name` — the seat `on_seat` chose's by default."""
+        card, local = self.place(self.SEAT if seat is None else seat)
+        return self.SEAT_AT_OF[card][self.seat_name(name, local)]
+
+    @contextlib.contextmanager
+    def on_seat(self, seat):
+        """What runs inside runs on seat `seat`'s conversation — its reset, its prompt, its steps — and on seat 0 after."""
+        if not 0 <= seat < self.SEATS:
+            raise Refused("seat %r of %d" % (seat, self.SEATS))
+        was, self.SEAT = self.SEAT, seat
+        try:
+            yield self
+        finally:
+            self.SEAT = was
+
+    def seat_state_regions(self, length, seat):
+        """`state_regions` of seat `seat`'s conversation: its slot of every layer's state."""
+        return self.state_regions(length, where=self.seat_state_at[seat])
+
     def reset(self):
-        """A conversation from nothing: every DeltaNet layer's state and window to zero. The attention caches need
-        nothing — a position reads only rows it has written."""
-        zeros = []
+        """A conversation from nothing on the seat `on_seat` chose: every DeltaNet layer's state and window to zero. The
+        attention caches need nothing — a position reads only rows it has written."""
+        zeros, seat = [], self.place(self.SEAT)[1]          # the seat's slot on its card
         for l in self.run_layers:
             if self.kinds[l] == "d":
-                zeros += ["(nn__vector__zero %s %d)" % (self.state(l, "up"), self.S_BYTES // 2),
-                          "(nn__vector__zero %s %d)" % (self.state(l, "down"), self.W_BYTES // 2)]
+                zeros += ["(nn__vector__zero %s %d)" % (self.state(l, "up", seat), self.S_BYTES // 2),
+                          "(nn__vector__zero %s %d)" % (self.state(l, "down", seat), self.W_BYTES // 2)]
         for k in range(1, self.CARDS):                  # every other card of a tensor-parallel group: its own states
             self.m.act_as(k)
             self.m.must("(begin %s (type x))" % " ".join(zeros), "the reset of card %d" % k)
         if self.CARDS > 1:
             self.m.act_as(-1)
-        self.m.must("(begin %s (type x))" % " ".join(zeros), "the reset")
+        if self.SEATS > 1:                               # on the seat's card, in its view
+            self._run("(begin %s (type x))" % " ".join(zeros), "seat %d's reset" % self.SEAT)
+        else:
+            self.m.must("(begin %s (type x))" % " ".join(zeros), "the reset")
         self._room(0, exact=True)                       # a conversation from nothing: every lent slot the tier's again
         self._mtp_have, self._mtp_hid, self._mtp_next = -1, -1, None
 
@@ -1746,6 +2001,12 @@ class Qwen35(Generates):
         self._room(pos + 1)
         head = sample or ("(head)" if greedy else "(head_logits)")
         self._lag = lag                                    # what `generate` finds set (▶ generate.py)
+        if self.SEATS > 1:
+            # ⭐ A SEAT'S POSITION, A CHAIN OF STEPS (▶ qwen3_5.lisp's chain), its rotary position from here: no LAG shared
+            if sample is not None:
+                raise Refused("a seat's token is drawn on the host: its logits, not a sampler on the card")
+            return self._run("(chain_position %d %d %d %d)" % (token, pos, pos - lag, 1 if greedy else 2),
+                             "seat %d's position %d" % (self.SEAT, pos))
         return self._run("(begin (set! LAG %d) (position %d %d) %s)" % (lag, token, pos, head), "position %d" % pos)
 
     def generate(self, token, pos, n, stop=(), sampler=None, lag=0):
@@ -1850,7 +2111,13 @@ class Qwen35(Generates):
 
     def _run(self, text, what):
         """A program's answer. ⛳ With a CPU worker (the experts, or the embedding) it runs with every block standing — it
-        hands them work (`sys__compute`) — and a program that does not would find the CPU's block never started."""
+        hands them work (`sys__scheduler__add`) — and a program that does not would find the CPU's block never started.
+        With seats, on the card's block in the view of the seat `on_seat` chose (▶ `_seat_views`)."""
+        if self.SEATS > 1:
+            kind, value = self.m.run_in(self.place(self.SEAT)[0], text, view=self.view_of(self.SEAT))
+            if kind == self.m.K["sys__error"]:
+                raise EngineError("%s did not run on seat %d: %s" % (what, self.SEAT, value))
+            return value
         if self.CPU_WORKER or self.CARDS > 1:
             return self.m.grid(text)[1]
         return self.m.must(text, what)
@@ -1859,10 +2126,24 @@ class Qwen35(Generates):
         """A prompt chunk's tokens into PROMPT, which `embed_rows` reads — sixty-four to a program, as a program is one
         form and a form must fit one of the heap's chunks."""
         for at in range(0, len(tokens), 64):
-            self.m.must("(begin %s 0)" % " ".join("(sys__node_array__set PROMPT %d %d)" % (i, t)
-                                                  for i, t in enumerate(tokens[at:at + 64], at)), "the prompt's tokens")
+            text = "(begin %s 0)" % " ".join("(sys__node_array__set PROMPT %d %d)" % (i, t)
+                                             for i, t in enumerate(tokens[at:at + 64], at))
+            if self.SEATS > 1:      # the seat's card's PROMPT, in its view: each card has its own
+                self._run(text, "seat %d's prompt tokens" % self.SEAT)
+            else:
+                self.m.must(text, "the prompt's tokens")
 
     def prefill(self, tokens, first, greedy=True, sample=None, positions=None, rows=None):
+        """`_prefill` — with seats, on the seat `on_seat` chose, under the card's lock: a prompt's rows, their scratch and
+        the CPU's copies of them are the card's, one seat's at a time."""
+        if self.SEATS == 1:
+            return self._prefill(tokens, first, greedy, sample, positions, rows)
+        if sample is not None:
+            raise Refused("a seat's token is drawn on the host: its logits, not a sampler on the card")
+        with self._card_locks[self.place(self.SEAT)[0]]:
+            return self._prefill(tokens, first, greedy, sample, positions, rows)
+
+    def _prefill(self, tokens, first, greedy=True, sample=None, positions=None, rows=None):
         """Positions `first ..` for `tokens` in chunks of rows — each layer one call a chunk — then the next token from
         the last row (greedy, or drawn by `sample`), or its logits left for a sampler. A picture's tokens come with
         `rows` {index in `tokens`: the tower's row, in place of that pad's embedding} and every token with its three
@@ -1891,8 +2172,13 @@ class Qwen35(Generates):
                 start = ""
             else:
                 start = "(embed_rows %d)" % len(chunk)
-            self._run("(begin (set! ROWPOS %s) %s (rows %d %d) (set! ROWPOS (< 1 0)) (type xs))"
-                      % ("(< 0 1)" if given else "(< 1 0)", start, first + at, len(chunk)), "the rows from %d" % (first + at))
+            flag = "(< 0 1)" if given else "(< 1 0)"
+            if self.SEATS > 1:      # a view's bindings are its snapshot's, which a `set!` cannot write: a seat's a `let`'s
+                self._run("(begin %s (let ((ROWPOS %s)) (rows %d %d)) (type xs))" % (start, flag, first + at, len(chunk)),
+                          "the rows from %d" % (first + at))
+            else:
+                self._run("(begin (set! ROWPOS %s) %s (rows %d %d) (set! ROWPOS (< 1 0)) (type xs))"
+                          % (flag, start, first + at, len(chunk)), "the rows from %d" % (first + at))
             last = len(chunk) - 1
             if self.MTP is not None and given:
                 self._mtp_hid = -1                     # a picture's prompt: the MTP layer is given none of it
@@ -2001,9 +2287,10 @@ class Qwen35(Generates):
         return m.must("(begin (nn__vector__add (nn__vector__range xs %d %d) zero_h x %d) %s)"
                       % ((n - 1) * H, H, H, head if isinstance(head, str) else "(head)"), "the chunk's last row")
 
-    def logits(self):
+    def logits(self, seat=None):
+        """The logits a head left — seat `seat`'s, the seat `on_seat` chose's by default."""
         self._needs_head()
-        return np.frombuffer(self.m.read(self.LOGITS_AT, self.VOCAB * 2), dtype="<f2").astype(np.float32)
+        return np.frombuffer(self.m.read(self._at("logits_h", seat), self.VOCAB * 2), dtype="<f2").astype(np.float32)
 
     # ── ⑤ LoRAs, swapped in place ─────────────────────────────────────────────────────────────────────────────
     # ⚖ *"would it be a nightmare to do hot swapping of loras at the cartridge level? … if there is a unload_lora and

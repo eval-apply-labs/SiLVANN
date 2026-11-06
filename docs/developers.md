@@ -19,14 +19,22 @@ the model package's verbs, or nn's, over tables of its weights that the runtime 
 (`fused=False` in `glm5.py`) is the one the runtime writes itself, a few procedures a layer. The evaluator runs the
 program on the host, and each verb launches its arithmetic on the silicon that holds the data — a card, or the CPU's
 cores. The machine is a set of **workers**, one a device: the card is worker 0, a CPU socket a worker of the
-`x86_avx2` family, and a program hands work to another worker with `sys__compute` and collects it with `sys__result`.
+`x86_avx2` family, and a program hands work to another worker with `sys__scheduler__add` and reads it with
+`sys__wait`: the work waits on that worker's queue, which several workers can hand work to at once, and its value goes
+into the answer `sys__scheduler__add` handed back (▶ `sys`'s README).
 
 Every package has a README; read `engine/src/README.md` first, then `sys`'s and `nn`'s.
 
 ## Where the programs are
 
 A model's program is Lisp, written by hand, and it travels with the model: a model folder carries it in `lisp/`, and
-its pack on Hugging Face with it. The boot reads the folder's files and hands every form to the evaluator, as a REPL
+its pack on Hugging Face with it — a program for each release that changed it, `lisp/v<X.Y.Z>/`, of which a boot reads
+the highest release at or below its own (`silvann_runtime/version.py`'s `RELEASE`); `lisp/dev/` before them all (a
+program of your own, or a development tree's: `scripts/model_lisp.py FOLDER --link`); the files in `lisp/` itself are
+the programs of the releases before v0.24.0. A release that retires a word sends its program as a new folder, and the
+older releases keep reading theirs. A pack's `version.json` (`{"version", "release", "updated"}`) is raised by every
+upload that changes its files — `scripts/model_lisp.py --upload` raises it with the program it sends,
+`scripts/pack_version.py NAME` after any other change — and a folder that is there then says **update**. The boot reads the folder's files and hands every form to the evaluator, as a REPL
 would; a procedure is then a binding like any other, which a program can call or define again. The files are one a
 family — `qwen3_5.lisp`, `glm5.lisp`, `mistral3.lisp`, with `qwen3_5_cpu.lisp` and `glm5_cpu.lisp` for what a CPU worker
 runs, `sampling.lisp` for the sampler every model shares, and `generate.lisp` for an answer made on the card a token
@@ -60,8 +68,22 @@ The family's runtime class (`qwen3_5.py` …) makes what the program reads — t
 the tables (a node array of a matrix's planes and the shape's integers; the cells each verb reads are named in its
 package's `contracts/objects/`) — and binds the names the file is written against: `_bindings`. Three forms are the
 machine's rather than the language's: `(worker N …)` defines its forms as worker N, `(picture name form)` freezes a form
-for `sys__compute` to hand another block, `(view name)` snapshots the bindings a computed block sees — and a top-level
-`if` choosing between `defun`s is defined as it stands (▶ `Machine.load_source`).
+for `sys__scheduler__add` to hand another block, `(view name)` snapshots the bindings a computed block sees — and a
+top-level `if` choosing between `defun`s is defined as it stands (▶ `Machine.load_source`).
+
+**Memory is counted**: a value is taken apart when its last holder lets go of it. A program can put that off with
+`(sys__garbage_collection__manual #t)`, and what dies meanwhile waits until `(sys__garbage_collection__collect)`,
+`(sys__garbage_collection__manual #f)` or the evaluation's end, so the program chooses where the teardown is paid;
+what waits keeps its room until then. The mode stays on until the program turns it off, and the verb answers the
+mode it replaced: `(let ((was (sys__garbage_collection__manual #t))) … (sys__garbage_collection__manual was))`.
+
+**A verb refuses; the evaluator panics.** A verb that cannot do what it was asked leaves an error value, and the
+program goes on. The evaluator itself stops in four places — a head that is not a verb or a call it cannot make
+(`EVAV`), a form it has no room to make (`EVNR`), a descent it has no room to remember (`EVAD`) — and each abandons
+the evaluation where it stands, so the machine stops with it: every door refuses (`e.panic()` names the word) until a
+shutdown and a boot. The runtime's `Machine` shuts down at once and raises `Panic`, the word first; the server answers
+the turn with it, writes `⛔ stopped: EVAV — …` as its last line and ends, and nothing boots it again — starting it
+again is yours (the UI's start).
 
 **A token** is one program the runtime writes a step — `(begin (position TOKEN POS) (head))` — the token's embedding read
 by the card from a table in RAM, the layers, the head. **An answer** is `(generate TOKEN POS N …)` on the card, the next
@@ -119,7 +141,7 @@ program.
    against `nn`'s doors. `engine/scripts/src_enroll.py` enrols a new package and `engine/scripts/src_assemble.sh`
    regenerates the manifests.
 3. **Write its program and its runtime class**: the program in `lisp/<name>.lisp`, copied into the model folder's
-   `lisp/`, and the class (`runtime/silvann_runtime/<name>.py`) with the collections and the boot's section, the load,
+   `lisp/dev/`, and the class (`runtime/silvann_runtime/<name>.py`) with the collections and the boot's section, the load,
    the buffers, the tables, the names the program reads, `step` and `prefill`. `mistral3` is the smallest to copy from
    (nn's words only), `qwen3_5` the fullest; `silvann_runtime/__init__.py` maps an architecture name to its class.
 

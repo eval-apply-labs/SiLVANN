@@ -1,18 +1,29 @@
 # SiLVANN
 
-> **Developer preview, v0.23.1.** It runs the models below well on the hardware it was tested on, and it is shared
+> **Developer preview, v0.24.0.** It runs the models below well on the hardware it was tested on, and it is shared
 > for people who can find their way around a build and a stack trace. NVIDIA cards are tested on two, a GeForce
 > RTX 5060 Ti and an RTX 5070 Ti; Windows natively on one PC; macOS is not supported.
 
 **Silicon Linked Virtualized Architecture for Neural Networks** — a from-scratch inference engine for large language
 models, and the two things it is made of:
 
-- **the Eval-Apply GPU Interpreter** — a small Lisp whose evaluator runs on the CPU and hands arithmetic to whichever
-  silicon holds the data: a graphics card, or the CPU's own cores;
+- **the Eval-Apply GPU Interpreter** — a small Lisp, and the operating system its programs run in, virtualized over the
+  host's. It keeps its own heap of reference-counted objects and a run queue on every worker — a CPU socket, a graphics
+  card — and a program hands work to a worker with the answer that work will fill. Its scheduling is cooperative
+  multitasking: a step runs to its end, and gives its worker back by ending or by queuing the step that continues it. A
+  step that waits for answers is parked, and its worker runs other work until they are filled; an idle worker sleeps
+  until work is queued for it. The evaluator runs on the CPU and hands arithmetic to whichever silicon holds the data.
+  Of the host it asks only primitive calls — threads, locks and conditions, a clock, memory, files, and opening a
+  library: a silicon family is such a library, wrapping a driver's functions (HIP, CUDA, OpenCL) or the CPU's vector
+  units — answered for Linux and for Windows in one file each;
 - **the Neural Network library** (`nn`) — the arithmetic, the memory structures and the words a model is written in.
 
 A model is a program in that language (`engine/src/packages/ai_qwen_3`, `engine/src/packages/ai_z__glm_5_3`), and the
 weights are packed with TurboQuant: rotated rows at 4 or 8 bits, so a 35-billion-parameter model fits in 19 GB.
+
+Nothing in the language or its operating system knows about neural networks: `nn` is a package written on top of them,
+and they stand on their own (`engine/src/packages/sys/README.md`). Python hosts the engine today — the runtime that loads
+a model, the chat and the server — through the engine's C interface, which a program in any language can call.
 
 ## Models, and what they run on
 
@@ -27,7 +38,7 @@ measured on, how fast it reads a prompt and answers after one:
 | [16 GB](docs/results.md#a-16-gb-card) | 32 GB | 4 cores | NVMe, 5.7 GB/s | [Qwen 3.5 122B-A10B](docs/models.md#qwen-35-122b-a10b) `D8E4` | the experts from the disk, ~30 GB of them in RAM | 17.6 positions/s | 5.65 tokens/s after 100k | 110,000 |
 | [16 GB](docs/results.md#a-16-gb-card) | 14 GB | 4 cores | NVMe, 5.7 GB/s | [GLM 5.3 Flash](docs/models.md#glm-53-flash) `D8E4` | the experts from the disk | 9.1 positions/s | 2.21 tokens/s after 100k | 110,000 |
 | [16 GB](docs/results.md#a-16-gb-card) | 16 GB | 4 cores | — | [Qwen 3.8 27B](docs/models.md#qwen-38-27b) `D4` | on the card | 221.3 positions/s | 14.32 tokens/s after 35k | 35,840 |
-| [2× 16 GB](docs/results.md#two-cards-or-more) | 62 GB | 28 cores | — | [Qwen 3.6 35B-A3B](docs/models.md#qwen-36-35b-a3b) `D8E4` | every layer over both cards, a tier on each | 85.3 positions/s | 30.5 tokens/s after 100k | 262,144 |
+| [2× 16 GB](docs/results.md#two-cards-or-more) | 125 GB | 28 cores | — | [Qwen 3.6 35B-A3B](docs/models.md#qwen-36-35b-a3b) `D8E4` | every layer over both cards, a tier on each | 85.9 positions/s | 32.22 tokens/s after 100k | 262,144 |
 | [32 GB](docs/results.md#a-24-or-32-gb-card) | 160 GB | 28 cores | — | [GLM 5.3 Flash](docs/models.md#glm-53-flash) `D8E4` | every expert in RAM, a tier on the card | 72.1 positions/s | 9.86 tokens/s after 100k | 1,048,576 |
 | [2× 32 GB](docs/results.md#two-cards-or-more) | 251 GB | 28 cores | — | [DeepSeek-V4.1-Flash](docs/models.md#deepseek-v41-flash) `D8E4` | every expert in RAM, exclusive tiers | 31.3 positions/s | 9.72 tokens/s after 100k | 1,048,576 |
 <!-- /rates -->
@@ -37,7 +48,7 @@ every machine one model was measured on, its packs and its notes: [`docs/models.
 names no setup chooses its own when the server starts, by trying it on the card: where its experts go, how much of the
 card holds the ones used most, the context the card has room for ([`docs/config.md`](docs/config.md)).
 
-**New in v0.23.1**, and in every release before it: [`release_logs/v0.md`](release_logs/v0.md).
+**New in v0.24.0**, and in every release before it: [`docs/release_logs/v0.md`](docs/release_logs/v0.md).
 
 ## Platforms
 
@@ -49,7 +60,7 @@ card holds the ones used most, the context the card has room for ([`docs/config.
 
 In full — what was checked on each, and what is not yet: [`docs/platforms.md`](docs/platforms.md).
 
-Pictures and videos are read by the Qwen models and GLM 5.3 Flash (v0.7.0: [`release_logs/v0.md`](release_logs/v0.md#v070)), pictures by DeepSeek-V4.1-Flash (v0.17.0: [`docs/users.md`](docs/users.md#3-serve-it-and-chat)); Ministral 3 reads neither.
+Pictures and videos are read by the Qwen models and GLM 5.3 Flash (v0.7.0: [`docs/release_logs/v0.md`](docs/release_logs/v0.md#v070)), pictures by DeepSeek-V4.1-Flash (v0.17.0: [`docs/users.md`](docs/users.md#3-serve-it-and-chat)); Ministral 3 reads neither.
 Every model calls the tool, a Lisp REPL on the machine, in its own trained format (v0.9.0: [`docs/users.md`](docs/users.md#the-models-tool)).
 Pictures are made from a prompt by Qwen-Image 2.1, a server's model of its own (v0.10.0: [`docs/users.md`](docs/users.md#a-picture-model-qwen-image-21)).
 A model's tool draws with the picture model, opens subagents and keeps skills of its own; a dense Qwen model's layers split over AMD cards (v0.11.0: [`docs/tools.md`](docs/tools.md), [`docs/config.md`](docs/config.md)).
@@ -140,24 +151,26 @@ uname -a; cat /etc/os-release; podman --version; docker --version; nvidia-smi -L
 
 ```
 install.sh          fetches, builds and installs the `silvann` command — the one-line install on Linux
-install.ps1         the same on Windows, with the libraries the release was built with; build.ps1 builds them on the PC
-build.sh, build.py  build the engine into lib/ — on Linux, on Windows
+install.ps1         the same on Windows, with the libraries the release was built with
+scripts/            build.sh, build.py — the engine built into lib/, on Linux, on Windows; build.ps1 the libraries
+                    built on a PC; requirements*.txt the Python packages; install_nonfree.ps1 PyAV on Windows
 docker/             a Dockerfile, for a container of your own — no image is published
 engine/src/         the interpreter (engine, sys), the library (nn), the models (ai_qwen_3, ai_z__glm_5_3, ai_qwen_image,
                     ai_deepseek_4), silicon_families/ — one folder a kind of silicon, what it answers for the library —
                     and operating_systems/ — one folder a system, what it answers for the engine
 runtime/            the Python side: a model folder booted onto the machine, conversations, the chat framing
-lisp/               each model family's program, in Lisp — a model folder carries its family's in its own lisp/
-silvann_core.py     download-model · list-models · hf-token
+lisp/               each model family's program, in Lisp — a model folder carries its family's in its own lisp/, a folder
+                    for each release that changed it
+silvann_core.py     download-model · check-model · list-models · hf-token
 start_silvann_server.py, silvann_ui.py, silvann_cli.py     the server, the chat in a browser, the chat in a terminal
 models/             where downloaded models go
 skills/             commands for the model's tool, a folder each — docs/tools.md says how to add yours
-release_logs/       v0.md — what each 0.x release brought, newest first
 docs/               users.md — running it; ui.md — the chat in the browser; config.md — a model's settings; tools.md — the model's tool and your own
                     commands; models.md — every model and what it needs; results.md — every measurement;
                     developers.md — how it is built, adding a model or a silicon;
                     concepts.md — the ideas behind it; compression.md — how the weights are packed;
-                    directions.md — where it could go; local_ai.md — why AI on your own machine
+                    directions.md — where it could go; local_ai.md — why AI on your own machine;
+                    release_logs/v0.md — what each 0.x release brought, newest first
 ```
 
 ## Contact

@@ -123,6 +123,8 @@ class Chat:
                             elif event == "error":
                                 self.line()
                                 print("%s[the server: %s]%s" % (RED, d.get("error"), RESET))
+                                if d.get("stopped"):           # the evaluator stopped, and the server ends with it
+                                    sys.exit("%s[the server has stopped: start it again to go on]%s" % (RED, RESET))
                 return ask
             except KeyboardInterrupt:
                 self.http.post("/cartridges/%s/stop" % self.cid)

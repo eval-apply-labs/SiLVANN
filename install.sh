@@ -137,7 +137,7 @@ fetch() {
         return
     fi
     # a folder of its own, or one this installer filled before: never files it did not write
-    if [ ! -e "$DIR/build.sh" ] && [ -n "$(ls -A "$DIR" | grep -vxE 'models|venv|user_sessions' || true)" ]; then
+    if [ ! -e "$DIR/install.sh" ] && [ -n "$(ls -A "$DIR" | grep -vxE 'models|venv|user_sessions' || true)" ]; then
         stop "$DIR already holds other files: install into a folder of its own (the default, ./silvann)"
     fi
     say "fetching SiLVANN into $DIR"
@@ -157,10 +157,10 @@ environment() {
     say "the Python environment ($DIR/venv)"
     [ -x "$DIR/venv/bin/python" ] || python3 -m venv "$DIR/venv"
     "$DIR/venv/bin/python" -m pip install --quiet --upgrade pip
-    "$DIR/venv/bin/python" -m pip install --quiet -r "$DIR/requirements.txt"
+    "$DIR/venv/bin/python" -m pip install --quiet -r "$DIR/scripts/requirements.txt"
     # what it reads more with and runs without: a failure is said, not fatal
-    if [ "${SILVANN_NONFREE:-1}" != 0 ] && [ -f "$DIR/requirements-nonfree.txt" ]; then
-        "$DIR/venv/bin/python" -m pip install --quiet -r "$DIR/requirements-nonfree.txt" \
+    if [ "${SILVANN_NONFREE:-1}" != 0 ] && [ -f "$DIR/scripts/requirements-nonfree.txt" ]; then
+        "$DIR/venv/bin/python" -m pip install --quiet -r "$DIR/scripts/requirements-nonfree.txt" \
             || note "requirements-nonfree.txt was not installed: SiLVANN runs without it (a video file other than an animated picture is refused)"
     fi
 }
@@ -170,7 +170,7 @@ build() {
     find_cards
     say "building the engine and the families for this machine: $FAMILIES (a few minutes; everything in $DIR/build.log)"
     if ! (cd "$DIR" && env SILVANN_PYTHON="$DIR/venv/bin/python" SILVANN_SILICON_FAMILIES="$FAMILIES" ${BUILD_ENV[@]+"${BUILD_ENV[@]}"} \
-              ./build.sh > "$DIR/build.log" 2>&1); then
+              scripts/build.sh > "$DIR/build.log" 2>&1); then
         tail -n 30 "$DIR/build.log" >&2
         stop "the build failed — the lines above, and all of it in $DIR/build.log"
     fi
@@ -194,7 +194,8 @@ export SILVANN_DATA="\${SILVANN_DATA:-\$DATA}"
 usage() {
     cat <<HELP
 silvann list                        the models this release can fetch, and which are here
-silvann download <model>            a model into \$SILVANN_DATA/models
+silvann download <model>            a model into \$SILVANN_DATA/models — when it is there, what changed in its pack
+silvann check [model]               update or done, each model here — with one, the files its update fetches
 silvann token [--set | --forget]    the Hugging Face token the downloads use (faster than none)
 silvann serve <model> [config]      the server, on port 8765 (--port to change it)
 silvann ui                          the chat in a browser, on port 8090, talking to the server
@@ -211,6 +212,8 @@ cmd=\${1:-help}; [ \$# -gt 0 ] && shift
 case "\$cmd" in
     list|list-models)          exec "\$PY" "\$HERE/silvann_core.py" list-models "\$@" ;;
     download|download-model)   exec "\$PY" "\$HERE/silvann_core.py" download-model "\$@" ;;
+    check|check-model)         [ \$# -eq 0 ] && exec "\$PY" "\$HERE/silvann_core.py" check-versions
+                               exec "\$PY" "\$HERE/silvann_core.py" check-model "\$@" ;;
     token|hf-token)            exec "\$PY" "\$HERE/silvann_core.py" hf-token "\$@" ;;
     serve)
         [ \$# -gt 0 ] || { echo "silvann serve <model> [config] [--port 8765]   — a model in \$SILVANN_DATA/models"; exit 1; }
@@ -267,6 +270,16 @@ EOF
     ln -sf "$DIR/silvann_cli" "$BIN/silvann_cli"
 }
 
+# ── the models here: each one's program for this release, from its pack (a boot fetches it otherwise) ──────────────
+programs() {
+    local data="$DIR"
+    [ -s "$DIR/data_folder" ] && data=$(cat "$DIR/data_folder")
+    [ -d "${SILVANN_DATA:-$data}/models" ] || return 0
+    say "The models here: each one's program for this release"
+    SILVANN_DATA="${SILVANN_DATA:-$data}" "$DIR/venv/bin/python" "$DIR/silvann_core.py" update-programs \
+        || note "not checked now — each model's boot checks its program again"
+}
+
 main() {
     local only_build=0
     [ "${1:-}" = --build ] && only_build=1
@@ -281,6 +294,7 @@ main() {
     [ $only_build -eq 1 ] || environment
     build
     command_file
+    [ $only_build -eq 1 ] || programs
     say "done: SiLVANN is in $DIR, and \`silvann\` in $BIN"
     case ":$PATH:" in
         *":$BIN:"*) ;;

@@ -52,6 +52,8 @@ static sys__heap_node nn__vector__zzabi_apply_top_k_biased(const sys__heap_node*
 static __device__ SYS__NOINLINE void nn__vector__zzabi_adapter_top_k_biased(sys__heap_node* base, uint64_t form);
 static sys__heap_node nn__vector__zzabi_apply_top_k_scored(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx);
 static __device__ SYS__NOINLINE void nn__vector__zzabi_adapter_top_k_scored(sys__heap_node* base, uint64_t form);
+static sys__heap_node nn__vector__zzabi_apply_top_k_rows(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx);
+static __device__ SYS__NOINLINE void nn__vector__zzabi_adapter_top_k_rows(sys__heap_node* base, uint64_t form);
 static sys__heap_node nn__vector__zzabi_apply_penalize(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx);
 static __device__ SYS__NOINLINE void nn__vector__zzabi_adapter_penalize(sys__heap_node* base, uint64_t form);
 

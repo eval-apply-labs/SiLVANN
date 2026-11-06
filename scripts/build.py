@@ -9,8 +9,8 @@ where its toolchain is installed and skipped where it is not.
   SILVANN_NVCC              CUDA's compiler            default %CUDA_PATH%\\bin\\nvcc.exe, else nvcc on the PATH
   SILVANN_CLANG_CL          clang-cl                   default Visual Studio's "C++ Clang tools", else on the PATH
 
-  python build.py             build (install.ps1 runs it with the release's own Python and keeps what it says)
-  python build.py --dry-run   the commands it would run, not run — on any system
+  python scripts/build.py     build (install.ps1 runs it with the release's own Python and keeps what it says)
+  python scripts/build.py --dry-run   the commands it would run, not run — on any system
 
 The toolchains are Visual Studio's (2022 or newer, the "Desktop development with C++" workload and its "C++ Clang tools
 for Windows") and CUDA's (12.x). Visual Studio's environment is taken from its `vcvars64.bat`, so a plain PowerShell
@@ -25,7 +25,7 @@ import subprocess
 import sys
 import sysconfig
 
-HERE = os.path.dirname(os.path.abspath(__file__))
+HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))    # the release's folder: this file is in its scripts/
 SRC = os.path.join(HERE, "engine", "src")
 WORK = os.path.join(HERE, "engine", "build", "silicon_families")    # each family's generated translation unit
 LIB = os.path.join(HERE, "lib")
@@ -177,7 +177,7 @@ def exports_entry(path, family):
 
 def main():
     if not WINDOWS and not DRY:
-        sys.exit("build.py builds on Windows; on Linux, build.sh")
+        sys.exit("build.py builds on Windows; on Linux, scripts/build.sh")
     os.makedirs(FAMILIES_OUT, exist_ok=True)
     os.makedirs(WORK, exist_ok=True)
     vs = visual_studio()

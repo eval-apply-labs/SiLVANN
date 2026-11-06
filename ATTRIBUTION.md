@@ -23,7 +23,7 @@ rest of SiLVANN under the AGPL, as the prebuilt Windows libraries (§7) and the 
 ## 2. Third-party code in the source tree
 
 One parser and the OpenCL API's headers, carried unchanged in `engine/scripts/third_party/` (its README says why). The engine, the runtime and
-the other build scripts are original work. The release is source: `install.sh` and `build.ps1` build the engine on the
+the other build scripts are original work. The release is source: `install.sh` and `scripts/build.ps1` build the engine on the
 user's own machine. Two things carry binaries: the prebuilt Windows libraries attached to a release, which §7 lists, and
 the published images, which §6 lists.
 
@@ -44,7 +44,7 @@ Headers and libraries the builder installs themselves:
 | NVIDIA CUDA toolkit | NVIDIA CUDA EULA | the `nvidia_cuda12` family, built only where `nvcc` is installed; it links the CUDA runtime statically, so a binary of it may be redistributed only under that EULA's terms |
 | Khronos OpenCL headers | Apache-2.0 | the `khronos_opencl2` and `khronos_opencl1_igpu` families |
 
-Python packages the runtime imports (`requirements.txt`), installed by the user:
+Python packages the runtime imports (`scripts/requirements.txt`), installed by the user:
 
 | package | licence |
 |---|---|
@@ -58,7 +58,7 @@ Python packages the runtime imports (`requirements.txt`), installed by the user:
 | nicegui | MIT |
 | Pillow | MIT-CMU (HPND) — a picture decoded and resized for the vision tower |
 | pypdf | BSD-3-Clause — a PDF's text, for a file attached to a message |
-| PyAV (`av`), in `requirements-nonfree.txt` — `install.sh` installs it; the Docker image does not carry it, and its scripts' `install_nonfree` fetches it from PyPI into the user's volume | BSD-3-Clause — a video file's frames. Its wheels carry FFmpeg's libraries (LGPL-3.0-or-later, as FFmpeg reports itself) and the codec libraries they link, x264 and x265 among them (GPL-2.0-or-later) |
+| PyAV (`av`), in `scripts/requirements-nonfree.txt` — `install.sh` installs it; the Docker image does not carry it, and its scripts' `install_nonfree` fetches it from PyPI into the user's volume | BSD-3-Clause — a video file's frames. Its wheels carry FFmpeg's libraries (LGPL-3.0-or-later, as FFmpeg reports itself) and the codec libraries they link, x264 and x265 among them (GPL-2.0-or-later) |
 
 ## 4. Models
 
@@ -101,9 +101,9 @@ From v0.20.0 two images are published on GitHub's registry, `ghcr.io/eval-apply-
 | NVIDIA's CUDA runtime, linked statically into `libsilvann_nvidia_cuda12.so` | `-nvidia` | NVIDIA CUDA Toolkit EULA (a redistributable component) | `notices/CUDA_EULA.txt`, `notices/CUDA_VERSION.txt` |
 | AMD's ROCm HIP runtime (6.1.3), from AMD's repository: the HIP runtime, comgr, the HSA runtime, rocminfo and what they require — ROCm's compilers left out | `-amd` | each component's own: MIT (HIP, comgr, hsakmt, rocm-core), the University of Illinois/NCSA licence (the HSA runtime, rocminfo), Apache-2.0 (openmp-extras) | `/opt/rocm/share/doc/<component>/`; its source at https://github.com/ROCm |
 | Ubuntu 22.04 and the packages installed on it (Python 3.10, tini, ca-certificates, and what they require) | both | each package's own; their source is Ubuntu's archive at the versions listed | `/usr/share/doc/<package>/copyright` |
-| the Python environment `/opt/silvann/venv`: `requirements.txt` (§3) and what it requires | both | each package's own (§3) | each package's `.dist-info` |
+| the Python environment `/opt/silvann/venv`: `scripts/requirements.txt` (§3) and what it requires | both | each package's own (§3) | each package's `.dist-info` |
 
-Not in them: PyAV (`requirements-nonfree.txt`, §3), which `docker/README.md`'s command fetches from PyPI into the user's
+Not in them: PyAV (`scripts/requirements-nonfree.txt`, §3), which `docker/README.md`'s command fetches from PyPI into the user's
 volume; the card's driver, which is the host's (NVIDIA's handed in by its container toolkit; AMD's `amdgpu` is the
 host's kernel's); the models.
 

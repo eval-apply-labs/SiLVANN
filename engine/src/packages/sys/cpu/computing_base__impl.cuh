@@ -336,11 +336,10 @@ static __device__ inline sys__heap_node* sys__computing_base__begin(sys__heap_no
  * ⛔⛔ THE STATE IS READ AND THEN ACTED ON, WHICH IS THE PATTERN THIS PACKAGE OTHERWISE REFUSES, AND HERE
  * IT IS SOUND FOR A REASON WORTH WRITING DOWN. Everywhere else a check-then-act loses because a second
  * party can move the word in between. Nothing can move it here, and the property that buys that is not
- * scarcity of writers — FIVE ROUTES REACH COMPUTING+N — it is that every one of them writes the id of
+ * scarcity of writers — FOUR ROUTES REACH COMPUTING+N — it is that every one of them writes the id of
  * whoever acts next. `claim` and `begin` leave it naming the block that took it. `read_result`'s two
  * swaps leave it naming the collector, which is already inside the call that empties the base.
- * `zzpackage_start` stores it plainly on a node nothing has been told the address of. And the host, in
- * `eng_abi_result_release`, names the block it is handing the base back to. Moving it away again is this
+ * `zzpackage_start` stores it plainly on a node nothing has been told the address of. Moving it away again is this
  * verb, `init`'s stores (SCHEDULED, FREE, or ERROR on a half fill) and `begin`'s two ERROR arms, and all
  * of them run on a base the word already names the caller in. So a base
  * seen at COMPUTING+me can only be moved by me, and reading it first is not a window — the word is its
@@ -557,6 +556,19 @@ static __device__ inline bool sys__computing_base__init(sys__heap_node* computin
     return true;
 }
 
+/* ⭐ WHERE A SCHEDULED COMPUTATION'S VALUE GOES — the answer its request carried, an offset the base holds while the work
+ * runs; 0 for a base running nothing scheduled; `SYS__SCHEDULER__CONTINUED` once its step went on
+ * (▶ `scheduler__header.cuh`). The base node's own op_code, which nothing else here reads: the six arguments are every
+ * one taken. Written and read by the block that owns the base while it holds it. */
+static __device__ inline uint64_t sys__computing_base__zzengine_answer(const sys__heap_node* computing_base) {
+    if (!sys__computing_base__is(computing_base)) return 0ull;
+    return computing_base->op_code;
+}
+
+static __device__ inline void sys__computing_base__zzengine_set_answer(sys__heap_node* computing_base, uint64_t answer) {
+    if (sys__computing_base__is(computing_base)) computing_base->op_code = answer;
+}
+
 /* Hand a freshly carved node to this block as its base. The one caller is the heap, at the moment it has
  * placed a base and tagged it and has nothing else to do with it.
  *
@@ -579,6 +591,7 @@ static __device__ inline bool sys__computing_base__zzpackage_start(sys__heap_nod
      * not do it, because for every other caller these two name live chunks worth keeping. */
     computing_base->args[SYS__COMPUTING_BASE__OBJECTS] = 0ull;
     computing_base->args[SYS__COMPUTING_BASE__ARRAYS]  = 0ull;
+    computing_base->op_code = 0ull;                            /* no answer: ▶ `zzengine_answer` */
     sys__computing_base__zzprivate_set_status(computing_base,
                                               SYS__COMPUTING_BASE__COMPUTING + block_id);
     return sys__computing_base__init(computing_base, block_id, 0ull, 0ull);
@@ -715,55 +728,16 @@ static __device__ inline sys__heap_node sys__computing_base__read_result(sys__he
                                                 was == SYS__COMPUTING_BASE__ERROR);
 }
 
-/* ── AND THE SAME ENDING WHEN THE COLLECTOR IS THE HOST'S C DOOR ─────────────────────────────────────
- * A scheduler on another block takes a finished base with `read_result` and everything is closed inside
- * one call. The host's door cannot: reading the answer is a copy it makes for itself, and the putting
- * away is reference counting, which runs `sys` — and that door runs nothing of `sys` while the runners
- * work (▶ `eng_abi_result_release`). So the two halves come apart, and these two words are the seam.
- *
- * ⭐⭐ THE HAND-BACK IS `COMPUTING + THE OWNER`, AND NO NEW STATE WAS ADDED TO CARRY IT. There was no room
- *   for one — the status is FREE, SCHEDULED, OK, ERROR and then COMPUTING plus a block number, so every
- *   value below four is spoken for and every value above is somebody's identity. What this needed turned
- *   out not to be a new state but a state READ FROM A PLACE IT COULD NOT OTHERWISE OCCUR:
- *
- *     at the top of block N's own waiting loop, COMPUTING + N can only have been written by somebody else
- *
- *   because every route that legitimately reaches it has block N somewhere other than here — claiming
- *   (it is not scheduling), beginning (it would be evaluating), collecting (it would be in the call that
- *   collects). A scheduler on another block writes COMPUTING + ITSELF and is never mistaken for this.
- * ⇒ ★ A STATE CAN BE UNAMBIGUOUS BECAUSE OF WHERE IT IS READ RATHER THAN WHAT IT IS, and that is worth
- *   the paragraph it costs, because nothing about the value says so.
- *
- * ⛔⛔ IT READS AND MUST NOT WRITE, WHICH IS THE WHOLE REASON THE SEAM GREW A WORD FOR IT. The obvious
- *   spellings — adding zero, or swapping a value for itself — both put the word back, and putting back
- *   what you read is how you destroy what somebody else wrote in between. `MEASURED` on the device path
- *   and NOT re-derived on the host: with the waiter compare-and-swapping this word, a host write of
- *   SCHEDULED never survived, while the two operands written beside it on the same node always did. The
- *   rule stands either way. `status` stays a plain read: every OTHER caller of it
- *   is reading a word it wrote itself.
- *
- * ⛳ AND THE ANSWER IT PUTS AWAY IS NOT LOST, IT IS ALREADY SOMEWHERE ELSE. The host copied the value out
- *   before handing the base back, and the drain empties the slot without releasing — so the hold the
- *   base was keeping becomes the host's, by the same rule that makes `read_result` a transfer. */
+/* ── THE WAITING LOOP'S LOOK AT ITS OWN BASE ─────────────────────────────────────────────────────────
+ * A parked block reads its base's status on every turn of its loop (▶ `engine/opcodes.cuh`), and reads it as a word.
+ * ⛔ IT READS AND DOES NOT WRITE: a look that swapped the word for itself would put back what it read over anything
+ *   written in between, and every turn of every idle block makes it. `status` stays a plain read: every other caller
+ *   of it is reading a word it wrote itself. */
 static __device__ inline uint32_t sys__computing_base__zzengine_peek_status(const sys__heap_node* computing_base) {
     if (!sys__computing_base__is(computing_base)) return SYS__COMPUTING_BASE__FREE;
     const unsigned int* word =
         (const unsigned int*)&computing_base->args[SYS__COMPUTING_BASE__STATUS];
     return (uint32_t)sys__silicon__read_u32(word);
-}
-
-/* Put away a computation whose answer somebody else already has. The base is held by this block because
- * whoever took the answer said so, so there is no state to win and nothing to wait for.
- * ⛳ `threw` IS FALSE AND THE CHOICE DOES NOT MATTER, which is the point of it deciding only what is
- * handed back: the answer is discarded here either way, and a fault code in the slot is emptied rather
- * than released exactly as a value would be. */
-static __device__ inline bool sys__computing_base__zzengine_release_result(sys__heap_node* computing_base,
-                                                                          uint32_t block_id) {
-    if (sys__computing_base__zzengine_peek_status(computing_base)
-            != SYS__COMPUTING_BASE__COMPUTING + block_id)
-        return false;
-    (void)sys__computing_base__zzprivate_drain(computing_base, block_id, false);
-    return true;
 }
 
 /* ── FINDING THE ONE THIS BLOCK IS WORKING WITH ──────────────────────────────────────────────────────
@@ -809,6 +783,13 @@ static __device__ inline sys__heap_node* sys__computing_base__get(uint32_t block
      * still the scalar, hoisted load the heap's argument assumes. The file holding the body says so beside
      * it, and what would decide it is a program worth timing rather than a spill count. */
     return sys__heap__zzpackage_computing_base(block_id);
+}
+
+static __device__ inline uint32_t sys__computing_base__host(void) {
+    const sys__heap_node where = sys__system_register__get(SYS__SYSTEM_REGISTER__COMPUTING_BASE_ARRAY);
+    if (where.dtype != SYS__KIND__VALUE_INT || where.args[0] == 0ull) return 0u;
+    const uint64_t slots = sys__node_array__length(where.args[0]);
+    return slots != 0ull ? (uint32_t)(slots - 1ull) : 0u;
 }
 
 /* ── AND WHAT HAPPENS WHEN A RELEASE REACHES ONE, WHICH IS THAT NOTHING SHOULD ────────────────────────

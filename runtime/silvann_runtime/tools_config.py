@@ -88,6 +88,21 @@ def built_in():
                            "from the address it listens on (with --host 0.0.0.0, the one its route to the registry "
                            "leaves from), or \"http://host:port\", a container's: its machine's address and the port "
                            "published (▶ docs/tools.md)"},
+        "ui": {"enabled": "auto", "config": {"display": "auto"},
+               "about": "(ui 'look …), (ui 'move …), (ui 'click …), (ui 'type …), (ui 'key …), (ui 'scroll …): the "
+                        "model's hands on this machine's screen — a picture of a share of it around the pointer, the "
+                        "pointer moved, clicks, typing, keys, scrolling; a look asked of a person as a read is and each "
+                        "action as a write, so not in full-auto. display: \"auto\" the server's DISPLAY, or an X11 "
+                        "display, \":0\" or \"host:N\"; an X11 screen alone — a Wayland session's is not reached, nor "
+                        "Windows' yet. \"auto\" on where a display answers and the model reads pictures"},
+        "browser": {"enabled": "auto", "config": {"address": "auto", "robots": "keep"},
+                    "about": "(browser 'open …), (browser 'look …), (browser 'elements), (browser 'click …), (browser 'type "
+                             "…): a Firefox of the model's own in the browser companion, a container beside SiLVANN's whose "
+                             "firewall lets it reach the public internet and nothing private (docker/"
+                             "install_companion_firefox.sh). address: \"auto\" — the companion on SiLVANN's container "
+                             "network, ws://silvann-firefox:9222, then ws://127.0.0.1:9222 — or \"ws://host:port\"; robots: "
+                             "\"keep\" a page a site's robots.txt asks robots not to read is not opened, as (fetch …) keeps "
+                             "to it, or \"ignore\". \"auto\" on where the companion answers"},
         "fetch": {"enabled": "yes", "config": {"contact": None},
                   "about": "(fetch \"url\"): a web page's words. contact: who a site writes to about the fetches, in "
                            "their User-Agent — an e-mail address or a page; null the project's page"},

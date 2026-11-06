@@ -15,35 +15,109 @@ import inspect
 import json
 import os
 
-from .model_folder import ModelFolder, Refused
-from .machine import Machine, EngineError
+from .model_folder import ModelFolder, Refused, architecture_of
+from .machine import Machine, EngineError, Panic
 from .qwen3_5 import Qwen35
 from .glm5 import Glm5
 from .mistral3 import Ministral3
 from .deepseek4 import DeepSeek4
+from .qwen4_exp import Qwen4Exp
 
 ARCHITECTURES = {"qwen3_5_text": Qwen35, "qwen3_5_moe_text": Qwen35, "qwen3_vl_text": Qwen35, "glm5_next_text": Glm5, "ministral3": Ministral3,
-                 "deepseek_v41_text": DeepSeek4}
+                 "deepseek_v41_text": DeepSeek4, "qwen4_exp_text": Qwen4Exp}
 
 
-def with_cards(path, num_cards, options):
-    """A config's `num_cards` as its family's option: `tensor_parallel` for the Qwen models and GLM, the `cards` list for
-    DeepSeek — every layer split over the machine's first `num_cards` cards. One card adds nothing (every family's
-    default); more refused for a family that runs on one, or where `options` already names another number. `options`'
-    own `tensor_parallel` is still read where `num_cards` is left out (the configs written before it). `num_cards` is
-    the config's own key, beside `options`: inside them it is refused, with where it goes."""
+def _yes_no(value, name):
+    """A config's switch: "yes" or "no", as the boot's other switches are written, or true or false."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value.lower() in ("yes", "no"):
+        return value.lower() == "yes"
+    raise Refused("%s is \"yes\" or \"no\", not %r" % (name, value))
+
+
+def _routed(path):
+    """Whether a model folder's model has routed experts, from its config.json alone."""
+    whole = json.load(open(os.path.join(os.path.abspath(path), "config.json")))
+    c = whole.get("text_config", whole)
+    return any(int(c.get(k) or 0) > 0 for k in ("num_experts", "n_routed_experts", "num_local_experts"))
+
+
+def with_cards(path, num_cards, options, multi_user=None):
+    """A config's `num_cards` and `multi_user` as its family's options. ⭐ `multi_user` says what several cards are
+    (⚖ 2026-11-04, seats.md ⑥): "no" (the default) one conversation's model split over the machine's first `num_cards`
+    cards — `tensor_parallel` for the Qwen models and GLM, the `cards` list for DeepSeek, every layer over the group;
+    "yes" a conversation a card, for a family that seats one on each (`CARDS_ARE_SEATS`: Flash-Next's `cards`), the
+    session answering them at once. With "yes" the routed experts are the inclusive set (⚖ 2026-11-04): every expert in
+    RAM where the cards are seats, and each card's tier a copy of some of them — never an exclusive tier.
+    ⚖ 2026-11-04 *"only consider the one gpu pc with two conversation as the limit case, otherwise everyone runs with one
+    conversation per card"*: on ONE card "yes" seats two conversations there (`seats` 2, the card on one's dense part
+    while the CPU computes the other's experts), with no tier — two seats share the card and the tier is one seat's — the
+    limit case, worth it as far as the card's dense part takes as long as the CPU's experts; a family that seats none
+    keeps one, its tier inclusive. More cards refused for a family that runs on one or seats none, or where `options`
+    already names another number. `options`' own `tensor_parallel` is still read where `num_cards` is left out (the configs written before
+    it). `num_cards` and `multi_user` are the config's own keys, beside `options`: inside them refused, with where they
+    go."""
     options = dict(options)
-    if "num_cards" in options:
-        raise Refused("num_cards is a key of the config, beside options — not one of them: move \"num_cards\": %s out of "
-                      "options" % (options["num_cards"],))
+    for key in ("num_cards", "multi_user"):
+        if key in options:
+            raise Refused("%s is a key of the config, beside options — not one of them: move \"%s\": %s out of options"
+                          % (key, key, json.dumps(options[key])))
+    many = _yes_no("no" if multi_user is None else multi_user, "multi_user")
     num_cards = 1 if num_cards is None else num_cards
     n = int(num_cards)
     if n < 1:
         raise Refused("num_cards is 1 or more, not %r" % (num_cards,))
-    if n == 1:
+    if n == 1 and not many:
         return options
-    arch = ARCHITECTURES.get(ModelFolder(path).architecture)
+    arch = ARCHITECTURES.get(architecture_of(path))
     takes = inspect.signature(arch.__init__).parameters if arch is not None else {}
+    seats = bool(getattr(arch, "CARDS_ARE_SEATS", False))
+    # a family that seats two conversations on one card — Flash-Next's, and a family that says so (`SEATS_ON_A_CARD`, once
+    #   its seats have answered through the server) — for a model with routed experts: a dense model's card and CPU have
+    #   no two parts of a token to overlap (NN-155)
+    two = (seats or bool(getattr(arch, "SEATS_ON_A_CARD", False))) and _routed(path)
+    name = os.path.basename(path.rstrip(os.sep))
+    if many:
+        if options.get("card_exclusive"):
+            raise Refused("multi_user \"yes\" keeps the experts inclusive, each card's tier a copy of what RAM holds: no "
+                          "card_exclusive")
+        if "card_exclusive" in takes:
+            options["card_exclusive"] = False
+        if n == 1 and not two:
+            return options
+        if options.get("experts_from", "auto") not in ("auto", "ram"):
+            raise Refused("several conversations take every expert in RAM: experts_from \"ram\", not %r"
+                          % (options["experts_from"],))
+        if n == 1:
+            if float(options.get("card_experts_gb") or 0):
+                raise Refused("two conversations on one card share it with no tier of experts, the tier being one seat's: "
+                              "no card_experts_gb with multi_user \"yes\" on one card")
+            if int(options.get("seats", 2)) != 2:
+                raise Refused("multi_user \"yes\" on one card seats two conversations there, not seats %s"
+                              % options["seats"])
+            options["experts_from"], options["seats"], options["card_experts_gb"] = "ram", 2, 0
+            if "experts_on" in takes:                   # a seat's experts the CPU's, the card on the other's dense part
+                options["experts_on"] = "cpu"
+            return options
+        apart = bool(getattr(arch, "CONVERSATION_A_CARD", False)) and _routed(path)   # a card each, no tier yet
+        if not (seats or apart):
+            raise Refused("%s holds one conversation over its cards: num_cards 1 with multi_user \"yes\", or multi_user "
+                          "\"no\" to split it over %d" % (name, n))
+        if apart and float(options.get("card_experts_gb") or 0):
+            raise Refused("a conversation a card takes no tier of experts on its card yet: no card_experts_gb with "
+                          "multi_user \"yes\" over %d cards" % n)
+        if "cards" in options and list(options["cards"]) != list(range(n)):
+            raise Refused("num_cards %d and options.cards %s say two things: num_cards alone" % (n, options["cards"]))
+        options["experts_from"], options["cards"] = "ram", list(range(n))
+        if apart:                                       # the experts the CPU's, the cards' tiers none (▶ qwen3_5.py)
+            options["card_experts_gb"] = 0
+            if "experts_on" in takes:
+                options["experts_on"] = "cpu"
+        return options
+    if seats:
+        raise Refused("%s splits nothing over its cards, it seats a conversation on each: multi_user \"yes\", or num_cards 1"
+                      % name)
     if "tensor_parallel" in takes:
         if int(options.get("tensor_parallel", n)) != n:
             raise Refused("num_cards %d and options.tensor_parallel %s say two numbers: num_cards alone" % (n, options["tensor_parallel"]))
@@ -51,7 +125,7 @@ def with_cards(path, num_cards, options):
     elif "cards" in takes:
         options["cards"] = list(range(n))
     else:
-        raise Refused("%s runs on one card: num_cards 1" % os.path.basename(path.rstrip(os.sep)))
+        raise Refused("%s runs on one card: num_cards 1" % name)
     return options
 
 
@@ -102,7 +176,7 @@ def programs_key(folder, architecture, max_context, options, silicon):
         h.update(f.read())
     h.update(json.dumps([architecture, max_context, folder.lora, options, silicon], sort_keys=True, default=str).encode())
     here = os.path.dirname(os.path.abspath(__file__))
-    for src in sorted(glob.glob(os.path.join(here, "*.py")) + glob.glob(os.path.join(folder.path, "lisp", "*.lisp"))) + [NL.__file__]:
+    for src in sorted(glob.glob(os.path.join(here, "*.py")) + glob.glob(os.path.join(folder.lisp, "*.lisp"))) + [NL.__file__]:
         with open(src, "rb") as f:
             h.update(f.read())
     return h.hexdigest()[:32]

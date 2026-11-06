@@ -665,8 +665,22 @@ static sys__heap_node ai_qwen_3__experts_down__zzabi_apply(const sys__heap_node*
     const uint64_t rows = p.H / p.P, first = p.s * rows;
     /* ⛳ With more than two parts `other` is the others' activations already summed — the program adds them. */
     doors->vector_add((uint16_t*)(uintptr_t)whole, (const uint16_t*)(uintptr_t)act, (const uint16_t*)(uintptr_t)other, p.K * p.I, over);
-    doors->hadamard_rotate((uint16_t*)(uintptr_t)actr, (const uint16_t*)(uintptr_t)whole, (const uint16_t*)(uintptr_t)p.signs,
-                           p.K * p.I, over);
+    /* ⛔ each pick's activations are rotated as its own I, in the ladder of 512s, a 256 and a 128 that I alone makes: one
+     *   launch over every pick where I is whole 512s, so no block straddles two picks, one launch of the ladder a row a
+     *   pick where I is whole 128s, and a launch a pick otherwise — as nn's routed experts rotate theirs
+     *   (`nn__routed__zzprivate_rotate`). Over all K·I at once, Qwen3.8-Flash-Next's I of 640 (512 and 128) took the
+     *   ladder of 6,400 instead, and its answer was another model's: MEASURED node03 2026-10-31, the first token 264 where
+     *   HF's is 11751 (measurements/2026-10-31_nn141_flash_next_node03.md). */
+    if (p.I % 512u == 0u)
+        doors->hadamard_rotate((uint16_t*)(uintptr_t)actr, (const uint16_t*)(uintptr_t)whole, (const uint16_t*)(uintptr_t)p.signs,
+                               p.K * p.I, over);
+    else if (p.I % 128u == 0u)
+        doors->hadamard_ladder_rows((uint16_t*)(uintptr_t)actr, (const uint16_t*)(uintptr_t)whole, (const uint16_t*)(uintptr_t)p.signs,
+                                    p.I, p.K, over);
+    else
+        for (uint64_t j = 0u; j < p.K; ++j)
+            doors->hadamard_rotate((uint16_t*)(uintptr_t)(actr + 2u * j * p.I), (const uint16_t*)(uintptr_t)(whole + 2u * j * p.I),
+                                   (const uint16_t*)(uintptr_t)p.signs, p.I, over);
     doors->vector_zero((uint16_t*)(uintptr_t)routed, p.H);
     nn__turboquant__groups down = {};
     for (uint64_t j = 0u; j < p.K; ++j) {
@@ -873,9 +887,15 @@ static sys__heap_node ai_qwen_3__experts_rows__zzabi_apply(const sys__heap_node*
     bool tier_ok = true;
     const bool holds = ai_qwen_3__moe__zzprivate_tier(argv, argc, 4u, v[AI_QWEN_3__EXP__LAYER], &tier, &tier_ok);
     if (!tier_ok || (holds && masked)) return sys__engine__abi__error(AI_QWEN_3__MOE__FAULT_TABLE);
-    /* a prompt's rows on the CPU in integers, a card's tier's exactly (▶ AI_QWEN_3__EXP__INT8) */
+    /* a prompt's rows on the CPU in integers unless the table says exact, a card's tier's exactly (▶ AI_QWEN_3__EXP__INT8) */
+    bool int8 = !holds;
+    if (!holds && sys__node_array__length(table) > AI_QWEN_3__EXP__INT8) {
+        const sys__heap_node f = sys__node_array__borrow(table, AI_QWEN_3__EXP__INT8);
+        if (f.dtype != SYS__KIND__VALUE_INT || f.args[0] > 1u) return sys__engine__abi__error(AI_QWEN_3__MOE__FAULT_TABLE);
+        int8 = f.args[0] == 1u;
+    }
     nn__routed r;
-    if (!ai_qwen_3__moe__zzprivate_routed(table, at, room, v, !holds, &r)) return sys__engine__abi__error(AI_QWEN_3__MOE__FAULT_TABLE);
+    if (!ai_qwen_3__moe__zzprivate_routed(table, at, room, v, int8, &r)) return sys__engine__abi__error(AI_QWEN_3__MOE__FAULT_TABLE);
     const nn__doors* doors = nn__doors_for(ctx);
     if (doors == 0) return sys__engine__abi__error(NN__PRIMITIVES__FAULT_NO_DEVICE);
     const uint64_t f = nn__routed__rows(ctx, doors, &r, hands, n, holds ? &tier : 0, routed,

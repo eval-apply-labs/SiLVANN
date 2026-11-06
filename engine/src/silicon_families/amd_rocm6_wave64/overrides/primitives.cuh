@@ -207,44 +207,85 @@ static __device__ inline float amd_rocm6_wave64__zzprivate_squares4(float4 q, fl
     part = __builtin_fmaf(q.z, q.z, part);
     return __builtin_fmaf(q.w, q.w, part);
 }
-static __global__ AMD_ROCM6_WAVE64__ZZPRIVATE_BOUNDS void amd_rocm6_wave64__zzprivate_norm_fp32(uint16_t* o, const float* x, const uint16_t* w,
-                                                                                                uint64_t n, uint64_t cuts, float eps,
-                                                                                                unsigned int* over) {
+/* One wave's part of one row: the row's whole sum of squares, and its slice `t` of `cuts` written. */
+static __device__ inline void amd_rocm6_wave64__zzprivate_norm_fp32_cut(uint16_t* o, const float* x, const uint16_t* w, uint64_t n,
+                                                                       uint64_t cuts, uint64_t t, float eps, unsigned int* over) {
     const uint32_t HELD = AMD_ROCM6_WAVE64__ZZPRIVATE_NORM_FP32_HELD, W = AMD_ROCM6_WAVE64__ZZPRIVATE_WAVE;
-    const uint32_t lane = (uint32_t)(nn__silicon__lane() % W), waves = (uint32_t)(nn__silicon__lanes() / W);
+    const uint32_t lane = (uint32_t)(nn__silicon__lane() % W);
     const uint64_t groups = n / 4u, held = (groups + W - 1u) / W, per = (held + cuts - 1u) / cuts;
     const float4 none = make_float4(0.0f, 0.0f, 0.0f, 0.0f);   /* a group past the row: squares of +0, which add nothing */
     const float4* xr = (const float4*)(const void*)x;
-    for (uint64_t t = (uint64_t)nn__silicon__block() * waves + nn__silicon__lane() / W; t < cuts; t += (uint64_t)nn__silicon__blocks() * waves) {
-        float4 q[AMD_ROCM6_WAVE64__ZZPRIVATE_NORM_FP32_HELD];
+    float4 q[AMD_ROCM6_WAVE64__ZZPRIVATE_NORM_FP32_HELD];
 #pragma unroll
-        for (uint32_t k = 0u; k < HELD; ++k) {
-            const uint64_t gk = lane + (uint64_t)k * W;
-            q[k] = k < held && gk < groups ? xr[gk] : none;
-        }
-        float part[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
-#pragma unroll
-        for (uint32_t k = 0u; k < HELD; ++k)
-            if (k < held) part[k % 4u] = amd_rocm6_wave64__zzprivate_squares4(q[k], part[k % 4u]);
-#pragma unroll
-        for (uint32_t off = 1u; off < W; off <<= 1)
-#pragma unroll
-            for (uint32_t k = 0u; k < 4u; ++k) part[k] += amd_rocm6_wave64__zzpackage_xor(part[k], off);
-        const float scale = 1.0f / nn__silicon__sqrtf(((part[0] + part[1]) + (part[2] + part[3])) / (float)n + eps);
-        const uint64_t k0 = t * per, k1 = k0 + per < held ? k0 + per : held;
-#pragma unroll 1
-        for (uint64_t k = k0; k < k1; ++k) {
-            const uint64_t g = lane + k * W;
-            if (g >= groups) continue;
-            const float4 v = xr[g];
-            const uint2 ws = ((const uint2*)(const void*)w)[g];
-            const uint32_t a = amd_rocm6_wave64__zzpackage_to_half((v.x * scale) * nn__silicon__half_to_float((uint16_t)(ws.x & 0xFFFFu)), over);
-            const uint32_t b = amd_rocm6_wave64__zzpackage_to_half((v.y * scale) * nn__silicon__half_to_float((uint16_t)(ws.x >> 16)), over);
-            const uint32_t c = amd_rocm6_wave64__zzpackage_to_half((v.z * scale) * nn__silicon__half_to_float((uint16_t)(ws.y & 0xFFFFu)), over);
-            const uint32_t d = amd_rocm6_wave64__zzpackage_to_half((v.w * scale) * nn__silicon__half_to_float((uint16_t)(ws.y >> 16)), over);
-            ((uint2*)(void*)o)[g] = make_uint2(a | (b << 16), c | (d << 16));
-        }
+    for (uint32_t k = 0u; k < HELD; ++k) {
+        const uint64_t gk = lane + (uint64_t)k * W;
+        q[k] = k < held && gk < groups ? xr[gk] : none;
     }
+    float part[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+#pragma unroll
+    for (uint32_t k = 0u; k < HELD; ++k)
+        if (k < held) part[k % 4u] = amd_rocm6_wave64__zzprivate_squares4(q[k], part[k % 4u]);
+#pragma unroll
+    for (uint32_t off = 1u; off < W; off <<= 1)
+#pragma unroll
+        for (uint32_t k = 0u; k < 4u; ++k) part[k] += amd_rocm6_wave64__zzpackage_xor(part[k], off);
+    const float scale = 1.0f / nn__silicon__sqrtf(((part[0] + part[1]) + (part[2] + part[3])) / (float)n + eps);
+    const uint64_t k0 = t * per, k1 = k0 + per < held ? k0 + per : held;
+#pragma unroll 1
+    for (uint64_t k = k0; k < k1; ++k) {
+        const uint64_t g = lane + k * W;
+        if (g >= groups) continue;
+        const float4 v = xr[g];
+        const uint2 ws = ((const uint2*)(const void*)w)[g];
+        const uint32_t a = amd_rocm6_wave64__zzpackage_to_half((v.x * scale) * nn__silicon__half_to_float((uint16_t)(ws.x & 0xFFFFu)), over);
+        const uint32_t b = amd_rocm6_wave64__zzpackage_to_half((v.y * scale) * nn__silicon__half_to_float((uint16_t)(ws.x >> 16)), over);
+        const uint32_t c = amd_rocm6_wave64__zzpackage_to_half((v.z * scale) * nn__silicon__half_to_float((uint16_t)(ws.y & 0xFFFFu)), over);
+        const uint32_t d = amd_rocm6_wave64__zzpackage_to_half((v.w * scale) * nn__silicon__half_to_float((uint16_t)(ws.y >> 16)), over);
+        ((uint2*)(void*)o)[g] = make_uint2(a | (b << 16), c | (d << 16));
+    }
+}
+static __global__ AMD_ROCM6_WAVE64__ZZPRIVATE_BOUNDS void amd_rocm6_wave64__zzprivate_norm_fp32(uint16_t* o, const float* x, const uint16_t* w,
+                                                                                                uint64_t n, uint64_t cuts, float eps,
+                                                                                                unsigned int* over) {
+    const uint32_t W = AMD_ROCM6_WAVE64__ZZPRIVATE_WAVE, waves = (uint32_t)(nn__silicon__lanes() / W);
+    for (uint64_t t = (uint64_t)nn__silicon__block() * waves + nn__silicon__lane() / W; t < cuts; t += (uint64_t)nn__silicon__blocks() * waves)
+        amd_rocm6_wave64__zzprivate_norm_fp32_cut(o, x, w, n, cuts, t, eps, over);
+}
+/* ⭐ …AND `rows` OF THEM, nn's `rmsnorm_fp32_rows`: row `r` of `n` floats normed by the gain's row `r mod period`, each row
+ *   `cuts` waves as the one-row door cuts it, the same wave's arithmetic — so a row is the bytes `rmsnorm_fp32` gives it. */
+static __global__ AMD_ROCM6_WAVE64__ZZPRIVATE_BOUNDS void amd_rocm6_wave64__zzprivate_norm_fp32_rows(uint16_t* o, const float* x,
+                                                                                                     const uint16_t* w, uint64_t n,
+                                                                                                     uint64_t rows, uint64_t period,
+                                                                                                     uint64_t cuts, float eps,
+                                                                                                     unsigned int* over) {
+    const uint32_t W = AMD_ROCM6_WAVE64__ZZPRIVATE_WAVE, waves = (uint32_t)(nn__silicon__lanes() / W);
+    for (uint64_t u = (uint64_t)nn__silicon__block() * waves + nn__silicon__lane() / W; u < rows * cuts;
+         u += (uint64_t)nn__silicon__blocks() * waves) {
+        const uint64_t r = u / cuts;
+        amd_rocm6_wave64__zzprivate_norm_fp32_cut(o + r * n, x + r * n, w + (r % period) * n, n, cuts, u - r * cuts, eps, over);
+    }
+}
+static void amd_rocm6_wave64__override_rmsnorm_fp32_rows(uint16_t* o, const float* x, const uint16_t* w, uint64_t n, uint64_t rows,
+                                                         uint64_t period, float eps, unsigned int* over) {
+    const uint64_t held = (n / 4u + AMD_ROCM6_WAVE64__ZZPRIVATE_WAVE - 1u) / AMD_ROCM6_WAVE64__ZZPRIVATE_WAVE;
+    if (n == 0u || n % 4u != 0u || rows == 0u || period == 0u || held > AMD_ROCM6_WAVE64__ZZPRIVATE_NORM_FP32_HELD
+     || ((uint64_t)(uintptr_t)x) % 16u != 0u || ((uint64_t)(uintptr_t)o) % 8u != 0u || ((uint64_t)(uintptr_t)w) % 8u != 0u
+     || !((const char*)(o + rows * n) <= (const char*)x || (const char*)(x + rows * n) <= (const char*)o)) {
+        nn__rmsnorm__zzabi_launch_fp32_rows(o, x, w, n, rows, period, eps, over);
+        return;
+    }
+    /* each row cut as the one-row door cuts it — as many waves as the card holds at once, a row's share of them */
+    const uint32_t threads = AMD_ROCM6_WAVE64__ZZPRIVATE_ROWS * AMD_ROCM6_WAVE64__ZZPRIVATE_WAVE;
+    const uint64_t waves = (uint64_t)amd_rocm6_wave64__zzpackage_resident((const void*)amd_rocm6_wave64__zzprivate_norm_fp32_rows, threads, 0u)
+                         * AMD_ROCM6_WAVE64__ZZPRIVATE_ROWS;
+    uint64_t cuts = waves / rows;
+    cuts = cuts < 1u ? 1u : cuts > held ? held : cuts;
+    const uint64_t want = (rows * cuts + AMD_ROCM6_WAVE64__ZZPRIVATE_ROWS - 1u) / AMD_ROCM6_WAVE64__ZZPRIVATE_ROWS;
+    const uint32_t blocks = want < NN__KERNELS__BLOCKS_MAX ? (uint32_t)want : NN__KERNELS__BLOCKS_MAX;
+    void* args[] = { &o, &x, &w, &n, &rows, &period, &cuts, &eps, &over };
+    const size_t sizes[] = { sizeof o, sizeof x, sizeof w, sizeof n, sizeof rows, sizeof period, sizeof cuts, sizeof eps, sizeof over };
+    nn__silicon__launch((const void*)amd_rocm6_wave64__zzprivate_norm_fp32_rows, "amd_rocm6_wave64__zzprivate_norm_fp32_rows", blocks, threads,
+                        args, sizes, 9u);
 }
 static void amd_rocm6_wave64__override_rmsnorm_fp32(uint16_t* o, const float* x, const uint16_t* w, uint64_t n, float eps,
                                                     unsigned int* over) {

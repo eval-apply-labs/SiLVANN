@@ -287,6 +287,32 @@ static sys__heap_node nn__vector__zzabi_apply_top_k_scored(const sys__heap_node*
     return nn__vector__zzprivate_top_k(argv, ctx, b_at, (float)sys__heap_node__real(argv[6].args[0]), argv[7].args[0]);
 }
 
+/* `(nn__vector__top_k_rows x n k rows out picks_at weights_at row_bytes)` — `nn__vector__top_k` over `rows` rows of `n`
+ * values, into a buffer of rows `row_bytes` apart rather than a node array: each row's `k` largest, the largest first, as
+ * 8-byte words at byte `picks_at` of its row of `out`, their softmax as halves at byte `weights_at` — a chunk's router
+ * picks written into its hand rows, which a CPU worker reads in one copy (▶ ai_qwen_3's `experts_rows`). Answers `out`.
+ * Refused: a row's words or halves off their alignment, a row's picks or weights past its bytes. */
+static sys__heap_node nn__vector__zzabi_apply_top_k_rows(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx) {
+    if (argc != 8u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
+    uint64_t x_at = 0, x_room = 0, o_at = 0, o_room = 0;
+    for (unsigned a = 1u; a < 8u; ++a)
+        if (a != 4u && argv[a].dtype != SYS__KIND__VALUE_INT) return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
+    if (!nn__primitives__room(&argv[0], &x_at, &x_room) || !nn__primitives__room(&argv[4], &o_at, &o_room))
+        return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
+    const uint64_t n = argv[1].args[0], k = argv[2].args[0], rows = argv[3].args[0];
+    const uint64_t picks_at = argv[5].args[0], weights_at = argv[6].args[0], row = argv[7].args[0];
+    if (n == 0ull || n > (1ull << 24) || k == 0ull || k > NN__VECTOR__TOP_K_MAX || k > n || rows == 0ull || rows > (1ull << 24)
+     || row == 0ull || row % 8ull != 0ull || picks_at % 8ull != 0ull || weights_at % 2ull != 0ull
+     || picks_at + 8ull * k > row || weights_at + 2ull * k > row || (picks_at < weights_at + 2ull * k && weights_at < picks_at + 8ull * k)
+     || !nn__primitives__fits(rows * n, x_room) || row > 0xFFFFFFFFFFFFull / rows || rows * row > o_room)
+        return sys__engine__abi__error(NN__PRIMITIVES__FAULT_BOUNDS);
+    const nn__doors* doors = nn__doors_for(ctx);
+    if (doors == 0) return sys__engine__abi__error(NN__PRIMITIVES__FAULT_NO_DEVICE);
+    doors->vector_top_k_rows((uint64_t*)(uintptr_t)(o_at + picks_at), 1ull, row / 8ull, (uint16_t*)(uintptr_t)(o_at + weights_at),
+                             row / 2ull, (const uint16_t*)(uintptr_t)x_at, n, k, rows);
+    return nn__doors_answer(&argv[4]);
+}
+
 /* `(nn__vector__penalize x n ids count penalty)` — the repetition penalty over the `n` logits of `x`, in place: each token
  * among the first `count` elements of `ids`, a node array of integers, has its logit divided by `penalty` when positive
  * and multiplied by it otherwise, once however often it appears. Answers `x`; a `count` of 0 runs nothing.
@@ -338,6 +364,7 @@ static sys__heap_node nn__vector__zzabi_apply_penalize(const sys__heap_node* arg
 SYS__ENGINE__ABI__BRIDGE(nn__vector__zzabi_adapter_top_k,         nn__vector__zzabi_apply_top_k)
 SYS__ENGINE__ABI__BRIDGE(nn__vector__zzabi_adapter_top_k_biased,  nn__vector__zzabi_apply_top_k_biased)
 SYS__ENGINE__ABI__BRIDGE(nn__vector__zzabi_adapter_top_k_scored,  nn__vector__zzabi_apply_top_k_scored)
+SYS__ENGINE__ABI__BRIDGE(nn__vector__zzabi_adapter_top_k_rows,    nn__vector__zzabi_apply_top_k_rows)
 SYS__ENGINE__ABI__BRIDGE(nn__vector__zzabi_adapter_penalize,      nn__vector__zzabi_apply_penalize)
 SYS__ENGINE__ABI__BRIDGE(nn__vector__zzabi_adapter_pointwise_mul, nn__vector__zzabi_apply_pointwise_mul)
 SYS__ENGINE__ABI__BRIDGE(nn__vector__zzabi_adapter_scale,         nn__vector__zzabi_apply_scale)

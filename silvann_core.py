@@ -1,6 +1,11 @@
 """SiLVANN's command line for what is not the server.
 
-    python3 silvann_core.py download-model <name>     a model into models/<name>/, from Hugging Face
+    python3 silvann_core.py download-model <name>     a model into models/<name>/, from Hugging Face — or, when it is
+                                                      there, the files of its pack it lacks or holds otherwise
+    python3 silvann_core.py check-model <name> [--json]   what download-model would fetch for a model that is here
+    python3 silvann_core.py check-versions [--json]   each model here against its pack's version: update or done
+    python3 silvann_core.py update-programs           each model here gets this release's program from its pack —
+                                                      what an update of SiLVANN runs once it is installed
     python3 silvann_core.py list-models [--json]      the models this release knows how to fetch, and which are here
     python3 silvann_core.py hf-token                  whether a Hugging Face token is saved, and whose it is
     python3 silvann_core.py hf-token --set            save one, asked for without echoing it (or: hf-token <token>)
@@ -25,15 +30,16 @@ ROOT = Path(__file__).resolve().parent
 # the runtime beside this file in a release, or the development tree's
 _HERE = ROOT / "runtime" if (ROOT / "runtime").is_dir() else ROOT.parent / "python"
 sys.path.insert(0, os.environ.get("SILVANN_RUNTIME", str(_HERE)))
-from silvann_runtime.fetch import KNOWN, ensure_model, present     # noqa: E402
+from silvann_runtime.fetch import KNOWN, differences, ensure_model, present, said, state, update_program  # noqa: E402
+from silvann_runtime.fetch import size as fetch_size                                # noqa: E402
 from silvann_runtime.model_folder import Refused                   # noqa: E402
 
 # what a user's machine keeps — the models and the conversations: beside the release, or where SILVANN_DATA says
 DATA = Path(os.environ.get("SILVANN_DATA") or ROOT)
 MODELS = DATA / "models"
 TOKEN_FILE = DATA / ".huggingface_token"
-DEFAULT_CONFIG = {"max_context": "auto", "max_tokens_per_video": 8192, "num_cards": 1, "card": "auto", "vram_margin_mb": 50,
-                  "lora": None, "thinking": True,
+DEFAULT_CONFIG = {"max_context": "auto", "max_tokens_per_video": 8192, "num_cards": 1, "multi_user": "no", "card": "auto",
+                  "vram_margin_mb": 50, "lora": None, "thinking": True,
                   "sampler": "generation", "options": {},
                   "pipeline_parallelism": "no", "pipeline_parallelism_layers": "", "pipeline_parallelism_next": "192.0.2.2:8766",
                   "pipeline_parallelism_port": 8766, "tools": "chill", "tools_config": "default",
@@ -149,6 +155,52 @@ def main(argv):
         except Refused as ex:
             raise SystemExit(str(ex))
         print("%s is in %s — configs: %s" % (argv[1], folder, default_config(folder)))
+        return 0
+    if len(argv) >= 2 and argv[0] == "check-model":
+        if not os.environ.get("HF_TOKEN") and saved_token():
+            os.environ["HF_TOKEN"] = saved_token()
+        folder, name = MODELS / argv[1], argv[1]
+        if name not in KNOWN:
+            raise SystemExit("%r is not a model this release knows how to fetch — known: %s" % (name, ", ".join(sorted(KNOWN))))
+        if not present(str(folder)):
+            raise SystemExit("%s is not here: `silvann_core.py download-model %s` fetches it whole" % (name, name))
+        d = differences(str(folder), KNOWN[name][0])
+        if "--json" in argv[2:]:
+            print(json.dumps(d))
+        else:
+            print("%s: %s" % (name, said(d)))
+            for f, size in d["files"]:
+                print("    %-60s %10s" % (f, fetch_size(size)))
+        return 0
+    if argv[:1] == ["update-programs"]:
+        if not os.environ.get("HF_TOKEN") and saved_token():
+            os.environ["HF_TOKEN"] = saved_token()
+        here = [(name, repo) for name, (repo, _, _) in sorted(KNOWN.items()) if present(str(MODELS / name))]
+        for name, repo in here:
+            got = update_program(str(MODELS / name), repo, say=False)
+            line = ("fetched %s" % ", ".join(got["fetched"]) if got["fetched"] else got["why"] or "")
+            if got["kept"]:
+                line += "%skept as changed here: %s (`silvann download %s` fetches the pack's)" % (
+                    "; " if line else "", ", ".join(got["kept"]), name)
+            if got["newer"]:
+                line += "; the pack has a program for a later release — a newer SiLVANN is out"
+            print("   %-44s %s" % (name, line), flush=True)
+        if not here:
+            print("   no model here yet")
+        return 0
+    if argv[:1] == ["check-versions"]:
+        if not os.environ.get("HF_TOKEN") and saved_token():
+            os.environ["HF_TOKEN"] = saved_token()
+        states = {name: state(str(MODELS / name), repo) for name, (repo, _, _) in sorted(KNOWN.items())
+                  if present(str(MODELS / name))}
+        if "--json" in argv[1:]:
+            print(json.dumps(states))
+            return 0
+        for name, st in states.items():
+            v = lambda d: "v%s" % d["version"] if d else "none"       # noqa: E731
+            print("%-44s %-8s here %s, the pack %s%s" % (name, st["state"], v(st.get("here")), v(st.get("pack")),
+                                                       ("; " + st["why"]) if st.get("why") else
+                                                       "; a newer SiLVANN is out" if st.get("newer") else ""))
         return 0
     if argv[:1] == ["list-models"]:
         if argv[1:] == ["--json"]:

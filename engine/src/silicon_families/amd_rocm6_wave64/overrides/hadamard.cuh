@@ -110,7 +110,7 @@ static void amd_rocm6_wave64__override_hadamard_rotate(uint16_t* out, const uint
  *   nn's body does. A wave reads its whole block before it writes any of it, so `out` may be `in`. */
 /* One block of `E · 64` from `at`, a wave's: what `hadamard_block` below and the ladder's rows run. */
 template <uint32_t E>
-static __device__ __forceinline__ void amd_rocm6_wave64__zzprivate_hadamard_at(uint16_t* out, const uint16_t* in, uint64_t at,
+static __device__ __forceinline__ void amd_rocm6_wave64__zzpackage_hadamard_at(uint16_t* out, const uint16_t* in, uint64_t at,
                                                                        const uint16_t* sign, uint64_t inverse, unsigned int* over) {
     const uint32_t lane = (uint32_t)(nn__silicon__lane() % AMD_ROCM6_WAVE64__ZZPRIVATE_WAVE);
     const uint32_t B = E * AMD_ROCM6_WAVE64__ZZPRIVATE_WAVE;
@@ -164,7 +164,7 @@ static __device__ inline void amd_rocm6_wave64__zzprivate_hadamard_block(uint16_
                          + nn__silicon__lane() / AMD_ROCM6_WAVE64__ZZPRIVATE_WAVE;
     if (block >= blocks) return;
     const uint32_t B = E * AMD_ROCM6_WAVE64__ZZPRIVATE_WAVE;
-    amd_rocm6_wave64__zzprivate_hadamard_at<E>(out, in, block * B, sign, inverse, over);
+    amd_rocm6_wave64__zzpackage_hadamard_at<E>(out, in, block * B, sign, inverse, over);
 }
 
 static __global__ AMD_ROCM6_WAVE64__ZZPRIVATE_BOUNDS void amd_rocm6_wave64__zzprivate_hadamard_e2(uint16_t* out, const uint16_t* in, const uint16_t* sign,
@@ -215,11 +215,11 @@ static __global__ AMD_ROCM6_WAVE64__ZZPRIVATE_BOUNDS void amd_rocm6_wave64__zzpr
          u < rows * units; u += nn__silicon__blocks() * AMD_ROCM6_WAVE64__ZZPRIVATE_ROWS) {
         const uint64_t row = u / units, j = u - row * units, at = row * cols;
         if (j < whole)
-            amd_rocm6_wave64__zzprivate_hadamard_at<8u>(out, in, at + j * 512u, sign, 0u, over);
+            amd_rocm6_wave64__zzpackage_hadamard_at<8u>(out, in, at + j * 512u, sign, 0u, over);
         else if (rest >= 256u && j == whole)
-            amd_rocm6_wave64__zzprivate_hadamard_at<4u>(out, in, at + whole * 512u, sign, 0u, over);
+            amd_rocm6_wave64__zzpackage_hadamard_at<4u>(out, in, at + whole * 512u, sign, 0u, over);
         else
-            amd_rocm6_wave64__zzprivate_hadamard_at<2u>(out, in, at + whole * 512u + (rest >= 256u ? 256u : 0u), sign, 0u, over);
+            amd_rocm6_wave64__zzpackage_hadamard_at<2u>(out, in, at + whole * 512u + (rest >= 256u ? 256u : 0u), sign, 0u, over);
     }
 }
 static void amd_rocm6_wave64__override_hadamard_ladder_rows(uint16_t* out, const uint16_t* in, const uint16_t* sign, uint64_t cols,

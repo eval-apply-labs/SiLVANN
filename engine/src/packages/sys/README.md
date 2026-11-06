@@ -1,8 +1,32 @@
-# `sys` — the language
+# `sys` — the language, and the operating system it runs in
 
-`sys` is the language of the Eval-Apply GPU Interpreter: what a value is, the objects values are built
-into, and the verbs a program calls. The evaluator that walks a program lives in `engine/`; the neural
-network library, `nn`, is a second package written on top of this one.
+`sys` is the language of the Eval-Apply GPU Interpreter — what a value is, the objects values are built
+into, and the verbs a program calls — and the small operating system those programs run in, virtualized
+over the host's. The evaluator that walks a program lives in `engine/`; the neural network library, `nn`,
+is a second package written on top of this one.
+
+**As an operating system.** A machine is a set of workers — runner threads, a block each — over one heap
+in host memory. Every block has a run queue any block appends to, and a request is a program, the
+read-only names it runs in and the answer it fills (▶ "Work waits its turn", below). The blocks stay up
+from the boot to the shutdown; a step that waits for answers is parked while its block runs other work,
+the block that fills the last of them wakes it, and an idle block sleeps on its door until work is queued
+for it. `MEASURED` on node03: a request there and back ~9 µs on the host, and a parked step on a sleeping
+block run within milliseconds of its last answer, where the doze alone would leave it up to 100 ms
+(measurements/2026-11-05_callbacks_node03.md). ⛳ The scheduling is **cooperative multitasking**, as in Windows 3.x
+or the classic Mac OS: a step runs to its end once begun, and gives its block back by ending or by queuing the step
+that continues it (`sys__scheduler__continue`, the yield); a queue is first in, first out. Nothing preempts a step and
+nothing bounds how long it runs, so a long step holds its block — that one worker, not the machine — until it ends.
+
+**What it asks of the host: primitive calls**, in one contract (`contracts/abi/os.cuh`) that each host
+answers in one file (`../../operating_systems/linux/os.cuh`, `../../operating_systems/windows/os.cuh`):
+threads and thread keys, locks, conditions and once; a clock, sleep and yield; the CPUs and pinning to
+them; memory — mapped, aligned, bound to or interleaved over NUMA nodes, kept resident; files and paths;
+and opening a library. A silicon family is such a library: it wraps a driver's functions — HIP, CUDA,
+OpenCL — or the CPU's vector units behind the arithmetic `sys` says it needs (`contracts/abi/gpu.cuh`).
+
+**What it knows of neural networks: nothing.** `nn` is written on top of `sys` and the model packages on
+top of `nn`; `sys` names them only in its comments. The language and its operating system stand on their
+own.
 
 A program is a list. The evaluator scans it, and each time it reaches a form whose head is a verb it
 hands that form to the verb, which rewrites it in place — with a value, or with more work. Everything
@@ -43,8 +67,8 @@ the switch over all of them is written once, over `PACKAGE_LIST`, and never edit
 | error | what a computation hands back when it went wrong |
 | computing base | the state machine that owns one computation: claimed, started, finished, read |
 
-And three things that are not objects: the **carousel** (a ring of numbers in C — the heap's free-chunk
-list is one), the **system register** (a few rows every block can name without being handed them), and
+And three things that are not objects: the **C fixed stack** (an array of numbers and an index, in C —
+the heap's free chunks are one), the **system register** (a few rows every block can name without being handed them), and
 the **settings** (a config file read into a sealed dictionary at boot).
 
 **Verbs are rows too.** Each verb is a row: the spelling a program uses, the function that runs it, and
@@ -57,22 +81,55 @@ control      if begin prog1 while unquote
 names        let defun bindings__set bindings__viewonly add_bindings remove_bindings
 objects      create type clone
 node arrays  node_array__get node_array__set
-computation  compute result completed worker
+lists        list__shared_append list__shared_take list__shared_length
+computation  compute result wait worker scheduler__continue scheduler__gate
 the machine  system_register__get system_register__set package__init
 dictionary   dictionary__put dictionary__get
 files        file__open file__close
+memory       garbage_collection__manual garbage_collection__collect
 ```
 
 **Nothing is a special form.** A quoted list is a value, so both arms of an `if` sit untouched while its
 test is reduced; a quoted name is a value, so an assignment is handed the name rather than what it
 means. Quoting covers conditional evaluation and assignment, and no verb is treated specially.
 
-**Truth is two values.** `#t` and `#f` are kinds of their own. `sys__opcodes__truth` is the only thing
-that makes one, and `if` refuses anything that is neither.
+**Truth is two values.** `#t` and `#f` are kinds of their own, and a program writes them so. Inside the
+engine `sys__opcodes__truth` is the only thing that makes one, and `if` refuses anything that is neither.
+
+**A teardown can wait.** After `(sys__garbage_collection__manual #t)` an object whose last hold goes waits
+on the thread's worklist instead of being taken apart, and `(sys__garbage_collection__collect)`,
+`(sys__garbage_collection__manual #f)`, or the evaluation's end takes everything waiting apart. The mode is
+the thread's and stays on until the program turns it off; the verb answers the mode it replaced, so
+`(let ((was (sys__garbage_collection__manual #t))) … (sys__garbage_collection__manual was))` scopes it. The
+counts still decide what is dead; the program chooses when. ▶ `cpu/garbage_collection__header.cuh`.
+
+**Work waits its turn, and its value has a home before it is asked for.** `(sys__scheduler__add cu names program)`
+puts a program on block `cu`'s queue, which any number of blocks append to at once, and hands back the **answer** its
+value will go into — or `(sys__scheduler__add cu names program answer)` into an answer the program already holds. The
+block runs its queue in the order it arrived whenever its base is free, and files each value into its answer.
+`(sys__result answer)` says `#t` once the value is there and `#f` while it is on its way, reading one word;
+`(sys__wait answer)` hands over the value, waiting for it, bounded. Reading takes nothing away, so any number of readers
+share one answer, and an answer lives as long as somebody holds it — the asker, a reader, a request on its way. A
+program that asks a block one thing at a time can name the block instead: `(sys__result cu)` and `(sys__wait cu)` read
+what this computation last asked of `cu`. A step may go on: `(sys__scheduler__continue cu names program)` queues its
+next step on block `cu`, this one among them, in `names` (0: the names it runs in), into the same answer, and only the
+step that does not continue fills it. Asked with the names of answers — `(let ((ra (sys__scheduler__add …)) (rb
+(sys__scheduler__add …))) (sys__scheduler__continue CARD names second_half '(ra rb)))` — the next step runs once every
+one of them is filled, its block parking it and running what is behind it until the block that fills the last one
+rings it, and finds `ra` and `rb` bound to what they came to in its environment — the results themselves, read
+straight, the answers behind them let go of when the step ends. The host does the same from outside (`place`,
+`poll`, `take`). A value that could not be computed arrives as an error, a value like any other. A shared list is
+reached only through the `list__shared_` verbs, each the list's own lock around one append, take or count.
+▶ `cpu/scheduler__header.cuh`, `cpu/answer.cuh`.
 
 **When something refuses, it says why.** A verb that refuses leaves an error in the form it was handed,
 and a refusal with nobody to return to lands on the fault channel as a four-letter word.
-▶ `cpu/error.cuh`, `cpu/fault__header.cuh`.
+▶ `cpu/error.cuh`, `cpu/fault__header.cuh`. The program goes on: a refusal is a value.
+
+**The evaluator stopping is a panic.** Its stops — a descent it has no room to record (`EVAD`), a form it
+has no room to make (`EVNR`), a call it cannot make or a head that is not a verb (`EVAV`) — abandon the
+evaluation where it stands, so the machine stops with it: the word is kept, and every door refuses until a shutdown and a boot.
+▶ `engine/eval.cuh`, "A STOP IS A PANIC".
 
 **Packages stand themselves up.** At boot every package's init is one call in a list, and the list is
 evaluated like any program: an init that finds what it needs not ready yet goes back to the end of the

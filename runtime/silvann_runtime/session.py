@@ -195,10 +195,15 @@ class Runtime:
         t.done.set()
 
     def _run(self, t):
+        self._activate(t.cartridge)
+        tok, how = self._prompt(t)
+        return self._answer(t, tok, how)
+
+    def _prompt(self, t):
         """⛳ `tokens[length:]` ARE SEEN AND NOT YET RUN — the answer's last token, or a whole conversation brought
-        back without its state — so a turn runs them first, then its own new tokens, then answers."""
+        back without its state — so a turn runs them first, then its own new tokens. Answers the answer's first token and
+        how the rest is drawn: (greedy, drawn on the card, the positions' lag)."""
         m, c = self.model, t.cartridge
-        self._activate(c)
         pending = c.tokens[c.length:] + t.new_tokens
         if not pending:
             raise Refused("a turn needs a token to run")
@@ -243,12 +248,16 @@ class Runtime:
             out = m.step(pending[0], c.length, greedy=greedy,
                          sample=sampling.head(t.sampler, c.length, pending[0]) if card else None)
             c.length += 1
-        lag = dict(lag=c.lag) if c.lag else {}
+        return (out if greedy or card else t.sampler(m.logits(), c.tokens)), (greedy, card, c.lag)
+
+    def _answer(self, t, tok, how):
+        """The answer from its first token `tok`, a token at a time, until an end token, its length or a cancel."""
+        m, c, (greedy, card, lag) = self.model, t.cartridge, how
+        lag = dict(lag=lag) if lag else {}
         # ⭐ THE ANSWER GENERATED ON THE CARD where the model has the loop and the token is chosen there — `GENERATE_CALL`
         #   tokens a call, so a stream sees them in that many at a time and a cancel waits for at most that many
         on_card = getattr(m, "GENERATES", False) and (greedy or card)
         answer = []
-        tok = out if greedy or card else t.sampler(m.logits(), c.tokens)
         while True:
             answer.append(tok)
             c.tokens.append(tok)
@@ -272,6 +281,18 @@ class Runtime:
             c.length += 1
             tok = out if greedy or card else t.sampler(m.logits(), c.tokens)
 
+    def card_lost(self):
+        """The machine went down under the conversations (a panic, ▶ machine's `Panic`): what the card held is gone, so
+        every conversation whose state was on it is read again from its tokens when it next runs, and none is on it. One
+        whose state was read off keeps it."""
+        for c in self.cartridges.values():
+            if c.state is None:
+                c.length, c.lag = 0, 0
+        self._holds_nothing()
+
+    def _holds_nothing(self):
+        self.active = None
+
     def save(self, c, path, with_state=True):
         """A cartridge to disk; the one on the card has its state read first, and stays on the card — where the model's
         state can be read off (a ring's cannot: its tokens are read again)."""
@@ -286,6 +307,268 @@ class Runtime:
     def close(self):
         if self._running is not None:
             self._running.done.wait()
+
+
+class SeatedRuntime(Runtime):
+    """⭐ SEATS (NN-147): a model's conversations held on the card at once, one a seat (the model's `SEATS`), their turns
+    run together. ⚖ 2026-10-30: *"4 conversation on the same card, two active during inference ad other two being rotated
+    out so that the queue of conversations can continue"* · *"lets keep that a [prompt] takes the whole card as it does
+    now"*.
+    ```
+      a turn       takes a seat no turn is running on: its conversation's own where it sits there, else an empty one,
+                   else the one least recently used — whose conversation is read off into RAM first (its state, as a
+                   cartridge is parked). Busy where every seat is answering — and the conversations told so wait their
+                   turn: a seat that frees is theirs, oldest first, before a seated conversation's next turn (⚖ *"the
+                   first one to end will evict and pass the ball to the waiting one"*); one that stops asking for
+                   WAIT_FORGET seconds is forgotten
+      a prompt     runs by itself, the whole card's, before the next step of any answer
+      answers      two seats answering are stepped as a pair (▶ the model's `pair_step`: the card on one's attention while
+                   the CPUs compute the other's experts), the two stepped longest ago; one answering alone a position at
+                   a time
+    ```
+    One thread runs the model: every turn's work is its, in the order above. ⭐ A MODEL WHOSE SEATS STEP ON THEIR OWN
+    (its `ALONE`, ⚖ 2026-11-04 the resident machine) has a thread a seat instead, each running its seat's turns — its
+    prompt, then its answer a position at a time — so no seat waits for another's position: their steps interleave on
+    their card's queue (▶ the model's chain), and a prompt holds its card's other seats only between its chunks."""
+    WAIT_FORGET = 15.0                               # three of the callers' 5 s retries
+
+    def __init__(self, model):
+        super().__init__(model)
+        n = int(getattr(model, "SEATS", 1))
+        if n < 2:
+            raise Refused("a seated runtime takes a model with two seats or more, not %d" % n)
+        if not getattr(model, "PARKS", True):
+            raise Refused("seats take a model whose conversation's state can be read off the card")
+        self.held = [None] * n                       # the conversation each seat holds
+        self.used = [0.0] * n                        # when a turn last ran on each seat
+        self.stepped = [0.0] * n                     # when each seat's answer last took a step
+        self.running = {}                            # seat -> its turn
+        self.waiting = {}                            # a conversation told Busy -> [when first, when last], oldest first
+        self._work = threading.Condition(self._lock)
+        if getattr(model, "ALONE", False):
+            for seat in range(n):
+                threading.Thread(target=self._loop, args=(seat,), daemon=True).start()
+        else:
+            threading.Thread(target=self._loop, daemon=True).start()
+
+    # the server reads one conversation on the card; with seats every seat's is, and none of them is "the" one
+    @property
+    def active(self):
+        return None
+
+    @active.setter
+    def active(self, value):
+        if value is not None:
+            raise Refused("a seated runtime's conversations are its seats'")
+
+    def seat_of(self, c):
+        return next((k for k, h in enumerate(self.held) if h is c), None)
+
+    def _holds_nothing(self):
+        with self._lock:
+            self.held = [None] * len(self.held)
+
+    def forget(self, c):
+        """`c` put away: what its seat holds is no one's now."""
+        with self._lock:
+            k = self.seat_of(c)
+            if k is not None and k not in self.running:
+                self.held[k] = None
+
+    def turn(self, c, new_tokens, max_new, sampler=None, stop=(), on_token=None, images=()):
+        """A turn on a seat (▶ the class); answers its object, whose `.wait()` gives the answer. ⛔ `Busy` where every seat
+        is answering, or where `c` runs under another LoRA than the one the answering seats run under."""
+        with self._lock:
+            if self._holding():
+                raise Busy("the card is lent")
+            k = self.seat_of(c)
+            if k is not None and k in self.running:
+                raise Busy("a turn of this conversation is on the card")
+            want = c.lora["name"] if c.lora else None
+            if want != self.model.active_lora and self.running:
+                raise Busy("the seats answering run under another LoRA")
+            now = time.time()
+            for cid in [cid for cid, (_, last) in self.waiting.items() if now - last > self.WAIT_FORGET]:
+                del self.waiting[cid]
+            free = [j for j in range(len(self.held)) if j not in self.running]
+            ahead = [cid for cid in self.waiting if cid != c.id]
+            if c.id in self.waiting:                 # waiting: the free seats go to the ones waiting longer first
+                ahead = ahead[:list(self.waiting).index(c.id)]
+            if len(ahead) >= len(free):
+                self.waiting.setdefault(c.id, [now, now])[1] = now
+                raise Busy("every seat is answering" if not free else "the conversations waiting take the free seats")
+            self.waiting.pop(c.id, None)
+            if k is None:
+                empty = [j for j in free if self.held[j] is None]
+                k = empty[0] if empty else min(free, key=lambda j: self.used[j])
+            t = _Turn(c, list(new_tokens), max_new, sampler, set(stop), on_token)
+            t.images, t.seat, t.phase = list(images), k, "new"
+            self.running[k] = t
+            self._running = t
+            self._work.notify_all()
+        return t
+
+    def _holding(self):
+        """Whether the server holds every turn off (its `_Holding` in `_running`: the card lent to another model)."""
+        h = self._running
+        return h is not None and not hasattr(h, "seat") and not h.done.is_set()
+
+    def busy(self):
+        return bool(self.running) or self._holding()
+
+    def put_down(self):
+        """Before the model leaves the card (lent to another): every seat's answer finished, and every seat's conversation
+        read off into RAM — each written back when its next turn takes a seat."""
+        while self.running:
+            time.sleep(0.05)
+        with self._lock:
+            for k, c in enumerate(self.held):
+                if c is not None:
+                    c.state = self._seat_read(k, c.length)
+                    self.held[k] = None
+
+    def save(self, c, path, with_state=True):
+        """A cartridge to disk; one a seat holds has its state read off that seat, and stays there."""
+        with_state = with_state and getattr(self.model, "PARKS", True)
+        k = self.seat_of(c)
+        if k is not None and with_state:
+            with self._lock:
+                if k in self.running:
+                    raise Busy("its turn is on the card")
+                c.state = self._seat_read(k, c.length)
+            c.save(path, with_state)
+            c.state = None
+        else:
+            c.save(path, with_state)
+
+    def close(self):
+        while self.running:
+            time.sleep(0.05)
+
+    # ── the seats' state ──────────────────────────────────────────────────────────────────────────────────────
+    def _seat_read(self, k, length):
+        m = self.model
+        return [m.m.read(at, n) for at, n in m.seat_state_regions(length, k) if n]
+
+    def _seat_write(self, k, length, blobs):
+        m = self.model
+        for (at, _), blob in zip([(at, n) for at, n in m.seat_state_regions(length, k) if n], blobs):
+            m.m.write(at, blob)
+
+    def _seat(self, k, c):
+        """Seat `k` given to `c`: the conversation it held read off into RAM, `c`'s written in — or, saved without its state,
+        its seat reset and its tokens run again."""
+        m, old = self.model, self.held[k]
+        want = c.lora["name"] if c.lora else None
+        if want != m.active_lora:                    # the model's one LoRA: every seat's turns run under it (▶ `turn`)
+            self.stats["lora_seconds"] += m.load_lora(want)
+            self.stats["lora_swaps"] += 1
+        if c.lora is not None:
+            c.lora = m.lora_identity()
+        if old is c:
+            return
+        t0 = time.time()
+        if old is not None:
+            old.state = self._seat_read(k, old.length)
+        self.held[k] = None
+        self.stats["park_seconds"] += time.time() - t0
+        with m.on_seat(k):
+            if c.state is not None:
+                self._seat_write(k, c.length, c.state)
+            else:
+                m.reset()
+                c.length, c.lag = 0, 0
+        c.state = None
+        self.held[k] = c
+        self.stats["switches"] += 1
+
+    # ── the model's thread ────────────────────────────────────────────────────────────────────────────────────
+    def _loop(self, seat=None):
+        """The model's thread — or seat `seat`'s, stepping that seat alone."""
+        def mine(k):
+            return seat is None or k == seat
+        while True:
+            with self._lock:
+                while not any(mine(k) for k in self.running):
+                    self._work.wait()
+                new = [(k, t) for k, t in self.running.items() if mine(k) and t.phase == "new"]
+                answering = [(k, t) for k, t in self.running.items() if mine(k) and t.phase == "answer"]
+            if new:                                  # a prompt takes the card by itself, before any answer's next step
+                k, t = new[0]
+                try:
+                    self._seat(k, t.cartridge)
+                    with self.model.on_seat(k):
+                        tok, t.how = self._prompt(t)
+                    t.phase, t.answer = "answer", []
+                    self._emit(k, t, tok)
+                except Exception as exc:             # a turn that fails answers its failure
+                    self._end(k, t, exc)
+                continue
+            if len(answering) >= 2:
+                group = sorted(answering, key=lambda kt: self.stepped[kt[0]])[:2]
+                try:
+                    self._pair(group)
+                except Exception as exc:
+                    for k, t in group:
+                        self._end(k, t, exc)
+            elif answering:
+                k, t = answering[0]
+                try:
+                    self._single(k, t)
+                except Exception as exc:
+                    self._end(k, t, exc)
+
+    def _head(self, t, tok):
+        """A seat's head for its next token: the greedy one, the card's draw, or the host's over the logits read back."""
+        greedy, card, _ = t.how
+        if greedy:
+            return "(head)"
+        if card:
+            return sampling.head(t.sampler, t.cartridge.length, tok)
+        return lambda logits: t.sampler(logits, t.cartridge.tokens)
+
+    def _single(self, k, t):
+        m, c, tok = self.model, t.cartridge, t.answer[-1]
+        h = self._head(t, tok)
+        with m.on_seat(k):
+            out = m.step(tok, c.length, greedy=h == "(head)", sample=h if isinstance(h, str) and h != "(head)" else None)
+            if not isinstance(h, str):
+                out = h(m.logits())
+        c.length += 1
+        self.stepped[k] = time.time()
+        self._emit(k, t, out)
+
+    def _pair(self, pair):
+        (ka, ta), (kb, tb) = pair
+        toks = (ta.answer[-1], tb.answer[-1])
+        heads = (self._head(ta, toks[0]), self._head(tb, toks[1]))
+        outs = self.model.pair_step(toks, (ta.cartridge.length, tb.cartridge.length), heads=heads, seats=(ka, kb))
+        now = time.time()
+        for (k, t), out in zip(pair, outs):
+            t.cartridge.length += 1
+            self.stepped[k] = now
+            self._emit(k, t, out)
+
+    def _emit(self, k, t, tok):
+        """A token of `t`'s answer: in its conversation, to its stream — and the turn ended at an end token, its length or a
+        cancel."""
+        c = t.cartridge
+        t.answer.append(tok)
+        c.tokens.append(tok)
+        if t.on_token:
+            t.on_token(tok)
+        if tok in t.stop or len(t.answer) >= t.max_new or t.cancelled:
+            self._end(k, t)
+
+    def _end(self, k, t, error=None):
+        with self._lock:
+            self.running.pop(k, None)
+            self.used[k] = time.time()
+            if error is not None and self.held[k] is t.cartridge:
+                self.held[k] = None                  # its seat's state unknown after a failure: written again when it returns
+                t.cartridge.state, t.cartridge.length, t.cartridge.lag = None, 0, 0
+        t.result, t.error = (None if error is not None else t.answer), error
+        t.done.set()
 
 
 class _Turn:

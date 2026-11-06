@@ -24,6 +24,7 @@
 #include <algorithm>
 #include <map>
 #include <mutex>
+#include <shared_mutex>
 #include <string>
 #include <tuple>
 #include <vector>
@@ -189,8 +190,12 @@ static void silvann_wheel_load_silicon_families(void) {
     }
 }
 
-/* ══ ONE ENGINE CALL AT A TIME, AND PYTHON FREE WHILE ONE RUNS ══════════════════════════════════════════
- * The engine's heap takes one caller at a time, and every door below that reaches it takes this lock. A door
+/* ══ THE MACHINE SHARED BETWEEN THREADS, AND PYTHON FREE WHILE A CALL RUNS ══════════════════════════════════
+ * ⚖ 2026-11-04 the resident machine: the blocks run what the host queues, and a door that builds acts as the host
+ * under the engine's own host lock (▶ `ENG__ABI__AS_THE_HOST`) — so the doors below take this lock SHARED, and
+ * threads driving different blocks run their programs at once, a door that runs one waiting for its block's answer
+ * holding only its share. The doors that make or unmake the machine — the boot, the shutdown, choosing its silicon
+ * and its workers, loading a family — take it whole (`silvann_wheel_whole`), after every call in flight. A door
  * that runs a program — `execute`, `eval`, `run_grid`, `dispatch` — or moves memory gives the interpreter's lock
  * back first, so the server's other threads (its HTTP, the stream, a status request) run while a token's work
  * does (NN-107: /health waited 1.4-2.8 s through a 35B answer, `MEASURED` node-01,
@@ -202,25 +207,33 @@ static void silvann_wheel_load_silicon_families(void) {
  *   another thread needs the interpreter's lock to hand back its answer, so a door finding the engine busy
  *   gives the interpreter's lock up before it waits. The guards end in that order too: the engine's lock is
  *   let go before the interpreter's is taken again.
- * ⛳ The resident launch's four doors (`stop_residing`, `place`, `poll`, `result_release`) take neither:
- *   `stop_residing` waits for blocks that `place` and `poll` speak to, and a lock across that wait would hold
- *   them out. */
-static std::mutex silvann_wheel_engine;
+ * ⛳ `place`, `poll` and `take` take only the host lock inside them: they speak to running blocks whatever another
+ *   thread is doing. */
+static std::shared_mutex silvann_wheel_engine;
 
 template <typename F> static auto silvann_wheel_long(F&& f) -> decltype(f()) {
     decltype(f()) got{};
     { py::gil_scoped_release step_aside;
-      std::lock_guard<std::mutex> one(silvann_wheel_engine);
+      std::shared_lock<std::shared_mutex> share(silvann_wheel_engine);
       got = f(); }
     return got;
 }
 
 template <typename F> static auto silvann_wheel_short(F&& f) -> decltype(f()) {
-    std::unique_lock<std::mutex> free_now(silvann_wheel_engine, std::try_to_lock);
+    std::shared_lock<std::shared_mutex> free_now(silvann_wheel_engine, std::try_to_lock);
     if (free_now.owns_lock()) return f();
     decltype(f()) got{};
     { py::gil_scoped_release step_aside;
-      std::lock_guard<std::mutex> one(silvann_wheel_engine);
+      std::shared_lock<std::shared_mutex> share(silvann_wheel_engine);
+      got = f(); }
+    return got;
+}
+
+/* The machine made or unmade: every call in flight finished first, and none begun until this one ends. */
+template <typename F> static auto silvann_wheel_whole(F&& f) -> decltype(f()) {
+    decltype(f()) got{};
+    { py::gil_scoped_release step_aside;
+      std::unique_lock<std::shared_mutex> whole(silvann_wheel_engine);
       got = f(); }
     return got;
 }
@@ -320,7 +333,7 @@ PYBIND11_MODULE(SILVANN_MODULE_NAME, m) {
      * that only learns "no" has to guess which of `eng__boot__why`'s refusals it hit. */
     m.def("boot", [](unsigned blocks, unsigned chunks, unsigned chunk_nodes, const std::string& config) {
         unsigned b = 0, c = 0, n = 0;
-        const int st = silvann_wheel_long([&] {
+        const int st = silvann_wheel_whole([&] {
             const int st = eng_abi_boot_with(blocks, chunks, chunk_nodes, config.empty() ? 0 : config.c_str(),
                                              (unsigned long long)config.size());
             if (st == 0) eng_abi_geometry(&b, &c, &n);
@@ -337,19 +350,23 @@ PYBIND11_MODULE(SILVANN_MODULE_NAME, m) {
        "lines. Each package's host init reads it for its own sizing before the machine exists, and the\n"
        "device_params section is handed to the card VERBATIM for the settings register row.");
 
-    m.def("shutdown", []() { silvann_wheel_long([] { eng_abi_shutdown(); return 0; }); }, "Give the device memory back.");
+    m.def("shutdown", []() { silvann_wheel_whole([] { eng_abi_shutdown(); return 0; }); }, "Give the device memory back.");
+    /* ⛳ READ WITHOUT THE WHEEL: two words, and the one question a caller asks when every other door refuses. */
+    m.def("panic", []() { return eng_abi_panic(); },
+          "The four-letter word the evaluator stopped with, as a number, or 0: while it is set every door refuses, and "
+          "a shutdown and a boot clear it.");
 
     /* Which silicon. A name the binary has no card for is an error rather than a quiet fallback, because a
      * caller that asked for one card and got another would be told it had what it asked for. */
     m.def("choose_silicon", [](const std::string& name) {
-        if (!silvann_wheel_short([&] { return eng_abi_choose_silicon(name.c_str()); }))
+        if (!silvann_wheel_whole([&] { return eng_abi_choose_silicon(name.c_str()); }))
             throw std::runtime_error("no card for silicon '" + name + "' in this binary");
     }, py::arg("name"), "Name the silicon the next boot stands up on: 'host', 'amd_rocm6_wave64', 'nvidia_cuda12'.");
     /* The workers the next boot stands up — a device of a family each, block `w` running as worker `w`. */
     m.def("choose_workers", [](const std::vector<std::pair<std::string, unsigned int>>& workers) {
         std::vector<const char*> names; std::vector<unsigned int> devices;
         for (const auto& w : workers) { names.push_back(w.first.c_str()); devices.push_back(w.second); }
-        if (!silvann_wheel_short([&] { return eng_abi_choose_workers((unsigned int)workers.size(), names.data(),
+        if (!silvann_wheel_whole([&] { return eng_abi_choose_workers((unsigned int)workers.size(), names.data(),
                                                                      devices.data()); }))
             throw std::runtime_error("a worker names a family this binary has no card for, or a device it does not count");
     }, py::arg("workers"), "Name the workers the next boot stands up: [(silicon, device), ...]; [] for one, as choose_silicon says.");
@@ -372,7 +389,7 @@ PYBIND11_MODULE(SILVANN_MODULE_NAME, m) {
     }, "The workers of the machine that is up: [(silicon, device), ...].");
     m.def("load_silicon_family", [](const std::string& path) {
         std::string why;
-        const std::string silicon = silvann_wheel_short([&] { return silvann_wheel_load_silicon_family(path, &why); });
+        const std::string silicon = silvann_wheel_whole([&] { return silvann_wheel_load_silicon_family(path, &why); });
         silvann_wheel_silicon_family rec; rec.path = path; rec.silicon = silicon; rec.outcome = why;
         silvann_wheel_silicon_families.push_back(rec);
         if (silicon.empty()) throw std::runtime_error("family '" + path + "' not loaded: " + why);
@@ -415,7 +432,7 @@ PYBIND11_MODULE(SILVANN_MODULE_NAME, m) {
     }, "The directory the families were loaded from at import, or None when none was found.");
     /* A family loaded by someone else, handed over as the address `silvann_silicon_family_get` answered. */
     m.def("offer_silicon_family", [](unsigned long long table) {
-        if (!silvann_wheel_short([&] { return eng_abi_offer_silicon_family((const void*)(uintptr_t)table); }))
+        if (!silvann_wheel_whole([&] { return eng_abi_offer_silicon_family((const void*)(uintptr_t)table); }))
             throw std::runtime_error("the family's table was refused");
     }, py::arg("table"), "Hand the engine a loaded family's table, by address.");
     m.def("devices", [](const std::string& name) { return silvann_wheel_short([&] { return eng_abi_devices(name.c_str()); }); },
@@ -546,9 +563,9 @@ PYBIND11_MODULE(SILVANN_MODULE_NAME, m) {
     }, py::arg("bindings"), py::arg("program"),
        "Run a PICTURE of a program; answers (kind, value). Freeze a list to get one.");
 
-    /* Run a program on a block the host never talks to, by having block zero put it there. The answer
-     * comes back as the same pair `eval` gives; `outcome` is what happened, so a caller with no value
-     * can tell a refusal from a program that answered nothing. */
+    /* Run a program on the block named, queued there with the host as the caller. The answer comes back as the
+     * same pair `eval` gives; `outcome` is what happened, so a caller with no value can tell a refusal from a
+     * program that answered nothing. */
     m.def("dispatch", [](unsigned long long bindings, unsigned long long program, unsigned onto) {
         unsigned kind = 0; unsigned long long value = 0ull; int outcome = 0;
         const int ok = silvann_wheel_long([&] { return eng_abi_dispatch(bindings, program, onto, &kind, &value, &outcome); });
@@ -556,9 +573,8 @@ PYBIND11_MODULE(SILVANN_MODULE_NAME, m) {
     }, py::arg("bindings"), py::arg("program"), py::arg("onto") = 1u,
        "Dispatch a program picture onto a block. -> (kind, value, outcome, ran).");
 
-    /* Run a program on the whole machine: block zero runs it, every other block waits to be given work
-     * BY it. What it dispatches and to whom is the program's own business — this only makes sure the
-     * blocks it may name are there. */
+    /* Run a program on the whole machine: block zero runs it, every other block resident to be given work BY it.
+     * What it hands out and to whom is the program's own business. */
     /* ⛔⛔ THE LOCK COMES OFF THE LAUNCH AND GOES BACK ON BEFORE ANYTHING PYTHON IS TOUCHED, and the
      * scope is the whole of why this is written out rather than declared. A guard on the DEFINITION
      * wraps the entire body — including the tuple built at the end, which is a call into the
@@ -572,51 +588,32 @@ PYBIND11_MODULE(SILVANN_MODULE_NAME, m) {
     }, py::arg("bindings"), py::arg("program"),
        "Run a program with every booted block available to it. -> (kind, value, ran).");
 
-    /* Staying up. Launch every block into its waiting loop and do not wait for the launch — from here
-     * the engine is a machine you talk to rather than a call you make.
-     * ⛔ EVERY SETTLING DOOR REFUSES WHILE IT IS UP. Build the programs, freeze them and take the
-     * addresses FIRST; asking for a list while sixty blocks are parked would otherwise be a wait for a
-     * device that has been told never to go quiet. What stays open is `place`/`poll`/`result_release`
-     * and `peek`, which is the whole scheduling vocabulary. */
-    m.def("reside", []() { return silvann_wheel_short([] { return eng_abi_reside(); }) != 0; },
-          "Launch every block into its waiting loop and leave it running. Build everything first.");
-    m.def("residing", []() { return silvann_wheel_short([] { return eng_abi_residing(); }) != 0; },
-          "Whether a launch is out there that is not going to end on its own.");
-    m.def("stop_residing", []() {
-        int ok = 0;
-        { py::gil_scoped_release step_aside; ok = eng_abi_stop_residing(); }
-        return ok != 0;
-    }, "Tell it to stop and wait for it. False changes nothing and may be asked again.");
+    /* Scheduling from out here, as a program's `sys__scheduler__add`, `sys__result` and `sys__wait` do, from the host's own
+     * slot (▶ `engine/abi/residency.cuh`). The blocks are resident, so they work whatever another thread is running,
+     * and a block runs what they queue when it parks. */
+    m.def("place", [](unsigned block, unsigned long long bindings, unsigned long long program) {
+        unsigned long long answer = 0ull;
+        { py::gil_scoped_release step_aside; answer = eng_abi_place(block, bindings, program); }
+        return answer;
+    }, py::arg("block"), py::arg("bindings"), py::arg("program"),
+       "Queue a program picture on a block, into a new answer. Answers the answer, yours to `release` once read, or 0 "
+       "where it was not queued: no engine, no such block, an operand missing, or the queue's refusal. The queue takes "
+       "holds of its own; yours stay yours.");
 
-    /* Scheduling from out here. The same three acts a program performs with `(sys__compute …)`,
-     * `(sys__completed …)` and `(sys__result …)`, which is why the state machine did not have to grow
-     * to take them. ⛔ `place` CONSUMES both operands: filling a base takes a hold of its own and the
-     * host has no way to take one, so the caller's becomes the base's. Freeze again to place twice. */
-    m.def("place", [](unsigned long long address, unsigned long long bindings,
-                      unsigned long long program) {
-        int ok = 0;
-        { py::gil_scoped_release step_aside; ok = eng_abi_place(address, bindings, program); }
-        return ok != 0;
-    }, py::arg("address"), py::arg("bindings"), py::arg("program"),
-       "Put work on a block that is already running. False means it was not taken, and a busy base "
-       "is only one of the reasons: no engine, no base at that address, bindings and program "
-       "disagreeing about being zero, or the send itself not going. Only a busy base is worth "
-       "waiting out, so a retry loop needs a bound. TAKES OVER your hold on both operands.");
+    m.def("poll", [](unsigned long long answer) {
+        int ok = 0, ready = 0;
+        { py::gil_scoped_release step_aside; ok = eng_abi_poll(answer, &ready); }
+        if (!ok) throw std::runtime_error("no machine, or not an answer");
+        return ready != 0;
+    }, py::arg("answer"), "Whether that answer's value is there. Reads its state and nothing else.");
 
-    m.def("poll", [](unsigned long long address) {
-        unsigned state = 0, kind = 0; unsigned long long value = 0ull; int ok = 0;
-        { py::gil_scoped_release step_aside; ok = eng_abi_poll(address, &state, &kind, &value); }
-        if (!ok) throw std::runtime_error("that base did not answer");
-        return py::make_tuple(state, kind, value);
-    }, py::arg("address"), "How a placed computation is going. -> (state, kind, value).");
-
-    m.def("result_release", [](unsigned long long address, unsigned block) {
-        int ok = 0;
-        { py::gil_scoped_release step_aside; ok = eng_abi_result_release(address, block); }
-        return ok != 0;
-    }, py::arg("address"), py::arg("block"),
-       "Give the base back once you have taken the answer; its own block puts the computation away. "
-       "Does not wait for that — `poll` until the state reads free.");
+    m.def("take", [](unsigned long long answer) {
+        unsigned kind = 0; unsigned long long value = 0ull; int ok = 0;
+        { py::gil_scoped_release step_aside; ok = eng_abi_take(answer, &kind, &value); }
+        return py::make_tuple(ok != 0, kind, value);
+    }, py::arg("answer"),
+       "That answer's value, once it is there. -> (read, kind, value). The answer keeps it, so a second read gets the "
+       "same; a reference answered is yours to release.");
 
     /* The words, as the maps a caller was going to build out of them anyway. */
     m.def("verbs", []() {

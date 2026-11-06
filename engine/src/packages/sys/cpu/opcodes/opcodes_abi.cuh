@@ -436,108 +436,129 @@ static __device__ sys__heap_node sys__opcodes__zzabi_bindings_set(const sys__hea
 }
 SYS__ENGINE__ABI__BRIDGE(sys__opcodes__zzabi_adapter_bindings_set, sys__opcodes__zzabi_bindings_set)
 
-/* ── THE DISPATCH TRIO. Each addresses a block by its number. ───────────────────────────────────────── */
+/* ── THE DISPATCH TRIO. A request addresses a block by its number, and its value goes into an answer. ─────── */
 
-/* `(sys__compute block names actions)` — put a computation on another block and carry on.
- * ⭐⭐ IT IS `claim` AND `init` AND NOTHING ELSE. A claim without a fill leaves a base held by nobody; a
- * fill without a claim is the race `init` refuses. They are one word because they are never separately
- * useful, and separating them would publish the half that can strand a block.
+/* `(sys__scheduler__add block names actions [answer])` -> the answer: queue a computation on another block and carry on;
+ * its value goes into the answer — `answer`, or a new one — which is handed back, and read with `sys__result` and
+ * `sys__wait` (▶ `answer.cuh`). ⚖ 2026-11-05 *"(sys__scheduler__add CU names expert result) repeated with as much as
+ * the async results are needed"* · *"sys__scheduler__add returns an object, which we can bind with let"*.
+ * ⭐⭐ IT QUEUES A REQUEST (▶ `scheduler__header.cuh`): the block runs its queue in the order it arrived whenever its
+ * base is free, so work handed to a block that is computing waits its turn, and any number of blocks can hand one
+ * work at once.
+ * ⭐ THE ANSWER IS RECORDED AGAINST THE BLOCK TOO, for this computation, so a program that asks a block one thing at a
+ * time can name the block when it reads (`(sys__wait block)`) rather than keep the answer.
  * ⭐ BOTH OPERANDS ARE READ-ONLY COPIES, AND THAT IS WHY THIS IS SAFE AT SIXTY BLOCKS: the receiving block
  * thaws its own program out of one and builds its own scopes over the other, so nothing either block
  * writes is anything the other can see. ⛔ An environment is refused here although the machinery beneath
- * would accept one — a program dispatching elsewhere would be handing a second block one scope stack.
+ * would accept one — a program dispatching elsewhere would be handing a second block one scope stack. The answer is
+ * the one thing both see, and it is written once, by the block that finishes, under its own lock.
  * ⛳ The actions arrive unevaluated with no marking, because a picture is a `QUOTED_ARRAY` and the scan
  * descends only into a reference naming a list.
- * ⛳ THE SHAPES ARE CHECKED BEFORE ANYTHING IS CLAIMED, so a refused compute leaves every base as it found
- * it. What is checked is what the offset NAMES, never how the cell is tagged: a picture carried inside a
- * picture comes back from the thaw as an `OBJECT_REFERENCE`, same offset, same array.
- * ⛔ IT ANSWERS A REAL YES, AND EVERY NO IS AN ERROR SAYING WHICH — a busy block, one never started, an
- * operand of the wrong shape and a fill with no room are four different repairs. */
-static __device__ sys__heap_node sys__opcodes__zzabi_compute(const sys__heap_node* argv, unsigned argc,
+ * ⛳ THE SHAPES ARE CHECKED BEFORE ANYTHING IS QUEUED, so a refused compute leaves every queue as it found it.
+ * What is checked is what the offset NAMES, never how the cell is tagged: a picture carried inside a picture
+ * comes back from the thaw as an `OBJECT_REFERENCE`, same offset, same array.
+ * ⛔ A BLOCK IS NOT HANDED ITS OWN WORK: it takes from its queue only when it parks, and it is running this
+ * program, so the value would never come — refused BUSY (▶ `sys__scheduler__continue` for a step that goes on there).
+ * ⛔ EVERY NO IS AN ERROR SAYING WHICH — the block it runs on, one never started, an operand of the wrong shape, an
+ * answer a computation is still on its way to and a queue with no room are five different repairs. */
+static __device__ sys__heap_node sys__opcodes__zzabi_scheduler_add(const sys__heap_node* argv, unsigned argc,
                                                               sys__engine__ctx* ctx) {
     (void)ctx;
-    if (argc != 3u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
+    if (argc != 3u && argc != 4u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
     if (argv[0].dtype != SYS__KIND__VALUE_INT
      || !sys__heap_node__carries_reference(argv[1].dtype) || !sys__node_array__is(argv[1].args[0])
      || !sys__heap_node__carries_reference(argv[2].dtype) || !sys__node_array__is(argv[2].args[0]))
         return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
+    if (argc == 4u && (!sys__heap_node__carries_reference(argv[3].dtype) || !sys__answer__is(argv[3].args[0])))
+        return sys__engine__abi__error(SYS__ANSWER__FAULT_KIND);
     if (argv[0].args[0] >= (uint64_t)sys__silicon__block_count())
         return sys__engine__abi__error(SYS__COMPUTING_BASE__FAULT_NO_BLOCK);
-    sys__heap_node* there = sys__computing_base__get((uint32_t)argv[0].args[0]);
+    const sys__heap_node* there = sys__computing_base__get((uint32_t)argv[0].args[0]);
     if (there == 0 || !sys__computing_base__is(there))
         return sys__engine__abi__error(SYS__COMPUTING_BASE__FAULT_NO_BLOCK);
-    const uint32_t me = (uint32_t)sys__silicon__block_id();
-    if (sys__computing_base__claim(there, me) == 0)
-        return sys__engine__abi__error(SYS__COMPUTING_BASE__FAULT_BUSY);
-    if (!sys__computing_base__init(there, me, argv[1].args[0], argv[2].args[0])) {
-        /* ⛳ A claim taken and an init refused leaves the base half-standing, so it is finished and read
-         * out before the refusal goes back. */
-        (void)sys__computing_base__finish(there, me, SYS__COMPUTING_BASE__ERROR, sys__heap_node__nothing());
-        (void)sys__computing_base__read_result(there, me);
-        return sys__engine__abi__error(SYS__COMPUTING_BASE__FAULT_HALF);
+    const uint32_t me = (uint32_t)sys__silicon__block_id(), cu = (uint32_t)argv[0].args[0];
+    if (cu == me) return sys__engine__abi__error(SYS__COMPUTING_BASE__FAULT_BUSY);
+    /* ⛳ A NEW ANSWER IS THE MAKER'S HOLD HANDED OVER; A GIVEN ONE IS HELD ONCE MORE for the hand-back. */
+    const uint64_t answer = argc == 4u ? argv[3].args[0] : sys__answer__create();
+    if (answer == 0ull) return sys__engine__abi__error(SYS__SCHEDULER__FAULT_NOT_QUEUED);
+    if (argc == 4u) (void)sys__heap_object__retain(answer);
+    if (!sys__scheduler__add(cu, argv[1].args[0], argv[2].args[0], answer)) {
+        const uint64_t why = sys__answer__state(answer) == SYS__ANSWER__WAITING ? SYS__ANSWER__FAULT_BUSY
+                                                                                : SYS__SCHEDULER__FAULT_NOT_QUEUED;
+        (void)sys__heap_object__release(answer);
+        return sys__engine__abi__error(why);
     }
-    return sys__opcodes__truth(true);
+    sys__scheduler__zzpackage_ask(me, cu, answer);
+    return sys__heap_object__reference_to(answer);                /* ⛳ a hold handed over; the bridge gives it back */
 }
-SYS__ENGINE__ABI__BRIDGE(sys__opcodes__zzabi_adapter_compute, sys__opcodes__zzabi_compute)
+SYS__ENGINE__ABI__BRIDGE(sys__opcodes__zzabi_adapter_scheduler_add, sys__opcodes__zzabi_scheduler_add)
 
-/* ⛳ `completed` AND `result` SHARE THEIR WHOLE PREAMBLE, so it is written once. It answers the base,
- * or zero with the reason in `why`. */
-static __device__ inline sys__heap_node* sys__opcodes__zzabi_base_at(const sys__heap_node* argv,
-                                                                      unsigned argc, uint64_t* why) {
-    if (argc != 1u)                                 { *why = SYS__OPCODES__FAULT_ARITY;              return 0; }
-    if (argv[0].dtype != SYS__KIND__VALUE_INT)      { *why = SYS__OPCODES__FAULT_TYPE;               return 0; }
-    if (argv[0].args[0] >= (uint64_t)sys__silicon__block_count())
-                                                    { *why = SYS__COMPUTING_BASE__FAULT_NO_BLOCK;    return 0; }
-    sys__heap_node* there = sys__computing_base__get((uint32_t)argv[0].args[0]);
-    if (there == 0 || !sys__computing_base__is(there))
-                                                    { *why = SYS__COMPUTING_BASE__FAULT_NO_BLOCK;    return 0; }
+/* ⛳ `result` AND `wait` SHARE THEIR PREAMBLE, so it is written once: the answer an operand names — an answer, or a
+ * block, read as what this computation last asked of it. It answers the answer, borrowed, or 0 with the reason in
+ * `why`. */
+static __device__ inline uint64_t sys__opcodes__zzabi_answer_of(const sys__heap_node* argv, unsigned argc,
+                                                                 uint64_t* why) {
+    if (argc != 1u) { *why = SYS__OPCODES__FAULT_ARITY; return 0ull; }
+    uint64_t answer = 0ull;
+    if (argv[0].dtype == SYS__KIND__VALUE_INT) {
+        if (argv[0].args[0] >= (uint64_t)sys__silicon__block_count()) {
+            *why = SYS__COMPUTING_BASE__FAULT_NO_BLOCK;
+            return 0ull;
+        }
+        answer = sys__scheduler__zzpackage_asked((uint32_t)sys__silicon__block_id(), (uint32_t)argv[0].args[0]);
+    } else if (sys__heap_node__carries_reference(argv[0].dtype) && sys__answer__is(argv[0].args[0])) {
+        answer = argv[0].args[0];
+    } else {
+        *why = SYS__ANSWER__FAULT_KIND;
+        return 0ull;
+    }
+    /* ⛔ ONE NOBODY ASKED FOR WILL NEVER BE READY, so it is refused rather than polled or waited on for good. */
+    if (answer == 0ull || sys__answer__state(answer) == SYS__ANSWER__EMPTY) {
+        *why = SYS__SCHEDULER__FAULT_NOT_ASKED;
+        return 0ull;
+    }
     *why = 0ull;
-    return there;
+    return answer;
 }
 
-/* `(sys__completed block)` — ⚖ a real `#t`/`#f`, which is what lets a program POLL rather than block:
- * collecting is what takes the value, so without this a program could not ask without committing.
- * ⛳ IT ANSWERS WHETHER THERE IS ANYTHING LEFT TO WAIT FOR, NOT WHETHER IT WENT WELL — an errored
- * computation is over too, and what happened is the result's business. It takes nothing and changes
- * nothing, so a program may ask as often as it likes; only `sys__result` moves the base. */
-static __device__ sys__heap_node sys__opcodes__zzabi_completed(const sys__heap_node* argv, unsigned argc,
-                                                                sys__engine__ctx* ctx) {
-    (void)ctx;
-    uint64_t why = 0ull;
-    sys__heap_node* there = sys__opcodes__zzabi_base_at(argv, argc, &why);
-    if (there == 0) return sys__engine__abi__error(why);
-    return sys__opcodes__truth(sys__computing_base__completed(there));
-}
-SYS__ENGINE__ABI__BRIDGE(sys__opcodes__zzabi_adapter_completed, sys__opcodes__zzabi_completed)
-
-/* `(sys__result block)` — take what that block's computation came to, and put its base back.
- * ⭐⭐ COLLECTING IS WHAT ENDS A COMPUTATION, AND NOTHING ELSE DOES. The base goes back to FREE here and
- * nowhere else, so a `compute` whose result is never taken holds that block's base forever and the next
- * `compute` onto it is refused BUSY — loudly, at the next dispatch, rather than as a silent leak.
- * ⭐ IT HANDS THE VALUE OVER RATHER THAN LENDING IT: the slot is emptied, and a second collector is
- * handed nothing.
- * ⛳ IT WAITS, BOUNDED. A result read before the block has published one is nothing, so this retries up
- * to `SYS__COMPUTING_BASE__RESULT_TRIES` with a back-off; a computation that never finishes answers
- * NOTHING rather than parking the block that asked. The non-blocking shape is `sys__completed`: ask,
- * and collect when the answer is `#t`. */
+/* `(sys__result answer)` — ⚖ *"sys__result r only tells us if the computing is still waiting or if the result is
+ * ready"*: `#t` once the value is there, `#f` while it is on its way — a real truth, so a program polls with it in an
+ * `if` or a `while`. ⛳ IT SAYS WHETHER THE VALUE IS THERE, NOT WHETHER IT WENT WELL — an error is a value too, and what
+ * happened is `sys__wait`'s to hand over. It reads one word and takes no lock, so a program may ask as often as it
+ * likes. A block in place of the answer is what this computation last asked of it. */
 static __device__ sys__heap_node sys__opcodes__zzabi_result(const sys__heap_node* argv, unsigned argc,
                                                              sys__engine__ctx* ctx) {
     (void)ctx;
     uint64_t why = 0ull;
-    sys__heap_node* there = sys__opcodes__zzabi_base_at(argv, argc, &why);
-    if (there == 0) return sys__engine__abi__error(why);
-    const uint32_t me = (uint32_t)sys__silicon__block_id();
-    sys__heap_node got = sys__heap_node__nothing();
-    for (uint64_t k = 0ull; k < SYS__COMPUTING_BASE__RESULT_TRIES; ++k) {
-        got = sys__computing_base__read_result(there, me);
-        if (got.dtype != SYS__KIND__VALUE_NULL || got.args[0] != 0ull) break;
-        sys__silicon__wait_cycles(SYS__COMPUTING_BASE__POLL_CYCLES);
-    }
-    return got;                       /* ⛳ read_result hands over a hold; the bridge gives it back */
+    const uint64_t answer = sys__opcodes__zzabi_answer_of(argv, argc, &why);
+    if (answer == 0ull) return sys__engine__abi__error(why);
+    return sys__opcodes__truth(sys__answer__state(answer) == SYS__ANSWER__READY);
 }
 SYS__ENGINE__ABI__BRIDGE(sys__opcodes__zzabi_adapter_result, sys__opcodes__zzabi_result)
 
-/* ── THE DICTIONARY'S TWO DOORS ────────────────────────────────────────────────────────────────────── */
+/* `(sys__wait answer)` — the value, once the answer has it.
+ * ⭐ IT LENDS THE VALUE OUT RATHER THAN TAKING IT: the answer keeps it, so a second reader is handed the same value —
+ * ⚖ *"several readers of one answer"*.
+ * ⛳ IT WAITS, BOUNDED. A value not filed yet is waited for up to `SYS__COMPUTING_BASE__RESULT_TRIES` tries with a
+ * back-off; one that never comes answers NOTHING rather than parking the block that asked. A program that knows the
+ * value may take longer polls with `sys__result` and reads once it says `#t`. A block in place of the answer is what
+ * this computation last asked of it. */
+static __device__ sys__heap_node sys__opcodes__zzabi_wait(const sys__heap_node* argv, unsigned argc,
+                                                           sys__engine__ctx* ctx) {
+    (void)ctx;
+    uint64_t why = 0ull;
+    const uint64_t answer = sys__opcodes__zzabi_answer_of(argv, argc, &why);
+    if (answer == 0ull) return sys__engine__abi__error(why);
+    for (uint64_t k = 0ull; k < SYS__COMPUTING_BASE__RESULT_TRIES; ++k) {
+        if (sys__answer__state(answer) == SYS__ANSWER__READY)
+            return sys__answer__read(answer);                    /* ⛳ a hold handed over; the bridge gives it back */
+        sys__silicon__wait_cycles(SYS__COMPUTING_BASE__POLL_CYCLES);
+    }
+    return sys__heap_node__nothing();
+}
+SYS__ENGINE__ABI__BRIDGE(sys__opcodes__zzabi_adapter_wait, sys__opcodes__zzabi_wait)
+
+/* ── THE DICTIONARY'S THREE DOORS ────────────────────────────────────────────────────────────────────── */
 
 /* `(sys__dictionary__put dict key value)` -> `#t` / `#f`. False on a SEALED dictionary and on a heap
  * that would not carve — two different facts, each raised by the dictionary itself. */
@@ -566,6 +587,20 @@ static __device__ sys__heap_node sys__opcodes__zzabi_dict_get(const sys__heap_no
     return sys__dictionary__get(argv[0].args[0], &key);   /* held; the bridge gives the hold back */
 }
 SYS__ENGINE__ABI__BRIDGE(sys__opcodes__zzabi_adapter_dict_get, sys__opcodes__zzabi_dict_get)
+
+/* `(sys__dictionary__remove dict key)` -> `#t` when there was a value to take, `#f` when there was none or the
+ * dictionary is SEALED (which raises). A key taken out is gone from what the readers read at once, and from the
+ * leaves as they are next written (▶ `cpu/dictionary.cuh`, "WHAT A WRITE CLEARS"). */
+static __device__ sys__heap_node sys__opcodes__zzabi_dict_remove(const sys__heap_node* argv, unsigned argc,
+                                                                  sys__engine__ctx* ctx) {
+    (void)ctx;
+    if (argc != 2u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
+    if (!sys__heap_node__carries_reference(argv[0].dtype) || !sys__dictionary__is(argv[0].args[0]))
+        return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
+    const sys__heap_node key = sys__dictionary__zzpackage_key_of(&argv[1]);
+    return sys__opcodes__truth(sys__dictionary__remove(argv[0].args[0], &key));
+}
+SYS__ENGINE__ABI__BRIDGE(sys__opcodes__zzabi_adapter_dict_remove, sys__opcodes__zzabi_dict_remove)
 
 /* `(sys__node_array__get array i)` -> element `i`, by value. ⛳ A GET TAKES A HOLD, per the array's own
  * rule, and the bridge gives the verb's back once the form has taken its own. ⛔ An index past the end
@@ -652,6 +687,126 @@ static __device__ sys__heap_node sys__opcodes__zzabi_worker(const sys__heap_node
 }
 SYS__ENGINE__ABI__BRIDGE(sys__opcodes__zzabi_adapter_worker, sys__opcodes__zzabi_worker)
 
+/* ── ⭐ THE MANUAL MODE (▶ `garbage_collection__header.cuh`) ─────────────────────────────────────────────────
+ * `(sys__garbage_collection__manual #t)` -> the mode it replaced: this thread's teardowns wait from here, until
+ *   `(sys__garbage_collection__manual #f)`, which collects. ⛔ Anything but #t or #f is refused, as `if` refuses a
+ *   test that is neither: a number read as off would be a switch that silently does nothing. */
+static __device__ sys__heap_node sys__opcodes__zzabi_gc_manual(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx) {
+    (void)ctx;
+    if (argc != 1u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
+    if (argv[0].dtype != SYS__KIND__VALUE_TRUE && argv[0].dtype != SYS__KIND__VALUE_FALSE)
+        return sys__engine__abi__error(SYS__GARBAGE_COLLECTION__FAULT_TRUTH);
+    return sys__opcodes__truth(sys__garbage_collection__manual(argv[0].dtype == SYS__KIND__VALUE_TRUE));
+}
+SYS__ENGINE__ABI__BRIDGE(sys__opcodes__zzabi_adapter_gc_manual, sys__opcodes__zzabi_gc_manual)
+
+/* `(sys__garbage_collection__collect)` -> #t: every teardown waiting on this thread's worklist, done now. */
+static __device__ sys__heap_node sys__opcodes__zzabi_gc_collect(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx) {
+    (void)argv; (void)ctx;
+    if (argc != 0u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
+    sys__garbage_collection__collect();
+    return sys__opcodes__truth(true);
+}
+SYS__ENGINE__ABI__BRIDGE(sys__opcodes__zzabi_adapter_gc_collect, sys__opcodes__zzabi_gc_collect)
+
+/* ── ⭐ A LIST SEVERAL BLOCKS SHARE, AND THE SCHEDULER (▶ `list__header.cuh`, `scheduler__header.cuh`) ────────────
+ * A list arrives as the datum it is — `QUOTED_LIST`, as a constructor answers it — or as any cell naming one; what
+ * is checked is what the offset names. */
+static __device__ inline bool sys__opcodes__zzprivate_names_list(const sys__heap_node* cell) {
+    return sys__heap_node__carries_reference(cell->dtype) && sys__sublist__is(cell->args[0]);
+}
+
+/* `(sys__list__shared_append list value)` -> #t: the value after the last, under the list's lock. */
+static __device__ sys__heap_node sys__opcodes__zzabi_list_shared_append(const sys__heap_node* argv, unsigned argc,
+                                                                        sys__engine__ctx* ctx) {
+    (void)ctx;
+    if (argc != 2u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
+    if (!sys__opcodes__zzprivate_names_list(&argv[0])) return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
+    return sys__list__shared_append(argv[0].args[0], &argv[1]) ? sys__opcodes__truth(true)
+                                                               : sys__engine__abi__error(SYS__LIST__FAULT_NOT_PUT);
+}
+SYS__ENGINE__ABI__BRIDGE(sys__opcodes__zzabi_adapter_list_shared_append, sys__opcodes__zzabi_list_shared_append)
+
+/* `(sys__list__shared_take list)` -> the first value, taken out — its hold the program's — or nothing when there is
+ * none. */
+static __device__ sys__heap_node sys__opcodes__zzabi_list_shared_take(const sys__heap_node* argv, unsigned argc,
+                                                                      sys__engine__ctx* ctx) {
+    (void)ctx;
+    if (argc != 1u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
+    if (!sys__opcodes__zzprivate_names_list(&argv[0])) return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
+    return sys__list__shared_take(argv[0].args[0]);           /* ⛳ a hold handed over; the bridge gives it back */
+}
+SYS__ENGINE__ABI__BRIDGE(sys__opcodes__zzabi_adapter_list_shared_take, sys__opcodes__zzabi_list_shared_take)
+
+/* `(sys__list__shared_length list)` -> how many values it holds, now. */
+static __device__ sys__heap_node sys__opcodes__zzabi_list_shared_length(const sys__heap_node* argv, unsigned argc,
+                                                                        sys__engine__ctx* ctx) {
+    (void)ctx;
+    if (argc != 1u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
+    if (!sys__opcodes__zzprivate_names_list(&argv[0])) return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
+    sys__heap_node n = sys__heap_node__nothing();
+    n.dtype = SYS__KIND__VALUE_INT; n.args[0] = sys__list__shared_length(argv[0].args[0]);
+    return n;
+}
+SYS__ENGINE__ABI__BRIDGE(sys__opcodes__zzabi_adapter_list_shared_length, sys__opcodes__zzabi_list_shared_length)
+
+/* `(sys__scheduler__continue cu names program ['(ra rb …)])` -> #t: this computation goes on as the picture `program` on
+ * block `cu` — this one among them — in `names` (0: the names it runs in), into the same answer
+ * (▶ `scheduler__header.cuh`). With a list of names, once every answer they mean here is filled: the block parks it
+ * until then and runs what is behind it, and the step finds the names bound to what their answers came to —
+ * ⚖ 2026-11-05 *"(sys__scheduler__continue card names second_half '(ra rb)) and names also contains the references to
+ * ra and rb as bindings in this way, it is the environment both for ra and rb and for second_half"*. This step's value
+ * is dropped: the next step fills the answer, or continues in its turn.
+ * ⛔ A STEP CONTINUES ONCE; asked again, or on a base with no answer to fill, it is refused — and so is a name that means
+ * no answer here (ANSN), or one nobody asked into (SCNA). */
+static __device__ sys__heap_node sys__opcodes__zzabi_scheduler_continue(const sys__heap_node* argv, unsigned argc,
+                                                                        sys__engine__ctx* ctx) {
+    if (argc != 3u && argc != 4u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
+    const bool own = argv[1].dtype == SYS__KIND__VALUE_INT && argv[1].args[0] == 0ull;
+    if (argv[0].dtype != SYS__KIND__VALUE_INT
+     || (!own && (!sys__heap_node__carries_reference(argv[1].dtype) || !sys__node_array__is(argv[1].args[0])))
+     || !sys__heap_node__carries_reference(argv[2].dtype) || !sys__node_array__is(argv[2].args[0]))
+        return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
+    if (argv[0].args[0] >= (uint64_t)sys__silicon__block_count())
+        return sys__engine__abi__error(SYS__COMPUTING_BASE__FAULT_NO_BLOCK);
+    if (ctx == 0 || ctx->base == 0) return sys__engine__abi__error(SYS__SCHEDULER__FAULT_NOT_QUEUED);
+    uint64_t gate = 0ull;
+    if (argc == 4u && argv[3].dtype != SYS__KIND__VALUE_NULL) {
+        if (argv[3].dtype != SYS__KIND__QUOTED_LIST || argv[3].args[0] == 0ull)
+            return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
+        /* ⭐ THE GATE IS THE NAMES AND WHAT THEY MEAN HERE, pairs in one array the request holds: what the step waits for,
+         *   and what its environment binds once it runs. */
+        const uint64_t list = argv[3].args[0], n = sys__sublist__length(list);
+        const uint64_t env = ctx->base->args[SYS__COMPUTING_BASE__BINDINGS];
+        gate = n != 0ull ? sys__node_array__create(2ull * n) : 0ull;
+        if (n != 0ull && gate == 0ull) return sys__engine__abi__error(SYS__SCHEDULER__FAULT_NOT_QUEUED);
+        for (uint64_t i = 0ull; i < n; ++i) {
+            sys__heap_node name = sys__sublist__nth(list, i);
+            /* ⛳ A NAME MENTIONED READS AS THE SAME NAME QUOTED: the list arrives unevaluated, and the binding wants the name. */
+            if (name.dtype == SYS__KIND__BINDING_REFERENCE)        name.dtype = SYS__KIND__QUOTED_NAME;
+            if (name.dtype == SYS__KIND__STRING_BINDING_REFERENCE) name.dtype = SYS__KIND__QUOTED_STRING_NAME;
+            uint64_t why = 0ull;
+            if (!sys__bindings__numbered(name.dtype) && !sys__bindings__spelled(name.dtype)) why = SYS__BINDINGS__FAULT_NOT_NAME;
+            const sys__heap_node means = why == 0ull ? sys__bindings__get(env, &name) : sys__heap_node__nothing();
+            if (why == 0ull && (!sys__heap_node__carries_reference(means.dtype) || !sys__answer__is(means.args[0])))
+                why = SYS__ANSWER__FAULT_KIND;
+            if (why == 0ull && sys__answer__state(means.args[0]) == SYS__ANSWER__EMPTY) why = SYS__SCHEDULER__FAULT_NOT_ASKED;
+            if (why == 0ull && (!sys__node_array__set(gate, 2ull * i, &name) || !sys__node_array__set(gate, 2ull * i + 1ull, &means)))
+                why = SYS__SCHEDULER__FAULT_NOT_QUEUED;
+            if (sys__heap_node__carries_reference(means.dtype) && means.args[0] != 0ull) (void)sys__heap_object__release(means.args[0]);
+            if (why != 0ull) {
+                (void)sys__heap_object__release(gate);
+                return sys__engine__abi__error(why);
+            }
+        }
+    }
+    const bool went = sys__scheduler__continue(ctx->base, (uint32_t)argv[0].args[0], own ? 0ull : argv[1].args[0],
+                                               argv[2].args[0], gate);
+    if (gate != 0ull) (void)sys__heap_object__release(gate);          /* the queue holds its own */
+    return went ? sys__opcodes__truth(true) : sys__engine__abi__error(SYS__SCHEDULER__FAULT_NOT_QUEUED);
+}
+SYS__ENGINE__ABI__BRIDGE(sys__opcodes__zzabi_adapter_scheduler_continue, sys__opcodes__zzabi_scheduler_continue)
+
 /* ── ⭐ A CARD'S LANDING PAD (NN-115, ▶ `silicon/pad.cuh`) ─────────────────────────────────────────────────────────────
  * `(sys__pad__open up down chunk_bytes)` -> the chunks: the calling worker's card's pad, pinned now — `up` chunks up,
  *   `down` down. */
@@ -712,6 +867,8 @@ static __device__ sys__heap_node sys__opcodes__zzabi_package_init(const sys__hea
     if (argv[0].dtype != SYS__KIND__QUOTED_LIST || argv[0].args[0] == 0ull)
         return sys__engine__abi__error(SYS__PACKAGE__FAULT_LIST);
     if (!sys__symbol__zzpackage_stand_up()) return sys__engine__abi__error(SYS__SYMBOL__FAULT_NO_TABLE);
+    /* The scheduler's queues, one each a block, now that there is a heap to make them in. */
+    if (!sys__scheduler__zzpackage_stand_up()) return sys__engine__abi__error(SYS__SCHEDULER__FAULT_NOT_UP);
     return sys__heap_node__nothing();
 }
 SYS__ENGINE__ABI__BRIDGE(sys__opcodes__zzabi_adapter_package_init, sys__opcodes__zzabi_package_init)

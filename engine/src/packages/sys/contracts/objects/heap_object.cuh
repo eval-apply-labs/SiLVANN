@@ -40,6 +40,9 @@
 #ifndef SYS__HEAP_OBJECT__LOCK_BACKOFF_CYCLES
 #define SYS__HEAP_OBJECT__LOCK_BACKOFF_CYCLES 10u
 #endif
+#ifndef SYS__HEAP_OBJECT__SHARED_LOCK_TRIES
+#define SYS__HEAP_OBJECT__SHARED_LOCK_TRIES 1048576u
+#endif
 
 /* ── WHAT A DYING OBJECT HANDS OVER ─────────────────────────────────────────────────────────────────
  * A kind being taken apart says what it was holding by MOVING it onto the releaser stack it is handed.

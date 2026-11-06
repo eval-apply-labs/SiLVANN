@@ -70,7 +70,7 @@
  * rather than chosen: under it a block cannot hold both its providers, and a heap allocation pool that
  * cannot do that does not run slowly, it fails to start. `publish` refuses under exactly this and nothing
  * else.
- * ⛳ CLAIMABLE IS THE LOAD-BEARING WORD. Chunk zero never enters the free ring, so a heap allocation pool of n offers
+ * ⛳ CLAIMABLE IS THE LOAD-BEARING WORD. Chunk zero never enters the free stack, so a heap allocation pool of n offers
  * n-1, and a floor written against n accepts a heap allocation pool one short of what its own blocks need.
  *
  * ⚠ ANYTHING ABOVE THE FLOOR IS A CURRENT CONDITION AND NOT A RULE. A block that fills what it started
@@ -128,7 +128,8 @@
 #define SYS__HEAP__FAULT_NO_BASE   0x48504E42ull   /* "HPNB" — nothing has started a block here */
 #define SYS__HEAP__FAULT_GEOMETRY  0x48504745ull   /* "HPGE" — a fresh chunk could not hold one granule */
 #define SYS__HEAP__FAULT_NO_PROVIDER 0x48504E56ull  /* "HPNV" — a kind that is not carved from a provider */
-#define SYS__HEAP__FAULT_NOT_FREE  0x48504E46ull   /* "HPNF" — the carousel offered a chunk that is held */
+#define SYS__HEAP__FAULT_NOT_FREE  0x48504E46ull   /* "HPNF" — the free stack offered a chunk that is held */
+#define SYS__HEAP__FAULT_NOT_OFFERED 0x48504E4Full /* "HPNO" — chunk zero, or no chunk, handed back to the free stack */
 #define SYS__HEAP__FAULT_UNKNOWN_KIND 0x48504B44ull /* "HPKD" — no package registered this kind at all   */
 /* Raised at publish, not at an allocation: the heap allocation pool cannot hold two chunks for every block in the launch,
  * so some block would be unable to start and which one is decided by arrival order. Its own word because
@@ -200,11 +201,10 @@
 #define SYS__CHUNK__FIRST       2u   /* the first node an allocation can use                           */
 
 /* What every verb here that answers with a chunk INDEX says when there is no chunk to name — an address
- * outside the heap allocation pool, a ring with nothing left in it, a chunk somebody is already inside.
+ * outside the heap allocation pool, a free stack with nothing left on it, a chunk somebody is already inside.
  * ⛳ IT IS THE TOP OF THE RANGE AND NOT ZERO, and that is the whole reason it can exist at all: chunk
  * zero is a real chunk — the one the boot hands to the first block — so zero is an ANSWER and cannot
- * also be the absence of one. The carousel makes the opposite choice for its slots, where zero means
- * unwritten, and the two do not collide because neither ever holds the other's number. */
+ * also be the absence of one. */
 #define SYS__HEAP__NO_CHUNK     0xFFFFFFFFu
 
 /* ⭐⭐ A CHUNK IS AN OBJECT, AND NOTHING HAD TO BE ARRANGED FOR IT TO BE ONE. ⚖ ARCHITECT: *"we can
@@ -263,14 +263,14 @@
  * off-by-default switch and compiles to nothing when it is down.
  * ⛔ THE OTHER TWO ARE NOT SWITCHED, which anyone sizing a shipping build should know: `CHUNK_CLAIMS` and
  * `CHUNK_REFUSED` are counted unconditionally inside the claim, so a build with the switch down still
- * pays their add every time a chunk leaves the free ring.
+ * pays their add every time a chunk leaves the free stack.
  * ⛳ THEY ARE `unsigned int` AND THE ADD IS A CAS LOOP, which is a choice about these counters and not about
  * the seam: the seam publishes `add_u32` — bought precisely because a retry loop is a structure the
  * compiler must keep whole and that structure is what costs — and both halves of the reference count are
  * a single instruction through it. A diagnostic sits nowhere near a hot path, so the loop here has never
  * been worth taking out, and a diagnostic wrapping at four billion is a price nothing here reads back. */
-#define SYS__HEAP__COUNTER_CHUNK_CLAIMS   0u   /* a heap chunk left the free ring for a block          */
-#define SYS__HEAP__COUNTER_CHUNK_REFUSED  1u   /* one was asked for and the ring was empty             */
+#define SYS__HEAP__COUNTER_CHUNK_CLAIMS   0u   /* a heap chunk left the free stack for a block         */
+#define SYS__HEAP__COUNTER_CHUNK_REFUSED  1u   /* one was asked for and the stack was empty            */
 #define SYS__HEAP__COUNTER_DEALLOCATIONS  2u   /* an object's last hold went                           */
 #define SYS__HEAP__COUNTER_N              3u
 

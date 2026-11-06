@@ -29,6 +29,7 @@ system keeps the file's pages, so the memory holds the experts in use and the di
 Every matrix is a TurboQuant record rotated along its input, so each gemv is handed its input rotated; the lossless
 ones (d = 16: the routers, the maps, the norms) take it as it is.
 """
+import contextlib
 import json
 import os
 import pickle
@@ -59,7 +60,7 @@ class Glm5(Generates):
                  experts_lock=False, experts_register="auto", experts_from="auto", experts_on="cpu", experts_dir=None, chunk=256, experts_ram_gb=None, card_experts_gb=0, card_hot=None,
                  card_landing="auto", card_line=None, card_exclusive=False, card_free=16, card_duplex_line=1200, card_duplex=None, card_landing_line=3,
                  lend_cache=True, picture_pixels=1 << 22, mtp=False, mtp_hidden="hn", tensor_parallel=1, card_shared="auto", card_visit_first=False,
-                 stream=False, embed_on="auto", experts_ahead="auto",
+                 stream=False, embed_on="auto", experts_ahead="auto", seats=1,
                  ):
         if folder.architecture not in ARCHITECTURES:
             raise Refused("%s is a %r model, not one of %s" % (folder.path, folder.architecture, ARCHITECTURES))
@@ -175,6 +176,11 @@ class Glm5(Generates):
         #   `card_shared`: of a card's slots a layer, the share every card keeps (NN-99 ③) — "auto" from this machine's own
         #   speeds at boot (▶ `expert_tier.slice_of`), a number as it says
         self.P = int(tensor_parallel or 1)
+        # ⭐ SEATS (NN-147): the conversations held on the card at once, each its own state and the weights the same for both —
+        #   two, the card running one's attention while the CPUs compute the other's experts (▶ glm5.lisp's two seats)
+        if not isinstance(seats, int) or isinstance(seats, bool) or not 1 <= seats <= self.SEATS_MOST:
+            raise Refused("seats is a count from 1 to %d, not %r" % (self.SEATS_MOST, seats))
+        self.SEATS = seats
         # a group's state is every card's share, which `state_regions` does not lay out yet: a conversation put away is
         #   its tokens, read again when it comes back (▶ session's PARKS, as a ring's)
         self.PARKS = self.P == 1
@@ -354,6 +360,20 @@ class Glm5(Generates):
         self.CH = max(1, min(chunk, max_context)) if fused else 0
         # a prompt goes as rows wherever the routed experts have a worker that reads a chunk of them: the CPUs, or the card
         self.ROWS = bool(self.CH) and (self.EPLAN is not None or self.ON_CARD)
+        # ⛳ TWO SEATS TAKE THE PROGRAM'S LAYERS AND THE SOCKETS: the pair's step is glm5.lisp's, its experts the sockets', on
+        #   one card; a draft's check, a card tier, the experts read from the disk and a prompt streamed are not paired yet —
+        #   and the disk is refused outright: RAM would be a cache of the experts each seat keeps its own way (⚖ 2026-11-06)
+        if self.SEATS > 1:
+            why = [w for w, on in (("the layers fused (`fused`)", not self.SOURCE), ("the experts on the CPUs", not self.CPUS),
+                                   ("one card", self.P > 1), ("no draft (`mtp`)", self.MTP is not None),
+                                   ("no card tier", self.CPLAN is not None), ("no experts read ahead", self.AHEAD is not None),
+                                   ("every expert in RAM (experts_from 'ram' or 'mapped', not 'disk': from the disk RAM "
+                                    "is a cache of the experts, which each conversation would keep its own way)",
+                                    self.EXPERTS_FROM == "disk"))
+                   if on]
+            if why:
+                raise Refused("two seats take %s" % ", ".join(why))
+        self.SEAT = 0                  # the seat the programs run on (▶ `on_seat`)
         self.experts_dir = experts_dir or os.path.join(folder.path, "experts")
         self._mask_layout()
         # ⭐ PICTURES ON THE CARD (NN-81): the vision tower's weights in a collection of their own and its scratch in another,
@@ -460,7 +480,8 @@ class Glm5(Generates):
         plan_of_type = {self.TYPE[k]: self.PLAN[k] for k in keys}
         self.collections = ([(t, plan_of_type[t], slots[t]) for t in sorted(self.WIDTH)]
                             + [(self.T_HEAD, self.HPLAN, 1),
-                               (self.T_STATE, self.SPLAN, max(1, n_d)), (self.T_KV, self.KVPLAN, max(1, len(run) - n_d))])
+                               (self.T_STATE, self.SPLAN, max(1, n_d) * self.SEATS),
+                               (self.T_KV, self.KVPLAN, max(1, len(run) - n_d) * self.SEATS)])
         self.arena = sum(p.slot_bytes * n for _, p, n in self.collections)
         # the CPU's one collection: an expert a slot — gate and up rows as one matrix, then down
         moe = [l for l in run if self.moe[l]]
@@ -640,7 +661,9 @@ class Glm5(Generates):
     # ── ② the load ───────────────────────────────────────────────────────────────────────────────────────────
     def load(self, progress=None):
         m, b = self.m, self.b
-        self.state_of = {}
+        if self.P > 1:                                # the cards' group first: refused before a weight is read
+            m.join_group(self.GROUP, self.P)
+        self.state_of, self.state_seats = {}, {}
         for card in range(self.P):                    # card 0 first: the others' buffers take its signs
             m.act_as(card)
             loader = m.loader()
@@ -660,9 +683,12 @@ class Glm5(Generates):
                     else:
                         loader.load_bytes(self.PLAN[k], self.TYPE[k], l, got[0], got[1], which=self.WHICH[k])
                 t = self.T_STATE if self.kinds[l] == "d" else self.T_KV
-                loader.layer_width(l, t, 1)
-                at[l] = loader.reserve(t)
-                loader.assign(l, t, 0, at[l])
+                loader.layer_width(l, t, self.SEATS)
+                for seat in range(self.SEATS):           # a seat's state its own slot: the plane's expert is the seat
+                    got = loader.reserve(t)
+                    loader.assign(l, t, seat, got)
+                    self.state_seats.setdefault(seat, {})[l] = got
+                at[l] = self.state_seats[0][l]
             if self.CPLAN is not None:
                 self._card_experts(loader, card)
             if loader.handed() != 0:
@@ -695,11 +721,8 @@ class Glm5(Generates):
         m.act_as(CARD)
         self._tables()
         if self.P > 1:
-            # ⭐ THE GROUP: each card joins it on its own worker, card 0 first (▶ nn's `nn__partials__join`)
-            for card in range(self.P):
-                m.act_as(card)
-                m.must("(nn__partials__join %d %d %d %d)" % (self.GROUP, card, self.P, min(4, self.P)),
-                       "card %d joining the group" % card, "sys__value_true")
+            # ⭐ THE GROUP: each card joins it on its own worker, card 0 first (▶ `Machine.join_group`)
+            m.join_group(self.GROUP, self.P)
             m.act_as(CARD)
         if self.CPLAN is not None:
             self._lend()
@@ -1027,6 +1050,14 @@ class Glm5(Generates):
         m.node_array("picks", self.TOPK)
         if self.AHEAD is not None:
             m.node_array("guess", self.GUESS)
+        # a seat's own past the first (▶ `seat_name`): its streams, its hand and picks, its sites' scratch
+        for seat in range(1, self.SEATS):
+            sn = lambda name: self.seat_name(name, seat)
+            self.at[sn("streams")] = m.buffer(self.MULT * H * 2, sn("streams"))
+            self.at[sn("hand")] = m.buffer(2 * (H + self.TOPK), sn("hand"))
+            m.buffer(1 << 19, sn("gscratch"))
+            m.node_array(sn("picks"), self.TOPK)
+            m.node_array(sn("seen"), sampling.SEEN)
         if self.CH:
             # a chunk's rows: its streams, the hands and carries of its MoE sites, the routed sums back, its tokens
             CH = self.CH
@@ -1093,6 +1124,9 @@ class Glm5(Generates):
             m.buffer(H * 2, c("emb"))
         m.buffer(2 * (H + self.TOPK), c("hand"))
         m.buffer(2 * H, c("zero"), _half(np.zeros(H)))
+        for seat in range(1, self.SEATS):             # a seat's hand and share of the routed sum past the first
+            m.buffer(2 * (H + self.TOPK), c(self.seat_name("hand", seat)))
+            m.buffer(2 * H, c(self.seat_name("routed", seat)))
         if self.MTP is not None:                      # a draft's check: the second position's hand and routed sum
             m.buffer(2 * (H + self.TOPK), c("hand2"))
             m.buffer(2 * H, c("routed2"))
@@ -1193,24 +1227,67 @@ class Glm5(Generates):
         at, size = (p.at_up_data, p.up_data) if which == "data" else (p.at_down_lut, p.down_lut)
         return "(nn__expert__plane %d %d %d %d %d)" % (l, self.TYPE[k], self.WHICH[k], at, size)
 
-    def state(self, l, which, at=0, size=None):
-        """A KDA layer's state (`S`) or conv window (`W`), or a part of the window."""
+    def state(self, l, which, at=0, size=None, seat=0):
+        """A KDA layer's state (`S`) or conv window (`W`), or a part of the window — seat `seat`'s."""
         p = self.SPLAN
         base, whole = (p.at_up_data, self.S_BYTES) if which == "S" else (p.at_down_data, self.W_BYTES)
-        return "(nn__expert__plane %d %d 0 %d %d)" % (l, self.T_STATE, base + at, whole if size is None else size)
+        return "(nn__expert__plane %d %d %d %d %d)" % (l, self.T_STATE, seat, base + at, whole if size is None else size)
 
-    def kv(self, l, which, at=None, size=None):
-        """An MLA layer's latent cache, one row of it (`at` an expression in bytes), or its decoded expansion."""
+    def kv(self, l, which, at=None, size=None, seat=0):
+        """An MLA layer's latent cache, one row of it (`at` an expression in bytes), or its decoded expansion — seat
+        `seat`'s; the expansion is the weights', decoded once into seat 0's slot, which every seat's table reads."""
         p = self.KVPLAN
         if which == "kvb":
-            return "(nn__expert__plane %d %d 0 %d %d)" % (l, self.T_KV, p.at_down_data, self.KVB_BYTES)
+            return "(nn__expert__plane %d %d %d %d %d)" % (l, self.T_KV, seat, p.at_down_data, self.KVB_BYTES)
         if which in ("ikeys", "igates", "ipool"):
             at, n = dict(ikeys=(self.IK_AT, self.IG_AT - self.IK_AT), igates=(self.IG_AT, self.IP_AT - self.IG_AT),
                          ipool=(self.IP_AT, self.UP_BYTES - self.IP_AT))[which]
-            return "(nn__expert__plane %d %d 0 %d %d)" % (l, self.T_KV, p.at_up_data + at, n)
+            return "(nn__expert__plane %d %d %d %d %d)" % (l, self.T_KV, seat, p.at_up_data + at, n)
         if at is None:
-            return "(nn__expert__plane %d %d 0 %d %d)" % (l, self.T_KV, p.at_up_data, self.C_BYTES)
-        return "(nn__expert__plane %d %d 0 (sys__add %d %s) %d)" % (l, self.T_KV, p.at_up_data, at, size)
+            return "(nn__expert__plane %d %d %d %d %d)" % (l, self.T_KV, seat, p.at_up_data, self.C_BYTES)
+        return "(nn__expert__plane %d %d %d (sys__add %d %s) %d)" % (l, self.T_KV, seat, p.at_up_data, at, size)
+
+    @staticmethod
+    def seat_name(name, seat):
+        """Seat `seat`'s own name for a buffer, a table or an array: seat 0's is the name itself."""
+        return name if seat == 0 else "%s_s%d" % (name, seat)
+
+    # what a section on a seat binds (▶ glm5.lisp's two seats): the names its programs read a conversation's state by —
+    #   and the sampler's recent tokens, so a seat's draw reads its own conversation's
+    SEAT_NAMES = ("streams", "hand", "picks", "AT", "MO", "seen")
+    SEATS_MOST = 8
+    SEATS_ON_A_CARD = True              # multi_user "yes" on one card seats two (▶ `with_cards`)
+
+    def seated(self, text, seat):
+        """`text` as one form run on seat `seat`: inside a `let` that binds that seat's names and SEAT, its number — unbound
+        when it ends; seat 0's names are the names themselves."""
+        if seat == 0:
+            return "(begin %s)" % text
+        names = " ".join("(%s %s)" % (n, self.seat_name(n, seat)) for n in self.SEAT_NAMES)
+        return "(let (%s (SEAT %d)) %s)" % (names, seat, text)
+
+    def _seated(self, text):
+        """`text` run on the seat `on_seat` chose (▶ `seated`)."""
+        return text if self.SEAT == 0 else self.seated(text, self.SEAT)
+
+    def remember(self, tokens):
+        """A conversation's recent tokens into its seat's `seen`, for the card's sampler's penalty (▶ `sampling.remember`)."""
+        sampling.remember(self.m, tokens, self.seat_name("seen", self.SEAT))
+
+    def seat_state_regions(self, length, seat):
+        """`state_regions` of seat `seat`'s conversation: its own slots."""
+        return self.state_regions(length, where=self.state_seats[seat])
+
+    @contextlib.contextmanager
+    def on_seat(self, seat):
+        """What runs inside runs on seat `seat`'s conversation — its reset, its prompt, its steps — and on seat 0 again after."""
+        if not 0 <= seat < self.SEATS:
+            raise Refused("seat %r of %d" % (seat, self.SEATS))
+        was, self.SEAT = self.SEAT, seat
+        try:
+            yield self
+        finally:
+            self.SEAT = was
 
     def gemv(self, l, n, x, out):
         """`out = W x` for a layer's matrix — its input rotated unless the matrix is lossless."""
@@ -1343,29 +1420,34 @@ class Glm5(Generates):
         heads = {l: [H, 0 if l == self.MTP else self.MULT, self.ITERS] for l in self.run_layers}
         for l in self.run_layers:
             head = heads[l]
-            if self.kinds[l] == "d":
-                mats = [s + n + ".weight" for n in ("q_proj", "k_proj", "v_proj", "f_a_proj", "g_a_proj", "b_proj",
-                                                    "f_b_proj", "g_b_proj", "o_proj")]
-                m.table(n("at%d" % l), hc(l, "attn") + [data(l, "input_layernorm.weight")] + [c for x in mats for c in pair(l, x)]
-                        + [data(l, s + "%s_conv1d.weight" % c) for c in "qkv"]
-                        + [data(l, s + "A_log"), data(l, s + "dt_bias"), data(l, s + "o_norm.weight"),
-                           self.state(l, "S"), self.state(l, "W"), n("signs"), n("gscratch")]
-                        + head + [self.KHC, self.KD] + [d(l, x) for x in mats] + [self.EPS, self.HC_EPS, self.LOWER]
-                        + self._masked(k, l, "attn"))
-            else:
-                mats = [s + n + ".weight" for n in ("q_a_proj", "kv_a_proj_with_mqa", "q_b_proj", "o_proj")]
-                ix = [s + "indexer." + n for n in ("wq_b.weight", "wk.weight", "weights_proj.weight", "index_kpool_compress_gate")]
-                m.table(n("at%d" % l), hc(l, "attn") + [data(l, "input_layernorm.weight")] + [c for x in mats for c in pair(l, x)]
-                        + [data(l, s + "q_a_layernorm.weight"), data(l, s + "kv_a_layernorm.weight"), self.kv(l, "kvb"),
-                           self.kv(l, "c"), n("scores"), n("signs"), n("gscratch")]
-                        + head + [self.QHC, self.QR, self.LAT, self.NOPE, self.VD] + [d(l, x) for x in mats]
-                        + [self.EPS, self.HC_EPS]
-                        # the indexer — ▶ the package's AI_Z__GLM_5_3__IDX__ cells
-                        + [c for x in ix for c in pair(l, x)]
-                        + [data(l, s + "indexer.k_norm.weight"), data(l, s + "indexer.k_norm.bias"), n("ape%d" % l),
-                           self.kv(l, "ikeys"), self.kv(l, "igates"), self.kv(l, "ipool"), n("iscores"), n("iindex"), n("igather")]
-                        + [self.IH, self.ID, self.KP, self.ITOPK] + [d(l, x) for x in ix]
-                        + self._masked(k, l, "attn"))
+            # a seat's attention table over its own state's slots and its own scratch (▶ `seat_name`); seat 0's the names
+            #   themselves, and in a group only seat 0
+            for seat in range(self.SEATS if k == 0 else 1):
+                sn = lambda name: self.seat_name(n(name), seat)
+                if self.kinds[l] == "d":
+                    mats = [s + n + ".weight" for n in ("q_proj", "k_proj", "v_proj", "f_a_proj", "g_a_proj", "b_proj",
+                                                        "f_b_proj", "g_b_proj", "o_proj")]
+                    m.table(sn("at%d" % l), hc(l, "attn") + [data(l, "input_layernorm.weight")] + [c for x in mats for c in pair(l, x)]
+                            + [data(l, s + "%s_conv1d.weight" % c) for c in "qkv"]
+                            + [data(l, s + "A_log"), data(l, s + "dt_bias"), data(l, s + "o_norm.weight"),
+                               self.state(l, "S", seat=seat), self.state(l, "W", seat=seat), n("signs"), sn("gscratch")]
+                            + head + [self.KHC, self.KD] + [d(l, x) for x in mats] + [self.EPS, self.HC_EPS, self.LOWER]
+                            + self._masked(k, l, "attn"))
+                else:
+                    mats = [s + n + ".weight" for n in ("q_a_proj", "kv_a_proj_with_mqa", "q_b_proj", "o_proj")]
+                    ix = [s + "indexer." + n for n in ("wq_b.weight", "wk.weight", "weights_proj.weight", "index_kpool_compress_gate")]
+                    m.table(sn("at%d" % l), hc(l, "attn") + [data(l, "input_layernorm.weight")] + [c for x in mats for c in pair(l, x)]
+                            + [data(l, s + "q_a_layernorm.weight"), data(l, s + "kv_a_layernorm.weight"), self.kv(l, "kvb"),
+                               self.kv(l, "c", seat=seat), n("scores"), n("signs"), sn("gscratch")]
+                            + head + [self.QHC, self.QR, self.LAT, self.NOPE, self.VD] + [d(l, x) for x in mats]
+                            + [self.EPS, self.HC_EPS]
+                            # the indexer — ▶ the package's AI_Z__GLM_5_3__IDX__ cells
+                            + [c for x in ix for c in pair(l, x)]
+                            + [data(l, s + "indexer.k_norm.weight"), data(l, s + "indexer.k_norm.bias"), n("ape%d" % l),
+                               self.kv(l, "ikeys", seat=seat), self.kv(l, "igates", seat=seat), self.kv(l, "ipool", seat=seat),
+                               n("iscores"), n("iindex"), n("igather")]
+                            + [self.IH, self.ID, self.KP, self.ITOPK] + [d(l, x) for x in ix]
+                            + self._masked(k, l, "attn"))
             if not self.moe[l]:
                 mats = ["mlp.%s_proj.weight" % n for n in ("gate", "up", "down")]
                 m.table(n("ml%d" % l), hc(l, "ffn") + [data(l, "post_attention_layernorm.weight")] + [c for x in mats for c in pair(l, x)]
@@ -1392,7 +1474,9 @@ class Glm5(Generates):
             mats = ["mlp.shared_experts.%s_proj.weight" % n for n in ("gate", "up", "down")]
             # ⛳ a draft's check runs a layer's MoE site for two positions at once: the second its own table over the same
             #   planes, its scratch its own (`gscratch2`), so the first's carry is not written over (▶ `_check_procedures`)
-            for name, scratch in ((n("mo%d" % l), n("gscratch")),) + ((("mo%db" % l, "gscratch2"),) if self.MTP is not None and l != self.MTP else ()):
+            #   — and a seat's its own table and scratch, so one seat's carry outlives the other's attention and router
+            sites = [(self.seat_name(n("mo%d" % l), seat), self.seat_name(n("gscratch"), seat)) for seat in range(self.SEATS if k == 0 else 1)]
+            for name, scratch in sites + ([("mo%db" % l, "gscratch2")] if self.MTP is not None and l != self.MTP else []):
                 m.table(name, hc(l, "ffn") + [data(l, "post_attention_layernorm.weight"), data(l, "mlp.gate.weight"),
                                               data(l, "mlp.gate.e_score_correction_bias")]
                         + [c for x in mats for c in pair(l, x)] + [n("signs"), scratch]
@@ -1456,9 +1540,9 @@ class Glm5(Generates):
                 before, after = "", ""
                 layers.append(before + "(ai_z__glm_5_3__route streams mo%d hand picks) " % l + after
                               + ("(ai_z__glm_5_3__experts hand picks exk%d routed_k %s) " % (l, expert_tier.BINDING) if self.CPLAN is not None else "")
-                              + " ".join("(sys__compute %d names xf%d_%d)" % (w, l, i) for i, w in ws)
+                              + " ".join("(sys__scheduler__add %d names xf%d_%d)" % (w, l, i) for i, w in ws)
                               + " (ai_z__glm_5_3__shared hand mo%d) " % l
-                              + " ".join("(sys__result %d)" % w for _, w in ws) + " "
+                              + " ".join("(sys__wait %d)" % w for _, w in ws) + " "
                               # the CPUs done: an exclusive tier's writes back to RAM, held on half duplex, go now
                               + ("(nn__expert_tier__written %s) " % expert_tier.BINDING if self.CPLAN is not None else "")
                               + " ".join("(nn__buffer__copy %s %d %s %d)" % (self.cn(i, "routed"), w, "routed" if i == 0 else "routed%d" % i,
@@ -1486,7 +1570,7 @@ class Glm5(Generates):
                            ROWS_HANDS_BYTES=self.CH * self.HAND, ROWS_BYTES=2 * H * self.CH, ROWS_HALVES=H * self.CH,
                            CARD_TIER=tier, EXPERTS_ON_CARD=self.ON_CARD, CARD=CARD, SOCKETS=len(self.CPUS), FIRST_SOCKET=self.P, CARDS=self.P, GROUP=self.GROUP,
                            VISIT_FIRST=self.VISIT_FIRST, STREAM=self.T_SLICE is not None, CH=self.CH,
-                           EMBED_ON_CPU=bool(self.EMBED_CPU), AHEAD=self.AHEAD or 0,
+                           EMBED_ON_CPU=bool(self.EMBED_CPU), AHEAD=self.AHEAD or 0, SEATS=self.SEATS, SEAT=0,
                            NOTE_STREAM=expert_tier.NOTE_STREAM))
         if self.T_SLICE is not None:
             m.bind_values(dict({name.upper() + "_S": self._slice_plane(name) for name in ("srows", "hands", "carries", "rrows")},
@@ -1510,6 +1594,13 @@ class Glm5(Generates):
         # the next MoE layer's place in RUN, where its experts are read ahead (`experts_ahead`); 0 where none
         m.array("AHEAD_NEXT", [run.index(self._next_moe(l)) if self._next_moe(l) is not None else 0 for l in run])
         m.array("ML", [0 if self.moe[l] else "ml%d" % l for l in run])
+        # a seat's tables past the first, and each seat's names by seat (▶ glm5.lisp's two seats)
+        seats, sn = range(self.SEATS), self.seat_name
+        for seat in seats[1:]:
+            m.array(sn("AT", seat), [sn("at%d" % l, seat) for l in run])
+            m.array(sn("MO", seat), [sn("mo%d" % l, seat) if self.moe[l] else 0 for l in run])
+        for name in self.SEAT_NAMES:
+            m.array(name.upper() + "_OF", [sn(name, seat) for seat in seats])
         if self.CPLAN is not None:                  # the card's experts tables: its tier's, or every expert's
             m.array("EXK", moe("exk%d"))
             if self.CH:
@@ -1525,6 +1616,11 @@ class Glm5(Generates):
         m.array("ROUTED_INTO", ["routed" if i == 0 else "routed%d" % i for i in socket])
         m.array("C_HAND", [self.cn(i, "hand") for i in socket])
         m.array("C_ROUTED", [self.cn(i, "routed") for i in socket])
+        for seat in seats[1:]:
+            m.array(sn("C_HAND", seat), [self.cn(i, sn("hand", seat)) for i in socket])
+            m.array(sn("C_ROUTED", seat), [self.cn(i, sn("routed", seat)) for i in socket])
+        m.array("C_HAND_OF", [sn("C_HAND", seat) for seat in seats])
+        m.array("C_ROUTED_OF", [sn("C_ROUTED", seat) for seat in seats])
         for i in socket:
             m.array("EX_%d" % i, [("ex%d_" + str(i)) % l if self.moe[l] else 0 for l in run])
         m.array("EX", ["EX_%d" % i for i in socket])
@@ -1538,7 +1634,7 @@ class Glm5(Generates):
             for i in socket:
                 m.array("EXR_%d" % i, [("exr%d_" + str(i)) % l if self.moe[l] else 0 for l in run])
             m.array("EXR", ["EXR_%d" % i for i in socket])
-        m.node_array("HERE", 1)             # the layer a socket's picture runs (▶ lisp/glm5_cpu.lisp)
+        m.node_array("HERE", 2)             # the layer a socket's picture runs, and the seat (▶ lisp/glm5_cpu.lisp)
         m.node_array("EMB_TOK", 1)          # the token the first socket decodes the row of (EMBED_ON_CPU)
 
     def _procedures(self):
@@ -1608,14 +1704,14 @@ class Glm5(Generates):
         m.defun("(defun (moe i) (let ((s 0)) (ai_z__glm_5_3__route streams (nth MO i) hand picks) "
                 "(tier_and_sockets i) "
                 "(ai_z__glm_5_3__shared hand (nth MO i)) "
-                "(while '(< s SOCKETS) '(begin (sys__result (nth SOCKET s)) (set! s (+ s 1)))) "
+                "(while '(< s SOCKETS) '(begin (sys__wait (nth SOCKET s)) (set! s (+ s 1)))) "
                 "(if CARD_TIER (nn__expert_tier__written nn__expert_tier) 0) "
                 "(sockets_sum) (if CARD_TIER (nn__vector__add routed routed_k routed HIDDEN) 0) "
                 "(ai_z__glm_5_3__close streams (nth MO i) routed GROUP tsum)))")
         m.defun("(defun (layer i pos) (begin (mixer i pos) (if (nth MOE i) (moe i) (ai_z__glm_5_3__mlp streams (nth ML i) GROUP tsum)) "
                 "(type streams)))")
-        start = " ".join("(sys__compute %d names %s)" % (k, self.sfx("tp_first", k)) for k in range(1, self.P))
-        wait = " ".join("(sys__result %d)" % k for k in range(1, self.P))
+        start = " ".join("(sys__scheduler__add %d names %s)" % (k, self.sfx("tp_first", k)) for k in range(1, self.P))
+        wait = " ".join("(sys__wait %d)" % k for k in range(1, self.P))
         m.defun("(defun (position tok pos) (begin (sys__node_array__set TP_POS 0 pos) %s (embed tok) "
                 "(nn__partials__reduce GROUP streams streams %d) (layers_f pos) %s (type streams)))" % (start, MH, wait))
         if self.CH:
@@ -1631,7 +1727,7 @@ class Glm5(Generates):
                     "(if CARD_TIER (ai_z__glm_5_3__experts_rows hands (nth EXKR i) rrows_k n nn__expert_tier) 0) "
                     "(sockets_sum_rows) (if CARD_TIER (nn__vector__add rrows rrows_k rrows (* n HIDDEN)) 0) "
                     "(ai_z__glm_5_3__close_rows srows (nth MO i) rrows carries n rwork GROUP tsums)))")
-            start = " ".join("(sys__compute %d names %s)" % (k, self.sfx("tp_rows", k)) for k in range(1, self.P))
+            start = " ".join("(sys__scheduler__add %d names %s)" % (k, self.sfx("tp_rows", k)) for k in range(1, self.P))
             m.defun("(defun (rows first n) (let ((i 0)) (sys__node_array__set TP_ROWS 0 first) (sys__node_array__set TP_ROWS 1 n) "
                     "%s (nn__partials__reduce GROUP srows srows (* n %d)) (sys__node_array__set nrows 0 n) "
                     "(while '(< i RUN) '(begin (rows_layer i first n) (set! i (+ i 1)))) %s (type srows)))" % (start, MH, wait))
@@ -1656,7 +1752,7 @@ class Glm5(Generates):
                     % (part("SROWS_S", "SROW_HALVES"), g, part("SROWS_S", "SROW_HALVES"), g, part("SROWS_S", "SROW_HALVES"),
                        part("HANDS_S", "HAND_HALVES"), part("CARRIES_S", "CARRY_HALVES"), part("SROWS_S", "SROW_HALVES"), g,
                        part("SROWS_S", "SROW_HALVES"), part("RROWS_S", "HIDDEN"), part("CARRIES_S", "CARRY_HALVES"), g))
-            start = " ".join("(sys__compute %d names %s)" % (k, self.sfx("tp_slice", k)) for k in range(1, self.P))
+            start = " ".join("(sys__scheduler__add %d names %s)" % (k, self.sfx("tp_slice", k)) for k in range(1, self.P))
             m.defun("(defun (rows_slice first k last_n w) (let ((i 0) (all (+ (* (- k 1) w) last_n))) "
                     "(sys__node_array__set TP_SLICE 0 first) (sys__node_array__set TP_SLICE 1 k) (sys__node_array__set TP_SLICE 2 last_n) "
                     "(sys__node_array__set TP_SLICE 3 w) %s (nn__partials__reduce GROUP SROWS_S SROWS_S (* all SROW_HALVES)) "
@@ -1735,7 +1831,7 @@ class Glm5(Generates):
         moe = ("(ai_z__glm_5_3__route mres (nth MO i) hand picks) "
                "(if CARD_TIER (ai_z__glm_5_3__experts hand picks (nth EXK i) routed_k nn__expert_tier) 0) "
                "(sockets_start i xf) (ai_z__glm_5_3__shared hand (nth MO i)) "
-               "(while '(< s SOCKETS) '(begin (sys__result (nth SOCKET s)) (set! s (+ s 1)))) "
+               "(while '(< s SOCKETS) '(begin (sys__wait (nth SOCKET s)) (set! s (+ s 1)))) "
                "(if CARD_TIER (nn__expert_tier__written nn__expert_tier) 0) (sockets_sum) "
                "(if CARD_TIER (nn__vector__add routed routed_k routed HIDDEN) 0) (ai_z__glm_5_3__close mres (nth MO i) routed)")
         # the layer alone — what a prompt's positions give it, its cache's row written, no draft read
@@ -1802,8 +1898,8 @@ class Glm5(Generates):
                 ffn = ("(ai_z__glm_5_3__route streams mo%d hand picks) (ai_z__glm_5_3__route streams2 mo%db hand2 picks2) "
                        "(sys__node_array__set HERE 0 %d) %s (ai_z__glm_5_3__shared hand mo%d) (ai_z__glm_5_3__shared hand2 mo%db) %s %s "
                        "(ai_z__glm_5_3__close streams mo%d routed) (ai_z__glm_5_3__close streams2 mo%db routed2)"
-                       % (l, l, i, " ".join("(sys__compute %d names xfb)" % c["w"] for c in self.CPUS), l, l,
-                          " ".join("(sys__result %d)" % c["w"] for c in self.CPUS), " ".join(sums), l, l))
+                       % (l, l, i, " ".join("(sys__scheduler__add %d names xfb)" % c["w"] for c in self.CPUS), l, l,
+                          " ".join("(sys__wait %d)" % c["w"] for c in self.CPUS), " ".join(sums), l, l))
             else:
                 ffn = "(ai_z__glm_5_3__mlp streams ml%d) (ai_z__glm_5_3__mlp streams2 ml%d)" % (l, l)
             m.defun("(defun (ck%d p q) (begin %s %s (type streams)))" % (l, mix, ffn))
@@ -1888,8 +1984,8 @@ class Glm5(Generates):
                       "(nn__vector__range c_embedding (+ %d tok) 1) c_emb 1 %d %d))"
                       % (self.EMB_ROW_BYTES // 2, self.EMB_ROW_BYTES // 2, self.EMB_DATA_BYTES // 2, H, self.EMB_BITS))
             m.act_as(CARD)
-            m.defun("(defun (embed_e tok) (begin (sys__node_array__set EMB_TOK 0 tok) (sys__compute %d names xe) "
-                    "(sys__result %d) (nn__buffer__copy c_emb %d u %d) (nn__hadamard__rotate u ones512 hu %d) "
+            m.defun("(defun (embed_e tok) (begin (sys__node_array__set EMB_TOK 0 tok) (sys__scheduler__add %d names xe) "
+                    "(sys__wait %d) (nn__buffer__copy c_emb %d u %d) (nn__hadamard__rotate u ones512 hu %d) "
                     "(nn__vector__pointwise_mul hu signs_row e %d)))"
                     % (self.CPUS[0]["w"], self.CPUS[0]["w"], self.CPUS[0]["w"], 2 * H, H, H))
         else:
@@ -1952,7 +2048,7 @@ class Glm5(Generates):
                 m.picture("xw%d" % l, "(x%d)" % l)
             m.act_as(CARD)
         # ⭐ A TOKEN AS ONE PROGRAM: the card runs every layer, and hands each MoE layer's experts to the CPU's block —
-        #   `sys__compute` with that layer's picture over a snapshot of the names, `sys__result` to collect it
+        #   `sys__scheduler__add` with that layer's picture over a snapshot of the names, `sys__wait` to collect it
         fused = self._fused_body() if self.FUSED else None
         fused_tok = fused
         if self.CH and self.EPLAN is not None:
@@ -1967,7 +2063,7 @@ class Glm5(Generates):
             m.defun("(defun (layers_f pos) (begin %s (type streams)))" % fused)
         if fused is None:
             # the layers as nn's words, a layer's latent row `at` and the positions it attends `len`
-            layers = " ".join(("(a%d at len) (sys__compute %d names xw%d) (s%d) (sys__result %d) (c%d)" % (l, CPU, l, l, CPU, l))
+            layers = " ".join(("(a%d at len) (sys__scheduler__add %d names xw%d) (s%d) (sys__wait %d) (c%d)" % (l, CPU, l, l, CPU, l))
                               if self.moe[l] else "(a%d at len)" % l for l in self.run_layers)
             m.defun("(defun (position tok pos) (let ((at (* pos %d)) (len (+ pos 1))) (embed tok) %s (type streams)))"
                     % (self.LAT * 2, layers))
@@ -2008,13 +2104,13 @@ class Glm5(Generates):
                          + ("(nn__expert_tier__note hands %s %d n %d %d %s) " % (expert_tier.BINDING, l, self.HAND, self.HAND - 8 * self.TOPK,
                                                                        expert_tier.THRESHOLD)
                             if self.CPLAN is not None else "")
-                         + " ".join("(sys__compute %d names xr%d_%d)" % (w, l, i) for i, w in ws) + " "
+                         + " ".join("(sys__scheduler__add %d names xr%d_%d)" % (w, l, i) for i, w in ws) + " "
                          # the card's share computed while the CPUs compute theirs
                          + ("(ai_z__glm_5_3__experts_rows hands exkr%d rrows_k n %s) " % (l, expert_tier.BINDING) if self.CPLAN is not None else "")
-                         # ⛳ WAITED FOR WITHOUT A BOUND: `sys__result` gives up after ~15 s, and a chunk's experts read
-                         #   from the disk can take longer — so the card asks `sys__completed` until it says so, then
+                         # ⛳ WAITED FOR WITHOUT A BOUND: `sys__wait` gives up after ~15 s, and a chunk's experts read
+                         #   from the disk can take longer — so the card asks `sys__result` until it says so, then
                          #   collects. `(< 1 0)` is #f: the loop runs while completed is #f
-                         + " ".join("(while '(sys__eq (sys__completed %d) (< 1 0)) '(< 0 1)) (sys__result %d)" % (w, w)
+                         + " ".join("(while '(sys__eq (sys__result %d) (< 1 0)) '(< 0 1)) (sys__wait %d)" % (w, w)
                                     for _, w in ws) + " "
                          + ("(nn__expert_tier__written %s) " % expert_tier.BINDING if self.CPLAN is not None else "")
                          + " ".join("(nn__buffer__copy %s %d %s %d)" % (self.cn(i, "rrows"), w, "rrows" if i == 0 else "rrows%d" % i,
@@ -2033,13 +2129,13 @@ class Glm5(Generates):
 
     # ── ④ running ─────────────────────────────────────────────────────────────────────────────────────────────
     def reset(self):
-        """A conversation from nothing: every KDA layer's state and window to zero. The latent caches need nothing — a
-        position reads only rows it has written."""
+        """A conversation from nothing — the seat's `on_seat` chose: every KDA layer's state and window to zero. The latent
+        caches need nothing — a position reads only rows it has written."""
         zeros = []
         for l in self.run_layers:
             if self.kinds[l] == "d":
-                zeros += ["(nn__vector__zero %s %d)" % (self.state(l, "S"), self.S_BYTES // 2),
-                          "(nn__vector__zero %s %d)" % (self.state(l, "W"), self.W_BYTES // 2)]
+                zeros += ["(nn__vector__zero %s %d)" % (self.state(l, "S", seat=self.SEAT), self.S_BYTES // 2),
+                          "(nn__vector__zero %s %d)" % (self.state(l, "W", seat=self.SEAT), self.W_BYTES // 2)]
         for k in reversed(range(self.P)):
             self.m.act_as(k)
             self.m.must("(begin %s (type %s))" % (" ".join(zeros), self.sfx("streams", k)), "card %d's reset" % k)
@@ -2056,6 +2152,33 @@ class Glm5(Generates):
             m.must("(x%d)" % l, "layer %d's experts at %d" % (l, pos))
             m.act_as(CARD)
             m.must("(c%d)" % l, "layer %d's close at %d" % (l, pos))
+
+    def pair_step(self, tokens, positions, heads=None, seats=(0, 1)):
+        """⭐ TWO SEATS A STEP (NN-147): seat `seats[0]`'s token at its position and `seats[1]`'s at its own, through
+        glm5.lisp's pair — the card on one seat's attention while the CPUs compute the other's experts — then each seat's
+        head, inside its seat's `let`: `heads` a head a seat, a head's expression (▶ `step`'s `sample`; "(head)" the greedy
+        one, the default) or a function of the logits the host draws from, read before the other seat's head runs.
+        Answers each seat's next token."""
+        (ka, kb), (a, b), (pa, pb) = seats, tokens, positions
+        if self.SEATS < 2 or ka == kb or not all(0 <= k < self.SEATS for k in seats):
+            raise Refused("a pair's step takes two of the %d seats, not %r" % (self.SEATS, seats))
+        if max(pa, pb) >= self.max_context:
+            raise Refused("position %d is past the context of %d" % (max(pa, pb), self.max_context))
+        heads = heads or ("(head)", "(head)")
+        layers = "(pair_position %d %d %d %d %d %d)" % (ka, a, pa, kb, b, pb)
+        if all(isinstance(h, str) for h in heads):     # both tokens from the card: one program, seat ka's in the bits from 20
+            both = self.m.grid("(begin %s (+ (* %s 1048576) %s))"
+                               % (layers, self.seated(heads[0], ka), self.seated(heads[1], kb)))[1]
+            return both >> 20, both & ((1 << 20) - 1)
+        self.m.grid("(begin %s (type streams))" % layers)
+        out = []
+        for k, h in zip(seats, heads):
+            if isinstance(h, str):
+                out.append(self.m.grid(self.seated(h, k))[1])
+            else:
+                self.m.grid(self.seated("(head_logits)", k))
+                out.append(h(self.logits()))
+        return tuple(out)
 
     def step(self, token, pos, greedy=True, sample=None):
         """One position: the token in, the next token out — greedy, or drawn on the card by `sample` (a `sampling.head`)
@@ -2096,9 +2219,9 @@ class Glm5(Generates):
         return Generates.generate(self, token, pos, n, stop, sampler, lag)
 
     def _run(self, text, what):
-        """A program's answer, run with every block standing: it hands the CPU sockets their experts (`sys__compute`), and
+        """A program's answer, run with every block standing: it hands the CPU sockets their experts (`sys__scheduler__add`), and
         a program that does not would find their blocks never started."""
-        return self.m.grid(text)[1]
+        return self.m.grid(self._seated(text))[1]
 
     def _prompt(self, tokens):
         """A prompt chunk's tokens into PROMPT, which `embed_rows` reads — sixty-four to a program, as a program is one
@@ -2357,8 +2480,8 @@ class Glm5(Generates):
         """A program that embeds: with the table the first socket's (EMBED_CPU) a grid's, every worker standing for the
         hand-off (▶ `Machine.grid`), else the card's alone."""
         if self.EMBED_CPU:
-            return self.m.grid(text)[1]
-        return self.m.must(text, what)
+            return self.m.grid(self._seated(text))[1]
+        return self.m.must(self._seated(text), what)
 
     def forward_rows(self, first, tokens=None, xs=None, n=None, head=False, greedy=True, sample=None, rows=None):
         """A chunk of rows through this stage's layers: its tokens embedded (the first stage) — a picture's `rows` {index in
@@ -2385,7 +2508,7 @@ class Glm5(Generates):
         else:
             m.write(self.SROWS_AT, xs)
         if self.SOURCE:
-            m.grid("(begin (rows %d %d) (type srows))" % (first, n))
+            m.grid(self._seated("(begin (rows %d %d) (type srows))" % (first, n)))
         else:
             layers = " ".join("(r%d %d %d)" % (l, first, n) for l in self.run_layers)
             m.grid("(begin (sys__node_array__set nrows 0 %d) %s (type srows))" % (n, layers))
@@ -2393,9 +2516,10 @@ class Glm5(Generates):
             return m.read(self.SROWS_AT, n * M * H * 2)
         # the last row's streams, then the head
         last = (n - 1) * M * H
-        m.must("(begin %s (type streams))" % " ".join("(nn__vector__add %s zero_h %s %d)" % (
-            self.rng("srows", last + j * H, H), self.rng("streams", j * H, H), H) for j in range(M)), "the prompt's last row")
-        return m.must(head if isinstance(head, str) else sample or ("(head)" if greedy else "(head_logits)"), "the head")
+        m.must(self._seated("(begin %s (type streams))" % " ".join("(nn__vector__add %s zero_h %s %d)" % (
+            self.rng("srows", last + j * H, H), self.rng("streams", j * H, H), H) for j in range(M))), "the prompt's last row")
+        return m.must(self._seated(head if isinstance(head, str) else sample or ("(head)" if greedy else "(head_logits)")),
+                      "the head")
 
     def _prefill_streamed(self, tokens, first, greedy, sample):
         """⭐ A PROMPT READ LAYER-MAJOR (NN-115 ③) — `prefill`'s, with `stream` (▶ qwen3_5.py's): a slice of SLICE_CHUNKS

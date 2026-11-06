@@ -36,16 +36,23 @@ static __device__ SYS__NOINLINE void sys__opcodes__zzabi_adapter_if(sys__heap_no
 /* The last nine. */
 static __device__ SYS__NOINLINE void sys__opcodes__zzabi_adapter_viewonly(sys__heap_node* base, uint64_t form);
 static __device__ SYS__NOINLINE void sys__opcodes__zzabi_adapter_bindings_set(sys__heap_node* base, uint64_t form);
-static __device__ SYS__NOINLINE void sys__opcodes__zzabi_adapter_compute(sys__heap_node* base, uint64_t form);
-static __device__ SYS__NOINLINE void sys__opcodes__zzabi_adapter_completed(sys__heap_node* base, uint64_t form);
+static __device__ SYS__NOINLINE void sys__opcodes__zzabi_adapter_wait(sys__heap_node* base, uint64_t form);
 static __device__ SYS__NOINLINE void sys__opcodes__zzabi_adapter_result(sys__heap_node* base, uint64_t form);
 static __device__ SYS__NOINLINE void sys__opcodes__zzabi_adapter_dict_put(sys__heap_node* base, uint64_t form);
 static __device__ SYS__NOINLINE void sys__opcodes__zzabi_adapter_dict_get(sys__heap_node* base, uint64_t form);
+static __device__ SYS__NOINLINE void sys__opcodes__zzabi_adapter_dict_remove(sys__heap_node* base, uint64_t form);
 static __device__ SYS__NOINLINE void sys__opcodes__zzabi_adapter_array_get(sys__heap_node* base, uint64_t form);
 static __device__ SYS__NOINLINE void sys__opcodes__zzabi_adapter_array_set(sys__heap_node* base, uint64_t form);
 static __device__ SYS__NOINLINE void sys__opcodes__zzabi_adapter_file_open(sys__heap_node* base, uint64_t form);
 static __device__ SYS__NOINLINE void sys__opcodes__zzabi_adapter_file_close(sys__heap_node* base, uint64_t form);
 static __device__ SYS__NOINLINE void sys__opcodes__zzabi_adapter_worker(sys__heap_node* base, uint64_t form);
+static __device__ SYS__NOINLINE void sys__opcodes__zzabi_adapter_gc_manual(sys__heap_node* base, uint64_t form);
+static __device__ SYS__NOINLINE void sys__opcodes__zzabi_adapter_gc_collect(sys__heap_node* base, uint64_t form);
+static __device__ SYS__NOINLINE void sys__opcodes__zzabi_adapter_list_shared_append(sys__heap_node* base, uint64_t form);
+static __device__ SYS__NOINLINE void sys__opcodes__zzabi_adapter_list_shared_take(sys__heap_node* base, uint64_t form);
+static __device__ SYS__NOINLINE void sys__opcodes__zzabi_adapter_list_shared_length(sys__heap_node* base, uint64_t form);
+static __device__ SYS__NOINLINE void sys__opcodes__zzabi_adapter_scheduler_continue(sys__heap_node* base, uint64_t form);
+static __device__ SYS__NOINLINE void sys__opcodes__zzabi_adapter_scheduler_add(sys__heap_node* base, uint64_t form);
 static __device__ SYS__NOINLINE void sys__opcodes__zzabi_adapter_pad_open(sys__heap_node* base, uint64_t form);
 static __device__ SYS__NOINLINE void sys__opcodes__zzabi_adapter_pad_move(sys__heap_node* base, uint64_t form);
 static __device__ SYS__NOINLINE void sys__opcodes__zzabi_adapter_pad_close(sys__heap_node* base, uint64_t form);

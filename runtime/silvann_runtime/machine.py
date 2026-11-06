@@ -5,12 +5,14 @@ silicon family the wheel loads. `Machine` chooses the family, boots with the tex
 what the tests all wrote for themselves: run a program, make a buffer and bind it, fill a table, define a procedure,
 read and write a card's memory.
 """
+import contextlib
 import ctypes
 import importlib
 import os
 import platform
 import re
 import sys
+import threading
 
 from .composer import Composer, read_all, to_text
 
@@ -45,6 +47,34 @@ _memory_policy_local()
 
 class EngineError(Exception):
     pass
+
+
+# nn's fault when a card of a group cannot read and write another's memory directly — "NPDM", NN__PARTIALS__FAULT_NO_DMA
+#   (▶ src/packages/nn/contracts/objects/partials.cuh)
+NO_DMA = 0x4E50444D
+
+
+# The evaluator's stops, by their word (▶ src/engine/eval.cuh, "A STOP IS A PANIC").
+STOPS = {"EVAV": "a form it could not run — a head that is not a verb, or a call it could not make",
+         "EVNR": "a form it had no room to make — a frozen form to thaw, or a call's body to copy",
+         "EVAD": "a descent it had no room to remember"}
+
+
+class Panic(EngineError):
+    """⛔ THE EVALUATOR STOPPED, AND THE MACHINE WITH IT. An evaluation abandoned where it stood leaves the heap holding
+    what it was in the middle of, so the engine refuses every door until it is booted again; the `Machine` it happened
+    on is shut down before this is raised. Booting again is the caller's choice (⚖ 2026-11-03: *"a panicked response
+    should simply output to the repl/log that it failed and not reinstate the heap ... the reboot is an user's explicit
+    choice"*). `word` is the stop's, as text: what is said first."""
+
+    def __init__(self, word):
+        self.word = word
+        super().__init__("%s — the evaluator stopped on %s; the machine is shut down, and answers nothing until it is "
+                         "booted again" % (word, STOPS.get(word, "a stop of its own")))
+
+
+def _word(number):
+    return number.to_bytes(4, "big").decode("ascii", "replace")
 
 
 def _indent(text):
@@ -125,10 +155,14 @@ def own_memory(machine):
 
 
 class Machine:
+    # ⛔ What a panic tells besides raising: a callable handed the `Panic`, once the machine is shut down — the server's
+    #   way of stopping (▶ start_silvann_server.py's `_stopped`). None: the panic is raised and nothing else.
+    on_panic = None
+
     def __init__(self, silicon=None, engine="cpu"):
         # every procedure, picture and view defined, in order: (what, worker, name, text) — ▶ `write_programs`
         self.programs = []
-        self.worker = -1               # the worker `act_as` last chose
+        self._thread = threading.local()   # the worker `act_as` last chose, a thread's own (▶ `worker`)
         self.worker_moved = {}         # a `(worker N ...)` form's N -> the worker it is here (▶ `_source_forms`)
         self.recording = False         # True: the definitions are recorded and not made — ▶ `composed_programs`
         self.read_from = None          # the file the programs were read from, when they were
@@ -175,38 +209,153 @@ class Machine:
         self.env = e.bindings_create(bindings)
         self.comp = Composer(e, self.env)
 
+    @property
+    def worker(self):
+        """The worker `act_as` last chose on this thread, -1 for none: a thread driving one worker acts as it while another
+        thread drives another (the resident machine, ▶ `run_in`)."""
+        return getattr(self._thread, "worker", -1)
+
+    @worker.setter
+    def worker(self, worker):
+        self._thread.worker = worker
+
     def act_as(self, worker):
-        """What runs from here runs as `worker`: its buffers, its device, its tables. -1 is the default again."""
+        """What runs from here runs as `worker`: its buffers, its device, its tables — on this thread. -1 is the default
+        again."""
         self.worker = worker
         if not self.recording:
             self.e.act_as(worker)
 
+    # ── a panic ─────────────────────────────────────────────────────────────────────────────────────
+    def panicked(self):
+        """The word the evaluator stopped with, as text, or None (▶ `Panic`)."""
+        if not self.booted or not hasattr(self.e, "panic"):
+            return None
+        word = self.e.panic()
+        return _word(word) if word else None
+
+    def _stop_if_panicked(self, cause=None):
+        word = self.panicked()
+        if word is None:
+            return
+        self.shutdown()
+        panic = Panic(word)
+        try:
+            if Machine.on_panic is not None:
+                Machine.on_panic(panic)
+        finally:
+            raise panic from cause                    # whatever the telling did, the panic is what is raised
+
+    @contextlib.contextmanager
+    def _evaluating(self):
+        """Around every door that evaluates: what it answered or raised — unless the machine panicked under it, and then
+        the machine is shut down and the `Panic` raised in its place. ⛳ ASKED ON A FAILURE TOO: after a stop every door
+        refuses, so what a caller sees first may be a refusal the panic caused."""
+        try:
+            yield
+        except Panic:
+            raise
+        except Exception as ex:
+            self._stop_if_panicked(ex)
+            raise
+        self._stop_if_panicked()
+
     # ── running ──────────────────────────────────────────────────────────────────────────────────────
     def run(self, text):
         """A program's answer as (kind, value)."""
-        return self.comp.run(text)
+        with self._evaluating():
+            got = self.comp.run(text)
+        return got
+
+    def run_in(self, worker, text, view=None):
+        """A program's answer as (kind, value), run on worker `worker`'s block in the bindings the view bound as `view`
+        names — the program's own where it is None. ⭐ A THREAD THAT DRIVES ONE WORKER (⚖ 2026-11-04 the resident machine):
+        the program runs on that worker's block beside every other block's, and nothing waits for them to be idle, as a
+        `grid` does — what it hands out it collects. The thread acts as `worker` for the call and as it did after."""
+        with self._evaluating():
+            env = self._env_of(view)
+            cell = self.comp.compose(text)
+            try:
+                pic = self.e.freeze(cell)
+                was = self.worker
+                self.e.act_as(worker)
+                try:
+                    kind, value = self.e.execute(env, pic)
+                finally:
+                    self.e.act_as(was)
+                    self.e.release(pic[2])
+            finally:
+                self.e.release(cell[2])
+        # ⛳ A FAULT FAILS IT, AS A `grid`'s DOES: the channel is the machine's, so one raised by another thread's program
+        #   meanwhile fails this one too — the run that reads it first says so
+        fault = self.e.sys.fault()
+        if fault["raised"] != 0:
+            self.e.sys.fault_clear()
+            raise EngineError("the program on worker %d did not run: kind %s value %s fault %s" % (worker, kind, value, fault))
+        return kind, value
+
+    def _env_of(self, view):
+        """The bindings a program runs in: the program's own, or the view bound by that name — read once and held."""
+        if view is None:
+            return (self.K["sys__object_reference"], 0, self.env)
+        views = self.__dict__.setdefault("_views", {})
+        if view not in views:
+            kind, at = self.run("(begin %s)" % view)
+            if kind not in (self.K["sys__object_reference"], self.K["sys__quoted_array"]) or not at:
+                raise EngineError("%r names no view (kind %s)" % (view, kind))
+            views[view] = (kind, 0, at)
+        return views[view]
 
     def must(self, text, what, want="sys__value_int"):
-        kind, value = self.comp.run(text)
+        with self._evaluating():
+            kind, value = self.comp.run(text)
         fault = self.e.sys.fault()
         if kind != self.K[want] or fault["raised"] != 0:
             self.e.sys.fault_clear()
-            raise EngineError("%s did not run: kind %s value %s fault %s" % (what, kind, value, fault))
+            ex = EngineError("%s did not run: kind %s value %s fault %s" % (what, kind, value, fault))
+            ex.fault = fault
+            raise ex
         return value
 
-    def grid(self, text):
-        """A program run with every block standing, so it can hand work to the others (`sys__compute`) and collect it
-        (`sys__result`). Block 0 runs it, as the host's worker."""
-        cell = self.comp.compose(text)
-        try:
-            pic = self.e.freeze(cell)
-            self.e.act_as(-1)
+    def join_group(self, group, ranks, fan=None):
+        """The cards 0 … ranks-1, each on its own worker and card 0 first, joined to nn's group `group` (▶ nn's
+        `nn__partials__join`), the worker left at the last card's. A model split over cards needs each pair of them to
+        read the other's memory directly (⚖ "tensor parallelism requires DMA"); a card that cannot is refused, saying so
+        and what to run instead. A runtime joins once at the start of its load, before a weight is read, so the refusal
+        costs no load — `MEASURED` 2026-11-06 debian01 (two MI50s, one on each socket): GLM's two cards were refused
+        with the fault's number after its 142 GB of experts had loaded — and again where its group is used: rank 0's
+        join starts the group afresh."""
+        fan = fan or min(4, ranks)
+        for k in range(ranks):
+            self.act_as(k)
             try:
-                kind, value, ran = self.e.run_grid(self.env, pic[2])
+                self.must("(nn__partials__join %d %d %d %d)" % (group, k, ranks, fan), "card %d joining the group" % k,
+                          "sys__value_true")
+            except EngineError as ex:
+                if (getattr(ex, "fault", None) or {}).get("op") != NO_DMA:
+                    raise
+                from .model_folder import Refused
+                raise Refused("card %d cannot read the memory of card%s %s directly, nor they its, and a model split "
+                              "over %d cards (tensor_parallel %d: the server's num_cards %d with multi_user \"no\") "
+                              "needs each pair of its cards to — a machine whose cards hang off different processors, "
+                              "a card on each socket, has no such path between them. Run the model on one card "
+                              "(num_cards 1), or a conversation on each card (multi_user \"yes\") where the model has it"
+                              % (k, "" if k == 1 else "s", ", ".join(map(str, range(k))), ranks, ranks, ranks)) from None
+
+    def grid(self, text):
+        """A program run with every block standing, so it can hand work to the others (`sys__scheduler__add`) and collect it
+        (`sys__wait`). Block 0 runs it, as the host's worker."""
+        with self._evaluating():
+            cell = self.comp.compose(text)
+            try:
+                pic = self.e.freeze(cell)
+                self.e.act_as(-1)
+                try:
+                    kind, value, ran = self.e.run_grid(self.env, pic[2])
+                finally:
+                    self.e.release(pic[2])
             finally:
-                self.e.release(pic[2])
-        finally:
-            self.e.release(cell[2])
+                self.e.release(cell[2])
         fault = self.e.sys.fault()
         if not ran or fault["raised"] != 0:
             self.e.sys.fault_clear()
@@ -216,21 +365,22 @@ class Machine:
     def bind(self, name, cell):
         """An object — a picture, a view — bound by name; the binding keeps its own hold and this one goes back."""
         e, K, V = self.e, self.K, self.V
-        lst = e.list_create()
-        for c in ((K["sys__standard"], V["sys__add_bindings"], 0), (K["sys__value_int"], 0, self.env),
-                  self.comp._cell_quoted_name(name), cell):
-            if not e.list_append(lst, *c):
-                raise EngineError("an append was refused")
-        e.release(cell[2])
-        pic = e.freeze((K["sys__object_reference"], 0, lst))
-        kind, _ = e.execute((K["sys__object_reference"], 0, self.env), pic)
-        e.release(pic[2])
-        e.release(lst)
+        with self._evaluating():
+            lst = e.list_create()
+            for c in ((K["sys__standard"], V["sys__add_bindings"], 0), (K["sys__value_int"], 0, self.env),
+                      self.comp._cell_quoted_name(name), cell):
+                if not e.list_append(lst, *c):
+                    raise EngineError("an append was refused")
+            e.release(cell[2])
+            pic = e.freeze((K["sys__object_reference"], 0, lst))
+            kind, _ = e.execute((K["sys__object_reference"], 0, self.env), pic)
+            e.release(pic[2])
+            e.release(lst)
         if kind != K["sys__value_true"]:
             raise EngineError("binding %r was refused (kind %s)" % (name, kind))
 
     def picture(self, name, text):
-        """A program frozen and bound by name — what `sys__compute` hands another block."""
+        """A program frozen and bound by name — what `sys__scheduler__add` hands another block."""
         self.programs.append(("picture", self.worker, name, text))
         if self.recording:
             return
@@ -260,7 +410,7 @@ class Machine:
         setting the boot bound — is defined as it is; three forms are the machine's rather than the language's:
             (worker N form ...)     the forms inside defined as worker N (▶ `act_as`) — or as the worker the model
                                     moved N to in `worker_moved` (Qwen's CPU, worker 1, after a group's cards)
-            (picture name form)     the form frozen and bound by name, for `sys__compute` to hand another block
+            (picture name form)     the form frozen and bound by name, for `sys__scheduler__add` to hand another block
             (view name)             the bindings as they stand, bound by name — what a computed block sees"""
         with open(path) as f:
             self._source_forms(read_all(f.read()), os.path.basename(path))
@@ -389,10 +539,11 @@ class Machine:
             return lst
 
         def run(program):
-            pic = e.freeze((K["sys__object_reference"], 0, program))
-            got = e.eval(self.env, pic[2])
-            e.release(pic[2])
-            e.release(program)
+            with self._evaluating():
+                pic = e.freeze((K["sys__object_reference"], 0, program))
+                got = e.eval(self.env, pic[2])
+                e.release(pic[2])
+                e.release(program)
             return got
         return NL.Loader(e, run, lambda n: (K["sys__standard"], V[n], 0), lambda n: (K["sys__value_int"], 0, n),
                          lambda l: (K["sys__object_reference"], 0, l), cells, K)
@@ -403,7 +554,8 @@ class Machine:
         ⛳ The program answers the buffer as well as binding it: the answer's hold is this caller's and goes back
         once the address is read, and the binding keeps its own."""
         verb = "nn__buffer__getnew_ram" if ram else "nn__buffer__getnew"
-        kind, ref = self.comp.run("(let ((b (%s %d))) (sys__add_bindings %d '%s b) b)" % (verb, nbytes, self.env, name))
+        with self._evaluating():
+            kind, ref = self.comp.run("(let ((b (%s %d))) (sys__add_bindings %d '%s b) b)" % (verb, nbytes, self.env, name))
         if kind != self.K["sys__object_reference"]:
             raise EngineError("a %d-byte buffer for %r was refused (fault %s)" % (nbytes, name, self.e.sys.fault()))
         at = self.e.sys.peek(self.e.sys.full_address(ref))[2][0]

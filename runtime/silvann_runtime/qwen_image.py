@@ -26,7 +26,7 @@ import pickle
 
 import numpy as np
 
-from .model_folder import NL, Refused
+from .model_folder import NL, Refused, program_dir
 
 # the block's matrices, by the pack's names, in the table's order
 MATRICES = (("attn.to_q.weight", "q"), ("attn.to_k.weight", "k"), ("attn.to_v.weight", "v"), ("attn.to_out.0.weight", "out"),
@@ -103,7 +103,7 @@ class QwenImage:
     def __init__(self, path, machine, blocks=None, max_rows=4096, prefix_max=1024, chunk=1024, max_steps=100, program=None):
         self.path, self.m = path, machine
         # the program's file: the pack's own (lisp/qwen_image.lisp), or the one given — a development box's
-        self.PROGRAM_FILE = program or os.path.join(path, "lisp", self.PROGRAM[0] + ".lisp")
+        self.PROGRAM_FILE = program or os.path.join(program_dir(os.path.join(path, "lisp")), self.PROGRAM[0] + ".lisp")
         folder = os.path.join(path, "transformer")
         self.config = c = json.load(open(os.path.join(folder, "config.json")))
         if c.get("_class_name") != "QwenImage21Transformer2DModel":

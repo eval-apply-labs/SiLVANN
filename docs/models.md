@@ -85,7 +85,7 @@ GB/s against 448, by NVIDIA's figures), and Ministral answers 1.5 times as fast 
 | GPU | RAM | CPU | Disk | Setup | Prefill | Decode | Max context | Version |
 |---|---|---|---|---|---|---|---|---|
 | [16 GB · RTX 5060 Ti](results.md#a-16-gb-card) | 16 GB | Xeon W-2123 (4 cores) | — | `D4` · on the card, the context the card holds | 221.3 positions/s | 14.32 tokens/s after 35k | 35,840 | v0.22.0 |
-| [16 GB · RTX 5060 Ti](results.md#a-16-gb-card) | 62 GB | Xeon W-2123 (4 cores) | — | `D4` · on the card | 562 positions/s | 24.0 tokens/s after 2k | 35,840 | v0.20.0 |
+| [16 GB · RTX 5060 Ti](results.md#a-16-gb-card) | 32 GB | Xeon W-2123 (4 cores) | — | `D4` · on the card | 552-553 positions/s | 23.8-23.9 tokens/s after 2k | 35,840 | v0.24.0 |
 | [16 GB · RTX 5060 Ti](results.md#a-16-gb-card) | 62 GB | Xeon W-2123 (4 cores) | — | `D4` · on the card | 486 positions/s | 22.2 tokens/s after 6k | 35,840 | v0.20.0 |
 | [32 GB · MI50](results.md#a-24-or-32-gb-card) | 251 GB | 2× Xeon E5-2680 v4 (28 cores) | — | `D4` · on the card | 206 positions/s | 31.8 tokens/s after 2k | — | v0.20.0 |
 | [32 GB · MI50](results.md#a-24-or-32-gb-card) | 251 GB | 2× Xeon E5-2680 v4 (28 cores) | — | `D4` · on the card | 69.1 positions/s | 21.3 tokens/s after 32k | — | v0.21.0 |
@@ -121,22 +121,25 @@ prompt a position at a time; through CUDA the same card answers 1.3 to 2.6 times
 | [8 GB · RTX 5060 Ti, 7.8 GB free](results.md#an-8-gb-card) | 32 GB | Xeon W-2123 (4 cores) | — | `D8E4` · the experts in RAM, a 4 GB tier | 164 positions/s | 52.2 tokens/s after 2k | — | v0.21.0 |
 | [12 GB · RTX 5060 Ti, 11.6 GB free](results.md#a-12-gb-card) | 62 GB | Xeon W-2123 (4 cores) | — | `D8E4` · the experts in RAM, a 6.75 GB tier | 113 positions/s | 51.8 tokens/s after 2k | — | v0.11.0 |
 | [16 GB · RTX 5060 Ti](results.md#a-16-gb-card) | 62 GB | Xeon W-2123 (4 cores) | — | `D8E4` · the experts in RAM, an 11.75 GB tier | 194 positions/s | 59.4 tokens/s after 2k | 32,768 | v0.21.0 |
-| [16 GB · RTX 5060 Ti](results.md#a-16-gb-card) | 62 GB | Xeon W-2123 (4 cores) | — | `D8E4` · the experts in RAM, a 9.5 GB tier | 193 positions/s | 59.4 tokens/s after 2k | 262,144 | v0.21.0 |
+| [16 GB · RTX 5060 Ti](results.md#a-16-gb-card) | 62 GB | Xeon W-2123 (4 cores) | — | `D8E4` · the experts in RAM, a 9.5 GB tier | 195-206 positions/s | 61.1-61.4 tokens/s after 2k | 262,144 | v0.24.0 |
+| [16 GB · RTX 5060 Ti](results.md#a-16-gb-card) | 32 GB | Xeon W-2123 (4 cores) | — | `D8E4` · the experts in RAM, a 9.5 GB tier | 185-204 positions/s | 60.6-61.3 tokens/s after 2k | 262,144 | v0.24.0 |
+| [16 GB · RTX 5060 Ti](results.md#a-16-gb-card) | 32 GB | Xeon W-2123 (4 cores) | — | `D8E4` · the experts in RAM, a 9.5 GB tier | 128.9 positions/s | 15.29 tokens/s after 100k | 262,144 | v0.24.0 |
+| [16 GB · RTX 5060 Ti](results.md#a-16-gb-card) | 62 GB | Xeon W-2123 (4 cores) | — | `D8E4` · the experts in RAM, a 9.5 GB tier | 125.8 positions/s | 15.21 tokens/s after 100k | 262,144 | v0.24.0 |
 | [16 GB · RTX 5060 Ti](results.md#a-16-gb-card) | 62 GB | Xeon W-2123 (4 cores) | — | `D8E4` · the experts in RAM, a 9.5 GB tier | 207 positions/s | 32.4 tokens/s after 32k | 262,144 | v0.21.0 |
 | [16 GB · RTX 5060 Ti](results.md#a-16-gb-card) | 28 GB | Xeon W-2123 (4 cores) | — | `D8E4` · the experts in RAM, an 8 GB tier | 174 positions/s | 59.0 tokens/s after 2k | — | v0.21.0 |
 | [16 GB · RTX 5060 Ti](results.md#a-16-gb-card) | 62 GB | Xeon W-2123 (4 cores) | — | `D8E4` · the experts in RAM, no tier | 61.3 positions/s | 29.4 tokens/s after 2k | — | v0.20.0 |
 | [16 GB · RTX 5070 Ti](results.md#a-16-gb-card) | 32 GB | Ryzen 7 5800X (8 cores) | — | `D8E4` · the experts in RAM, an 11 GB tier | 155 positions/s | 68.3 tokens/s after 2k | — | v0.11.0 |
 | [16 GB · RTX 5070 Ti, natively on Windows](results.md#a-16-gb-card) | 32 GB | Ryzen 7 5800X (8 cores) | — | `D8E4` · the server's setup | — | 48 tokens/s in the chat | — | v0.21.2 |
-| [16 GB · MI50](results.md#a-16-gb-card) | 62 GB | 2× Xeon E5-2680 v4 (28 cores) | — | `D8E4` · the experts in RAM, a 10 GB tier | 65.8 positions/s | 25.9 tokens/s after 100k | 262,144 | v0.23.0 |
-| [16 GB · MI50](results.md#a-16-gb-card) | 62 GB | 2× Xeon E5-2680 v4 (28 cores) | — | `D8E4` · the experts in RAM, a 10 GB tier | 236-239 positions/s | 47.9-51.6 tokens/s after 2k | 262,144 | v0.23.0 |
+| [16 GB · MI50](results.md#a-16-gb-card) | 125 GB | 2× Xeon E5-2680 v4 (28 cores) | — | `D8E4` · the experts in RAM, a 10 GB tier | 66.4 positions/s | 26.45 tokens/s after 100k | 262,144 | v0.24.0 |
+| [16 GB · MI50](results.md#a-16-gb-card) | 125 GB | 2× Xeon E5-2680 v4 (28 cores) | — | `D8E4` · the experts in RAM, a 10 GB tier | 270-277 positions/s | 50.7-51.5 tokens/s after 2k | 262,144 | v0.24.0 |
 | [32 GB · MI50](results.md#a-24-or-32-gb-card) | 251 GB | 2× Xeon E5-2680 v4 (28 cores) | — | `D8E4` · on the card | 379 positions/s | 88 tokens/s after 2k | — | v0.21.0 |
 | [32 GB · MI50](results.md#a-24-or-32-gb-card) | 251 GB | 2× Xeon E5-2680 v4 (28 cores) | — | `D8E4` · on the card | 132 positions/s | 54.8 tokens/s after 32k | — | v0.21.0 |
 | [32 GB · MI50](results.md#a-24-or-32-gb-card) | 251 GB | 2× Xeon E5-2680 v4 (28 cores) | — | `D8E4` · the experts in RAM, no tier | 116 positions/s | 32.1-32.8 tokens/s after 2k | — | v0.20.0 |
 | [32 GB · MI50](results.md#a-24-or-32-gb-card) | 251 GB | 2× Xeon E5-2680 v4 (28 cores) | — | `D8E4` · the experts in RAM, a 4 GB tier, the prompt streamed | 450 positions/s | 37.6 tokens/s after 2k | — | v0.20.0 |
 | [32 GB · MI50](results.md#a-24-or-32-gb-card) | 8 GB | 2× Xeon E5-2680 v4 (28 cores) | NVMe, 5 GB/s | `D8E4` · the experts from the disk | 32 positions/s | 11.9 tokens/s after 1k | — | v0.3 |
 | [32 GB · MI50](results.md#a-24-or-32-gb-card) | 6 GB | 2× Xeon E5-2680 v4 (28 cores) | NVMe, 5 GB/s | `D8E4` · the experts from the disk | 31 positions/s | 10.2 tokens/s after 1k | — | v0.3 |
-| [2× 16 GB · MI50](results.md#two-cards-or-more) | 62 GB | 2× Xeon E5-2680 v4 (28 cores) | — | `D8E4` · every layer over both cards, the experts in RAM, a 12.5 GB tier on each | 85.3 positions/s | 30.5 tokens/s after 100k | 262,144 | v0.23.0 |
-| [2× 16 GB · MI50](results.md#two-cards-or-more) | 62 GB | 2× Xeon E5-2680 v4 (28 cores) | — | `D8E4` · every layer over both cards, the experts in RAM, a 12.5 GB tier on each | 226-228 positions/s | 42.9-45.6 tokens/s after 2k | 262,144 | v0.23.0 |
+| [2× 16 GB · MI50](results.md#two-cards-or-more) | 125 GB | 2× Xeon E5-2680 v4 (28 cores) | — | `D8E4` · every layer over both cards, the experts in RAM, a 12.5 GB tier on each | 85.9 positions/s | 32.22 tokens/s after 100k | 262,144 | v0.24.0 |
+| [2× 16 GB · MI50](results.md#two-cards-or-more) | 125 GB | 2× Xeon E5-2680 v4 (28 cores) | — | `D8E4` · every layer over both cards, the experts in RAM, a 12.5 GB tier on each | 251-256 positions/s | 46.0 tokens/s after 2k | 262,144 | v0.24.0 |
 | [16 GB · RTX 5060 Ti, OpenCL 1.2](results.md#an-older-card-or-an-integrated-gpu) | 62 GB | Xeon W-2123 (4 cores) | — | `D8E4` · the experts in RAM, no tier | 37.1 positions/s | 23.0 tokens/s after 2k | — | v0.20.0 |
 <!-- /rates -->
 
@@ -163,7 +166,10 @@ is the faster, by about 10% (`measurements/2026-10-29_qwen36_35b_two_16gb_mi50_n
 |---|---|---|---|---|---|---|---|---|
 | [8 GB · RTX 5060 Ti, 8 GB held](results.md#an-8-gb-card) | 32 GB | Xeon W-2123 (4 cores) | NVMe, 5 GB/s | `D8E4` · the experts from the disk | 19.0 positions/s | 7.8 tokens/s after 1k | 33,792 | v0.19.0 |
 | [16 GB · RTX 5060 Ti](results.md#a-16-gb-card) | 32 GB | Xeon W-2123 (4 cores) | NVMe array, 5.7 GB/s | `D8E4` · the experts from the disk, a 30 GB cache | 17.6 positions/s | 5.65 tokens/s after 100k | 110,000 | v0.22.0 |
-| [16 GB · RTX 5060 Ti](results.md#a-16-gb-card) | 32 GB | Xeon W-2123 (4 cores) | NVMe, 5 GB/s | `D8E4` · the experts from the disk | 19.0 positions/s | 7.8 tokens/s after 1k | — | v0.19.0 |
+| [16 GB · RTX 5060 Ti](results.md#a-16-gb-card) | 32 GB | Xeon W-2123 (4 cores) | NVMe array, 5.7 GB/s | `D8E4` · the experts from the disk (`auto`) | 20.1-20.2 positions/s | 8.03 tokens/s after 2k | 110,000 | v0.24.0 |
+| [16 GB · RTX 5060 Ti](results.md#a-16-gb-card) | 62 GB | Xeon W-2123 (4 cores) | — | `D8E4` · the experts in RAM, a 6.75 GB tier (`auto`) | 61.9-62.5 positions/s | 16.14-16.27 tokens/s after 2k | 110,000 | v0.24.0 |
+| [16 GB · RTX 5060 Ti](results.md#a-16-gb-card) | 62 GB | Xeon W-2123 (4 cores) | — | `D8E4` · the experts in RAM, a 6.75 GB tier (`auto`) | 39.9 positions/s | 8.17 tokens/s after 100k | 110,000 | v0.24.0 |
+| [16 GB · RTX 5060 Ti](results.md#a-16-gb-card) | 32 GB | Xeon W-2123 (4 cores) | NVMe array, 5.7 GB/s | `D8E4` · the experts from the disk (`auto`) | 17.0 positions/s | 5.42 tokens/s after 100k | 110,000 | v0.24.0 |
 | [16 GB · RTX 5060 Ti](results.md#a-16-gb-card) | 28 GB | Xeon W-2123 (4 cores) | NVMe, 5 GB/s | `D8E4` · the experts from the disk | 18.8 positions/s | 7.5 tokens/s after 1k | — | v0.19.0 |
 | [16 GB · RTX 5060 Ti](results.md#a-16-gb-card) | 61 GB | Xeon W-2123 (4 cores) | — | `D8E4` · the experts in RAM, a 7.75 GB tier | 56.2 positions/s | 15.9 tokens/s after 2k | 32,768 | v0.21.0 |
 | [32 GB · MI50](results.md#a-24-or-32-gb-card) | 251 GB | 2× Xeon E5-2680 v4 (28 cores) | — | `D8E4` · the experts in RAM, no tier | 48-50 positions/s | 12.7-15.4 tokens/s after 2k | — | v0.20.0 |
@@ -191,6 +197,9 @@ answer; to 2.5 GB/s it slowed its prompt by 25%. Through OpenCL 2.0 a card alloc
 | [none](results.md#no-graphics-card) | 30 GB | 2× Xeon E5-2680 v4 (28 cores) | NVMe array, 6.6 GB/s | `D8E4` · the experts from the disk | 6.8 positions/s | 1.2 tokens/s after 1k | — | v0.21.2 |
 | [16 GB · RTX 5060 Ti](results.md#a-16-gb-card) | 14 GB | Xeon W-2123 (4 cores) | NVMe array, 5.7 GB/s | `D8E4` · the experts from the disk, the next layer's read ahead | 9.1 positions/s | 2.21 tokens/s after 100k | 110,000 | v0.22.0 |
 | [16 GB · RTX 5060 Ti](results.md#a-16-gb-card) | 16 GB | Xeon W-2123 (4 cores) | NVMe array (4 drives) | `D8E4` · the experts from the disk, a 12 GiB cache, the next layer's read ahead | — | 2.31 tokens/s after 256 | 32,768 | v0.22.0 |
+| [16 GB · RTX 5060 Ti](results.md#a-16-gb-card) | 62 GB | Xeon W-2123 (4 cores) | NVMe array, 5.7 GB/s | `D8E4` · the experts from the disk (`auto`) | 8.6-8.7 positions/s | 3.65-3.68 tokens/s after 2k | 110,000 | v0.24.0 |
+| [16 GB · RTX 5060 Ti](results.md#a-16-gb-card) | 32 GB | Xeon W-2123 (4 cores) | NVMe array, 5.7 GB/s | `D8E4` · the experts from the disk (`auto`) | 8.2-8.7 positions/s | 2.51-2.94 tokens/s after 2k | 110,000 | v0.24.0 |
+| [16 GB · RTX 5060 Ti](results.md#a-16-gb-card) | 32 GB | Xeon W-2123 (4 cores) | NVMe array, 5.7 GB/s | `D8E4` · the experts from the disk (`auto`) | 9.3 positions/s | 2.90 tokens/s after 100k | 110,000 | v0.24.0 |
 | [16 GB · RTX 5060 Ti](results.md#a-16-gb-card) | 60 GB | Xeon W-2123 (4 cores) | NVMe, 5 GB/s | `D8E4` · the experts from the disk | 10.8 positions/s | 3.1 tokens/s after 1k | — | v0.20.0 |
 | [16 GB · RTX 5060 Ti](results.md#a-16-gb-card) | 32 GB | Xeon W-2123 (4 cores) | NVMe, 5 GB/s | `D8E4` · the experts from the disk | 11.0 positions/s | 2.3 tokens/s after 1k | — | v0.20.0 |
 | [16 GB · RTX 5060 Ti](results.md#a-16-gb-card) | 28 GB | Xeon W-2123 (4 cores) | NVMe, 5 GB/s | `D8E4` · the experts from the disk | 11.1 positions/s | 2.2 tokens/s after 1k | — | v0.20.0 |
@@ -198,6 +207,8 @@ answer; to 2.5 GB/s it slowed its prompt by 25%. Through OpenCL 2.0 a card alloc
 | [32 GB · MI50](results.md#a-24-or-32-gb-card) | 251 GB | 2× Xeon E5-2680 v4 (28 cores) | NVMe array, 9 GB/s | `D8E4` · the experts from the disk, a 30 GB cache, the next layer's read ahead | — | 3.31 tokens/s after 256 | 576 | v0.22.0 |
 | [32 GB · MI50](results.md#a-24-or-32-gb-card) | 251 GB | 2× Xeon E5-2680 v4 (28 cores) | NVMe array, 9 GB/s | `D8E4` · the experts from the disk, an 8 GB cache, the next layer's read ahead | — | 2.18 tokens/s after 256 | 576 | v0.22.0 |
 | [32 GB · MI50](results.md#a-24-or-32-gb-card) | 160 GB | 2× Xeon E5-2680 v4 (28 cores) | — | `D8E4` · every expert in RAM, a 9.5 GB tier | 72.1 positions/s | 9.86 tokens/s after 100k | 1,048,576 | v0.22.0 |
+| [32 GB · MI50](results.md#a-24-or-32-gb-card) | 1.5 TB (PMem 100) | 2× Xeon Gold 6252 (48 cores) | — | `D8E4` · every expert in RAM, a 9.75 GB tier | 50.6 positions/s | 10.59 tokens/s after 100k | 110,000 | v0.24.0 |
+| [32 GB · MI50](results.md#a-24-or-32-gb-card) | 1.5 TB (PMem 100) | 2× Xeon Gold 6252 (48 cores) | — | `D8E4` · every expert in RAM, a 9.75 GB tier | 33.4-34.3 positions/s | 11.6-11.8 tokens/s after 2k | 110,000 | v0.24.0 |
 | [32 GB · MI50](results.md#a-24-or-32-gb-card) | 150 GB | 2× Xeon E5-2680 v4 (28 cores) | — | `D8E4` · every expert in RAM, a 17.75 GB tier | 54 positions/s | 10.8 tokens/s after 1k | 300,000 | v0.20.0 |
 | [32 GB · MI50](results.md#a-24-or-32-gb-card) | 128 GB | 2× Xeon E5-2680 v4 (28 cores) | NVMe, 5 GB/s | `D8E4` · the experts from the disk | 13.2 positions/s | 5.7 tokens/s after 1k | — | v0.3 |
 | [2× 32 GB · MI50](results.md#two-cards-or-more) | 251 GB | 2× Xeon E5-2680 v4 (28 cores) | — | `D8E4` · every layer over both cards, every expert in RAM, a 14 GB tier on each | 54.6-56.4 positions/s | 11.2-11.3 tokens/s after 2k | 1,048,576 | v0.21.0 |

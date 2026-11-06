@@ -13,6 +13,7 @@
 #endif
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h>                 /* memset: a zero as the memory's */
 #include "../primitives/pool.cuh"   /* the threads the rows are spread over */
 
 /* ══ ⭐⭐ OVERRIDES — THE DOORS THIS FAMILY RUNS FASTER THAN THE GENERIC BODY ══════════════════════════
@@ -507,10 +508,11 @@ static inline void x86_avx2__zzprivate_rotate_block(const x86_avx2__rotate_call*
     if (b == whole_blocks && rest >= 256u) { *at = c->whole; *size = 256u; return; }
     *at = c->whole + (rest >= 256u ? 256u : 0u); *size = 128u;
 }
-static void x86_avx2__zzprivate_rotate(void* a) {
-    const x86_avx2__rotate_call* c = (const x86_avx2__rotate_call*)a;
+/* Block `b` of row `row` (rows of `n`, one after another): its butterfly in floats, rounded once. */
+static inline void x86_avx2__zzprivate_rotate_one(const x86_avx2__rotate_call* c, uint64_t b, uint64_t row) {
     uint64_t at = 0u; uint32_t B = 512u;
-    x86_avx2__zzprivate_rotate_block(c, (uint64_t)nn__silicon__block(), &at, &B);
+    x86_avx2__zzprivate_rotate_block(c, b, &at, &B);
+    at += row * c->n;
     float v[512] __attribute__((aligned(32)));
     for (uint32_t i = 0u; i < B; ++i) v[i] = _cvtsh_ss(c->in[at + i]) * _cvtsh_ss(c->sign[i]);
     for (uint32_t h = 1u; h < 8u; h <<= 1)
@@ -525,6 +527,14 @@ static void x86_avx2__zzprivate_rotate(void* a) {
     const float inv = 1.0f / sqrtf((float)B);
     for (uint32_t i = 0u; i < B; ++i) c->out[at + i] = nn__kernels__zzabi_to_half(v[i] * inv, c->over);
 }
+static void x86_avx2__zzprivate_rotate(void* a) {
+    x86_avx2__zzprivate_rotate_one((const x86_avx2__rotate_call*)a, (uint64_t)nn__silicon__block(), 0u);
+}
+/* The pool blocks one row of `n` takes: its whole 512-blocks, then nn's 256 and 128 tail. */
+static inline uint64_t x86_avx2__zzprivate_rotate_blocks(uint64_t n) {
+    const uint64_t rest = n % 512u;
+    return n / 512u + (rest >= 256u ? 1u : 0u) + (rest % 256u == 128u ? 1u : 0u);
+}
 /* ⭐ Whole 512-blocks and nn's 256 and 128 tail, `out` apart from `in`: in place, nn's definition is its one-lane butterfly,
  *   rounded a stage at a time, so that is the generic door's. ⚖ THE TAIL ON THE FAST PATH TOO — `MEASURED` 2026-10-19 node-01:
  *   DeepSeek-V4.1's experts are 2304 wide (four 512s and a 256) and rotated a pick at a time, and the generic door took
@@ -535,8 +545,89 @@ static void x86_avx2__override_hadamard_rotate(uint16_t* out, const uint16_t* in
     if (n < 512u || n % 128u != 0u || !apart) { nn__hadamard__zzabi_launch_rotate(out, in, sign, n, over); return; }
     const uint64_t whole = n / 512u * 512u, rest = n - whole;
     x86_avx2__rotate_call c = { out, in, sign, over, whole, n };
-    x86_avx2__zzpackage_run((uint32_t)(whole / 512u + (rest >= 256u ? 1u : 0u) + (rest % 256u == 128u ? 1u : 0u)),
-                            x86_avx2__zzprivate_rotate, &c);
+    (void)rest;
+    x86_avx2__zzpackage_run((uint32_t)x86_avx2__zzprivate_rotate_blocks(n), x86_avx2__zzprivate_rotate, &c);
+}
+
+/* ⭐ THE LADDER ROW BY ROW — `hadamard_ladder_rows`: `rows` rows of `cols`, each rotated in nn's ladder (512s, a 256, a
+ *   128), every row's blocks one pool launch, a row's arithmetic the rotation's above — so a row here is the bytes
+ *   `hadamard_rotate` gives it alone. Where a launch a row took one: the picks of an expert 640 wide (512 and 128) are a
+ *   launch each through the rotation, 10.5 µs each past the evaluator on node03's pool, ten picks 105 µs where one
+ *   launch of 6,400 is 13 (`MEASURED` 2026-10-31, measurements/2026-10-31_nn141_flash_next_node03.md). Rows of 128 or
+ *   wider and whole 128s, `out` apart from `in`; anything else is nn's generic door. */
+typedef struct x86_avx2__ladder_call {
+    x86_avx2__rotate_call row;     /* one row's: `n` its width */
+    uint64_t per_row;              /* the pool blocks a row takes */
+} x86_avx2__ladder_call;
+static void x86_avx2__zzprivate_ladder(void* a) {
+    const x86_avx2__ladder_call* c = (const x86_avx2__ladder_call*)a;
+    const uint64_t b = (uint64_t)nn__silicon__block();
+    x86_avx2__zzprivate_rotate_one(&c->row, b % c->per_row, b / c->per_row);
+}
+static void x86_avx2__override_hadamard_ladder_rows(uint16_t* out, const uint16_t* in, const uint16_t* sign, uint64_t cols,
+                                                   uint64_t rows, unsigned int* over) {
+    const uint64_t n = cols * rows;
+    const bool apart = out + n <= in || in + n <= out;
+    const uint64_t per_row = cols >= 128u && cols % 128u == 0u ? x86_avx2__zzprivate_rotate_blocks(cols) : 0u;
+    if (per_row == 0u || rows == 0u || !apart || per_row * rows > 0xFFFFFFFFull) {
+        nn__hadamard__zzabi_launch_ladder_rows(out, in, sign, cols, rows, over);
+        return;
+    }
+    x86_avx2__ladder_call c = { { out, in, sign, over, cols / 512u * 512u, cols }, per_row };
+    x86_avx2__zzpackage_run((uint32_t)(per_row * rows), x86_avx2__zzprivate_ladder, &c);
+}
+
+/* ⭐ A ZERO AND AN ADD AS THE MEMORY'S, NOT AS A LANE AN ELEMENT — nn's bodies give item `i` to block `i mod blocks`, so
+ *   every cache line is written by every thread: on node03's pool a zero of 12,800 halves took 99 µs and an add of 6,400
+ *   43 µs past the evaluator (`MEASURED` 2026-10-31, measurements/2026-10-31_nn141_flash_next_node03.md), each launched
+ *   twice a layer by ai_qwen_3's experts split over the sockets. Here a vector the caller covers in a few microseconds is
+ *   the caller's own, and a larger one is cut into runs of whole cache lines, a run a pool block. The add's arithmetic is
+ *   nn's — both halves widened, summed in a float, rounded once by nn's own conversion, its overflow in the fault word —
+ *   so its bytes are nn's body's. */
+#define X86_AVX2__ZZPRIVATE_CALLER_HALVES (64u * 1024u)    /* 128 KB: under it the caller's, over it the pool's */
+#define X86_AVX2__ZZPRIVATE_RUN_HALVES    (16u * 1024u)    /* a pool block's run, 32 KB */
+typedef struct x86_avx2__pointwise_call {
+    uint16_t* z; const uint16_t* x; const uint16_t* y; uint64_t n; unsigned int* over;
+} x86_avx2__pointwise_call;
+/* Eight at a time through F16C: its conversion with the immediate's rounding is IEEE's to the nearest even, subnormals and
+ * NaNs included, which is nn's (`nn__primitives__zzpackage_float_to_half`) — and nn flags a finite sum that becomes an
+ * infinite half, as here. The tail is nn's conversion itself. */
+static inline void x86_avx2__zzprivate_add_run(const x86_avx2__pointwise_call* c, uint64_t first, uint64_t end) {
+    const __m256 inf = _mm256_set1_ps(INFINITY), magnitude = _mm256_castsi256_ps(_mm256_set1_epi32(0x7FFFFFFF));
+    int hit = 0;
+    uint64_t i = first;
+    for (; i + 8u <= end; i += 8u) {
+        const __m256 sum = _mm256_add_ps(_mm256_cvtph_ps(_mm_loadu_si128((const __m128i*)(c->x + i))),
+                                         _mm256_cvtph_ps(_mm_loadu_si128((const __m128i*)(c->y + i))));
+        const __m128i h = _mm256_cvtps_ph(sum, _MM_FROUND_TO_NEAREST_INT);
+        _mm_storeu_si128((__m128i*)(c->z + i), h);
+        const __m256 finite = _mm256_cmp_ps(_mm256_and_ps(sum, magnitude), inf, _CMP_LT_OQ);
+        const __m256 infinite = _mm256_cmp_ps(_mm256_and_ps(_mm256_cvtph_ps(h), magnitude), inf, _CMP_EQ_OQ);
+        hit |= _mm256_movemask_ps(_mm256_and_ps(finite, infinite));
+    }
+    for (; i < end; ++i) c->z[i] = nn__kernels__zzabi_to_half(_cvtsh_ss(c->x[i]) + _cvtsh_ss(c->y[i]), c->over);
+    if (hit) *c->over = NN__KERNELS__OVERFLOWED;
+}
+static void x86_avx2__zzprivate_add(void* a) {
+    const x86_avx2__pointwise_call* c = (const x86_avx2__pointwise_call*)a;
+    const uint64_t first = (uint64_t)nn__silicon__block() * X86_AVX2__ZZPRIVATE_RUN_HALVES;
+    x86_avx2__zzprivate_add_run(c, first, first + X86_AVX2__ZZPRIVATE_RUN_HALVES < c->n ? first + X86_AVX2__ZZPRIVATE_RUN_HALVES : c->n);
+}
+static void x86_avx2__zzprivate_zero(void* a) {
+    const x86_avx2__pointwise_call* c = (const x86_avx2__pointwise_call*)a;
+    const uint64_t first = (uint64_t)nn__silicon__block() * X86_AVX2__ZZPRIVATE_RUN_HALVES;
+    const uint64_t end = first + X86_AVX2__ZZPRIVATE_RUN_HALVES < c->n ? first + X86_AVX2__ZZPRIVATE_RUN_HALVES : c->n;
+    memset(c->z + first, 0, (size_t)(2u * (end - first)));
+}
+static void x86_avx2__override_vector_zero(uint16_t* v, uint64_t n) {
+    if (n <= X86_AVX2__ZZPRIVATE_CALLER_HALVES) { memset(v, 0, (size_t)(2u * n)); return; }
+    x86_avx2__pointwise_call c = { v, 0, 0, n, 0 };
+    x86_avx2__zzpackage_run((uint32_t)((n + X86_AVX2__ZZPRIVATE_RUN_HALVES - 1u) / X86_AVX2__ZZPRIVATE_RUN_HALVES), x86_avx2__zzprivate_zero, &c);
+}
+static void x86_avx2__override_vector_add(uint16_t* z, const uint16_t* x, const uint16_t* y, uint64_t n, unsigned int* over) {
+    x86_avx2__pointwise_call c = { z, x, y, n, over };
+    if (n <= X86_AVX2__ZZPRIVATE_CALLER_HALVES) { x86_avx2__zzprivate_add_run(&c, 0u, n); return; }
+    x86_avx2__zzpackage_run((uint32_t)((n + X86_AVX2__ZZPRIVATE_RUN_HALVES - 1u) / X86_AVX2__ZZPRIVATE_RUN_HALVES), x86_avx2__zzprivate_add, &c);
 }
 
 /* ── THE DELTANET STEP: a head a pool block, eight of its state's columns at a time ──────────────────────── */
@@ -2247,6 +2338,9 @@ static inline void x86_avx2__override_doors(nn__doors* doors) {
     doors->turboquant_gemv_groups_int8     = x86_avx2__override_gemv_groups_int8;
     doors->turboquant_gemv_groups_sum_int8 = x86_avx2__override_gemv_groups_sum_int8;
     doors->hadamard_rotate      = x86_avx2__override_hadamard_rotate;
+    doors->hadamard_ladder_rows = x86_avx2__override_hadamard_ladder_rows;
+    doors->vector_zero          = x86_avx2__override_vector_zero;
+    doors->vector_add           = x86_avx2__override_vector_add;
     doors->hadamard_blocks      = x86_avx2__override_hadamard_blocks;
     doors->deltanet_step        = x86_avx2__override_deltanet_step;
     doors->deltanet_steps       = x86_avx2__override_deltanet_steps;

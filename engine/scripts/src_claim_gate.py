@@ -118,19 +118,20 @@ def r_launch_width(files):
         for m in LAUNCH.finditer(body):
             stray.append(f"{k}: <<<{m.group(1)}>>>")
         # ⛳ RESIDENT is a launch site like the others — a launch whose runners outlive the call, but
-        #   one thread per block all the same; and so is HERE, one runner in the caller's own thread.
-        uses += len(re.findall(r'\bENG__LAUNCH_(?:ONE|MANY|RESIDENT|HERE)\s*\(', body))
+        #   one thread per block all the same.
+        uses += len(re.findall(r'\bENG__LAUNCH_(?:ONE|MANY|RESIDENT)\s*\(', body))
     if stray:
         return False, (f"{len(stray)} launch(es) bypass the seam in `{SEAM}`: " + '; '.join(stray[:3]))
 
     # ⭐ THE SEAM'S DEFINITIONS ARE WHERE THE WIDTH NOW LIVES, so they are what is checked. Since the device
     #   evaluator retired (2026-09-25) every launch is a host runner, one per block, which is thread zero of
-    #   that block BY CONSTRUCTION — so what is checked is that the seam still defines all four launches
-    #   and that no card launch (`<<<`) has come back into it.
+    #   that block BY CONSTRUCTION — so what is checked is that the seam still defines all three launches
+    #   and that no card launch (`<<<`) has come back into it. ⛳ Since 2026-11-04 no door runs its work in the
+    #   caller's thread as runner zero (the resident machine: a door builds as the host, ▶ `ENG__ABI__AS_THE_HOST`).
     seam = strip_comments(files.get(SEAM, ''))
-    defined = set(re.findall(r'#\s*define\s+(ENG__LAUNCH_(?:ONE|MANY|RESIDENT|HERE))\b', seam))
-    if defined != {'ENG__LAUNCH_ONE', 'ENG__LAUNCH_MANY', 'ENG__LAUNCH_RESIDENT', 'ENG__LAUNCH_HERE'}:
-        return False, f"`{SEAM}` does not define all four launches ({sorted(defined)}) — the seam is gone, not satisfied"
+    defined = set(re.findall(r'#\s*define\s+(ENG__LAUNCH_(?:ONE|MANY|RESIDENT))\b', seam))
+    if defined != {'ENG__LAUNCH_ONE', 'ENG__LAUNCH_MANY', 'ENG__LAUNCH_RESIDENT'}:
+        return False, f"`{SEAM}` does not define all three launches ({sorted(defined)}) — the seam is gone, not satisfied"
     if LAUNCH.search(seam):
         return False, f"`{SEAM}` launches on a card again; the evaluator's launches are host runners"
     widths = ['1'] * len(defined)

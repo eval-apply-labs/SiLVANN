@@ -354,6 +354,35 @@ static __device__ inline uint64_t sys__sublist__discard(uint64_t sublist, uint64
  * having raised. */
 static __device__ inline sys__heap_node sys__sublist__extract(uint64_t sublist, uint64_t n);
 
+/* ── A LIST SEVERAL BLOCKS SHARE ─────────────────────────────────────────────────────────────────────
+ * ⚖ ARCHITECT 2026-11-03: *"just make a method called sys__list__shared_append that uses the lock and the
+ * retry internally"* — the scheduler's queue a list every block appends to and one worker takes from
+ * (▶ `scheduler__header.cuh`).
+ * ⛔ A LIST IS ONE OWNER'S (above), and these are the exception, kept narrow: each takes the list's own
+ * object lock for the length of one append, one take or one count — of a value or of a group of them — and
+ * hands it back, so nothing reads a list another block is half way through changing. A list they take empty
+ * keeps its last chunk for the next append, so a list that empties and fills again turn by turn makes and
+ * gives back nothing. A list reached through these is reached through nothing
+ * else while it is shared. The wait is the patient one (`sys__heap_object__zzpackage_lock_shared`): contended
+ * by design, raised only when it runs out, and then the verb answers no. The last looks without the lock. */
+/* Put a value after the last one — the list takes its own hold, as `append` does. Answers whether it went. */
+static __device__ inline bool           sys__list__shared_append(uint64_t list, const sys__heap_node* value);
+/* Take the first value out: its hold moves to the caller, as `extract` does. Nothing when the list is empty. */
+static __device__ inline sys__heap_node sys__list__shared_take(uint64_t list);
+/* `n` values put after the last one under one hold of the lock, so a taker finds all of them or none: every one
+ * went, or none did (a refused append takes back the ones before it). The list takes its own holds. */
+static __device__ inline bool           sys__list__shared_append_cells(uint64_t list, const sys__heap_node* cells,
+                                                                       uint64_t n);
+/* The first `n` values taken out under one hold of the lock into `out`, their holds moving to the caller — or
+ * none, answering false, when the list holds fewer. */
+static __device__ inline bool           sys__list__shared_take_cells(uint64_t list, sys__heap_node* out, uint64_t n);
+/* How many values it holds, now. */
+static __device__ inline uint64_t       sys__list__shared_length(uint64_t list);
+/* Whether it held anything when it was looked at, read without the lock — a hint for a block polling a list
+ * only it takes from: a yes may find nothing by the time it takes (the take says so), a no is the next look's
+ * to correct, and the look writes nothing, so a poller never holds up the blocks appending. */
+static __device__ inline bool           sys__list__shared_waiting(uint64_t list);
+
 /* ── THE TWO ROW METHODS ─────────────────────────────────────────────────────────────────────────────
  * What each kind's row names, and none is called by hand: one runs when the last hold goes, the other
  * when a program asks for one. They are declared here because the rows that name them are read in a file

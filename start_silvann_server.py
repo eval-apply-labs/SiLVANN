@@ -14,7 +14,9 @@ conversation created with its own `lora` swaps it in for its turns. `options` go
 
 Conversations are CARTRIDGES, one on the card at a time: a turn keeps the card until its answer is done, and a turn
 asked for meanwhile is answered 503 with `Retry-After: 5` — ⚖ *"retry in 5 s is what the silvann ui will do (or the
-requestor in general), it is the convention and it is the caller that will do it"*. On disk each lives in
+requestor in general), it is the convention and it is the caller that will do it"*. A model holding several conversations
+at once — `"multi_user": "yes"` with `num_cards` above 1, a conversation a card, or `seats` in its options, several on
+one — answers them together (▶ session's `SeatedRuntime`): a turn is 503 only when every seat is answering. On disk each lives in
 `user_sessions/<model>/<id>/`: `cartridge.npz` (its tokens, and its state when it was put away), `meta.json` (what
 model it belongs to), `server_meta.json` (its name, history and password) and `conversation_config.json` (its own
 settings: a system prompt, where the config's `user_system_prompt` lets its creator give one).
@@ -62,12 +64,14 @@ import silvann_runtime as SR                                              # noqa
 from silvann_runtime import autotune, experts_file, registry, skills, tools, tools_config     # noqa: E402
 from silvann_runtime.chat import Chat, ToolMarkup                         # noqa: E402
 from silvann_runtime.fetch import ensure_model                            # noqa: E402
-from silvann_runtime.session import Busy, Cartridge, Runtime, _state_read, sampler, state_bytes     # noqa: E402
+from silvann_runtime.session import Busy, Cartridge, Runtime, SeatedRuntime, _state_read, sampler, state_bytes     # noqa: E402
 from silvann_runtime import image_session                                 # noqa: E402
 from silvann_runtime.qwen_image import Stopped, image_pack                 # noqa: E402
 from silvann_runtime.vision import MAX_VIDEO_TOKENS                       # noqa: E402
 
 IDLE_EVICTION_SECONDS = 120.0
+PANIC_GRACE_SECONDS = 2.0             # a panic's error on its way to the UI before the server ends (▶ `_stopped`)
+PANIC_END_SECONDS = 15.0              # and the HTTP server's own shutdown, before the process is ended without it
 PICTURE_WAIT_SECONDS = 600.0          # how long (image …) waits on a picture server drawing another's picture
 EVICTION_TICK_SECONDS = 30.0
 
@@ -169,6 +173,8 @@ class State:
         self.web = None                     # how the REPL's fetch goes onto the web (▶ tools.Web)
         self.listen = ("127.0.0.1", 8765)   # the address and port the server listens on
         self.offer = None                   # this server offered to the agent entry's registry (▶ registry.Offer)
+        self.panic = None                   # the evaluator's stop the server is ending on (▶ `_stopped`)
+        self.http = None                    # the HTTP server, which a panic ends (▶ `_stopped`)
 
 
 S = State()
@@ -250,6 +256,8 @@ async def _put_away(cid, persist=True):
         await asyncio.to_thread(_persist, c)
     if S.runtime.active is c:
         S.runtime.active = None              # what the card holds for it is no one's now
+    if hasattr(S.runtime, "forget"):
+        S.runtime.forget(c)                  # a seat's, the same
     S.runtime.cartridges.pop(cid, None)
 
 
@@ -363,8 +371,9 @@ def _boot(args):
     asked = "max" if str(asked).lower() in ("max", "auto") else int(asked)
     # a video's tokens at most, and what reading one holds of RAM beside the experts (▶ vision.MAX_VIDEO_TOKENS)
     S.video_tokens = int(cfg.get("max_tokens_per_video", MAX_VIDEO_TOKENS))
-    # how many of the machine's cards the model is split over — the one placement a config names (▶ `SR.with_cards`)
-    options = SR.with_cards(str(folder), cfg.get("num_cards"), cfg.get("options", {}))
+    # how many of the machine's cards the model runs on, and whether they serve one conversation split over them or a
+    #   conversation each (`multi_user`) — the placement a config names (▶ `SR.with_cards`)
+    options = SR.with_cards(str(folder), cfg.get("num_cards"), cfg.get("options", {}), cfg.get("multi_user"))
     # the model's tool (▶ the classifier): what its commands may do unasked in a new conversation — or "no", no
     #   conversation has it
     S.tools = str(cfg.get("tools", "chill")).lower()
@@ -389,7 +398,10 @@ def _boot(args):
                                                     margin_mb=cfg.get("vram_margin_mb"))
         n = int(options.get("tensor_parallel") or len(options.get("cards") or ()) or 1)
         if n > 1:
-            why = "every layer over %d cards; %s" % (n, why)
+            arch = SR.ARCHITECTURES.get(SR.architecture_of(str(folder)))
+            seated = getattr(arch, "CARDS_ARE_SEATS", False) or ("cards" in options and getattr(arch, "CONVERSATION_A_CARD",
+                                                                                                False))
+            why = ("a conversation on each of %d cards; %s" if seated else "every layer over %d cards; %s") % (n, why)
         S.why = why
         print("[silvann_server] the setup: %s" % why, flush=True)
         try:
@@ -418,7 +430,7 @@ def _boot(args):
         S.model = pipeline.Pipeline(S.model, link, say, fixed=asked != "max")
         max_context = S.model.max_context                 # the ring's, agreed
     S.setup = dict(folder=str(folder), lora=cfg.get("lora"), max_context=max_context, options=options, ring=ring)
-    S.runtime = Runtime(S.model)
+    S.runtime = _runtime_for(S.model)
     S.chat = Chat(S.model.folder)
     S.model_id = folder.name
     # the model's REPL starts in the workspace, where it reads unasked (▶ the classifier); tools.json keeps the folders
@@ -497,6 +509,29 @@ def _tools_ready(cfg):
         said.append("the REPL's (agent …): the servers the registry %s lists too" % reg)
     if S.offer is not None:
         S.offer.wake()                                # the offer follows the agent entry now, not at its next renewal
+    switch = box.enabled("ui")                    # the screen (NN-139): a display that answers
+    if switch != "no":
+        from silvann_runtime import ui as ui_
+        display = box.config("ui").get("display")
+        why = ui_.why_not(None if display in (None, "auto") else str(display))
+        if why and switch == "auto":
+            missing["ui"] = why
+        said.append("the REPL's (ui …): %s" % (_not_ready(switch, why) if why else
+                                              "the screen %s" % (display if display not in (None, "auto") else
+                                                                 os.environ.get("DISPLAY"))))
+    else:
+        said.append("the REPL's (ui …): switched off in the tools file")
+    switch = box.enabled("browser")               # the browser companion: its session opened now, and kept
+    if switch != "no":
+        try:
+            where, why = tools.browser_address(box), None
+        except Exception as ex:                   # noqa: BLE001 — whatever stops it, said as the reason
+            where, why = None, str(ex)
+        if why and switch == "auto":
+            missing["browser"] = why
+        said.append("the REPL's (browser …): %s" % (_not_ready(switch, why) if why else "the companion at %s" % where))
+    else:
+        said.append("the REPL's (browser …): switched off in the tools file")
     if box.enabled("bash") == "no":
         said.append("the REPL's (bash …): switched off in the tools file")
     else:                                             # where the model's commands reach (▶ tools.confinement)
@@ -956,14 +991,49 @@ def _registry_servers():
     return [e for e in got if e.get("address") != mine and not e.get("pictures")], None
 
 
+def _stopped(panic):
+    """⛔ THE EVALUATOR STOPPED, AND THE SERVER STOPS WITH IT (⚖ 2026-11-03: *"considering it was not handled at all i
+    think it makes sense to show it like this and stop the server... the ui is a different thing, you can maintain the ui
+    up and use that to restart the server"*). The machine is shut down already (▶ silvann_runtime's `Panic`), and
+    nothing boots it again: the request that met the stop answers its error, the word first, as any failure does; what
+    the card held is let go of, so each conversation is saved from its tokens; the log's last line says why, and the
+    process ends a moment later — once the error is on its way — with the HTTP server's own shutdown (the conversations
+    saved), then `main`'s exit 1. Starting it again is the user's choice: the UI's start (▶ silvann_ui.py,
+    `ServerProcess`, which shows the line)."""
+    if S.panic is not None:
+        return
+    S.panic = panic
+    if S.runtime is not None:
+        S.runtime.card_lost()
+    print("[silvann_server] ⛔ stopped: %s" % panic, flush=True)
+
+    def end():
+        time.sleep(PANIC_GRACE_SECONDS)
+        if S.http is not None:
+            S.http.should_exit = True                 # ⛳ ASKED, NOT SIGNALLED: a signal it caught it raises again as it
+        time.sleep(PANIC_END_SECONDS)                 #   ends, and the process would end on it and not on `main`'s exit
+        os._exit(3)                                   # a stream that would not close
+    threading.Thread(target=end, daemon=True).start()
+
+
 def _put_down():
     """The text model off the card: the conversation on it read off into RAM (its state written back when its answer
     goes on, ▶ `Runtime._activate`), and the model shut down. ▶ `_bring_back`."""
+    if hasattr(S.runtime, "put_down"):          # seats: every seat's answer finished and its conversation read off
+        S.runtime.put_down()
+        S.model.m.shutdown()
+        return
     a = S.runtime.active
     if a is not None and getattr(S.model, "PARKS", True):
         a.state = _state_read(S.model, a.length)
     S.runtime.active = None
     S.model.m.shutdown()
+
+
+def _runtime_for(model):
+    """The runtime a model's conversations take turns in: its seats', where it holds more than one conversation on the
+    card at once (▶ session's `SeatedRuntime`, the model's `seats` option), else one on the card at a time."""
+    return SeatedRuntime(model) if getattr(model, "SEATS", 1) > 1 else Runtime(model)
 
 
 def _bring_back():
@@ -989,7 +1059,8 @@ def _lend(folder, conf, rt=None):
         asked = conf.get("max_context", "auto")
         asked = "max" if str(asked).lower() in ("max", "auto") else int(asked)
         options, ctx, why = autotune.choose(str(folder), asked, SR.with_cards(str(folder), conf.get("num_cards"),
-                                                                          conf.get("options") or {}),
+                                                                          conf.get("options") or {},
+                                                                          conf.get("multi_user")),
                                             video_tokens=S.video_tokens,
                                             margin_mb=conf.get("vram_margin_mb", S.config.get("vram_margin_mb")))
         m = SR.open_model(str(folder), lora=conf.get("lora"), max_context=ctx, progress=_loading(), **options)
@@ -998,7 +1069,7 @@ def _lend(folder, conf, rt=None):
         holder.done.set()
         raise
     if rt is None:
-        rt = Runtime(m)
+        rt = _runtime_for(m)
     else:
         rt.model = m
     S.model, S.runtime, S.chat, S.model_id = m, rt, Chat(m.folder), Path(folder).name
@@ -1117,6 +1188,7 @@ def health():
             "lora": m.active_lora if m else None, "loras": m.folder.loras() if m else [],
             "tenants_loaded": len(S.runtime.cartridges) if S.runtime else 0,
             "active": S.runtime.active.id if S.runtime and S.runtime.active else None,
+            "seats": [c.id if c else None for c in S.runtime.held] if hasattr(S.runtime, "held") else None,
             "model_dir": m.folder.path if m else None, "pp_slice": "all", "num_gpus": _cards(m),
             "max_context": m.max_context if m else 0,
             "adapter": "silvann_runtime", "images": _reads_pictures(), "files": not S.image, "pictures": S.image,
@@ -1519,7 +1591,7 @@ def _picture_message(cid, req):
             answer = "_[the picture was stopped: %s]_" % ex
             emit("token", {"token_id": -1, "text": answer})
         except Exception as ex:                       # noqa: BLE001 — said to the UI
-            emit("error", {"error": str(ex)})
+            emit("error", {"error": str(ex), "stopped": S.panic is not None})
             return
         finally:
             S.busy_cart = None
@@ -1616,7 +1688,8 @@ def _tool_session(cid):
                                                  agent=None if extra.get("agent") else
                                                  lambda model, config, task: _tool_agent(cid, model, config, task),
                                                  allowed=extra.get("tools_allowed"),
-                                                 whoami=lambda: _whoami(cid), web=S.web, toolbox=S.toolbox)
+                                                 whoami=lambda: _whoami(cid), web=S.web, toolbox=S.toolbox,
+                                                 sees=lambda: hasattr(S.model, "vision") and S.chat.sees_in_answers())
     return s
 
 
@@ -1637,6 +1710,7 @@ class _Answer:
         self.written = False                   # whether the history holds this answer yet
         self.calls = 0
         self.forms, self.answers = [], []      # the stretch's calls, and the values of those run
+        self.pictures = []                     # what each answered call showed the model ((ui 'look …)), read as pictures
         self.ask = None
         self.queue = self.loop = None
 
@@ -1712,7 +1786,7 @@ class _Answer:
                 self._answered(value)
                 if self._calls() is not None:
                     return
-                t = self._turn(S.chat.tool_response(self.answers, self.thinking), retry=True)
+                t = self._turn(*self._response(), retry=True)
             while True:
                 t.wait()
                 if self.budget is not None:
@@ -1722,16 +1796,17 @@ class _Answer:
                     if self.held:              # a call never made, shown as the model wrote it
                         self._show("token", (self.opened + S.chat.decode(self.answer))[len(self.shown):], token_id=-1)
                     break
-                self.forms, self.answers = forms, []
+                self.forms, self.answers, self.pictures = forms, [], []
                 if self._calls() is not None:
                     return
-                t = self._turn(S.chat.tool_response(self.answers, self.thinking), retry=True)
+                t = self._turn(*self._response(), retry=True)
             self._write()
             self._done()
         except Exception as ex:                # noqa: BLE001 — said to the UI
             if self.written or self.calls:     # an answer that made calls keeps what it did
                 self._write()
-            self._emit("error", {"error": str(ex)})
+            # `stopped`: the evaluator stopped, and the server is ending with it (▶ `_stopped`) — a client stops asking
+            self._emit("error", {"error": str(ex), "stopped": S.panic is not None})
         finally:
             S.busy_cart = None
 
@@ -1776,7 +1851,24 @@ class _Answer:
 
     def _answered(self, value):
         self.answers.append(value)
+        self.pictures.append(self._pictures())
         self._show("tool", "<tool_response>%s</tool_response>" % value, answer=value)
+
+    def _pictures(self):
+        """What the call just answered showed the model — `(ui 'look …)`'s pictures — read through its vision tower."""
+        got = _tool_session(self.cid).take_pictures()
+        if not got or not hasattr(S.model, "vision"):
+            return []
+        v = S.model.vision()
+        return [v.read(png) for png in got]
+
+    def _response(self):
+        """The calls' answers as the model's next tokens, and the pictures they showed it placed at their pads, as a
+        message's are (▶ chat's `tool_response`)."""
+        pics = self.pictures + [[]] * (len(self.answers) - len(self.pictures))
+        new = S.chat.tool_response(self.answers, self.thinking, pictures=[[im.tokens for im in ps] for ps in pics])
+        flat = [im for ps in pics for im in ps]
+        return new, (list(zip(S.chat.image_starts(new, S.model.vision().pads), flat)) if flat else [])
 
     def _write(self):
         """The conversation's history: the user's message and the answer so far."""
@@ -1866,8 +1958,8 @@ def main():
     #   it in its status (▶ silvann_ui.py, `ServerProcess.failure`)
     try:
         _boot(args)
-    except SR.Refused as ex:                                  # a model not here, a config not found, a card too small
-        raise SystemExit("[silvann_server] ⛔ not started: %s" % ex)
+    except (SR.Refused, SR.Panic) as ex:                      # a model not here, a config not found, a card too small;
+        raise SystemExit("[silvann_server] ⛔ not started: %s" % ex)   # the evaluator stopped while the model loaded
     except Exception as ex:                                   # noqa: BLE001 — the engine's refusal is a plain error
         if not autotune.refused_by_card(ex):
             raise
@@ -1877,7 +1969,13 @@ def main():
     import uvicorn
     S.endpoint = "http://127.0.0.1:%d" % args.port   # the server itself, where a subagent of its own model talks to it
     S.listen = (args.host, args.port)
-    uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
+    SR.Machine.on_panic = _stopped
+    S.http = uvicorn.Server(uvicorn.Config(app, host=args.host, port=args.port, log_level="warning"))
+    S.http.run()
+    if not S.http.started:                                    # as uvicorn.run ends one that never listened: a port taken
+        raise SystemExit(3)
+    if S.panic is not None:
+        raise SystemExit(1)                                   # the line above it said why: `⛔ stopped:`
 
 
 if __name__ == "__main__":

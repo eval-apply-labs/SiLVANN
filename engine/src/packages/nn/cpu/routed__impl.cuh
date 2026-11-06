@@ -86,13 +86,22 @@ static uint64_t nn__routed__zzprivate_top_k(sys__engine__ctx* ctx, const nn__doo
 }
 
 /* `n` picks' activations rotated, each its own `I` halves: one launch where `I` is a whole number of the rotation's 512
- * blocks — the picks' blocks then never straddle two picks — and a launch a pick otherwise, as DeepSeek-V4's 2304 = four
- * blocks of 512 and one of 256 needs (one launch over the picks would join a pick's 256 to the next pick's first 256). */
+ * blocks — the picks' blocks then never straddle two picks — and otherwise one launch of the ladder a row a pick
+ * (`hadamard_ladder_rows`), as DeepSeek-V4's 2304 = four blocks of 512 and one of 256 and Qwen3.8-Flash-Next's 640 = a 512
+ * and a 128 need (one rotation over the picks would join a pick's tail to the next pick's first block). A launch a pick
+ * cost the CPU's pool 10.5 µs each past the evaluator, ten picks 105 µs where one launch of 6,400 is 13 (`MEASURED`
+ * 2026-10-31 node03, measurements/2026-10-31_nn141_flash_next_node03.md); a width the ladder does not cut whole (not 128s)
+ * keeps a launch a pick. */
 static void nn__routed__zzprivate_rotate(const nn__doors* doors, unsigned int* over, const nn__routed* r, uint64_t actr, uint64_t act,
                                          uint64_t n) {
     const uint64_t I = r->inter;
     if (I % 512u == 0u) {
         doors->hadamard_rotate((uint16_t*)(uintptr_t)actr, (const uint16_t*)(uintptr_t)act, (const uint16_t*)(uintptr_t)r->signs, n * I, over);
+        return;
+    }
+    if (I % 128u == 0u) {
+        doors->hadamard_ladder_rows((uint16_t*)(uintptr_t)actr, (const uint16_t*)(uintptr_t)act, (const uint16_t*)(uintptr_t)r->signs,
+                                    I, n, over);
         return;
     }
     for (uint64_t i = 0u; i < n; ++i)

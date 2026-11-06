@@ -55,6 +55,15 @@ static inline void sys__os__condition_init(sys__os__condition* condition) { (voi
 static inline void sys__os__condition_wait(sys__os__condition* condition, sys__os__lock* lock) {
     (void)pthread_cond_wait(condition, lock);
 }
+/* ⛳ THE DEADLINE ON THE CONDITION'S OWN CLOCK, which is the system's wall clock for one made by the initializer. */
+static inline void sys__os__condition_wait_for(sys__os__condition* condition, sys__os__lock* lock, uint64_t ns) {
+    struct timespec until;
+    clock_gettime(CLOCK_REALTIME, &until);
+    const uint64_t at = (uint64_t)until.tv_nsec + ns;
+    until.tv_sec += (time_t)(at / 1000000000ull);
+    until.tv_nsec = (long)(at % 1000000000ull);
+    (void)pthread_cond_timedwait(condition, lock, &until);
+}
 static inline void sys__os__condition_wake_one(sys__os__condition* condition) { (void)pthread_cond_signal(condition); }
 static inline void sys__os__condition_wake_all(sys__os__condition* condition) { (void)pthread_cond_broadcast(condition); }
 

@@ -10,6 +10,11 @@ The commands here are the by-hand ones. On Ubuntu 22.04, add the security profil
 
 ## SearXNG: a search engine of your own
 
+`install_companion_searxng.sh` sets it up as a companion on SiLVANN's container network
+([`README.md`](README.md#companions-a-browser-and-a-search-engine-of-the-models-own)); what follows is the way it was
+done before, in a pod, by hand. ⛔ Never put the browser companion in that pod: a pod shares one address, and its
+firewall could then not keep it from SiLVANN.
+
 SearXNG is a separate program — a search engine that asks the others and answers in JSON — in a container of its own,
 from SearXNG's image; SiLVANN's image does not include it. Run it beside SiLVANN, in a *pod*: containers in one pod
 share an address, so SiLVANN finds SearXNG by itself as it starts. It is the alternative to a Brave Search API key
@@ -190,7 +195,7 @@ PyAV into the folder, under `python/`, where it stays through a new image —
 podman run --rm --userns=keep-id -v ~/SiLVANN:/data --entrypoint /opt/silvann/venv/bin/python \
        ghcr.io/eval-apply-labs/silvann:0-amd -c "import subprocess, sys; \
   sys.exit(subprocess.call([sys.executable, '-m', 'pip', 'install', '--upgrade', '--target', '/data/python/%d.%d' % sys.version_info[:2], \
-  '-r', '/opt/silvann/requirements-nonfree.txt']))"
+  '-r', '/opt/silvann/scripts/requirements-nonfree.txt']))"
 ```
 
 then stop and start the container. `install.sh`, outside a container, installs it with the rest (`SILVANN_NONFREE=0`

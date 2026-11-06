@@ -66,6 +66,10 @@ SURFACE = {
 # implies.
 LOWERED = {"let": "let", "set!": "set", "defun": "defun", "if": "if", "=>": "thread"}
 
+# The two truths, written as a value rather than a name: `#t` and `#f` are what a program hands a switch —
+# `(sys__garbage_collection__manual #t)` (▶ sys's `garbage_collection__header.cuh`).
+TRUTH = {"#t": "sys__value_true", "#f": "sys__value_false"}
+
 # a text literal (a tool form's: ▶ tools.py), a lone `"` (a text never closed), the parentheses, the quote, a name
 _TOKENS = re.compile(r""""(?:[^"\\]|\\.)*"|"|\(|\)|'|[^\s()'"]+""", re.S)
 # the same, and a comment — `;` to the end of its line — which only a source file carries
@@ -313,6 +317,8 @@ class Composer:
             return self._cell_float(node)
         if isinstance(node, Text):
             raise ComposerError("a text reaches the engine only where a tool form lowers it (▶ tools.py), not in a program")
+        if isinstance(node, str) and node in TRUTH:
+            return (self.kinds[TRUTH[node]], 0, 0)
         if isinstance(node, str):
             return self._cell_name(node)
         if isinstance(node, tuple) and node and node[0] == "quote":

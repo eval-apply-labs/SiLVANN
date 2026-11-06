@@ -1,0 +1,33 @@
+# SiLVANN's companions as a Compose file — the scripts' containers by hand, built here from this folder:
+#
+#   docker compose -f docker/companions/compose.yaml up -d --build      (or podman-compose, the same)
+#
+# Firefox is built from ./firefox — Debian's Firefox ESR, Violentmonkey, the firewall — and never pulled ready-made: its
+# firewall and its unprivileged start are what keep a page from SiLVANN, and no published Firefox image carries them.
+# SearXNG is SearXNG's own image; its settings — a secret key, the JSON format on — are made once by
+# install_companion_searxng.sh, or by hand as docker/advanced.md says. Both join silvann-companions, the network setup.sh
+# puts SiLVANN on (made by it, or by `docker network create silvann-companions`).
+name: silvann-companions
+services:
+  silvann-firefox:
+    build: ./firefox
+    image: silvann-firefox
+    container_name: silvann-firefox
+    read_only: true
+    tmpfs:
+      - /tmp:size=1g
+      - /run
+    cap_add: [NET_ADMIN]                 # its firewall, set as it starts; Firefox itself runs with every capability dropped
+    mem_limit: 2g
+    restart: unless-stopped
+    networks: [silvann-companions]
+  searxng:
+    image: docker.io/searxng/searxng:latest
+    container_name: searxng
+    volumes:
+      - ${HOME}/.config/silvann/searxng:/etc/searxng
+    restart: unless-stopped
+    networks: [silvann-companions]
+networks:
+  silvann-companions:
+    external: true

@@ -25,8 +25,8 @@
  * this file sits in one.
  *
  * ⛳ AND THE LIST IS SHORT BECAUSE A HEADER DECLARES RATHER THAN CALLS, which is worth saying because
- * the obvious reading is that an allocator must need the carousel it allocates from. It does not, here:
- * the free ring is a static the implementation keeps and every verb that touches it is defined over
+ * the obvious reading is that an allocator must need the free stack it allocates from. It does not, here:
+ * the free stack is a static the implementation keeps and every verb that touches it is defined over
  * there, so `heap__impl.cuh` owes that include and this one does not. The silicon seam and the computing
  * base are not named in this file at all; they are what the IMPLEMENTATION needs, and its own includes
  * say so.
@@ -138,8 +138,8 @@ static __device__ inline uint32_t     sys__heap__chunk_of(const sys__heap_node* 
 static __device__ inline uint32_t     sys__heap__provider(sys__kind kind);
 /* ⛳ TWO WAYS A BLOCK COMES TO HAVE A BASE, AND THE ONLY DIFFERENCE IS WHERE THE ROOM COMES FROM. One is
  * HANDED a chunk, which is how the first block gets chunk zero — the one chunk that never enters the free
- * ring, and therefore the only one that can be given away from outside without racing an allocation for
- * it. Every other block TAKES its own from the ring, and taking is this file's business rather than its
+ * stack, and therefore the only one that can be given away from outside without racing an allocation for
+ * it. Every other block TAKES its own from the stack, and taking is this file's business rather than its
  * caller's, so that form asks for nothing and answers the same base. */
 static __device__ inline sys__heap_node*  sys__heap__start_block(sys__heap_node* chunk);
 static __device__ inline sys__heap_node*  sys__heap__start_own_block(void);
@@ -200,6 +200,9 @@ static __device__ inline sys__heap_node   sys__heap_node__nothing(void);
  * handed none; what an allocating block needs from the register it asks for once and then remembers.
  * ────────────────────────────────────────────────────────────────────────────────────────────────── */
 static __device__ inline bool         sys__heap__zzpackage_published(void);
+/* Which publish this is: one more each time the heap is published, so something kept past a publish can tell
+ * that the pool it pointed into is gone. */
+static __device__ inline uint32_t     sys__heap__zzengine_generation(void);
 /* Whether `bytes` from `address` lie inside the heap — the pool and the room the boot set aside past it. */
 static __device__ inline bool         sys__heap__holds(uint64_t address, uint64_t bytes);
 /* How far the heap allocation pool reaches, in nodes. Asked rather than read from a constant, because the heap allocation pool's size is

@@ -8,7 +8,7 @@
 #include "../language_contract.cuh"
 #include "heap_object__header.cuh"
 #include "bindings__header.cuh"
-#include "carousel__header.cuh"
+#include "c_fixed_stack__header.cuh"
 #include "computing_base__header.cuh"
 #include "fault__header.cuh"
 #include "error.cuh"
@@ -33,8 +33,8 @@
  * by whatever bytes are there and the allocator would find a full heap allocation pool. ⚠ `MEASURED` by
  * the harness's poison: 0xA5 fill makes every unzeroed heap chunk claim to hold 2,779,096,485 things.
  *
- * ── AND WHY SOMETHING HAS TO PUT CHUNKS ON THE RING ─────────────────────────────────────────────────
- * The carousel is a LIST, so somebody has to add to it, and the only moment that already walks every
+ * ── AND WHY SOMETHING HAS TO PUT CHUNKS ON THE STACK ────────────────────────────────────────────────
+ * The free stack is a LIST, so somebody has to push onto it, and the only moment that already walks every
  * heap chunk is the same one that zeroes them.
  *
  * ── ONE COUNTING, IN THE HEAD ────────────────────────────────────────────────────────────────────────
@@ -43,8 +43,8 @@
  * settled at publish and has no compile-time ceiling.
  *
  * ── CHUNK ZERO ──────────────────────────────────────────────────────────────────────────────────────
- * Chunk zero is block zero's and never enters the free ring, so no claim can take it and no release
- * can hand it back: it is permanent by construction.
+ * Chunk zero is block zero's and never enters the free stack — `publish` skips it and `recycle` refuses
+ * it — so no claim can take it and no release can hand it back: it is permanent by construction.
  * ══════════════════════════════════════════════════════════════════════════════════════════════════ */
 
 /* ── THE THREE THINGS THAT ARE THE SAME FOR EVERY BLOCK ──────────────────────────────────────────────
@@ -76,17 +76,16 @@
  * every block writing the same value to the same word is benign only by accident, and a
  * thing that is correct by accident is a thing nobody wrote down.
  * ────────────────────────────────────────────────────────────────────────────────────────────────── */
-/* ⭐ WHAT IS FREE, IN THE ORDER IT BECAME FREE. The ring is sized past the number of heap chunks rather
- * than onto it, which is what lets `head == tail` mean EMPTY and nothing else — the argument is in
- * `carousel__header.cuh`, and the half this file owes is a RUNTIME one: `publish` sizes the ring with
- * `SYS__CAROUSEL__SLOTS_ABOVE` over the chunk count it was handed. ⛳ IT CANNOT BE A STATIC ASSERT — the
- * chunk count is decided at boot and arrives as an argument, so there is nothing at compile time to
- * assert about, and the refusal that stands in for one is `publish`'s own floor check.
+/* ⭐ WHAT IS FREE, THE CHUNK FREED LAST ON TOP (⚖ 2026-11-02). A claim takes the chunk most recently
+ * handed back, the one whose header and nodes are most likely still in the caches; the chunk that has
+ * waited longest was last touched a whole pool's worth of carving ago. It is a C fixed stack
+ * (`c_fixed_stack__header.cuh`), whose room comes from the seam, because putting a chunk away must not
+ * need a chunk. `publish` makes it with a slot for every chunk, from the count it was handed at boot, and
+ * chunk zero is never in it, so a push from this file cannot find it full.
  *
- * ⛳ CHUNK ZERO CANNOT BE PUT IN IT, AND NOT BY A RULE — BY ARITHMETIC. Its index is zero, and zero is
- * the carousel's word for an unwritten slot, so adding it is refused. The one chunk that must never go
- * home is the one whose name cannot be spoken here. */
-static __device__ sys__carousel* sys__heap__zzprivate_free;
+ * ⛳ CHUNK ZERO NEVER GOES IN: `publish` skips it and `recycle` refuses it. It is block zero's — the block
+ * the boot path starts on, and the one the system register rides with. */
+static __device__ sys__c_fixed_stack* sys__heap__zzprivate_free;
 
 static __device__ sys__heap_node* sys__heap__zzprivate_heap_base_address;
 /* How big the heap allocation pool is, in chunks and in nodes. ⭐ 
@@ -96,6 +95,7 @@ static __device__ sys__heap_node* sys__heap__zzprivate_heap_base_address;
  * are derived from the chunks once, here, so the two bounds checks that use them do not have to multiply.
  * */
 static __device__ uint32_t    sys__heap__zzprivate_chunks;
+static __device__ uint32_t    sys__heap__zzprivate_generation = 0u;   /* ▶ `sys__heap__zzengine_generation` */
 static __device__ uint64_t    sys__heap__zzprivate_nodes;
 static __device__ sys__heap_counters* sys__heap__zzprivate_counters;
 
@@ -163,6 +163,10 @@ static __device__ inline bool sys__heap__zzpackage_published(void) {
     return sys__heap__zzprivate_heap_base_address != 0;
 }
 
+static __device__ inline uint32_t sys__heap__zzengine_generation(void) {
+    return sys__heap__zzprivate_generation;
+}
+
 /* ── THE TWO WAYS BETWEEN AN ADDRESS AND AN OFFSET ───────────────────────────────────────────────────
  * ⚖ ARCHITECT: *"i think we should have two sys methods called sys__heap__offset(address) and
  * sys__heap__object_full_address(heap_offset) to improve legibility."*
@@ -227,7 +231,7 @@ static __device__ inline sys__heap_node* sys__heap__zzpackage_computing_base(uin
 /* Stand the allocator up, from the boot path and nowhere else. Takes the four things the boot path owns —
  * the memory, how many chunks it holds, the counters, and how many nodes past those chunks are reserved
  * for storage the boot owns and no block does — and leaves every chunk counted zero with all but chunk
- * zero offered to the free ring.
+ * zero on the free stack.
  * ⛳ EVERY PATH THAT RETURNS FALSE LEAVES NOTHING PUBLISHED, which is the property the rest of the
  * package rests on: `published()` is the one question its verbs ask, and a half-stood heap would answer
  * it yes. */
@@ -250,7 +254,7 @@ static __device__ inline bool sys__heap__publish(sys__heap_node* heap_base_addre
      * below is what the launch ACTUALLY IS. Asking one party for both would compare a number against
      * itself.
      *
-     * ⛔ AND IT IS CLAIMABLE CHUNKS THAT ARE COUNTED, NOT CHUNKS. Chunk zero never enters the ring — the
+     * ⛔ AND IT IS CLAIMABLE CHUNKS THAT ARE COUNTED, NOT CHUNKS. Chunk zero never enters the stack — the
      * pass below skips it — so a heap allocation pool of n hands out n-1, and comparing against n accepts
      * a heap allocation pool that is one short of serving its own launch. The subtraction is the
      * difference between a check that is nearly right and one that is right. */
@@ -265,14 +269,15 @@ static __device__ inline bool sys__heap__publish(sys__heap_node* heap_base_addre
      * caller from having to know that. `MEASURED`: six host checks about faults failed without this,
      * because the harness publishes more than once and a base outlived the heap it belonged to. */
     sys__heap__forget_base();
+    sys__heap__zzprivate_generation += 1u;
     sys__heap__zzprivate_heap_base_address = heap_base_address;
     sys__heap__zzprivate_chunks            = chunks;
     /* ⭐⭐ TWO BOUNDARIES, NOT ONE, AND CONFLATING THEM IS WHAT THIS PARAMETER PREVENTS. What may be
      * HANDED OUT is the chunks; what may be ADDRESSED is everything the base covers. They differ by the
      * room that outlives every chunk and belongs to no block — the boot's own storage, which must carry a
-     * real offset and must never reach the free ring.
+     * real offset and must never reach the free stack.
      * ⇒ ★ AN OFFSET IS A PROPERTY OF THE ALLOCATION; BEING HANDED OUT IS A PROPERTY OF THE POOL.
-     * ⛳ AND THE RESERVATION IS COUNTED HERE AND NOWHERE ELSE: the pass below fills the ring from the
+     * ⛳ AND THE RESERVATION IS COUNTED HERE AND NOWHERE ELSE: the pass below fills the stack from the
      * CHUNKS alone, so nothing has to remember to skip the tail — it was never offered. A caller that
      * reserves nothing passes zero and every number is what it was.
      * ⛳ THE ALLOCATOR IS TOLD, NOT ASKED, and it does not learn what the room is for. Whatever the boot
@@ -289,62 +294,56 @@ static __device__ inline bool sys__heap__publish(sys__heap_node* heap_base_addre
      * ⛳ IT IS ONE WORD PER CHUNK, ONCE, ON A PATH THAT ALREADY RUNS ONCE — one strided store per chunk
      * against a heap allocation pool of a few megabytes. The whole chunk is NOT cleared and does not need
      * to be: everything else in a heap chunk is written by whoever claims it. */
-    /* ⛳ AND PUBLISHING TWICE IS A THING A HARNESS DOES, so the previous ring goes back before a new one is
-     * taken. Without it a suite that resets more times than the heap allocation pool has heap chunks
+    /* ⛳ AND PUBLISHING TWICE IS A THING A HARNESS DOES, so the previous stack goes back before a new one
+     * is taken. Without it a suite that resets more times than the heap allocation pool has heap chunks
      * empties it, and the failure would arrive as NO_ENTRY somewhere unrelated, long after the reset that
      * caused it.
      * ⛳ THE HARNESS PASSES THAT THRESHOLD MANY TIMES OVER, and the count is not written here because it
      * moves every time a section is added.
      *
-     * ⛔ THE DRAIN IS NOT TIDINESS: `dispose` REFUSES a ring with things still in it, and there is no
-     * reset — `take` in a loop is the only way a carousel empties. So this is what a republish costs.
+     * ⛔ THE DRAIN IS NOT TIDINESS: `dispose` REFUSES a stack with values still in it, and there is no
+     * reset — `pop` in a loop is the only way one empties. So this is what a republish costs.
      *
      * ⛔⛔ AND WHAT MAKES DISCARDING THE INDICES SAFE IS A PRECONDITION ON THE CALLER, WHICH IS WORTH
      * STATING BECAUSE NOTHING HERE CAN CHECK IT. Publishing is a BOOT act: no block is running, so no
-     * heap chunk is held, so every chunk in the pool is free whatever the ring happens to say. That is
+     * heap chunk is held, so every chunk in the pool is free whatever the stack happens to say. That is
      * why the values taken out here can be thrown away and the loop below can simply offer all of them —
      * it is not restoring a state, it is asserting the only state a boot can be in.
      * ⇒ ⛔ CALLED MID-RUN IT WOULD DO THE OPPOSITE OF WHAT IT LOOKS LIKE: every chunk would go back on the
-     * ring including the ones blocks are carving from, and two claimants would be handed the same one.
+     * stack including the ones blocks are carving from, and two claimants would be handed the same one.
      * The precondition is the whole of the protection; there is no guard, and a guard would need to know
      * what is running, which this file cannot ask. */
     if (sys__heap__zzprivate_free != 0) {
         uint32_t stale;
-        while (sys__carousel__take(sys__heap__zzprivate_free, &stale)) { }
-        sys__carousel__dispose(sys__heap__zzprivate_free);
+        while (sys__c_fixed_stack__pop(sys__heap__zzprivate_free, &stale)) { }
+        sys__c_fixed_stack__dispose(sys__heap__zzprivate_free);
     }
-    /* ⭐ THE RING IS SIZED PAST THE HEAP ALLOCATION POOL, NOT ONTO IT, and it is sized from the same number
-     * the heap allocation pool is. A ring of n holds n-1, and the most that can ever be waiting is every
-     * chunk but the one a block is carving from — so `slots >= chunks` is what this heap allocation pool
-     * actually requires. Rounding to the first power of two ABOVE that gives more, and what the surplus
-     * buys is distance: the ring runs at most `chunks - 1` against a ceiling strictly above it, so the
-     * carousel's FULL refusal is unreachable from here rather than merely untaken. The argument in full is
-     * at the top of `carousel__header.cuh`. */
-    sys__heap__zzprivate_free = sys__carousel__create(SYS__CAROUSEL__SLOTS_ABOVE(chunks),
-                                                      SYS__CAROUSEL__U32);
+    /* ⭐ A SLOT FOR EVERY CHUNK, sized from the same number the heap allocation pool is. The most that can
+     * ever be on it is every chunk but chunk zero, so the stack's FULL refusal is unreachable from here. */
+    sys__heap__zzprivate_free = sys__c_fixed_stack__create(chunks);
     if (sys__heap__zzprivate_free == 0) {
-        /* ⛔ THE OLD RING IS ALREADY GONE BY HERE, so what is left is not a heap that lost its free list —
+        /* ⛔ THE OLD STACK IS ALREADY GONE BY HERE, so what is left is not a heap that lost its free list —
          * it is not a heap. Clearing the two words `published()` asks about says exactly that, and every
-         * verb then refuses with NOT_PUBLISHED instead of reaching into a null carousel.
+         * verb then refuses with NOT_PUBLISHED instead of reaching into a null stack.
          * ⛳ THE ALTERNATIVE IS QUIETER AND WORSE: leave them and a failed republish answers `published()`
-         * TRUE while holding no ring, so the first claim after it walks into the null. Ten call sites ask
+         * TRUE while holding no stack, so the first claim after it walks into the null. Ten call sites ask
          * that question and none of them asks a second one. */
         sys__heap__forget_base();
         sys__heap__zzprivate_heap_base_address = 0;
         return false;
     }
-    /* ⛳ ONE PASS ZEROES AND OFFERS, WHICH IS WHERE THE POOL'S CONTENTS ARE DECIDED. A carousel is a LIST
+    /* ⛳ ONE PASS ZEROES AND OFFERS, WHICH IS WHERE THE POOL'S CONTENTS ARE DECIDED. The stack is a LIST
      * and not a search, so what is in the pool is exactly what was put there — and the one moment that
-     * already walks every chunk is this one, so it is where they go on.
-     * ⛔ CHUNK ZERO IS SKIPPED HERE RATHER THAN REFUSED LATER, AND IT IS BLOCK ZERO'S — the block the
-     * boot path starts on, and the one the system register rides with. It is still zeroed, being memory
-     * like the rest, and it simply never becomes claimable, so nothing can be handed it twice.
-     * ⛳ AND THE ADD CANNOT FAIL HERE, WHICH IS WHY ITS ANSWER IS DROPPED: the ring is sized ABOVE the
-     * chunk count on purpose, so a pass that offers at most `chunks - 1` of them cannot fill it. The cast
-     * is saying "this has no failing case" and not "I am ignoring one". */
-    for (uint32_t i = 0u; i < chunks; ++i) {
+     * already walks every chunk is this one, so it is where they go on. It walks down, so chunk 1 ends on
+     * top and a fresh pool is claimed from its start: 1, 2, 3 …
+     * ⛔ CHUNK ZERO IS SKIPPED HERE, AND IT IS BLOCK ZERO'S — the block the boot path starts on, and the
+     * one the system register rides with. It is still zeroed, being memory like the rest, and it simply
+     * never becomes claimable, so nothing can be handed it twice.
+     * ⛳ AND THE PUSH CANNOT FAIL HERE, WHICH IS WHY ITS ANSWER IS DROPPED: the stack has a slot for every
+     * chunk, and this pass offers `chunks - 1` of them. No block is running, so its lock is free. */
+    for (uint32_t i = chunks; i-- > 0u; ) {
         SYS__HEAP_OBJECT__COUNT(&heap_base_address[(uint64_t)i * (uint64_t)SYS__HEAP__CHUNK_NODES]) = 0u;
-        if (i != 0u) (void)sys__carousel__add(sys__heap__zzprivate_free, i);
+        if (i != 0u) (void)sys__c_fixed_stack__push(sys__heap__zzprivate_free, i);
     }
 
     sys__heap__zzprivate_counters        = counters;
@@ -352,7 +351,7 @@ static __device__ inline bool sys__heap__publish(sys__heap_node* heap_base_addre
 }
 
 /* ── AND STANDING THE ALLOCATOR DOWN ─────────────────────────────────────────────────────────────────
- * Give the free ring back and forget where the pool was, so that every verb in this file refuses instead
+ * Give the free stack back and forget where the pool was, so that every verb in this file refuses instead
  * of reaching into memory that has been handed back.
  *
  * ⭐⭐ IT IS NOT THE OPPOSITE OF `publish` AND IT IS NOT MEANT TO BE. Publishing decides what the pool IS;
@@ -360,9 +359,9 @@ static __device__ inline bool sys__heap__publish(sys__heap_node* heap_base_addre
  * goes home — the whole pool is about to stop existing, so an allocator tidying its contents first would
  * be arranging furniture in a house being demolished.
  *
- * ⛔ THE RING IS THE ONE THING THAT MUST GO, because it is the one thing that is NOT in the pool: its room
+ * ⛔ THE STACK IS THE ONE THING THAT MUST GO, because it is the one thing that is NOT in the pool: its room
  * comes from the seam and outlives every free the boot path does. Draining it first is not tidiness —
- * `dispose` refuses a ring with things still waiting, and `take` in a loop is the only way one empties.
+ * `dispose` refuses a stack with values still in it, and `pop` in a loop is the only way one empties.
  *
  * ⛳ AND AFTERWARDS `published()` ANSWERS NO, WHICH IS THE PROPERTY WORTH HAVING. A machine that has been
  * shut down and is asked to allocate now refuses by name instead of carving out of somebody else's
@@ -370,8 +369,8 @@ static __device__ inline bool sys__heap__publish(sys__heap_node* heap_base_addre
 static __device__ inline void sys__heap__zzengine_retire(void) {
     if (sys__heap__zzprivate_free != 0) {
         uint32_t stale;
-        while (sys__carousel__take(sys__heap__zzprivate_free, &stale)) { }
-        sys__carousel__dispose(sys__heap__zzprivate_free);
+        while (sys__c_fixed_stack__pop(sys__heap__zzprivate_free, &stale)) { }
+        sys__c_fixed_stack__dispose(sys__heap__zzprivate_free);
         sys__heap__zzprivate_free = 0;
     }
     sys__heap__forget_base();
@@ -519,17 +518,25 @@ static __device__ inline void sys__heap_chunk__zzprivate_init(sys__heap_node* ch
  * rewrites every field a chunk has at the moment it is claimed, so nothing downstream reads what is
  * left here. It is hygiene: a chunk sitting in the bin still tagged as a supplier, with a watermark from
  * its last tenant, is a confusing thing to meet in a dump, and the two stores cost nothing.
- * ⛳ AND THEY CANNOT RACE A CLAIMER, whatever runs beside this: both come before the carousel add below,
- * and until that add no runner can find the chunk. Were they ever moved after it, the fix would be to
+ * ⛳ AND THEY CANNOT RACE A CLAIMER, whatever runs beside this: both come before the push below, and
+ * until that push no runner can find the chunk. Were they ever moved after it, the fix would be to
  * remove them, not to lock them, because the claimer is the one initialising. */
 static __device__ inline void sys__heap_chunk__zzprivate_recycle(sys__heap_node* chunk) {
+    /* ⛔ CHUNK ZERO, OR AN ADDRESS OUTSIDE THE POOL, IS REFUSED, and before anything is written: neither
+     * is ever offered, so one arriving here is a defect upstream, and pushing it would hand block zero's
+     * chunk, or memory past the pool, to the next claim. */
+    const uint32_t idx = sys__heap__chunk_of(chunk);
+    if (idx == 0u || idx >= sys__heap__zzprivate_chunks) {
+        sys__fault__raise(0ull, SYS__HEAP__FAULT_NOT_OFFERED);
+        return;
+    }
     chunk[SYS__CHUNK__HEAD].dtype = SYS__KIND__HEAP_CHUNK;
     sys__heap_chunk__zzprivate_set_watermark(chunk, 0ull);
-    /* ⭐ AND THIS IS THE MOMENT IT BECOMES AVAILABLE AGAIN. The carousel is a list, so going home is an
-     * act and not something the count says. Putting it here rather than at the two call sites is
+    /* ⭐ AND THIS IS THE MOMENT IT BECOMES AVAILABLE AGAIN. The free stack is a list, so going home is
+     * an act and not something the count says. Putting it here rather than at the two call sites is
      * the whole reason this function exists: one caller is the block moving off a chunk it filled, the
      * other is the last thing inside one dying, and neither should have to know about a free list. */
-    (void)sys__carousel__add(sys__heap__zzprivate_free, sys__heap__chunk_of(chunk));
+    (void)sys__c_fixed_stack__push(sys__heap__zzprivate_free, idx);
 }
 
 /* ── WHAT A CHUNK DOES WHEN ITS LAST OCCUPANT GOES ───────────────────────────────────────────────────
@@ -537,7 +544,7 @@ static __device__ inline void sys__heap_chunk__zzprivate_recycle(sys__heap_node*
  * A plain object hands its granule back to the chunk it was carved from. The computing base hands nothing
  * back and raises, because a release reaching it is a mistake rather than an ending. A chunk has no chunk
  * to hand anything to — it IS the room — so what it owes is to stop being a supplier and go back on the
- * ring, which is what `recycle` does, reached here by kind.
+ * free stack, which is what `recycle` does, reached here by kind.
  *
  * ⭐ AND IT HANDS NOTHING OVER, WHICH IS A FACT AND NOT AN OMISSION. What a release method returns is
  * whatever the dying thing was still holding, for the caller's loop to walk. A chunk reaching zero means
@@ -581,16 +588,15 @@ static __device__ inline unsigned int* sys__heap_chunk__zzprivate_count_word(con
 /* ── THE ALLOCATOR ────────────────────────────────────────────────────────────────────────────────────
  * Take one free heap chunk and return its index, or a nil index when there is none.
  *
- * ⭐⭐ IT ASKS A LIST RATHER THAN SEARCHING THE HEAP ALLOCATION POOL, AND THE REASON IS BIAS BEFORE SPEED.
- * A search from a fixed origin only moves when it is BLOCKED, so a chunk freed and re-claimed comes back
- * as the same chunk every time — one region reused continuously while the rest is never touched, and a
- * cost O(n) in busy chunks on top. Taking from the tail of the carousel cannot do that: a chunk handed
- * back goes behind everything already waiting and cannot come out again until they have.
+ * ⭐⭐ IT ASKS A LIST RATHER THAN SEARCHING THE HEAP ALLOCATION POOL. A search costs O(n) in the busy
+ * chunks, which is worst exactly when the pool is nearly full; a pop is the same few instructions at any
+ * occupancy. And the list is a stack: what comes off it is the chunk handed back last, so a block that
+ * fills a chunk while the one before it empties carves next into memory it has just been using.
  *
  * ⭐ THE COMPARE-AND-SWAP ON THE COUNT IS A CHECK RATHER THAN THE MECHANISM.
  * ⚖ ARCHITECT: *"we can also keep it but it is an extra check that it buys for free."* It is: the count is
  * a word this function has to write anyway, so making the write a swap from zero costs nothing and asserts
- * the thing the carousel is trusted for — that what comes off it is genuinely unheld. If it ever is not,
+ * the thing the free stack is trusted for — that what comes off it is genuinely unheld. If it ever is not,
  * the two accountings have diverged, and a claim that proceeded would hand out live memory.
  *
  * ⛳ ONE THREAD, and the guard is not here because it is not this function's to hold — every verb in the
@@ -609,13 +615,13 @@ static __device__ inline unsigned int* sys__heap_chunk__zzprivate_count_word(con
 static __device__ inline uint32_t sys__heap__zzprivate_claim_chunk(void) {
     if (!sys__heap__zzpackage_published()) return SYS__HEAP__NO_CHUNK;
     uint32_t idx = 0u;
-    if (!sys__carousel__take(sys__heap__zzprivate_free, &idx)) {
+    if (!sys__c_fixed_stack__pop(sys__heap__zzprivate_free, &idx)) {
         sys__heap__zzprivate_count(SYS__HEAP__COUNTER_CHUNK_REFUSED);
         return SYS__HEAP__NO_CHUNK;
     }
     sys__heap_node* taken = sys__heap__zzprivate_chunk_base(idx);
     if (sys__silicon__cas_u32(sys__heap_chunk__zzprivate_count_word(taken), 0u, 1u) != 0u) {
-        /* The carousel offered a chunk somebody is inside. Nothing here can put it right — the entry is
+        /* The free stack offered a chunk somebody is inside. Nothing here can put it right — the entry is
          * already spent — and carrying on would hand out live memory, so this refuses and says why. */
         sys__fault__raise(0ull, SYS__HEAP__FAULT_NOT_FREE);
         return SYS__HEAP__NO_CHUNK;
@@ -806,29 +812,20 @@ static __device__ inline uint32_t sys__heap_chunk__zzprivate_occupants(const sys
  * lose the release.
  * ⛳ IT ANSWERS NOTHING, which is the other half. There is no "was that the last one" to be had from a
  * provisional number, and a caller that wanted one would be asking the question this tag exists to
- * defer. */
+ * defer.
+ * ⛳ ONE ADD OF ALL-ONES, the decrement `give_up` makes without its refusal: the count wraps below zero
+ * by design, and an add lands whatever another thread wrote in between, so there is nothing to retry. */
 static __device__ inline void sys__heap_chunk__zzprivate_let_go_provisional(sys__heap_node* chunk) {
-    unsigned int* slot = sys__heap_chunk__zzprivate_count_word(chunk);
-    unsigned int cur = *slot;
-    for (;;) {
-        const unsigned int old = sys__silicon__cas_u32(slot, cur, cur - 1u);
-        if (old == cur) return;
-        cur = old;
-    }
+    (void)sys__silicon__add_u32(sys__heap_chunk__zzprivate_count_word(chunk), 0xFFFFFFFFu);
 }
 
 /* Write down a run of holds in one go. The arithmetic wraps, and that is not an accident being tolerated
  * — it is what makes the reconciliation mechanical: a count that went to -3 while three increments were
- * being gathered is `0xFFFFFFFD`, and adding 3 lands on 0 with no case to distinguish. */
+ * being gathered is `0xFFFFFFFD`, and adding 3 lands on 0 with no case to distinguish. One add, for the
+ * reason the decrement above is one. */
 static __device__ inline void sys__heap_chunk__zzprivate_add_run(sys__heap_node* chunk, uint32_t n) {
     if (n == 0u) return;
-    unsigned int* slot = sys__heap_chunk__zzprivate_count_word(chunk);
-    unsigned int cur = *slot;
-    for (;;) {
-        const unsigned int old = sys__silicon__cas_u32(slot, cur, cur + n);
-        if (old == cur) return;
-        cur = old;
-    }
+    (void)sys__silicon__add_u32(sys__heap_chunk__zzprivate_count_word(chunk), n);
 }
 
 static __device__ inline void sys__heap_chunk__zzpackage_add(sys__heap_node* chunk) {
@@ -864,7 +861,7 @@ static __device__ inline bool sys__heap_chunk__zzpackage_release(sys__heap_node*
     /* ⛔⛔ A CHUNK SOMEBODY IS CARVING FROM IS LET GO OF AND NEVER GIVEN BACK, and the reason is that the
      * number here cannot answer the question. Its increments are being gathered by the block that is
      * carving; what is written here is the decrements alone, so it reaches zero long before the chunk is
-     * empty and would hand a live arena to the free ring. The reconciliation happens when that block
+     * empty and would hand a live arena to the free stack. The reconciliation happens when that block
      * moves off, and only from that moment is zero an answer. */
     if (sys__heap_chunk__zzprivate_is_active(chunk)) {
         sys__heap_chunk__zzprivate_let_go_provisional(chunk);
@@ -1308,11 +1305,11 @@ static __device__ inline sys__heap_node* sys__heap__start_block(sys__heap_node* 
 }
 
 /* ── AND A BLOCK STARTING ITSELF ─────────────────────────────────────────────────────────────────────
- * The same thing for a block nobody can hand a chunk to: it takes one from the free ring first and then
+ * The same thing for a block nobody can hand a chunk to: it takes one from the free stack first and then
  * starts off in it.
  *
  * ⭐⭐ THE TAKING IS WHY THIS EXISTS RATHER THAN THE STARTING. Chunk zero is the only room that can be
- * given away from outside, because it is the only chunk the free ring never holds — anything else offered
+ * given away from outside, because it is the only chunk the free stack never holds — anything else offered
  * from outside could be handed to an allocation in the same breath. So a second block cannot be given
  * room; it has to take some, and taking is the allocator's own business. Putting the two steps together
  * here is what lets a caller ask for a block to start without asking for a chunk to exist.
@@ -1379,7 +1376,7 @@ unsigned long long sys_abi_base_address(unsigned int block) {
     if (!sys__heap__zzpackage_published()) return 0ull;
     const sys__heap_node where = sys__system_register__get(SYS__SYSTEM_REGISTER__COMPUTING_BASE_ARRAY);
     if (where.dtype != SYS__KIND__VALUE_INT || where.args[0] == 0ull || !sys__node_array__is(where.args[0])) return 0ull;
-    if ((uint64_t)block >= sys__node_array__length(where.args[0])) return 0ull;
+    if (block >= sys__computing_base__host()) return 0ull;   /* a block's: the host's slot after them is no block's */
     return (unsigned long long)(uintptr_t)sys__heap__zzpackage_computing_base((uint32_t)block);
 }
 

@@ -69,7 +69,33 @@ https://brave.com/search/api/): the script asks for it, or put it in `~/SiLVANN/
 ```
 
 — then **Rebuild the tools** in Options. The key stays with the server; the model never reads it. To run a search
-engine of your own instead, a SearXNG beside SiLVANN: [`advanced.md`](advanced.md#searxng-a-search-engine-of-your-own).
+engine of your own instead, a SearXNG beside SiLVANN: the companions, below.
+
+## Companions: a browser and a search engine of the model's own
+
+Containers beside SiLVANN's that the model's tools use, each set up by its own script — all of them in one line:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/eval-apply-labs/SiLVANN/HEAD/docker/install_companions.sh | bash
+```
+
+| companion | its script | what the model gets |
+|---|---|---|
+| a Firefox, `silvann-firefox` | `install_companion_firefox.sh` | `(browser …)`: pages opened, looked at, clicked, typed into, Violentmonkey's userscripts ([`docs/tools.md`](../docs/tools.md#the-browser)) |
+| SearXNG, `searxng` | `install_companion_searxng.sh` | `(search …)` without a key: a search engine of your own, asking the others |
+
+They run on a network of their own, `silvann-companions`, which `setup.sh` puts SiLVANN on — a container made before
+it, by an older `setup.sh`, is put on it by running `setup.sh` once with `update` (the folder stays). Then restart
+SiLVANN, or press **Rebuild the tools** in Options.
+
+⛔ **The browser never runs in SiLVANN's container.** A page that goes wrong — a download, an exploit — would find every
+conversation there. The companion's firewall lets it reach the public internet and nothing private: not SiLVANN's
+container, not this machine, not your network (a private address is refused at once). Its root is read-only, its
+profile in memory and fresh for each session SiLVANN opens, Firefox runs without privileges, and nothing is kept.
+Any script with `remove` takes its companion away; where SiLVANN runs without a container (`install.sh`), the
+companions go on this machine's loopback instead, `127.0.0.1:9222` and `127.0.0.1:8888`. By hand, with Compose:
+`docker compose -f companions/compose.yaml up -d --build` — the browser is always built here, from Debian's Firefox ESR
+and Violentmonkey, never pulled ready-made: no published Firefox image carries its firewall.
 
 ## By hand
 

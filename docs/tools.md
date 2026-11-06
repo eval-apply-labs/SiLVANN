@@ -17,6 +17,7 @@ beside each conversation ([`users.md`](users.md#the-models-tool)).
 | command | what it does |
 |---|---|
 | `(help)`, `(help 'name)` | Lists every command, or gives one's page — made when it is called, from what the server holds: what is here, what is switched off or not available and why, and what asks the user first in this conversation's mode. |
+| `(tools)` | The commands that answer in this conversation and the skills', a line each — the tool's description names it, so a model reaches for it first. A command that cannot answer here is left out; `(help)` keeps it as a comment saying why. |
 | `(ls "folder")` | The names in a folder; a folder's name ends in `/`. |
 | `(read "file")`, `(read "file" from count)` | A file's first 200 lines, or `count` of its lines from line `from`; a last line says how to read on. |
 | `(write "file" "text")`, `(write "file" "text" 'append)` | Writes the file, or adds to its end, making the folders it needs. |
@@ -32,6 +33,8 @@ beside each conversation ([`users.md`](users.md#the-models-tool)).
 | `(remove_tool "name")` | Takes away a tool the model added, its settings kept in the tools file should it be added again. Never a built-in or one of yours. |
 | `(list_repo)`, `(list_package "name")`, `(get_tool "package/tool")`, `(add_repo "address")` | Tools from repositories: their packages listed, a tool put in the working folder to read before `(add_tool …)`, a repository added ([below](#tools-from-a-repository)). |
 | `(image "prompt")` | A picture drawn by the picture model and shown to the user. Settings go in the prompt: `--size 768x1024`, `--steps 20`, `--seed 7`, `--count 4` (four pictures, seeds 7, 8, 9 and 10). It draws with a picture model on this machine or on another SiLVANN server, as [the tools file](#the-tools-file)'s `image` entry says. Without one `(help)` lists it as a comment saying why, and it answers at once that none is installed, so the model can say so ([`config.md`](config.md#a-picture-from-the-text-model)). |
+| `(ui 'look 30)`, `(ui 'move x y)`, `(ui 'click)`, `(ui 'type "text")`, `(ui 'key "ctrl+s")`, `(ui 'scroll 3)`, `(ui 'pointer)` | The model's hands on this machine's screen: a picture of a share of it around the pointer, the pointer moved, clicks, typing, keys and scrolling ([below](#the-screen)). A look is asked of the user as a read is, and each action as a write. |
+| `(browser 'open "https://…")`, `(browser 'look)`, `(browser 'elements)`, `(browser 'click 3)`, `(browser 'type 2 "text")`, `(browser 'key "Enter")`, `(browser 'text)`, `(browser 'back)` | A Firefox of the model's own, in a container beside SiLVANN's that reaches the public internet and nothing private: pages opened, looked at as the screen is, their elements listed and clicked by number or words, typed into, read ([below](#the-browser)). Opening a page is asked as `(fetch …)` is, and each click, typing and key as the network is. |
 | `(whoami)` | Which model this is and under which LoRA, its cards, its context and how much this conversation used, its tool's mode, and what `(agent …)` can reach: its LoRAs, the other models here, the other servers (the workers and the registry's). |
 | `(agent 'model "config" "task")` | A subagent's session: another model, or this one under a LoRA, given a task ([below](#subagents)). |
 | `(guide)` | This page's part on [adding a command](#adding-a-command), headed by how the model adds a tool on this machine, or that adding is switched off. |
@@ -44,6 +47,62 @@ list words.
 
 **State:** a conversation's REPL keeps what the model defines from one call to the next until `(reset)`. A server's
 restart starts every REPL afresh.
+
+### The screen
+
+`(ui …)` drives the desktop of the machine the server runs on, for a model that reads pictures (the Qwen models, GLM 5.3
+Flash and DeepSeek-V4.1-Flash):
+
+- `(ui 'look percent)` takes a picture of that share of the screen's width and height, centred on the pointer — a red
+  cross — with rulers above and to its left in the screen's pixels, and shows it to the model in the call's answer, as a
+  picture you attach is shown. `(ui 'look 100)` is the whole screen; `(ui 'look 25)` a close look around the pointer.
+- `(ui 'move x y)` moves the pointer to a pixel of the screen; `(ui 'click)` clicks where it is — `(ui 'click 'right)`,
+  `(ui 'click 'left 2)` a double click, `(ui 'click x y)` moves there first.
+- `(ui 'type "text")` types into what has the keyboard, `(ui 'key "ctrl+s")` presses a key or a chord, `(ui 'scroll 3)`
+  scrolls down three notches where the pointer is (`-3` up), `(ui 'pointer)` answers `(x y width height)`.
+- Each click, typing, key and scroll answers what changed on the screen and where, or that nothing did — so a click
+  that missed, or typing into nothing, says so.
+
+The model works in small steps — look, act, look again — and is told to click something small only once a close look
+puts the red cross on it. A look is asked of the user as a read is, and each click, typing, key and scroll as a write:
+"ask first" and "reads unasked" ask each one; "full auto" asks none.
+
+It reaches an X11 screen: the server's `DISPLAY`, or the display the tools file's `ui` entry names (`display`: `":0"`,
+`"host:N"`). Its input goes through XTest and its picture through Pillow, so the machine needs `libXtst` — every X11
+desktop has it. A Wayland session's screen is not reached (its compositor takes no input from another program), nor yet
+Windows'. Where no display answers, `(help)` lists the command as a comment saying why.
+
+### The browser
+
+`(browser …)` drives a Firefox in the **browser companion**, a container of its own beside SiLVANN's
+([`docker/README.md`](../docker/README.md#companions-a-browser-and-a-search-engine-of-the-models-own)), over WebDriver
+BiDi, the W3C's protocol built into Firefox:
+
+- `(browser 'open "https://…")` opens a page (a bare name as `https://`), `(browser 'back)` goes back, `(browser 'where)`
+  answers its address and title, `(browser 'text)` its words — `(browser 'text 12000)` from there on.
+- `(browser 'elements)` lists what can be clicked or typed into, numbered, each with its words and its middle;
+  `(browser 'click 3)` clicks number 3, `(browser 'click "Sign in")` the one reading those words, `(browser 'click x y)` a
+  pixel. `(browser 'type 2 "text")` types into element 2, `(browser 'key "Enter")` presses a key, `(browser 'scroll 3)`
+  scrolls.
+- `(browser 'look percent)` shows the model the page — that share of it around the pointer — with rulers, as
+  [`(ui 'look …)`](#the-screen) shows the screen. Each click, typing, key and scroll answers what changed on the page,
+  and where an action leads to another page, it waits for that page to load first.
+
+**Userscripts**, for a session (⚖ *"sessions start clean, the service can copy/paste from its notepad or from a rag the
+appropriate script it needs"*): `(browser 'userscript "https://….user.js")` installs a public one in the session's
+Violentmonkey, which every profile carries, its `GM_` functions with it; `(browser 'userscript "fixes/site.user.js")` runs
+one from the model's workspace — or its text, given as it is — in the tab's pages as its header's `@match`, `@include`,
+`@exclude` and `@run-at` ask, without `GM_` functions. A session starts with none.
+
+Opening a page is asked of the user as `(fetch …)` is, and each click, typing and key as the network is; looking and
+reading are not. With the tools file's `browser` entry's `robots` left `"keep"`, a page a site's `robots.txt` asks
+robots not to read is not opened, as `(fetch …)` keeps to it. What a page says is the page's, not an instruction.
+
+**Why a companion:** a page that goes wrong — a download, an exploit — in SiLVANN's own container would find every
+conversation there. In the companion it finds nothing: its firewall lets it reach the public internet and nothing
+private (not SiLVANN, not the machine, not your network), its root is read-only, its profile in memory and fresh for
+each session, and Firefox runs without privileges. The entry's `address`: `"auto"` finds the companion on SiLVANN's
+container network, `ws://silvann-firefox:9222`, then on this machine's loopback, `ws://127.0.0.1:9222`.
 
 ### Searching the web
 

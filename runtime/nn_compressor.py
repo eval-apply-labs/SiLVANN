@@ -262,6 +262,8 @@ POLICY = [
     # DeepSeek-V4.1: a sink logit a head (64 values) and the engram gate's two small maps (4 x 5120)
     (r"\.attn_sink$",                                        RAW),
     (r"\.engram\.[qk]_weight$",                              RAW),
+    # Qwen3.8-Flash-Next: the gated residual's injection, four rows a site — as the router, kept exact
+    (r"_hyper_connection\.block_inject_weight\.weight$",     RAW),
 ]
 
 

@@ -131,8 +131,9 @@
 #define AI_QWEN_3__EXP__MASK           16u   /* past the parts' cells */
 #define AI_QWEN_3__POST__MASK          6u    /* the shared expert's */
 /* ⭐ optional, past the mask's cells: 1 where the routed experts' products are in integers — nn's int8 gemvs, the
- * activation quantised in blocks of 32 (`turboquant_gemv_groups_int8` / `…_sum_int8`) — for a position's experts on the
- * CPU; 0 or absent, exact. A prompt's rows on the CPU are in integers either way. */
+ * activation quantised in blocks of 32 (`turboquant_gemv_groups_int8` / `…_sum_int8`) — 0 where they are exact. A
+ * position's experts on the CPU are exact where the cell is absent; a prompt's rows there (`experts_rows`, nn's expert-major
+ * `expert_groups_int8` / `expert_rows_sum_int8`, in blocks of 256) are in integers where it is absent. */
 #define AI_QWEN_3__EXP__INT8           19u
 
 

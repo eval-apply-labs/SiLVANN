@@ -1,7 +1,7 @@
 # Windows' libraries, prebuilt: the evaluator for each Python install.ps1 accepts, and the silicon families, built on
-# GitHub's Windows runners from this tree with build.py — the commands a PC builds them with — and attached to the
+# GitHub's Windows runners from this tree with scripts/build.py — the commands a PC builds them with — and attached to the
 # release a tag names, as silvann_windows_x64.zip. install.ps1 takes them when their stamp is its own folder's (the
-# engine's tree and build.py, by git's hash); otherwise it builds them, as build.ps1 does.
+# engine's tree and scripts/build.py, by git's hash); otherwise it builds them, as scripts/build.ps1 does.
 #
 # The runners have no GPU: each library is built and loaded, no model is run. Windows Server 2022's runner, for its
 # Visual Studio 2022: CUDA 12.9's front end does not take Visual Studio 2026's headers (cudafe++ crashed on them),
@@ -44,8 +44,8 @@ jobs:
         env:
           SILVANN_SILICON_FAMILIES: none
         run: |
-          python -m pip install --quiet -r requirements.txt
-          python build.py
+          python -m pip install --quiet -r scripts/requirements.txt
+          python scripts/build.py
           if ($LASTEXITCODE -ne 0) { Get-Content lib\evaluator.log -ErrorAction SilentlyContinue; exit 1 }
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -78,8 +78,8 @@ jobs:
         env:
           SILVANN_SILICON_FAMILIES: x86_avx2 nvidia_cuda12 khronos_opencl2 khronos_opencl1_igpu
         run: |
-          python -m pip install --quiet -r requirements.txt
-          python build.py
+          python -m pip install --quiet -r scripts/requirements.txt
+          python scripts/build.py
           $built = Get-ChildItem lib\silicon_families -Filter "libsilvann_*.dll" | ForEach-Object { $_.Name }
           $missing = $env:SILVANN_SILICON_FAMILIES.Split(" ") | Where-Object { $built -notcontains "libsilvann_$_.dll" }
           if ($missing) {
@@ -124,7 +124,7 @@ jobs:
           cp built/evaluator-*/silvann_engine_cpu*.pyd out/lib/
           cp built/families/lib/silicon_families/*.dll out/lib/silicon_families/
           cp built/families/notices/* out/lib/notices/
-          printf 'engine %s\nbuild.py %s\ncommit %s\n' "$(git rev-parse HEAD:engine)" "$(git rev-parse HEAD:build.py)" \
+          printf 'engine %s\nbuild.py %s\ncommit %s\n' "$(git rev-parse HEAD:engine)" "$(git rev-parse HEAD:scripts/build.py)" \
             "$GITHUB_SHA" > out/lib/windows_libraries.txt
           cat > out/lib/NOTICES.md <<EOF
           # SiLVANN's prebuilt Windows libraries — what they hold

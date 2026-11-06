@@ -272,6 +272,13 @@
     X(PKG, 83, "nn__vector__widen",   nn__vector__zzabi_adapter_widen,             NN__VECTOR__WIDEN) \
     /* ⭐ THE CPUS' EXPERTS REGISTERED WITH A CARD (NN-115): a promotion copied straight from where it lies in RAM. ▶     */ \
     /* `contracts/objects/expert.cuh`, `cpu/opcodes/expert__abi.cuh`.                                                 */ \
-    X(PKG, 84, "nn__expert__register", nn__expert__zzabi_adapter_register,         NN__EXPERT__REGISTER)
+    X(PKG, 84, "nn__expert__register", nn__expert__zzabi_adapter_register,         NN__EXPERT__REGISTER) \
+    /* ⭐ A CHUNK'S ROUTER PICKS INTO ITS HAND ROWS: `top_k` over rows, each row's picks as words and weights as halves in */ \
+    /* a buffer of rows, which a CPU worker reads in one copy. ▶ `cpu/opcodes/vector__abi.cuh`.                        */ \
+    X(PKG, 85, "nn__vector__top_k_rows", nn__vector__zzabi_adapter_top_k_rows,     NN__VECTOR__TOP_K_ROWS) \
+    /* ⭐ AN N-GRAM MEMORY'S ROWS IN THE PROGRAM — ⚖ 2026-11-01 *"yes then it makes sense to turn it into an nn verb"*:   */ \
+    /* a position's n-grams hashed and their rows read from the table's file, as Flash-Next's and DeepSeek V4's hosts   */ \
+    /* did between tokens. ▶ `contracts/objects/ngram.cuh`.                                                               */ \
+    X(PKG, 86, "nn__ngram__rows",     nn__ngram__zzabi_adapter_rows,               NN__NGRAM__ROWS)
 
 #endif /* SILVANN__PACKAGES_NN_CONTRACTS_MACROS_LANGUAGE_CONTRACT__VERBS_CUH */

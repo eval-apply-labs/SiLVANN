@@ -36,7 +36,7 @@
  *
  * Two kinds name it, for one reason: neither is carved from a provider. A computing base is placed by hand
  * in `start_block`, before there is anywhere to remember a provider; a chunk provider is taken off the free
- * ring rather than carved out of anything. A row saying "objects" or "arrays" would claim a path neither
+ * stack rather than carved out of anything. A row saying "objects" or "arrays" would claim a path neither
  * takes. A kind with no row at all answers this too, so an unregistered kind and a deliberately
  * unprovided one arrive at the same refusal — which is right, since neither can be made.
  *

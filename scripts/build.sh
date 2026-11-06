@@ -8,7 +8,7 @@
 #   SILVANN_NVCC              CUDA's compiler, for NVIDIA cards           default nvcc on the PATH
 #   SILVANN_CUDA_ARCHES       the NVIDIA cards to build for, e.g. 120     default every one the family lists
 set -eu
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."    # the release's folder: this file is in its scripts/
 PY="${SILVANN_PYTHON:-python3}"
 SUFFIX=$("$PY" -c 'import sysconfig; print(sysconfig.get_config_var("EXT_SUFFIX") or ".so")')
 PYBIND=$("$PY" -c 'import pybind11; print(pybind11.get_include())')
@@ -16,7 +16,8 @@ PYINC=$("$PY" -c 'import sysconfig; print(sysconfig.get_path("include"))')
 mkdir -p lib/silicon_families
 
 echo "== the evaluator"
-g++ -x c++ -O2 -std=c++17 -pthread -fPIC -shared -DSILVANN_MODULE_NAME=silvann_engine_cpu \
+# its thread-locals one load each, as setup.py builds it (▶ there)
+g++ -x c++ -O2 -std=c++17 -pthread -fPIC -shared -ftls-model=initial-exec -DSILVANN_MODULE_NAME=silvann_engine_cpu \
     -Iengine/src -I"$PYBIND" -I"$PYINC" engine/src/manifest.cu -o "lib/silvann_engine_cpu$SUFFIX"
 
 echo "== the silicon families"

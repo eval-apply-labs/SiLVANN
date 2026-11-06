@@ -47,15 +47,6 @@
      * block id, and it is a plain indexed array rather than a list — one slot per block, sized       \
      * once, never resized, so every reason a list exists is absent and the lookup is an addition. */ \
     X(SYS__SYSTEM_REGISTER__COMPUTING_BASE_ARRAY)                                                     \
-    /* WHERE EVERY BLOCK'S MESSAGES ARRIVE. A REFERENCE, and the same shape as the bases: one slot    \
-     * per block, sized once at boot. What differs is what a slot HOLDS — not a thing but a LIST, so  \
-     * posting to a block is adding to a list, which needs no room found at the posting end and no    \
-     * protocol of its own. ⚖ ARCHITECT: a message is *"most likely"* an object reference to a heap   \
-     * object — which is where this is going, and not something decided.                              \
-     * ⛔ THE ROW IS THE WHOLE OF WHAT EXISTS. Nothing stands the array up, nothing posts to it and    \
-     * nothing drains it. It is here because a mailbox is the second thing no scope can own — a block \
-     * with its own copy of its mailbox is a block nobody can reach. */                               \
-    X(SYS__SYSTEM_REGISTER__MAILBOX_ARRAY)                                                            \
     /* WHERE EVERY OTHER PACKAGE KEEPS ITS OWN. A REFERENCE to one entry per package, indexed by the  \
      * package id — so a package reaches its own entry point by knowing who it is, which it always    \
      * does. ⚖ ARCHITECT: *"add a system register called extension_hatch which can be either an array \
@@ -94,7 +85,12 @@
      * is the only thing that runs after the register exists, before any init, AND is handed the text  \
      * as an argument. A call with no arguments cannot be given a string.                              \
      * ⛳ NO CONFIG FILE STILL WRITES ONE, EMPTY, so an init has ONE failure mode. */                   \
-    X(SYS__SYSTEM_REGISTER__SETTINGS)
+    X(SYS__SYSTEM_REGISTER__SETTINGS)                                                                 \
+    /* WHERE EVERY BLOCK'S WORK WAITS. An OFFSET to an array a slot a block, the bases' shape, each      \
+     * slot a list every block may append a request to and the block itself takes from, oldest first   \
+     * (▶ `cpu/scheduler__header.cuh`). ⚖ ARCHITECT 2026-11-03: *"we can add another system register    \
+     * voice with the scheduler pipeline which feeds directly to it"*. */                               \
+    X(SYS__SYSTEM_REGISTER__SCHEDULER_QUEUE_ARRAY)
 
 /* The seats, dealt in the order the list is read. */
 enum {

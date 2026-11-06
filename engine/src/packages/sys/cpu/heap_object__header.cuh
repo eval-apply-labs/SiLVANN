@@ -327,6 +327,10 @@ static __device__ inline uint32_t sys__heap_object__retain(uint64_t offset);
  * ⛳ NOT INLINED, AND THE ARGUMENT FOR IT IS WHERE IT IS DEFINED. */
 static __device__ SYS__NOINLINE uint32_t sys__heap_object__release(uint64_t offset);
 
+/* Every teardown waiting on this thread's worklist, taken apart now — the manual mode's collect, which
+ * turns the mode off around it (▶ `garbage_collection__header.cuh`). */
+static __device__ inline void sys__heap_object__zzpackage_collect(void);
+
 /* The same, through a value CELL rather than a bare reference — and it clears the cell.
  *
  * A cell is what a container HANDS YOU: `sys__stack__pop`, `sys__stack__peek` and
@@ -360,5 +364,7 @@ static __device__ inline uint64_t sys__heap_object__clone(uint64_t offset, sys__
  * spinning on memory the heap allocation pool has already handed out. */
 static __device__ inline bool sys__heap_object__lock(uint64_t offset);
 static __device__ inline void sys__heap_object__lock_release(uint64_t offset);
+/* The same lock for an object several blocks share, waited for longer (▶ its definition). */
+static __device__ inline bool sys__heap_object__zzpackage_lock_shared(uint64_t offset);
 
 #endif /* SILVANN__PACKAGES_SYS_CPU_HEAP_OBJECT__HEADER_CUH */

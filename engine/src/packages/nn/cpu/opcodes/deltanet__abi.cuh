@@ -80,22 +80,26 @@ static sys__heap_node nn__deltanet__zzabi_apply_conv_step(const sys__heap_node* 
 }
 
 /* ── ⭐⭐ ONE STEP, EVERY HEAD — the head loop in one launch ────────────────────────────────────────── */
-/* `(nn__deltanet__step S conved z beta g w out k_heads v_heads head_dim)` — every value head's recurrence at
+/* `(nn__deltanet__step S conved z beta g w out k_heads v_heads head_dim [gate])` — every value head's recurrence at
  * one token: `S` (fp32, `v_heads` of `head_dim²`) read, decayed by `e^g` and updated in place, and each head's
  * gated, normed readout into `out`. `conved` is the conv's output, `q`s then `k`s (`k_heads` each) then `v`s;
  * `z`, `beta` and `g` are the gate, the write strength and the log decay, one a head for the last two; `w` is
- * the gated norm's weight. ▶ `kernels.cuh` for the arithmetic. Refused: key heads that do not divide the
- * value heads. */
+ * the gated norm's weight. `gate` is the output gate's function: 0 silu(z), Qwen 3.5's (the default), 1 σ(z),
+ * Flash-Next's — the first through the `deltanet_step` door, the second through `deltanet_steps_gate` at one row.
+ * ▶ `kernels.cuh` for the arithmetic. Refused: key heads that do not divide the value heads, another gate. */
 static sys__heap_node nn__deltanet__zzabi_apply_step(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx) {
-    if (argc != 10u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
+    if (argc != 10u && argc != 11u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
     uint64_t at[7] = {0, 0, 0, 0, 0, 0, 0}, room[7] = {0, 0, 0, 0, 0, 0, 0};
     for (unsigned a = 0u; a < 7u; ++a)
         if (!nn__primitives__room(&argv[a], &at[a], &room[a])) return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
     if (argv[7].dtype != SYS__KIND__VALUE_INT || argv[8].dtype != SYS__KIND__VALUE_INT
-     || argv[9].dtype != SYS__KIND__VALUE_INT) return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
+     || argv[9].dtype != SYS__KIND__VALUE_INT || (argc == 11u && argv[10].dtype != SYS__KIND__VALUE_INT))
+        return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
     const uint64_t k_heads = argv[7].args[0], v_heads = argv[8].args[0], d = argv[9].args[0];
+    const uint64_t gate = argc == 11u ? argv[10].args[0] : (uint64_t)NN__DELTANET__GATE_SILU;
     if (k_heads == 0ull || v_heads == 0ull || d == 0ull || v_heads % k_heads != 0ull
-     || v_heads > 0xFFFFFFFFull || k_heads > v_heads) return sys__engine__abi__error(NN__DELTANET__FAULT_BOUNDS);
+     || v_heads > 0xFFFFFFFFull || k_heads > v_heads || gate > NN__DELTANET__GATE_SIGMOID)
+        return sys__engine__abi__error(NN__DELTANET__FAULT_BOUNDS);
     uint64_t k_dim = 0, v_dim = 0, cells = 0;
     if (!nn__deltanet__zzpackage_shape(argv[9], argv[9], &k_dim, &v_dim, &cells)
      || !nn__deltanet__zzpackage_fits32(cells * v_heads, room[0])
@@ -107,9 +111,15 @@ static sys__heap_node nn__deltanet__zzabi_apply_step(const sys__heap_node* argv,
 
     const nn__doors* doors = nn__doors_for(ctx);
     if (doors == 0) return sys__engine__abi__error(NN__PRIMITIVES__FAULT_NO_DEVICE);
-    doors->deltanet_step((float*)(uintptr_t)at[0], (const uint16_t*)(uintptr_t)at[1], (const uint16_t*)(uintptr_t)at[2],
-                         (const uint16_t*)(uintptr_t)at[3], (const uint16_t*)(uintptr_t)at[4], (const uint16_t*)(uintptr_t)at[5],
-                         (uint16_t*)(uintptr_t)at[6], k_heads, v_heads, d, ctx->fault_word);
+    if (gate == NN__DELTANET__GATE_SILU)
+        doors->deltanet_step((float*)(uintptr_t)at[0], (const uint16_t*)(uintptr_t)at[1], (const uint16_t*)(uintptr_t)at[2],
+                             (const uint16_t*)(uintptr_t)at[3], (const uint16_t*)(uintptr_t)at[4], (const uint16_t*)(uintptr_t)at[5],
+                             (uint16_t*)(uintptr_t)at[6], k_heads, v_heads, d, ctx->fault_word);
+    else
+        doors->deltanet_steps_gate((float*)(uintptr_t)at[0], (const uint16_t*)(uintptr_t)at[1], (const uint16_t*)(uintptr_t)at[2],
+                                   (const uint16_t*)(uintptr_t)at[3], (const uint16_t*)(uintptr_t)at[4],
+                                   (const uint16_t*)(uintptr_t)at[5], (uint16_t*)(uintptr_t)at[6], k_heads, v_heads, d, 1u,
+                                   (unsigned int)gate, ctx->fault_word);
     return nn__doors_answer(&argv[6]);
 }
 

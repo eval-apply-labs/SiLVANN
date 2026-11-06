@@ -69,6 +69,8 @@
 #define SYS__LIST__FAULT_KIND   0x4C53544Eull   /* "LSTN" — Not one                                  */
 #define SYS__LIST__FAULT_RANGE  0x4C53544Full   /* "LSTO" — a position Outside this view             */
 #define SYS__LIST__FAULT_SHARED 0x4C535453ull   /* "LSTS" — a list reached twice, so no picture of it */
+#define SYS__LIST__FAULT_NOT_PUT 0x4C535450ull  /* "LSTP" — a shared list's append that did not go: its lock, or no
+                                                  room — the word raised before it says which             */
 
 #include <stdint.h>
 #include "heap_node.cuh"

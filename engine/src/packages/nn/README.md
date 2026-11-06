@@ -153,8 +153,17 @@ A few things worth knowing before reading them:
   `defun` with the one it wants. The generic body defines the arithmetic; a family's faster body for a door
   goes in its `overrides/`.
 - **DeltaNet at one token is one verb, every head in one launch.** `nn__deltanet__step` reads and updates each
-  head's fp32 state in place and writes its gated, normed readout. The three verbs it was built from
+  head's fp32 state in place and writes its gated, normed readout — gated by silu(z), Qwen 3.5's, or with its `gate`
+  argument 1 by σ(z), Flash-Next's (the `deltanet_steps_gate` door). The three verbs it was built from
   (`rank_1_update`, `readout`, `conv_step`) remain, and `conv_step` still runs before it. ▶ `cpu/deltanet__header.cuh`.
+- **A chunk's router picks go straight into its hand rows.** `nn__vector__top_k_rows` is `top_k` over rows, each row's
+  picks written as words and its weights as halves into a buffer of rows, so a CPU worker reads a chunk's hands in one
+  copy (ai_qwen_3's `experts_rows`).
+- **A position's n-gram rows are read in the program.** `nn__ngram__rows` hashes the n-grams ending at a token — the
+  token and the ones before it in a buffer of the conversation's, each times its multiplier, xored, each length's value
+  modulo each head's size and offset into one table — reads their FP8 rows from the table's file through the system's
+  cache, several at once, and writes them dequantised as halves, the buffer of tokens moved on: Flash-Next's n-gram
+  embedding and DeepSeek V4's engram, which the host read between tokens. ▶ `contracts/objects/ngram.cuh`.
 - **A position's attention is one query.** `nn__rope__angles` writes a position's cos and sin (fp32) on the
   card, once for every layer, and `nn__rope__apply` rotates every head by them; `nn__attention__decode` is one query's
   attention over positions `from` to `to` of a `[position][kv_head][head_dim]` cache, grouped-query — so a

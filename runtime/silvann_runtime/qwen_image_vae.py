@@ -15,7 +15,7 @@ import struct
 
 import numpy as np
 
-from .model_folder import Refused
+from .model_folder import Refused, program_dir
 
 CHUNK_FLOATS = 1 << 25        # the unfolded rows a convolution multiplies at a time: 128 MB of float32
 
@@ -188,10 +188,11 @@ class CardVae:
     PROGRAM = "qwen_image_vae"      # the pack's lisp/ file
 
     def __init__(self, path, machine, max_h=64, max_w=64, chunk=4096, program=None):
+        self.path = path
         self.cpu = Vae(path)                   # the weights as the pack ships them, and the config
         self.m, self.MAX_H, self.MAX_W, self.CHUNK = machine, int(max_h), int(max_w), int(chunk)
         # the program's file: the pack's own, or the one given — a development box's
-        self.PROGRAM_FILE = program or os.path.join(path, "lisp", self.PROGRAM + ".lisp")
+        self.PROGRAM_FILE = program or os.path.join(program_dir(os.path.join(path, "lisp")), self.PROGRAM + ".lisp")
         c = self.cpu.config
         self.dims = [c["decoder_base_dim"] * u for u in [c["dim_mult"][-1]] + c["dim_mult"][::-1]]
         self.up_t = self.cpu.down_t[::-1]
@@ -364,7 +365,7 @@ class CardVae:
         m, levels, R = self.m, self.cpu.levels, self.cpu.config["num_res_blocks"] + 1
         if not os.path.isfile(self.PROGRAM_FILE):
             raise Refused("%s has no %s — the picture decoder's program; `silvann download` fetches it"
-                          % (os.path.dirname(os.path.dirname(self.PROGRAM_FILE)), os.path.basename(self.PROGRAM_FILE)))
+                          % (self.path, os.path.relpath(self.PROGRAM_FILE, self.path)))
         if any(n + "_short" in self.CONVS for n in ("mid_r0", "mid_r1")):
             raise Refused("this decoder's middle resnets change their width; the program's run in place")
         m.bind_values(dict(planes, LEVELS=levels, RESNETS=R))

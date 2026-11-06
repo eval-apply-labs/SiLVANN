@@ -29,7 +29,9 @@ static inline void amd_rocm6_wave64__override_doors(nn__doors* doors) {
     doors->attention_causal_scores_grouped = amd_rocm6_wave64__override_attention_causal_scores_grouped;
     doors->attention_scores_grouped     = amd_rocm6_wave64__override_attention_scores_grouped;
     doors->deltanet_steps               = amd_rocm6_wave64__override_deltanet_steps;
+    doors->deltanet_steps_gate          = amd_rocm6_wave64__override_deltanet_steps_gate;
     doors->deltanet_step                = amd_rocm6_wave64__override_deltanet_step;
+    doors->deltanet_gates_rows          = amd_rocm6_wave64__override_deltanet_gates_rows;
     doors->hadamard_rotate      = amd_rocm6_wave64__override_hadamard_rotate;
     doors->turboquant_gemv_groups     = amd_rocm6_wave64__override_gemv_groups;
     doors->turboquant_gemv_groups_n   = amd_rocm6_wave64__override_gemv_groups_n;
@@ -41,6 +43,9 @@ static inline void amd_rocm6_wave64__override_doors(nn__doors* doors) {
     doors->rmsnorm_rows         = amd_rocm6_wave64__override_rmsnorm_rows;
     doors->rmsnorm_rotate       = amd_rocm6_wave64__override_rmsnorm_rotate;
     doors->rmsnorm_fp32         = amd_rocm6_wave64__override_rmsnorm_fp32;
+    doors->rmsnorm_fp32_rows    = amd_rocm6_wave64__override_rmsnorm_fp32_rows;
+    doors->gated_rank           = amd_rocm6_wave64__override_gated_rank;
+    doors->gated_mean           = amd_rocm6_wave64__override_gated_mean;
     doors->argmax               = amd_rocm6_wave64__override_argmax;
     doors->vector_top_k         = amd_rocm6_wave64__override_vector_top_k;
     doors->vector_penalize      = amd_rocm6_wave64__override_vector_penalize;

@@ -45,8 +45,7 @@
  * exclusive. ⛳ AND WHAT IS CHECKED IS THE SLOT, NOT THE WRITER: both accessors turn away a `which` above
  * `ARRAYS`, and that is the whole of the enforcement. The other four are reached by direct stores — `init`
  * fills bindings and program, `begin` puts the thawed copy back, `finish` writes the answer and its kind,
- * the drain empties both — and the host fills the same four slots itself through `eng_abi_place` without
- * passing through any of them. ⇒ ★ A REFUSAL KEEPS A GENERIC DOOR OFF A SLOT; IT DOES NOT MAKE ONE WRITER
+ * the drain empties both. ⇒ ★ A REFUSAL KEEPS A GENERIC DOOR OFF A SLOT; IT DOES NOT MAKE ONE WRITER
  * OF IT. That each of those verbs is the only one that should touch what it touches is an argument in this
  * package, and a reader who needs it enforced reads the call sites.
  *
@@ -161,11 +160,11 @@
  * WHAT IT DOES NOT DO
  *   It is never RELEASED. It outlives everything it names, and its row in the kind list refuses rather
  *   than freeing — see `WHERE IT LIVES` above for why that is a fact about its home and not its shape.
- *   It does not WAIT UNBOUNDED, and it waits in only two places, neither of them a question. `begin` backs
- *   off for `SYS__COMPUTING_BASE__POLL_CYCLES` when its swap loses, so an idle block polls instead of
- *   hammering; and the lisp's `sys__result` retries up to `SYS__COMPUTING_BASE__RESULT_TRIES` times with
- *   that same back-off between tries. Every question — `status`, `completed`, `fault` — is a read, and a
- *   refused `claim` answers at once.
+ *   It does not WAIT UNBOUNDED, and it waits in one place, which is not a question: `begin` backs off for
+ *   `SYS__COMPUTING_BASE__POLL_CYCLES` when its swap loses, so an idle block polls instead of hammering.
+ *   The lisp's `sys__wait` waits on an answer, not on a base, up to `SYS__COMPUTING_BASE__RESULT_TRIES`
+ *   tries with that same back-off between them. Every question — `status`, `fault`, an answer's state — is a read,
+ *   and a refused `claim` answers at once.
  *   It does not COPY in `init`: bindings and program are references handed over and held, not duplicated.
  *   ⛔ `begin` DOES, and it is the one verb here that allocates — it thaws the picture into a list of its
  *   own with `sys__list__deep_copy_from_node_array`, and over a scheduled SNAPSHOT it builds an
@@ -219,6 +218,18 @@ static __device__ inline sys__heap_node sys__computing_base__read_result(sys__he
                                                                          uint32_t block_id);
 
 static __device__ inline sys__heap_node* sys__computing_base__get(uint32_t block_id);
+
+/* ⭐ THE HOST'S SLOT: the last of the bases row, one past the blocks'. The caller outside the runners — the engine's
+ * doors — acts as it to put work on a block's queue and read its answers, carving from a base of its own there
+ * (started at its first door) (▶ `scheduler__header.cuh`). It runs no queue: `sys__scheduler__add` names the runners
+ * alone. 0 before the register stands. */
+static __device__ inline uint32_t sys__computing_base__host(void);
+
+/* Where a scheduled computation's value goes: the answer its request carried, held by the base while it runs — 0 for a
+ * base running nothing scheduled, `SYS__SCHEDULER__CONTINUED` once its step went on (▶ the definition, and
+ * `scheduler__header.cuh`). The block that owns the base writes it, while it holds it. */
+static __device__ inline uint64_t sys__computing_base__zzengine_answer(const sys__heap_node* computing_base);
+static __device__ inline void     sys__computing_base__zzengine_set_answer(sys__heap_node* computing_base, uint64_t answer);
 
 /* ── OUTSIDE THE CONTRACT ───────────────────────────────────────────────────────────────────────────
  * Reachable from the rest of `sys` and no further. The heap reads and writes the two provider slots

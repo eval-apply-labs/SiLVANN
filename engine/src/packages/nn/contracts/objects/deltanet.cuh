@@ -9,4 +9,9 @@
 #define NN__DELTANET__CONV_TAPS    4u    /* `linear_conv_kernel_dim` — `conv1d.weight` is [ch x 4] */
 #define NN__DELTANET__CONV_WINDOW  3u    /* the retained columns: t-3, t-2, t-1                    */
 
+/* The readout's output gate, what multiplies the normed readout: Qwen 3.5's and Qwen3-Next's silu(z), Flash-Next's
+ * (`qwen4_exp`) σ(z). */
+#define NN__DELTANET__GATE_SILU    0u
+#define NN__DELTANET__GATE_SIGMOID 1u
+
 #endif /* SILVANN__PACKAGES_NN_CONTRACTS_OBJECTS_DELTANET_CUH */

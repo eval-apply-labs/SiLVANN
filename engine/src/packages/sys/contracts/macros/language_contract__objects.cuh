@@ -141,6 +141,11 @@
     X(PKG, SYS__KIND__DICTIONARY_LEAF,  sys__dictionary_leaf__zzpackage_release_internal,                    \
       SYS__COMPUTING_BASE__ARRAYS,       sys__heap_object__clone__default,                               \
       sys__heap_object__create_refusal,   SYS__DICTIONARY_LEAF__NODES)                                       \
+    /* ⛳ AN ANSWER HOLDS ONE VALUE, AND A PROGRAM MAY MAKE AN EMPTY ONE to hand `sys__scheduler__add`. It  */ \
+    /*   lasts as long as its holders, so it is carved where things that last are.                          */ \
+    X(PKG, SYS__KIND__ANSWER,           sys__answer__zzpackage_release_internal,                             \
+      SYS__COMPUTING_BASE__OBJECTS,      sys__heap_object__clone__default,                               \
+      sys__answer__zzpackage_construct,  SYS__ANSWER__NODES)                                              \
     /* ⛳ ONE OF TWO ROWS WHOSE SIZE COLUMN IS A FLOOR RATHER THAN AN ANSWER, with the string's. This   */ \
     /*   one is asked for its extent, so what the column states is the SMALLEST an array can be — a      */ \
     /*   head and one element — and a caller wanting more says so when it asks.                          */ \

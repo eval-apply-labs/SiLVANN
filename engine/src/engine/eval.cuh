@@ -122,11 +122,63 @@ static __device__ inline bool eng__eval__zzprivate_pool_put(uint64_t* pool, uint
 }
 #endif
 
+/* A list the evaluator fills: a recycled one from the runner's pool where a slot holds one (▶ "THE LIST POOL"), else one
+ * made — empty either way, held once, the caller's. `pool` is 0 where there is no pool. */
+static __device__ inline uint64_t eng__eval__zzprivate_list(uint64_t* pool) {
+#if SILVANN_LIST_POOL
+    if (pool != 0) {
+        const uint64_t got = eng__eval__zzprivate_pool_take(pool);
+        if (got != 0ull) return got;
+    }
+#else
+    (void)pool;
+#endif
+    return sys__list__create();
+}
+
 #define ENG__EVAL__FAULT_NOT_A_VERB 0x45564156ull   /* "EVAV" — a form whose head is not a verb        */
 #define ENG__EVAL__FAULT_DEPTH      0x45564144ull   /* "EVAD" — a descent the stack could not record  */
+#define ENG__EVAL__FAULT_NO_ROOM    0x45564E52ull   /* "EVNR" — a form there was No Room to make       */
+/* ⛳ EVNR IS A FORM THE EVALUATOR COULD NOT MAKE AS IT ENTERED IT — a frozen form thawed, a procedure's body
+ * copied for a call: the heap had no room for the list. A picture that is not one is refused the same way, and
+ * says so first in its own word (`NARN`); the stop is the evaluator's either way. */
 /* ⛔ A DESCENT THAT CANNOT BE REMEMBERED STOPS THE EVALUATOR. With no place pushed, the pop on the way
  * back would return to the wrong form, or find the stack empty; so the loop raises `EVAD` and ends
  * instead, after the stack itself has raised why it could not grow. */
+
+/* ══ A STOP IS A PANIC ════════════════════════════════════════════════════════════════════════════════
+ * ⚖ ARCHITECT 2026-11-03: *"i'd make EVAV a blocking error that resets the heap... the danger of not doing
+ * that is to keep zombie values in the heap, and an evaluator fault is serious enough to warrant a panic"*
+ * · *"all four panic, verbs keep refusing"*.
+ * The loop has four stops — a descent it has no room to record (`EVAD`), a form it has no room to make
+ * (`EVNR`: a thaw, or a call's body), a call it cannot make and a head that is not a verb (`EVAV`) — and each
+ * abandons the evaluation where it stands: what the
+ * program bound is still bound, and the forms it was in the middle of are let go of with nobody to say what
+ * they meant. So the machine stops with it. The first stop's word is kept; no evaluation starts and every
+ * door refuses (▶ `eng__abi__zzpackage_free_to_launch`) until the heap is published again — a shutdown and
+ * a boot — which forgets it, the word remembering the publish it was raised under.
+ * ⛳ A VERB THAT REFUSES IS NOT A STOP: it leaves an error value in its form and the program goes on, its
+ * enclosing forms — an unbinding among them — still running. */
+static uint32_t eng__eval__zzprivate_panic_word  = 0u;   /* the first stop's word, or 0                */
+static uint32_t eng__eval__zzprivate_panic_under = 0u;   /* the publish of the heap it was raised under */
+
+/* The word the machine panicked with under this publish of the heap, or 0. */
+static __device__ inline uint32_t eng__eval__panicked(void) {
+    if (sys__silicon__read_u32(&eng__eval__zzprivate_panic_under) != sys__heap__zzengine_generation()) return 0u;
+    return sys__silicon__read_u32(&eng__eval__zzprivate_panic_word);
+}
+
+/* A stop: its word raised on the fault channel, and the machine panicked with it — the first stop's word
+ * kept, whichever runner reaches one first. */
+static __device__ SYS__NOINLINE void eng__eval__zzprivate_stop(uint64_t word) {
+    sys__fault__raise(0ull, word);
+    const uint32_t now = sys__heap__zzengine_generation();
+    if (eng__eval__zzprivate_panic_under != now) {        /* a word from an earlier publish names nothing */
+        eng__eval__zzprivate_panic_word  = 0u;
+        eng__eval__zzprivate_panic_under = now;
+    }
+    (void)sys__silicon__cas_u32(&eng__eval__zzprivate_panic_word, 0u, (uint32_t)word);
+}
 
 /* Resolve every name in a form to what it means now. A QUOTED name is left exactly as it is, which is the
  * whole of why `set!` needs no special treatment. */
@@ -256,37 +308,53 @@ static __device__ inline uint64_t eng__eval__zzprivate_first_form(uint64_t form,
  *
  * ⛔⛔ AND THE BODY IS COPIED, WHICH IS THE PRICE OF EVALUATING BY REWRITING. A verb rewrites the form it
  * is handed, so a body evaluated in place is a body DESTROYED — the second call would find whatever the
- * first one left. Every call therefore makes a list of its own out of the body's picture first, and that is
+ * first one left. Every call therefore fills a list of its own from the body's picture first, and that is
  * a real cost on the hottest thing a program does, not a detail.
  * ⭐ AND THE PICTURE IS NEVER WRITTEN, SO READING IT COSTS NOBODY ANYTHING. The copy takes no hold on the
  * picture or on any array inside it — the procedure holds all of them — so any number of blocks can expand
  * one procedure at once, and the only counts they touch are those of the objects the body names.
  * ────────────────────────────────────────────────────────────────────────────────────────────────── */
 
-/* Turn a call into the program that performs it, in place. */
-static __device__ SYS__NOINLINE bool eng__eval__zzprivate_expand(uint64_t bindings, uint64_t form, sys__heap_node proc) {
+/* Turn a call into the program that performs it, in place. Answers 0, or the stop it could not: `EVNR` where the
+ * heap had no room for the body's copy or its unbinding, `EVAV` for a call it cannot make at all. `pool` is the
+ * runner's list pool, or 0: both lists a call makes are taken from it where it has them — they finish inside the
+ * call, so the pool has them back by the call's end. */
+static __device__ SYS__NOINLINE uint64_t eng__eval__zzprivate_expand(uint64_t bindings, uint64_t form, sys__heap_node proc,
+                                                                    uint64_t* pool) {
     /* Both halves are read without a hold: the form holds the procedure and the procedure holds them. A
      * procedure of no parameters has nil where their names would be. */
     sys__heap_node names; sys__heap_node body_cell;
-    if (!sys__procedure__zzengine_halves(proc.args[0], &names, &body_cell)) return false;
+    if (!sys__procedure__zzengine_halves(proc.args[0], &names, &body_cell)) return ENG__EVAL__FAULT_NOT_A_VERB;
     const uint64_t params = (names.dtype == SYS__KIND__QUOTED_LIST) ? names.args[0] : 0ull;
     const uint64_t body   = body_cell.args[0];
     const uint64_t arity  = (params == 0ull) ? 0ull : sys__node_array__length(params);
-    if (sys__sublist__length(form) != arity + 1ull) return false;
+    if (sys__sublist__length(form) != arity + 1ull) return ENG__EVAL__FAULT_NOT_A_VERB;
 
     sys__heap_node verb;
     verb.dtype = SYS__KIND__STANDARD; verb.num_args = 0u; verb.args[0] = 0ull;
 
     /* ⭐ THE EVALUATOR'S DOOR: a body copied once per call, and under `SILVANN_LAZY_THAW` its
-     * sub-forms come back frozen, so a call builds only the branch it takes. */
-    const uint64_t run = sys__list__thaw_running(body);
-    if (run == 0ull) return false;
+     * sub-forms come back frozen, so a call builds only the branch it takes. ⛳ INTO A RECYCLED LIST where the pool
+     * has one, as a descent's thaw is: `MEASURED` (measurements/2026-11-03_procedure_expansion_node03.md), the two
+     * lists a call made and took apart were its largest share. */
+    uint64_t run = 0ull;
+#if SILVANN_LIST_POOL
+    if (pool != 0) {
+        run = eng__eval__zzprivate_pool_take(pool);
+        if (run != 0ull && !sys__list__thaw_running_into(body, run)) {
+            (void)sys__heap_object__release(run);
+            run = 0ull;
+        }
+    }
+#endif
+    if (run == 0ull) run = sys__list__thaw_running(body);
+    if (run == 0ull) return ENG__EVAL__FAULT_NO_ROOM;
 
     /* ONE unbinding form for every parameter, and it goes on the end where it cannot disturb the
      * arguments still standing in the cells this is about to read. */
     if (arity > 0ull) {
-        const uint64_t drop = sys__list__create();
-        if (drop == 0ull) { (void)sys__heap_object__release(run); return false; }
+        const uint64_t drop = eng__eval__zzprivate_list(pool);
+        if (drop == 0ull) { (void)sys__heap_object__release(run); return ENG__EVAL__FAULT_NO_ROOM; }
         sys__heap_node v = verb; v.op_code = SYS__OPCODES__REMOVE_BINDINGS; (void)sys__sublist__append(drop, &v);
         sys__heap_node e; e.dtype = SYS__KIND__VALUE_INT; e.num_args = 0u; e.args[0] = bindings;
         (void)sys__sublist__append(drop, &e);
@@ -327,7 +395,7 @@ static __device__ SYS__NOINLINE bool eng__eval__zzprivate_expand(uint64_t bindin
         if (arity > 1ull) (void)sys__sublist__discard(form, 2ull, arity - 1ull);
     }
     (void)sys__heap_object__release(run);
-    return true;
+    return 0ull;
 }
 
 /* Run a program and answer what it became.
@@ -362,6 +430,9 @@ static __device__ inline sys__heap_node eng__eval(uint64_t bindings, uint64_t pr
     bool&           entering = zzhot_entering;
     uint64_t&       resume   = zzhot_resume;
 
+    /* ⛔ A PANICKED MACHINE STARTS NOTHING (▶ "A STOP IS A PANIC", above): a computation handed to a runner
+     * after another runner stopped answers nothing, and the door that asked refuses after it. */
+    if (eng__eval__panicked() != 0u) return sys__heap_node__nothing();
     places = sys__stack__create();
     if (places.dtype != SYS__KIND__OBJECT_REFERENCE) return sys__heap_node__nothing();
 
@@ -453,7 +524,7 @@ static __device__ inline sys__heap_node eng__eval(uint64_t bindings, uint64_t pr
             place.args[0] = current; place.args[1] = at;
             sys__list__zzengine_walk_park(&scan, &place);     /* and where the scan stands, to come back to */
             if (!sys__stack__zzengine_compute_stack_push(&places, &place)) {
-                sys__fault__raise(0ull, ENG__EVAL__FAULT_DEPTH);
+                eng__eval__zzprivate_stop(ENG__EVAL__FAULT_DEPTH);
                 answer = sys__heap_node__nothing();
                 break;
             }
@@ -489,7 +560,7 @@ static __device__ inline sys__heap_node eng__eval(uint64_t bindings, uint64_t pr
 #endif
                 made = sys__list__thaw_running(into.args[0]);
                 if (made == 0ull) {
-                    sys__fault__raise(0ull, ENG__EVAL__FAULT_NOT_A_VERB);
+                    eng__eval__zzprivate_stop(ENG__EVAL__FAULT_NO_ROOM);
                     answer = sys__heap_node__nothing();
                     break;
                 }
@@ -519,8 +590,13 @@ static __device__ inline sys__heap_node eng__eval(uint64_t bindings, uint64_t pr
         /* ⭐ A NAME THAT MEANT A PROCEDURE IS A CALL, and a call is a rewrite rather than a step this loop
          * takes: the form becomes the program that performs it and the scan carries on. */
         if (eng__eval__zzprivate_is_procedure(head)) {
-            if (!eng__eval__zzprivate_expand(bindings, current, head)) {
-                sys__fault__raise(0ull, ENG__EVAL__FAULT_NOT_A_VERB);
+#if SILVANN_LIST_POOL
+            const uint64_t refused = eng__eval__zzprivate_expand(bindings, current, head, zzhot_pool);
+#else
+            const uint64_t refused = eng__eval__zzprivate_expand(bindings, current, head, 0);
+#endif
+            if (refused != 0ull) {
+                eng__eval__zzprivate_stop(refused);
                 answer = sys__heap_node__nothing();
                 break;
             }
@@ -533,7 +609,7 @@ static __device__ inline sys__heap_node eng__eval(uint64_t bindings, uint64_t pr
             continue;
         }
         if (head.dtype != SYS__KIND__STANDARD) {
-            sys__fault__raise(0ull, ENG__EVAL__FAULT_NOT_A_VERB);
+            eng__eval__zzprivate_stop(ENG__EVAL__FAULT_NOT_A_VERB);
             answer = sys__heap_node__nothing();
             break;
         }
@@ -565,6 +641,9 @@ static __device__ inline sys__heap_node eng__eval(uint64_t bindings, uint64_t pr
     }
 #endif
     (void)sys__heap_object__release(places.args[0]);
+    /* ⛳ LAST, so what the evaluation let go of on its way out is collected with what the manual mode left
+     * waiting (▶ `sys`'s `garbage_collection__header.cuh`). */
+    sys__garbage_collection__zzengine_evaluation_ends();
     return answer;
 }
 

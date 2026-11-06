@@ -223,7 +223,11 @@ typedef struct nn__gemm__tile {
     X(PKG, void, attention_softmax_lens,   nn__attention__zzabi_launch_softmax_lens,   (float* p, uint64_t p_row, const uint32_t* lens, uint64_t heads, uint64_t rows)) \
     X(PKG, void, attention_mix_rows,       nn__attention__zzabi_launch_mix_rows,       (uint16_t* o, uint64_t o_row, const float* p, uint64_t p_row, const uint16_t* v, uint64_t v_row, const uint32_t* lens, uint64_t q_heads, uint64_t kv_heads, uint64_t head_dim, uint64_t rows, unsigned int* over)) \
     X(PKG, void, vector_top_k_rows,        nn__vector__zzabi_launch_top_k_rows,        (uint64_t* values, uint64_t stride, uint64_t values_row, uint16_t* weights, uint64_t weights_row, const uint16_t* x, uint64_t n, uint64_t k, uint64_t rows)) \
-    X(PKG, void, expert_pairs_rows,        nn__expert__zzabi_launch_pairs_rows,        (uint32_t* pairs, uint64_t n, uint64_t x_step, uint64_t x_at, uint64_t out_step, uint64_t out_at))
+    X(PKG, void, expert_pairs_rows,        nn__expert__zzabi_launch_pairs_rows,        (uint32_t* pairs, uint64_t n, uint64_t x_step, uint64_t x_at, uint64_t out_step, uint64_t out_at)) \
+    X(PKG, void, deltanet_steps_gate,      nn__deltanet__zzabi_launch_steps_gate,      (float* S, const uint16_t* conved, const uint16_t* z, const uint16_t* beta, const uint16_t* g, const uint16_t* w, uint16_t* out, uint64_t k_heads, uint64_t v_heads, uint64_t head_dim, uint64_t rows, unsigned int gate, unsigned int* over)) \
+    X(PKG, void, rmsnorm_fp32_rows,        nn__rmsnorm__zzabi_launch_fp32_rows,        (uint16_t* o, const float* x, const uint16_t* w, uint64_t n, uint64_t rows, uint64_t period, float eps, unsigned int* over)) \
+    X(PKG, void, gated_rank,               nn__gated__zzabi_launch_rank,               (uint16_t* rot, uint16_t* act, const uint16_t* a, const uint16_t* sign, uint64_t rank, float scale, unsigned int* over)) \
+    X(PKG, void, gated_mean,               nn__gated__zzabi_launch_mean,               (uint16_t* into, uint16_t* inj, const uint16_t* gt, const uint16_t* an, const uint16_t* ij, uint64_t hidden, uint64_t streams, float mean, unsigned int* over))
 
 /* ⛳ THE TABLE AND THE LAUNCH ARE THE HOST'S SIDE OF A FAMILY, so a family whose kernels are compiled as
  * OpenCL C does not see them there: that language has no function pointers, and `kernel` is a keyword. */

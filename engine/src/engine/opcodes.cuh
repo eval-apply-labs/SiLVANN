@@ -4,16 +4,15 @@
  * One verb, and it is the other half of the evaluator: `eng__eval` is what a block does with a program,
  * and this is what it does between them.
  *
- * ⭐⭐ THE WHOLE OF THE IDLE STATE IS A COMPUTING BASE'S STATUS WORD, AND NOTHING ELSE EXISTS. A block
- *   waiting for work is a block asking its own base whether anybody has scheduled any; work arriving is
- *   that word saying SCHEDULED; and the answer going back is the same word saying OK. There is no queue,
- *   no message, no wake-up and nothing to register with — ⚖ ARCHITECT: *"a semaphore will do."* What a
- *   scheduler does to reach a block is fill that block's base, which it can do because the bases are an
- *   array every runner can name.
+ * ⭐⭐ THE WHOLE OF THE IDLE STATE IS A COMPUTING BASE'S STATUS WORD AND THE BLOCK'S QUEUE. A block waiting
+ *   for work looks at its queue, which every caller appends to (▶ `sys`'s `scheduler__header.cuh`), and fills
+ *   its own base from the oldest request; the base saying SCHEDULED is the next turn's work, and the value
+ *   goes into the answer the request carried. There is no message and nothing to register with — ⚖ ARCHITECT:
+ *   *"a semaphore will do."* — and the look writes nothing.
  *
  * ⭐ AND THE WAITING IS THE `else` ARM OF THIS LOOP, BECAUSE THE IDLE PATH REACHES NOTHING ELSE. `begin`
  *   is called only once the peeked status already says SCHEDULED, so a block with nothing to do never
- *   gets near it — the word reads FREE, the third arm takes it, and that arm's back-off is the whole of
+ *   gets near it — the word reads FREE, the queue is empty, and the last arm's back-off is the whole of
  *   the waiting. ⛔ IT IS NOT A COPY OF `begin`'s AND DELETING IT AS ONE COSTS EXACTLY WHAT THAT VERB'S
  *   OWN COMMENT NAMES: *"a block refused a BEGIN has nowhere else: it IS the idle loop"*, and without a
  *   back-off *"an idle block polls a word at full rate, and the traffic is the entire cost of having
@@ -55,13 +54,32 @@ static __device__ inline bool eng__opcodes__zzprivate_told_to_stop(const unsigne
     return stop != 0 && sys__silicon__read_u32(stop) != 0u;
 }
 
+/* ── AND HOW AN IDLE BLOCK WAITS ─────────────────────────────────────────────────────────────────────
+ * ⭐ IT LOOKS, THEN DOZES ON ITS DOOR. A block with nothing to do looks at its queue and its base every POLL_CYCLES for
+ *   ENG__OPCODES__IDLE_SPIN_NS after its last work, then sleeps on its door until a request is queued for it — every
+ *   request rings its block's door (▶ `sys`'s `zzengine_doze`) — or ENG__OPCODES__DOZE_NS pass, and looks again. The
+ *   blocks are resident for the machine's life (▶ `engine/abi/residency.cuh`), so a machine nobody is asking anything
+ *   of keeps no core busy, and work arriving wakes its block at once.
+ * ⛔ THE LOOK IS LONG BECAUSE A SLEEPING NEIGHBOUR SLOWS A ROUND TRIP: with 5 ms of it, a program's
+ *   `sys__scheduler__add` and `sys__result` between two working blocks took 8.8 us against 6.9 with every block looking, the two blocks
+ *   the bench left idle asleep beside them; with 50 ms, 6.6-7.0 (`MEASURED` node03, review/resident's record). So a
+ *   block sleeps only once nothing has asked it for anything for longer than any gap a model's programs leave — a
+ *   CPU worker is handed a card's experts every layer, ~1 ms apart on the MI50s, and a card its next step after the
+ *   host's turnaround. */
+#define ENG__OPCODES__IDLE_SPIN_NS 50000000ull    /* 50 ms looking after the last work      */
+#define ENG__OPCODES__DOZE_NS     100000000ull    /* then asleep on the door, 100 ms at most */
+
+static __device__ inline uint64_t eng__opcodes__zzprivate_ns_since(const struct timespec* then) {
+    struct timespec now;
+    sys__os__clock(&now);
+    return (uint64_t)(now.tv_sec - then->tv_sec) * 1000000000ull + (uint64_t)now.tv_nsec - (uint64_t)then->tv_nsec;
+}
+
 /* Wait for work, do it, say so, wait again.
  *
- * ⭐⭐ THE ANSWER GOES INTO THE BASE AND NOWHERE ELSE, WHICH IS WHY THIS TAKES NO PLACE TO PUT ONE.
- * ⚖ ARCHITECT: *"reading the result transfers ownership."* A computation reduces to a CELL, the base
- * carries that cell, and whoever scheduled the work collects it — so the block that ran it needs to know
- * nothing about who asked or where they want it. The alternative was an address the scheduler named,
- * which works and makes every dispatch carry a second channel beside the one it already has.
+ * ⭐⭐ THE VALUE GOES INTO THE ANSWER THE REQUEST CARRIED, WHICH IS WHY THIS TAKES NO PLACE TO PUT ONE. The base holds
+ * the answer while the work runs, and the value is filed into it at the end — the answer taking a hold of its own,
+ * which every reader is lent from (▶ `sys`'s `answer.cuh`).
  *
  * ⛔ AND EVERY ITERATION ARMS THE CARVE STATE AND PUTS IT BACK, rather than the launch doing it once.
  * `eng__abi__k_reside` owes the same pairing and does write the watermark back on its way out — but a
@@ -79,42 +97,49 @@ static __device__ SYS__NOINLINE void eng__opcodes__await_instructions(sys__heap_
      * on the CPU's runner threads a block that left at the stop abandoned a computation
      * block 0 had scheduled on it a moment earlier — a card's blocks spin fast enough that it never showed.
      * ⇒ ★ A RACE ONE SILICON ALWAYS WINS IS STILL A RACE. */
+    struct timespec busy;                    /* when this block last had something to do */
+    sys__os__clock(&busy);
     for (;;) {
         const bool stopping = eng__opcodes__zzprivate_told_to_stop(stop);
         sys__heap__forget_base();
-        /* ⭐⭐ ONE READ DECIDES ALL THREE CASES, AND IT IS A READ RATHER THAN A SWAP FOR A REASON WORTH
-         * THE PARAGRAPH. Asking by compare-and-swap is harmless against other blocks, because two
-         * atomics on one address serialise — and fatal against a writer outside the runners, because a
-         * swap STORES the value it read and a plain write is not an atomic read-modify-write that can
-         * hold its place.
-         * `MEASURED`: a waiter asking that way lost every SCHEDULED the host sent it, while the two
-         * operands written beside it on the same node arrived untouched every time.
-         * ⇒ ★★ A POLL THAT WRITES IS A POLL THAT OVERWRITES — invisible until there is a second writer,
-         *   because until then it only ever puts back what it found.
-         *
-         * ⛳ SOMEBODY ELSE TOOK THE LAST ANSWER AND HANDED THE BASE BACK is the first case. A scheduler
-         * on another block collects in one call and this block never hears about it. Every collection
-         * is made by a runner — a door outside the machine launches one to collect — because putting a
-         * computation away is reference counting, and the runners are what do the counting
-         * (`REASONED`, from the `read_result` call sites in `engine/abi/running.cuh`). */
+        /* ⭐⭐ ONE READ DECIDES EVERY CASE, AND IT IS A READ RATHER THAN A SWAP: every idle turn makes it, and a
+         * swap would put back what it read over a word written in between (▶ `zzengine_peek_status`).
+         * ⛳ NOTHING BUT THIS BLOCK MOVES ITS BASE: every computation it runs comes off its own queue — a
+         * program's and the host's alike (▶ `sys`'s `scheduler__header.cuh`) — so its value goes into its answer and the
+         * base comes back free here, in this loop. */
         const uint32_t state = sys__computing_base__zzengine_peek_status(here);
-        if (state == SYS__COMPUTING_BASE__COMPUTING + me) {
-            (void)sys__computing_base__zzengine_release_result(here, me);
-        } else if (state == SYS__COMPUTING_BASE__SCHEDULED
-                && sys__computing_base__begin(here, me) != 0) {
+        if (state == SYS__COMPUTING_BASE__SCHEDULED && sys__computing_base__begin(here, me) != 0) {
+            /* A step that waited for answers finds their names bound in the environment `begin` built for it. */
+            sys__scheduler__zzengine_bind_gate(here, me, true);
             const uint64_t bindings = here->args[SYS__COMPUTING_BASE__BINDINGS];
             const uint64_t program  = here->args[SYS__COMPUTING_BASE__PROGRAM];
             const sys__heap_node value = eng__eval(bindings, program, here);
-            /* Finishing places the answer and says so, in that order and in one act — so there is no
+            sys__scheduler__zzengine_bind_gate(here, me, false);   /* left before `finish` lets the environment go */
+            /* ⭐ THE VALUE GOES INTO ITS ANSWER FIRST, while this block still holds the base, and the base is put away
+             * after it finishes. Finishing places the value and says so, in that order and in one act — so there is no
              * moment here where a base says it is done and is not yet holding what it came to. */
+            const bool posted = sys__scheduler__zzengine_post(here, me, value);
             (void)sys__computing_base__finish(here, me, SYS__COMPUTING_BASE__OK, value);
+            if (posted) sys__scheduler__zzengine_put_away(here, me);
+        } else if (state == SYS__COMPUTING_BASE__ERROR && sys__scheduler__zzengine_post_error(here, me)) {
+            /* A scheduled computation that could not begin: its answer told so, as a value, and the base free. */
+        } else if (state == SYS__COMPUTING_BASE__FREE && sys__scheduler__zzengine_next(here, me)) {
+            /* ⭐ THE OLDEST REQUEST ON THIS BLOCK'S QUEUE IS IN ITS BASE NOW, and the next turn runs it — before a
+             * stop, as work already scheduled is. */
         } else if (stopping) {
             sys__heap__stop_carving();
             return;                          /* told to stop, and nothing here was waiting */
         } else {
-            /* Nothing to do, and nothing was touched finding that out. */
-            sys__silicon__wait_cycles(SYS__COMPUTING_BASE__POLL_CYCLES);
+            /* Nothing to do, and nothing was touched finding that out: a short wait, or a nap once quiet. */
+            sys__heap__stop_carving();
+            if (eng__opcodes__zzprivate_ns_since(&busy) < ENG__OPCODES__IDLE_SPIN_NS) {
+                sys__silicon__wait_cycles(SYS__COMPUTING_BASE__POLL_CYCLES);
+            } else {
+                sys__scheduler__zzengine_doze(me, ENG__OPCODES__DOZE_NS);
+            }
+            continue;
         }
+        sys__os__clock(&busy);
         sys__heap__stop_carving();
     }
 }

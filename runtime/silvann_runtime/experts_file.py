@@ -21,7 +21,7 @@ import numpy as np
 
 from .machine import EngineError
 from .model_folder import Refused
-from .system import BINARY, WINDOWS, lock, lockable, memory, spans, write_at
+from .system import BINARY, WINDOWS, lock, lockable, memory, resident, spans, write_at
 
 
 def available():
@@ -84,8 +84,28 @@ SPARE = 500 << 20        # what is left to the system — ⚖ 2026-10-14, "a fla
 def in_ram(need, held=None, video=0):
     """Whether `need` bytes of experts go in RAM: they, the server's own memory beside them (`OWN`, and `video`, what
     reading a video holds — `vision.video_ram`) and the system's spare fit in what this process may hold (`held`, by
-    default `limit`: a container's or a capped scope's cgroup limit, else what the system has available)."""
-    return need + OWN + video + SPARE <= (limit() if held is None else held)
+    default `limit`: a container's or a capped scope's cgroup limit, else what the system has available).
+
+    The process's own memory is counted once. What the system has available is net of what this process holds already
+    — the engine, the card's host memory, the trial boots' — so of `OWN` only what it does not hold yet is taken from
+    it; a cgroup's limit counts everything the process holds, so there the larger of `OWN` and what it holds now is.
+    `MEASURED` 2026-11-06 on the precision, 62 GB (measurements/2026-11-06_home_rows_precision.md ③): the 122B's
+    54.141 GiB of experts + OWN 2 + the spare 0.488 against 56.521 GiB available, the process already holding 4.254 —
+    `OWN` taken twice, RAM missed by 0.108 GiB, and its experts read from the disk at 10.11 tokens/s where in RAM with a
+    tier they answer 16.43."""
+    held = limit() if held is None else held
+    mine = resident()
+    own = max(0, OWN - mine) if held >= available() else max(OWN, mine)
+    return need + own + video + SPARE <= held
+
+
+# ⛔ what a seated boot whose experts come from the disk is told — every family's seats (⚖ 2026-11-06 *"experts need to
+#   be in ram, otherwise we dont know which one to evict since multiple convs have a different list. so we have to refuse
+#   it, unless we rework the l2 setup to work independently with its own thread"*): from the disk RAM is a cache of the
+#   experts, and which it keeps is each conversation's own choice; "mapped" leaves the keeping to the kernel's page cache
+SEATED_FROM_DISK = ("several conversations at once take every expert in RAM — experts_from 'ram' or 'mapped', not "
+                    "'disk': from the disk RAM is a cache of the experts, and which it keeps is each conversation's own "
+                    "choice, which nothing yet keeps for several")
 
 
 def choose(experts_from, need, video=0):

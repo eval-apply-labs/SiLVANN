@@ -28,7 +28,7 @@ static inline bool nn__result__zzprivate_out(const sys__heap_node* ref, uint64_t
 
 /* ── the index of the largest element ────────────────────────────────────────────────────────────────
  * ⭐⭐ IT ANSWERS AN INTEGER, WHICH IS WHY IT MATTERS MORE THAN ITS ARITHMETIC. Every other verb here
- * hands back a buffer; this hands back a NUMBER, and `eng_abi_poll` gives a program's integer answer
+ * hands back a buffer; this hands back a NUMBER, and `eng_abi_take` gives a program's integer answer
  * straight to the host. ⇒ a token id needs no buffer, no address and no DMA. */
 /* `(nn__argmax__find x out n)` — the index of the largest of n, as a 32-bit value in `out`. */
 static sys__heap_node nn__argmax__zzabi_apply_find(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx) {

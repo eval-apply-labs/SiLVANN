@@ -1,0 +1,32 @@
+# The browser's way out: the public internet, and the resolver the container is given — never a private address, so
+# not SiLVANN's container, the machine it runs on or anything on its network. In: SiLVANN's connection to the control
+# port, and what answers the browser's own connections. RESOLVER is set by entrypoint.sh from /etc/resolv.conf.
+table inet silvann
+delete table inet silvann
+table inet silvann {
+    set private4 {
+        type ipv4_addr; flags interval
+        elements = { 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.0.0.0/24,
+                     192.168.0.0/16, 198.18.0.0/15, 224.0.0.0/4, 240.0.0.0/4 }
+    }
+    set private6 {
+        type ipv6_addr; flags interval
+        elements = { ::/127, ::ffff:0:0/96, 64:ff9b:1::/48, fc00::/7, fe80::/10, ff00::/8 }
+    }
+    chain output {
+        type filter hook output priority 0; policy drop;
+        oif "lo" accept
+        ct state established,related accept
+        ip daddr RESOLVER udp dport 53 accept
+        ip daddr RESOLVER tcp dport 53 accept
+        ip daddr @private4 reject
+        ip6 daddr @private6 reject
+        meta l4proto { tcp, udp } accept
+    }
+    chain input {
+        type filter hook input priority 0; policy drop;
+        iif "lo" accept
+        ct state established,related accept
+        tcp dport 9222 accept
+    }
+}

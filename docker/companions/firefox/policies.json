@@ -1,0 +1,14 @@
+{
+  "policies": {
+    "ExtensionSettings": {
+      "{aecec67f-0d10-4fa7-b7c7-609a2db280cf}": {
+        "installation_mode": "force_installed",
+        "install_url": "file:///opt/silvann/violentmonkey.xpi"
+      }
+    },
+    "DisableAppUpdate": true,
+    "DisableTelemetry": true,
+    "DisableFirefoxStudies": true,
+    "DontCheckDefaultBrowser": true
+  }
+}

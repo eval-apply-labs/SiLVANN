@@ -32,9 +32,9 @@ extern "C" {
 
 /* An empty list, ready to have cells put in it. Zero means it could not be made. */
 unsigned long long eng_abi_list_create(void) {
-    if (!eng__abi__zzpackage_free_to_launch()) return 0ull;
+    if (!eng__abi__zzpackage_live()) return 0ull;
     uint64_t got = 0ull;
-    ENG__ABI__ON_THE_MACHINE(got = sys__list__create());
+    ENG__ABI__AS_THE_HOST(got = sys__list__create());
     return got;
 }
 
@@ -46,14 +46,14 @@ unsigned long long eng_abi_list_create(void) {
  * THE SAME THREE FIELDS. */
 int eng_abi_list_append(unsigned long long list, unsigned int dtype,
                         unsigned long long op_code, unsigned long long value) {
-    if (!eng__abi__zzpackage_free_to_launch() || list == 0ull) return 0;
+    if (!eng__abi__zzpackage_live() || list == 0ull) return 0;
     sys__heap_node cell;
     memset(&cell, 0, sizeof cell);          /* every field, because a node carries more than it is given */
     cell.dtype   = (sys__kind)dtype;
     cell.op_code = op_code;
     cell.args[0] = value;
     bool got = false;
-    ENG__ABI__ON_THE_MACHINE(got = eng__abi__zzprivate_names_interned(&cell, 1ull) && sys__sublist__append(list, &cell));
+    ENG__ABI__AS_THE_HOST(got = eng__abi__zzprivate_names_interned(&cell, 1ull) && sys__sublist__append(list, &cell));
     return got ? 1 : 0;
 }
 
@@ -82,9 +82,9 @@ int eng_abi_create_executable(const sys__heap_node* cells, unsigned int count, s
     if (answer == 0) return 0;
     memset(answer, 0, sizeof *answer);
     answer->dtype = SYS__KIND__VALUE_NULL;
-    if (!eng__abi__zzpackage_free_to_launch() || cells == 0 || count == 0u) return 0;
+    if (!eng__abi__zzpackage_live() || cells == 0 || count == 0u) return 0;
     uint64_t got = 0ull;
-    ENG__ABI__ON_THE_MACHINE(got = eng__abi__zzprivate_names_interned(cells, count)
+    ENG__ABI__AS_THE_HOST(got = eng__abi__zzprivate_names_interned(cells, count)
                                    ? sys__list__create_executable(cells, count) : 0ull);
     if (got == 0ull) return 0;
     answer->dtype   = SYS__KIND__OBJECT_REFERENCE;
@@ -116,9 +116,9 @@ int eng_abi_freeze(sys__heap_node program, sys__heap_node* answer) {
     if (answer == 0) return 0;
     memset(answer, 0, sizeof *answer);
     answer->dtype = SYS__KIND__VALUE_NULL;
-    if (!eng__abi__zzpackage_free_to_launch() || program.args[0] == 0ull) return 0;
+    if (!eng__abi__zzpackage_live() || program.args[0] == 0ull) return 0;
     uint64_t got = 0ull;
-    ENG__ABI__ON_THE_MACHINE(got = sys__sublist__deep_copy_to_node_array(program.args[0]));
+    ENG__ABI__AS_THE_HOST(got = sys__sublist__deep_copy_to_node_array(program.args[0]));
     if (got == 0ull) return 0;
     answer->dtype   = SYS__KIND__QUOTED_ARRAY;
     answer->args[0] = got;
@@ -133,9 +133,9 @@ int eng_abi_thaw(sys__heap_node picture, sys__heap_node* answer) {
     if (answer == 0) return 0;
     memset(answer, 0, sizeof *answer);
     answer->dtype = SYS__KIND__VALUE_NULL;
-    if (!eng__abi__zzpackage_free_to_launch() || picture.args[0] == 0ull) return 0;
+    if (!eng__abi__zzpackage_live() || picture.args[0] == 0ull) return 0;
     uint64_t got = 0ull;
-    ENG__ABI__ON_THE_MACHINE(got = sys__list__deep_copy_from_node_array(picture.args[0]));
+    ENG__ABI__AS_THE_HOST(got = sys__list__deep_copy_from_node_array(picture.args[0]));
     if (got == 0ull) return 0;
     answer->dtype   = SYS__KIND__OBJECT_REFERENCE;
     answer->args[0] = got;
@@ -149,27 +149,27 @@ int eng_abi_thaw(sys__heap_node picture, sys__heap_node* answer) {
  * A caller that needs to tell them apart is asking whether a fault was raised, which is a different
  * question and has a different door. */
 unsigned int eng_abi_release(unsigned long long offset) {
-    if (!eng__abi__zzpackage_free_to_launch() || offset == 0ull) return 0u;
+    if (!eng__abi__zzpackage_live() || offset == 0ull) return 0u;
     uint64_t got = 0ull;
-    ENG__ABI__ON_THE_MACHINE(got = (uint64_t)sys__heap_object__release(offset));
+    ENG__ABI__AS_THE_HOST(got = (uint64_t)sys__heap_object__release(offset));
     return (unsigned int)got;
 }
 
 /* An environment with room for `symbols` names. `base` is the view a reader shares rather than clones;
  * zero means it has none, which is what an outermost environment has. */
 unsigned long long eng_abi_bindings_create(unsigned long long symbols, unsigned long long base) {
-    if (!eng__abi__zzpackage_free_to_launch()) return 0ull;
+    if (!eng__abi__zzpackage_live()) return 0ull;
     uint64_t got = 0ull;
-    ENG__ABI__ON_THE_MACHINE(got = sys__bindings__create(symbols, base));
+    ENG__ABI__AS_THE_HOST(got = sys__bindings__create(symbols, base));
     return got;
 }
 
 /* How many numbered names an environment holds — the number a composer gives names below and spells names
  * at or above. Zero is a refusal: nothing is an environment of no names. */
 unsigned long long eng_abi_bindings_symbols(unsigned long long bindings) {
-    if (!eng__abi__zzpackage_free_to_launch() || bindings == 0ull) return 0ull;
+    if (!eng__abi__zzpackage_live() || bindings == 0ull) return 0ull;
     uint64_t got = 0ull;
-    ENG__ABI__ON_THE_MACHINE(got = sys__bindings__symbols(bindings));
+    ENG__ABI__AS_THE_HOST(got = sys__bindings__symbols(bindings));
     return got;
 }
 
@@ -189,10 +189,10 @@ int eng_abi_string_create(const unsigned char* bytes, unsigned long long length,
     if (answer == 0) return 0;
     memset(answer, 0, sizeof *answer);
     answer->dtype = SYS__KIND__VALUE_NULL;
-    if (!eng__abi__zzpackage_free_to_launch() || (bytes == 0 && length != 0ull)) return 0;
+    if (!eng__abi__zzpackage_live() || (bytes == 0 && length != 0ull)) return 0;
     const unsigned char none = 0u;                  /* empty text still hands the package somewhere to look */
     uint64_t got = 0ull;
-    ENG__ABI__ON_THE_MACHINE(got = sys__string__create((const uint8_t*)(bytes ? bytes : &none), length));
+    ENG__ABI__AS_THE_HOST(got = sys__string__create((const uint8_t*)(bytes ? bytes : &none), length));
     if (got == 0ull) return 0;
     answer->dtype   = SYS__KIND__OBJECT_REFERENCE;
     answer->args[0] = got;
@@ -206,10 +206,10 @@ int eng_abi_string_read(unsigned long long string, unsigned char* text, unsigned
                         unsigned char* hash, unsigned long long* length) {
     if (length == 0) return 0;
     *length = 0ull;
-    if (!eng__abi__zzpackage_free_to_launch() || string == 0ull) return 0;
+    if (!eng__abi__zzpackage_live() || string == 0ull) return 0;
     /* ⛳ A REFERENCE THAT IS NOT A STRING ANSWERS ALL ONES, because zero is a length an empty string has. */
     uint64_t got = ~0ull;
-    ENG__ABI__ON_THE_MACHINE(if (sys__string__is(string))
+    ENG__ABI__AS_THE_HOST(if (sys__string__is(string))
                                  got = eng__abi__zzprivate_copy_string(string, text, capacity, hash));
     if (got == ~0ull) return 0;
     *length = got;
@@ -226,10 +226,10 @@ int eng_abi_string_read(unsigned long long string, unsigned char* text, unsigned
 unsigned long long eng_abi_intern(const unsigned char* bytes, unsigned long long length,
                                   unsigned long long* string) {
     if (string != 0) *string = 0ull;
-    if (!eng__abi__zzpackage_free_to_launch() || (bytes == 0 && length != 0ull)) return ~0ull;
+    if (!eng__abi__zzpackage_live() || (bytes == 0 && length != 0ull)) return ~0ull;
     const unsigned char none = 0u;                  /* empty text still hands the package somewhere to look */
     uint64_t got[2] = { ~0ull, 0ull };
-    ENG__ABI__ON_THE_MACHINE(got[0] = sys__symbol__intern((const uint8_t*)(bytes ? bytes : &none), length, &got[1]));
+    ENG__ABI__AS_THE_HOST(got[0] = sys__symbol__intern((const uint8_t*)(bytes ? bytes : &none), length, &got[1]));
     if (string != 0) *string = got[1];
     return got[0];
 }
@@ -239,9 +239,9 @@ int eng_abi_symbol_name(unsigned long long symbol, unsigned char* text, unsigned
                         unsigned long long* length) {
     if (length == 0) return 0;
     *length = 0ull;
-    if (!eng__abi__zzpackage_free_to_launch()) return 0;
+    if (!eng__abi__zzpackage_live()) return 0;
     uint64_t got = ~0ull;
-    ENG__ABI__ON_THE_MACHINE(
+    ENG__ABI__AS_THE_HOST(
         const sys__heap_node name = sys__symbol__name(symbol);
         if (name.dtype == SYS__KIND__OBJECT_REFERENCE) {
             got = eng__abi__zzprivate_copy_string(name.args[0], text, capacity, 0);

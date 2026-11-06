@@ -435,8 +435,8 @@ def new_config(model: str) -> dict:
             # what the card holds beside the model, up to its length, a tier sharing the card with the cache (NN-93)
             "max_context": "auto",
             "max_tokens_per_video": 8192, "thinking": True, "sampler": "generation",
-            "tools": "chill", "tools_folder": None, "lora": None, "num_cards": 1, "card": "auto", "vram_margin_mb": 50,
-            "tools_config": "default", "workers": [],
+            "tools": "chill", "tools_folder": None, "lora": None, "num_cards": 1, "multi_user": "no", "card": "auto",
+            "vram_margin_mb": 50, "tools_config": "default", "workers": [],
             "options": {},
             "pipeline_parallelism": "no",
             "pipeline_parallelism_layers": "0-%d" % (layers - 1) if layers else "",
@@ -457,7 +457,7 @@ HELP_DOCS = [
     ("Using SiLVANN", "Skills", RELEASE_DIR / "skills" / "README.md"),
     ("Using SiLVANN", "SiLVANN in a container", RELEASE_DIR / "docker" / "README.md"),
     ("Using SiLVANN", "More container setups", RELEASE_DIR / "docker" / "advanced.md"),
-    ("Using SiLVANN", "Every release's notes", RELEASE_DIR / "release_logs" / "v0.md"),
+    ("Using SiLVANN", "Every release's notes", DOCS_DIR / "release_logs" / "v0.md"),
     ("Using SiLVANN", "Why AI on your own machine", DOCS_DIR / "local_ai.md"),
     ("The models", "The models", DOCS_DIR / "models.md"),
     ("The models", "Their results", DOCS_DIR / "results.md"),
@@ -620,6 +620,8 @@ class ServerProcess:
                     self.setup = line.split("[silvann_server] ", 1)[1]
                 if "⛔ not started:" in line:
                     said = line.split("⛔ not started: ", 1)[1]
+                if "⛔ stopped:" in line:            # the evaluator stopped, and the server with it: start it again here
+                    said = line.split("⛔ stopped: ", 1)[1]
                 if "[silvann_server]" in line and " booted in " in line:
                     self.started = True
                     if self.remember:             # a start that never booted is not the one to start again
@@ -682,6 +684,11 @@ def folder_bytes(path: Path) -> int:
     return total
 
 
+def human_bytes(b: int) -> str:
+    """Bytes as a person reads them: GB, MB or KB."""
+    return f"{b / 1e9:.2f} GB" if b >= 1e9 else f"{b / 1e6:.1f} MB" if b >= 1e6 else f"{b / 1e3:.0f} KB"
+
+
 def approx_bytes(size: str) -> int:
     """`"20 GB"`, the size the release lists for a model, in bytes; 0 when it does not read as one."""
     m = re.match(r"\s*([\d.]+)\s*([KMGT])B", size or "")
@@ -739,7 +746,12 @@ class ModelDownloads:
     the download started and those received since (the subprocess counts them into a file, `SILVANN_DOWNLOAD_PROGRESS`),
     against the repository's: Hugging Face's client writes a file in blocks of a few hundred MB, so the bytes on the
     disk alone move in steps. A download stopped and started again keeps the files it finished. One is refused when
-    the disk under MODELS_DIR has less room than the model still needs, and 1 GB."""
+    the disk under MODELS_DIR has less room than the model still needs, and 1 GB.
+
+    A model that is here says **update** or **done** by its pack's version against its own (`silvann_core.py
+    check-versions`, ▶ `fetch.state`), read when the panel opens and after each download. An update fetches the files
+    that differ alone (`check-model`, ▶ `fetch.differences`) — the same `download-model`, which for a folder that is
+    there fetches those; its progress is the bytes received against theirs."""
 
     def __init__(self):
         self.known: Optional[list] = None   # [{name, repo, size, base}], read once from silvann_core.py
@@ -750,6 +762,9 @@ class ModelDownloads:
         self.report = os.path.join(tempfile.gettempdir(), "silvann_download_%d.json" % os.getpid())
         self.message = ""
         self.lines: deque[str] = deque(maxlen=200)
+        self.updating = False                # the one running is an update of a model that is here
+        self.states: Optional[dict] = None   # name → `fetch.state` of each model here; None until read (again)
+        self.reading = False
 
     def catalogue(self) -> list:
         if self.known is None:
@@ -764,20 +779,53 @@ class ModelDownloads:
     def running(self) -> bool:
         return self.proc is not None and self.proc.poll() is None
 
+    def _core(self, *args) -> dict:
+        r = subprocess.run([sys.executable, str(CORE_SCRIPT), *args, "--json"], capture_output=True, text=True,
+                           cwd=str(REPO_ROOT), env=dict(os.environ))
+        if r.returncode != 0:
+            raise RuntimeError(((r.stderr or r.stdout).strip().splitlines() or ["exit %d" % r.returncode])[-1])
+        return json.loads(r.stdout.strip().splitlines()[-1])
+
+    def read_states(self):
+        """Each model here against its pack's version (`fetch.state`), into `states`; one the Hub could not be asked
+        about says so."""
+        try:
+            self.states = self._core("check-versions")
+        except Exception as ex:
+            self.states = {m["name"]: {"state": "unknown", "why": "not checked: %s" % str(ex)[:200]}
+                           for m in self.catalogue() if m["here"]}
+
+    def check(self, name: str) -> dict:
+        """What an update of the model `name`, which is here, fetches: `fetch.differences`' answer, or {"error"}. The
+        first check of a folder that was not downloaded here reads its large files once."""
+        try:
+            return self._core("check-model", name)
+        except Exception as ex:
+            return {"error": str(ex)[:300]}
+
     def start(self, name: str):
         if self.running():
             raise RuntimeError(f"{self.name} is downloading — one at a time")
         model = next((m for m in self.catalogue() if m["name"] == name), None)
         if model is None:
             raise RuntimeError(f"{name} is not a model this release knows")
-        total = repo_bytes(model["repo"]) or approx_bytes(model["size"])
-        MODELS_DIR.mkdir(parents=True, exist_ok=True)
-        base = folder_bytes(MODELS_DIR / name)
-        need = max(0, total - base)
+        updating = model_present(name)
+        if updating:
+            d = self.check(name)
+            if "files" not in d:
+                raise RuntimeError("not checked: " + d.get("error", "?"))
+            if not d["files"]:
+                raise RuntimeError(f"{name} holds every file of its pack already")
+            total, base, need = d["bytes"], 0, d["bytes"]
+        else:
+            total = repo_bytes(model["repo"]) or approx_bytes(model["size"])
+            MODELS_DIR.mkdir(parents=True, exist_ok=True)
+            base = folder_bytes(MODELS_DIR / name)
+            need = max(0, total - base)
         free = shutil.disk_usage(MODELS_DIR).free
         if need + (1 << 30) > free:
             raise RuntimeError(f"{name} needs {need / 1e9:.1f} GB more, and {MODELS_DIR} has {free / 1e9:.1f} GB free")
-        self.name, self.total, self.base, self.message = name, total, base, ""
+        self.name, self.total, self.base, self.message, self.updating = name, total, base, "", updating
         self.lines.clear()
         try:
             os.remove(self.report)
@@ -796,6 +844,7 @@ class ModelDownloads:
         rc = proc.wait()
         self.message = ("done" if rc == 0 else
                         "stopped" if rc < 0 else "failed: " + (self.lines[-1] if self.lines else f"exit {rc}"))
+        self.states = None                             # what is here now, read again
 
     def progress(self) -> tuple:
         """(bytes there, bytes in all) of the model being or last downloaded: those on the disk, or those it held at
@@ -809,6 +858,8 @@ class ModelDownloads:
                         or bars.get("huggingface_hub.snapshot_download") or [0])[0]
         except (OSError, ValueError):
             pass
+        if self.updating:
+            return (self.total if self.message == "done" else min(received, self.total)), self.total
         return max(folder_bytes(MODELS_DIR / self.name), self.base + received), self.total
 
     def cancel(self):
@@ -1432,6 +1483,36 @@ async def page():
                             d = d.parent
                         return shutil.disk_usage(d).free
 
+                    # a model that is here: "update" when its pack's version is above its own, else "done"
+                    def here_state(name):
+                        st = (DOWNLOADS.states or {}).get(name) or {}
+                        with ui.row().classes("items-center gap-2"):
+                            if DOWNLOADS.running() and DOWNLOADS.name == name:
+                                ui.label("updating…").classes("text-sm")
+                            elif DOWNLOADS.states is None:
+                                ui.label("checking…").classes("text-sm opacity-70")
+                            elif st.get("state") == "update":
+                                ui.button("update", on_click=lambda _, n=name: start_download(n)
+                                          ).props("dense outline")
+                            elif st.get("state") == "done":
+                                ui.label("done").classes("text-sm text-green-700")
+                            else:
+                                with ui.label("here").classes("text-sm text-green-700"):
+                                    ui.tooltip(st.get("why") or "not checked against its pack")
+                            if st.get("newer"):
+                                ui.label("its pack has a program for a later release — a newer SiLVANN is out "
+                                         "(silvann update)").classes("text-xs text-orange-600")
+
+                    async def read_states():
+                        if DOWNLOADS.reading:
+                            return
+                        DOWNLOADS.reading = True
+                        try:
+                            await asyncio.to_thread(DOWNLOADS.read_states)
+                        finally:
+                            DOWNLOADS.reading = False
+                        models_table.refresh()
+
                     @ui.refreshable
                     def models_table():
                         if DOWNLOADS.known is None:
@@ -1451,7 +1532,7 @@ async def page():
                                     ui.label("")
                                 ui.label(m["size"]).classes("text-sm")
                                 if m["here"]:
-                                    ui.label("here").classes("text-sm text-green-700")
+                                    here_state(m["name"])
                                 elif DOWNLOADS.running() and DOWNLOADS.name == m["name"]:
                                     ui.label("downloading…").classes("text-sm")
                                 else:
@@ -1465,13 +1546,15 @@ async def page():
                         except Exception as e:
                             safe_notify(f"the list of models could not be read: {e}", type="negative")
                         models_table.refresh()
-                    if DOWNLOADS.known is None:
+                        if DOWNLOADS.states is None:
+                            await read_states()
+                    if DOWNLOADS.known is None or DOWNLOADS.states is None:
                         asyncio.create_task(read_catalogue())
 
                     async def start_download(name):
                         try:
                             await asyncio.to_thread(DOWNLOADS.start, name)
-                            safe_notify(f"downloading {name}", type="info")
+                            safe_notify(f"{'updating' if DOWNLOADS.updating else 'downloading'} {name}", type="info")
                         except Exception as e:
                             safe_notify(f"not downloaded: {e}", type="negative")
                         models_table.refresh()
@@ -1482,7 +1565,7 @@ async def page():
                         dl_stop = ui.button("stop the download", on_click=lambda: asyncio.to_thread(DOWNLOADS.cancel)
                                             ).props("dense flat color=negative")
                     dl_row.set_visibility(False)
-                    dl_seen = {"running": DOWNLOADS.running()}
+                    dl_seen = {"running": DOWNLOADS.running(), "states": DOWNLOADS.states is not None}
 
                     def refresh_model_select():
                         opts = list_models()
@@ -1496,7 +1579,8 @@ async def page():
                             have, total = DOWNLOADS.progress()
                             dl_row.set_visibility(True)
                             dl_bar.set_value(min(1.0, have / total) if total else 0)
-                            dl_label.set_text(f"{DOWNLOADS.name}: {have / 1e9:.1f} of {total / 1e9:.1f} GB"
+                            dl_label.set_text(f"{DOWNLOADS.name}{' (update)' if DOWNLOADS.updating else ''}: "
+                                              f"{human_bytes(have)} of {human_bytes(total)}"
                                               + ("" if running else f" — {DOWNLOADS.message}"))
                             dl_stop.set_visibility(running)
                         if running != dl_seen["running"]:
@@ -1504,6 +1588,10 @@ async def page():
                             models_table.refresh()
                             if not running:
                                 refresh_model_select()
+                                asyncio.create_task(read_states())     # what the folder holds now
+                        if (DOWNLOADS.states is not None) != dl_seen["states"]:
+                            dl_seen["states"] = DOWNLOADS.states is not None
+                            models_table.refresh()
                     ui.timer(1.0, pump_download)
 
                     ui.label(f"Models dir: {MODELS_DIR}").classes("text-xs opacity-70 mt-2")

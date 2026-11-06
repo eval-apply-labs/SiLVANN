@@ -84,11 +84,11 @@ not through `silvann`, reads the folder from `SILVANN_DATA` — which, when it i
 
 ```bash
 python3 -m venv venv
-venv/bin/pip install -r requirements.txt
-SILVANN_PYTHON=venv/bin/python ./build.sh
+venv/bin/pip install -r scripts/requirements.txt
+SILVANN_PYTHON=venv/bin/python scripts/build.sh
 ```
 
-`build.sh` compiles the evaluator and one library per silicon family whose toolchain it finds, into `lib/`. A
+`scripts/build.sh` compiles the evaluator and one library per silicon family whose toolchain it finds, into `lib/`. A
 family whose toolchain is missing is skipped and named. `SILVANN_HIP_ARCHES=gfx906` builds for one AMD card
 generation only, which is much faster than building for every one, and `SILVANN_CUDA_ARCHES=120` the same for NVIDIA
 (the number is the card's compute capability: 120 for the RTX 50 series, 89 for the 40, 86 for the 30). A card is given
@@ -106,16 +106,16 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
 It fetches the release into `.\silvann` (a git clone), makes its Python environment and takes the libraries GitHub built
-for the release — `silvann_windows_x64.zip` on the release's page, used when git's hashes of the engine and `build.py`
+for the release — `silvann_windows_x64.zip` on the release's page, used when git's hashes of the engine and `scripts/build.py`
 it was built from are the folder's — then writes `silvann.cmd` and `silvann_cli.cmd` into the folder and puts the folder
 on your PATH, from the next PowerShell you open (in the one it ran in, `.\silvann\silvann`). The `silvann` command is
 Linux's: `list`, `download`, `serve`, `ui`, `models <folder>`, `update`, `build`, `help`. Where the libraries are not the
-folder's — a branch, a change of your own — it builds them, as `build.ps1` does. It installs nothing system-wide and
+folder's — a branch, a change of your own — it builds them, as `scripts\build.ps1` does. It installs nothing system-wide and
 asks for no administrator. The prebuilt evaluator uses Microsoft's Visual C++ runtime, which most PCs have; the
 installer names the `winget` line that installs it if it is missing. Run from a clone's own folder, `install.ps1` and
-`build.ps1` install into that folder.
+`scripts\build.ps1` install into that folder.
 
-**Building on the PC** (`build.ps1` in the folder, `silvann build` again): Visual Studio's Build Tools with the C++
+**Building on the PC** (`scripts\build.ps1` in the folder, `silvann build` again): Visual Studio's Build Tools with the C++
 workload and its *C++ Clang tools for Windows* — `winget install -e --id Microsoft.VisualStudio.2022.BuildTools
 --override "--passive --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended --add
 Microsoft.VisualStudio.Component.VC.Llvm.Clang --add Microsoft.VisualStudio.Component.VC.Llvm.ClangToolset"` — and for
@@ -128,7 +128,7 @@ GPU's OpenCL families against its driver's `OpenCL.dll`; the build's output goes
 Smart App Control is on, Windows refuses to load the ones GitHub built, downloaded with the release (*"An Application
 Control policy has blocked this file"*), and the installer says so. Libraries built on the PC are subject to Smart App
 Control's lottery: some PCs let them load — one did — and others may not. Anyone who wants to play it meanwhile can:
-`.\install.ps1 -FromSource` (or `build.ps1` in a clone) builds them on the PC. Where they are refused too: turn Smart
+`.\install.ps1 -FromSource` (or `scripts\build.ps1` in a clone) builds them on the PC. Where they are refused too: turn Smart
 App Control off — Windows Security → App & browser control → Smart App Control settings → Off; on most PCs it cannot be
 turned on again without resetting Windows — or run SiLVANN on Linux ([below](#on-windows-linux-on-a-usb-ssd)). A PC
 upgraded from Windows 10, or one where it is off, is not affected.
@@ -195,9 +195,24 @@ silvann download silvann_tq_D8E4_qwen3.6_35b_a3b
 download a model too, with its progress.
 
 A model lands in `models/<name>/` with a `configs/default.json` and its program in `lisp/` — the Lisp the evaluator
-runs it with, yours to read and change. `silvann download <model>` on a model that is there fetches its pack's `lisp/`
-afresh, whole — the program its pack carries now, over any change of yours. A server started on a model that is not there asks, on a terminal, whether to
-download it; started without one (a service, the UI), it refuses and names this command.
+runs it with, yours to read and change. A pack carries a program for each release that changed it, `lisp/v0.24.0/` and
+so on, and a release reads the one of the highest release at or below its own: an update of SiLVANN reads the program
+written for it, and an older release keeps reading its own. A server's boot fetches this release's program from the pack
+when the folder does not hold it as the pack does — a few files of text; a file you changed is kept, and the boot says
+so. Your own program goes in `lisp/dev/`, which a boot reads before any other and never fetches over.
+
+**An update fetches what changed.** A pack carries its version (`version.json`), raised whenever its files change,
+and a folder keeps the version it was downloaded or last updated at: the UI's **Download models** says **update** or
+**done** by them, and `silvann check` prints the same for every model here. `silvann check <model>` lists which files of a
+model that is here differ from its pack, and their size; `silvann download <model>` on a model that is there fetches
+those files alone — this release's program with them, over any change of yours in it — and its version last, so an
+update cut short still says **update**. An update of SiLVANN itself (`silvann update`) goes through every model here
+once it is installed and fetches from each one's pack the program the new release reads — a few files, a change of
+yours kept — so the models are ready before their first boot, which checks it again otherwise. A file is the pack's when Hugging Face's client fetched it and it is unchanged
+since, or when its bytes are the pack's: the first check of a folder copied in from elsewhere reads its large files
+once, and the checks after it read nothing. A server started on a model that is not there asks, on a terminal, whether to
+download it; started without one (a service, the UI), it refuses and names this command. Offline (no network, or
+`HF_HUB_OFFLINE=1`), a boot runs the folder's own program.
 
 Hugging Face serves a client that is not signed in more slowly:
 a token with read access (huggingface.co/settings/tokens) saved with `venv/bin/python silvann_core.py hf-token --set`
@@ -241,7 +256,8 @@ The model's vision tower runs on the card: a picture is made at most 4 megapixel
 largest) on the test machine's RTX 5060 Ti, and from 0.13 s to about 8.5 s on an MI50 — every patch of a picture attends
 every other, so its time grows with the
 square of its size. A folder fetched before
-v0.7.0 lacks `lisp/qwen3_5_pictures.lisp` and refuses pictures until `silvann download <model>` fetches it.
+v0.7.0 lacks `qwen3_5_pictures.lisp` and refuses pictures until the boot, or `silvann download <model>`, fetches this
+release's program.
 
 **GLM 5.3 Flash reads pictures and videos** the same way: its own tower (24 blocks) runs on
 the card, a picture at most 4 megapixels by default (`picture_pixels`; 21,396 patches of 14 x 14) — 0.25 s for 448 x 448
@@ -255,7 +271,7 @@ the model routes those tokens by its router's bias for pictures, and its n-gram 
 448 (184 tokens) and 3.6 s for 2048 x 1536 (1,001 tokens) on an MI50.
 
 **Videos**, for the Qwen models and GLM, are attached with the same button: an animated GIF, WebP or PNG is read as it
-is, any other video file (MP4 and the like) through PyAV, which `install.sh` installs from `requirements-nonfree.txt`
+is, any other video file (MP4 and the like) through PyAV, which `install.sh` installs from `scripts/requirements-nonfree.txt`
 (an image built from `docker/` leaves it out: [`docker/README.md`](../docker/README.md)). Its frames are taken
 at 2 a second, two frames read together as one picture, each pair's time written into the message as the model's own
 processor writes it (Qwen's before the pair, the middle of its two frames: "<1.2 seconds>"; GLM's after it, its first
@@ -276,6 +292,12 @@ the card, the one on it is kept in RAM — or, when RAM has no room for two conv
 MB, put away to its folder, as one is when the UI or client that opened it has been gone for two minutes, and
 **Activate** brings it back.
 
+If the engine's evaluator stops — a word like `EVAV`, `EVNR` or `EVAD` in front of the answer's error (`EVNR` and
+`EVAD`: its heap had no room) — the model's machine is shut down and the server ends with it, its last line
+`⛔ stopped: EVAV — …`, which the UI shows (`silvann_cli` says the server has stopped, and ends). Every conversation is
+saved as it ends, and one that was on the card is read again from its text the next time it runs. Nothing starts the
+server again by itself: start it from the UI's Options, or as you started it.
+
 Which model suits a machine — the card, the RAM, the CPU — and how fast each answers there:
 [`results.md`](results.md#which-model-for-your-machine).
 
@@ -289,8 +311,8 @@ experts on the CPU beside a card at 27-29 against 15-17. `SILVANN_CPU_AVX512=0` 
 ### The model's tool
 
 A conversation has the model's tool unless its **tools** switch is off, or the config says `"tools": "no"`: the model
-can open a Lisp REPL on the server's machine in its answer: it sends one form at a time — `(help)` lists the commands —
-and reads each value back before it writes on. The commands list folders, read files and write them, run a shell
+can open a Lisp REPL on the server's machine in its answer: it sends one form at a time — `(tools)` lists the commands
+that answer in the conversation and `(help)` says more — and reads each value back before it writes on. The commands list folders, read files and write them, run a shell
 command and read a web page: `(ls "notes")`, `(read "notes/a.md" 140 20)`, `(write "out.txt" "…")`,
 `(bash "git log -3")` (in the working folder, stopped after 60 seconds or `(bash "…" 300)`), `(fetch "https://…")` (the
 page's words, without its markup), `(cd "…")`, `(pwd)`; and Lisp to put them together — `define`, `let`, `lambda`,

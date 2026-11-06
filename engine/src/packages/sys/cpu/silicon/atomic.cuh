@@ -15,7 +15,7 @@
  * back door on the shipping path and call it a backend.
  *
  * ⛳ THE ATOMICS ARE REAL BECAUSE THE HOST EVALUATOR IS NOT SINGLE-THREADED. ⚖ *"one thread
- * per gpu and one for the orchestrator at id 0."* The heap's chunk ring, the object counts and the
+ * per gpu and one for the orchestrator at id 0."* The heap's free stack, the object counts and the
  * computing bases are shared across those threads exactly as they are across blocks on a card, so a relaxed
  * read-modify-write here is the same defect it would be on the card.
  * ⛳ `__atomic_*` RATHER THAN `<atomic>`: this header is included by C-subset code that must also

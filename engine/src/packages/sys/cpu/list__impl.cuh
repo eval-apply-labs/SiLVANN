@@ -643,7 +643,11 @@ static __device__ inline uint64_t sys__sublist__discard(uint64_t sublist, uint64
     return count - left;
 }
 
-static __device__ inline sys__heap_node sys__sublist__extract(uint64_t sublist, uint64_t n) {
+/* `extract`'s body. `keep_tail` keeps the store's last chunk where it is when it empties, linked and holding
+ * nothing, for the next append to fill: a list that empties and fills again turn by turn (a shared list, ▶ the
+ * header) makes no chunk and gives none back. `locate` and a walk step past an empty chunk, and an append fills
+ * the tail's free slots, so an empty tail is an ordinary state of a store. */
+static __device__ inline sys__heap_node sys__list__zzprivate_extract(uint64_t sublist, uint64_t n, bool keep_tail) {
     sys__heap_node* f = sys__sublist__zzprivate_fields(sublist);
     if (f == 0) return sys__heap_node__nothing();
     if (n >= sys__sublist__length(sublist)) {
@@ -671,7 +675,7 @@ static __device__ inline sys__heap_node sys__sublist__extract(uint64_t sublist, 
     sys__heap_node* sf = sys__list__zzprivate_store_fields(store);
     sf->args[SYS__LIST__STORE_TOTAL] -= 1ull;
 
-    if (used - 1ull == 0ull) {
+    if (used - 1ull == 0ull && !(keep_tail && head->args[SYS__LIST_CHUNK__HEAD_NEXT] == 0ull)) {
         /* An empty chunk goes home. The link is cleared BEFORE the release, or the release would move
          * what it names onto the teardown chain and take the whole rest of the list with it. */
         const uint64_t after = head->args[SYS__LIST_CHUNK__HEAD_NEXT];
@@ -684,6 +688,10 @@ static __device__ inline sys__heap_node sys__sublist__extract(uint64_t sublist, 
 
     sys__list__zzprivate_adjust(store, position, false, true, 1ull);
     return gone;
+}
+
+static __device__ inline sys__heap_node sys__sublist__extract(uint64_t sublist, uint64_t n) {
+    return sys__list__zzprivate_extract(sublist, n, false);
 }
 
 /* ── GIVING ONE AWAY ─────────────────────────────────────────────────────────────────────────────── */
@@ -1126,17 +1134,21 @@ static __device__ SYS__NOINLINE void sys__list_chunk__zzpackage_release_internal
     if (head == 0) return;
     sys__heap_node*    cells = (sys__heap_node*)(head + 1);
     const uint64_t used  = head->args[SYS__LIST_CHUNK__HEAD_USED];
+
+    /* ⛳ THE CHUNK AFTER THIS ONE MOVES FIRST, so it comes off the worklist last and the worklist holds one
+     * chunk's references at a time however long the list — ▶ the stack chunk's teardown for the measurement. */
+    const uint64_t after = head->args[SYS__LIST_CHUNK__HEAD_NEXT];
+    head->args[SYS__LIST_CHUNK__HEAD_NEXT] = 0ull;
+    if (after != 0ull) {
+        sys__heap_node reference = sys__heap_object__reference_to(after);
+        sys__stack__transfer(releaser_stack, &reference);
+    }
+
     /* Nothing beyond `used` is read, which is what makes a chunk safe to hand out without clearing it —
      * and a roll chunk's cells are numbers rather than references, so this walk correctly moves none. */
     for (uint64_t i = 0ull; i < used; ++i)
         if (sys__heap_node__carries_reference(cells[i].dtype))
             sys__stack__transfer(releaser_stack, &cells[i]);
-
-    const uint64_t after = head->args[SYS__LIST_CHUNK__HEAD_NEXT];
-    head->args[SYS__LIST_CHUNK__HEAD_NEXT] = 0ull;
-    if (after == 0ull) return;
-    sys__heap_node reference = sys__heap_object__reference_to(after);
-    sys__stack__transfer(releaser_stack, &reference);
 }
 
 static __device__ inline sys__heap_node sys__list__zzpackage_construct(sys__heap_node* base,
@@ -1154,6 +1166,59 @@ static __device__ inline uint64_t sys__list__zzpackage_clone_object(sys__heap_no
     (void)computing_base;                 /* the copy carves from the CALLER's arena — see the header */
     if (head == 0) return 0ull;
     return sys__sublist__deep_clone(sys__heap__offset(head + 1));
+}
+
+/* ── A LIST SEVERAL BLOCKS SHARE (▶ the header) ── each verb the list's lock around one ordinary verb. ── */
+static __device__ inline bool sys__list__shared_append(uint64_t list, const sys__heap_node* value) {
+    if (!sys__heap_object__zzpackage_lock_shared(list)) return false;
+    const bool went = sys__sublist__append(list, value);
+    sys__heap_object__lock_release(list);
+    return went;
+}
+
+static __device__ inline sys__heap_node sys__list__shared_take(uint64_t list) {
+    if (!sys__heap_object__zzpackage_lock_shared(list)) return sys__heap_node__nothing();
+    sys__heap_node first = sys__heap_node__nothing();
+    if (sys__sublist__length(list) > 0ull) first = sys__list__zzprivate_extract(list, 0ull, true);
+    sys__heap_object__lock_release(list);
+    return first;
+}
+
+static __device__ inline bool sys__list__shared_append_cells(uint64_t list, const sys__heap_node* cells, uint64_t n) {
+    if (!sys__heap_object__zzpackage_lock_shared(list)) return false;
+    const uint64_t had = sys__sublist__length(list);
+    uint64_t went = 0ull;
+    while (went < n && sys__sublist__append(list, &cells[went])) went += 1ull;
+    if (went != n && went != 0ull) (void)sys__sublist__discard(list, had, went);
+    sys__heap_object__lock_release(list);
+    return went == n;
+}
+
+static __device__ inline bool sys__list__shared_take_cells(uint64_t list, sys__heap_node* out, uint64_t n) {
+    if (!sys__heap_object__zzpackage_lock_shared(list)) return false;
+    const bool there = sys__sublist__length(list) >= n;
+    for (uint64_t i = 0ull; there && i < n; ++i) out[i] = sys__list__zzprivate_extract(list, 0ull, true);
+    sys__heap_object__lock_release(list);
+    return there;
+}
+
+static __device__ inline uint64_t sys__list__shared_length(uint64_t list) {
+    if (!sys__heap_object__zzpackage_lock_shared(list)) return 0ull;
+    const uint64_t n = sys__sublist__length(list);
+    sys__heap_object__lock_release(list);
+    return n;
+}
+
+/* The store's total, its two halves each an atomic read: what it reads is a count some append or take wrote, or
+ * one torn between two of them — either is a hint, which is all this answers. ⛳ ANY HALF NOT ZERO IS A YES, so no
+ * byte order is assumed: a list holding something has a total that is not zero, and a view's start is not
+ * subtracted, so an empty view of a store that holds something says yes and its take finds nothing. */
+static __device__ inline bool sys__list__shared_waiting(uint64_t list) {
+    const sys__heap_node* f = sys__sublist__zzprivate_fields(list);
+    if (f == 0) return false;
+    const unsigned int* total =
+        (const unsigned int*)&sys__list__zzprivate_store_fields(f->args[SYS__SUBLIST__STORE])->args[SYS__LIST__STORE_TOTAL];
+    return (sys__silicon__read_u32(&total[0]) | sys__silicon__read_u32(&total[1])) != 0u;
 }
 
 #endif /* SILVANN__PACKAGES_SYS_CPU_LIST__IMPL_CUH */

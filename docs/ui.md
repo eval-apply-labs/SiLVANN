@@ -100,6 +100,11 @@ page on Hugging Face, and **made from** the original model's: its makers' card, 
 - **download** fetches one from Hugging Face into the data folder's `models/`, with its progress. One downloads at a
   time. A download is refused when the disk has less room than the model needs; stopped and started again, it keeps the
   files it finished.
+- A model that is here says **update** when its pack on Hugging Face has a newer version (its `version.json`) than
+  the folder's, or **done**; **update** fetches the files that changed alone, with its progress. The versions are
+  read when the panel opens and after each download; a pack holding a program for a later release than this one says a
+  newer SiLVANN is out (`silvann update`). A model shown only as **here** could not be checked — its pack has no version
+  yet, or Hugging Face did not answer (the reason on the word).
 - A **Hugging Face token** (read access, from huggingface.co/settings/tokens) makes the downloads faster. **save**
   checks it with Hugging Face and keeps it for every download after; **forget** removes it.
 

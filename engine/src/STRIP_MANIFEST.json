@@ -4,6 +4,7 @@
   "packages/ai_z__glm_5_3/cpu/opcodes/layer__abi.cuh": 4,
   "packages/nn/cpu/loader__impl.cuh": 50,
   "packages/sys/contracts/macros/language_contract__verbs.cuh": 10,
+  "packages/sys/cpu/dictionary.cuh": 17,
   "packages/sys/cpu/heap__impl.cuh": 6,
   "packages/sys/cpu/list__impl.cuh": 13,
   "packages/sys/cpu/opcodes/opcodes.cuh": 29,
@@ -14,6 +15,6 @@
   "silicon_families/x86_avx2/primitives/pool.cuh": 56,
   "silicon_families/x86_avx2/primitives/sys.cuh": 44
  },
- "total_lines": 461,
+ "total_lines": 478,
  "waived": []
 }

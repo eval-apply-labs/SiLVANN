@@ -22,6 +22,8 @@
 #include "string.cuh"                    /* and so does this one */
 #include "dictionary.cuh"                /* and these three */
 #include "opcodes/opcodes_abi__header.cuh"  /* the verb adapters the dispatch switch names */
+#include "../../../operating_systems/os.cuh"  /* a thread's key, whose exit lets go of its worklist: the system's */
+#include "garbage_collection__header.cuh"   /* whether a dying object waits: the manual mode */
 /* ══ the object interface, implemented ═══════════════════════════════════════════════════════════════
  *
  * Every `sys__heap_object__` verb that DOES something is defined here, together with the private ones its
@@ -338,6 +340,24 @@ static __device__ inline bool sys__heap_object__lock(uint64_t offset) {
     return false;
 }
 
+/* The same lock, waited for patiently: a SHARED object's — one several blocks write by design — tried up to
+ * `SYS__HEAP_OBJECT__SHARED_LOCK_TRIES` times with the same skewed back-off, and raised only when that runs out.
+ * Handed back with `sys__heap_object__lock_release`, as the lock is. */
+static __device__ inline bool sys__heap_object__zzpackage_lock_shared(uint64_t offset) {
+    if (!sys__heap_object__zzpackage_addressable(offset)) {
+        sys__fault__raise(0ull, SYS__HEAP_OBJECT__FAULT_LOCK);
+        return false;
+    }
+    unsigned int* word = sys__heap_object__zzprivate_lock_word(sys__heap_node__zzpackage_head(offset));
+    for (uint32_t t = 0u; t < SYS__HEAP_OBJECT__SHARED_LOCK_TRIES; ++t) {
+        if (sys__silicon__cas_u32(word, SYS__HEAP_OBJECT__LOCK_FREE, SYS__HEAP_OBJECT__LOCK_HELD) == SYS__HEAP_OBJECT__LOCK_FREE)
+            return true;
+        sys__silicon__wait_cycles(SYS__HEAP_OBJECT__LOCK_BACKOFF_CYCLES + sys__silicon__block_id());
+    }
+    sys__fault__raise(0ull, SYS__HEAP_OBJECT__FAULT_LOCK);
+    return false;
+}
+
 /* Hand it back. It is a swap and not a store so that releasing something not held is caught: a store
  * would make the mistake invisible and the next holder would find the object already free. */
 static __device__ inline void sys__heap_object__lock_release(uint64_t offset) {
@@ -573,6 +593,114 @@ static __device__ inline uint64_t sys__heap_object__clone(uint64_t offset, sys__
     }
 }
 
+/* ── THE WORKLIST A THREAD KEEPS ─────────────────────────────────────────────────────────────────────
+ * ⚖ ARCHITECT 2026-11-02: *"we can keep a makeshift object in the stack holding the chunk at zero cost"* ·
+ * *"maybe simply maintaining an object at position 1 would do what needs to be done"*.
+ * A release that reaches zero moves what the dying object held onto a stack and drains it. The stack starts
+ * with a value that holds nothing, its bottom (▶ `sys__stack__transfer`), and the drain stops there: the
+ * stack is never empty, so it is never ended, its first chunk never goes back, and it is kept as the
+ * thread's worklist for the next release. A release then makes no stack, and no chunk unless it moves more
+ * than the first chunk holds. `MEASURED` node03, Flash-Next's three turns: 690,070 of 2,577,756 releases to
+ * zero moved something, and made 690,070 stacks and 1,491,134 chunks to do it; kept, 3 stacks and 17,055
+ * chunks (measurements/2026-11-02_teardown_worklist_node03.md).
+ *
+ * ⛳ IT IS MADE BY THE FIRST RELEASE THAT MOVES SOMETHING, as the stack it replaces was: a release that
+ *   moves nothing allocates nothing, so it cannot fail for want of room.
+ * ⛳ A THREAD'S, NOT A BLOCK'S, because two threads can serve one block id (▶ the C fixed stack's thread
+ *   token). Nothing but its own thread can name it, which is why its drain excludes nobody.
+ * ⛳ IT BELONGS TO ONE PUBLISH OF THE HEAP. A heap published again leaves the offset naming room in a pool that
+ *   is no longer this one, so the worklist remembers the publish it was made under and is forgotten under a
+ *   new one.
+ * ⛳ AND A THREAD THAT ENDS LETS GO OF IT, through a key whose exit runs as the thread ends — the way the x86
+ *   family gives back a thread's scratch. The server starts a thread a turn, and each would otherwise leave its
+ *   stack and chunk behind. Letting go allocates nothing, since an ending thread has no carve armed: the
+ *   bottom value comes off, which leaves the first chunk empty and unlinked, and the chunk and then the stack
+ *   are released, neither moving anything.
+ * ⛳ IN THE MANUAL MODE A DYING OBJECT WAITS ON IT (▶ `garbage_collection__header.cuh`): put on the worklist
+ *   above its bottom, the worklist holding it, until a collect lets go of it — and a drain runs to the
+ *   bottom, so the first release that drains, a collect's or any other, takes everything waiting apart.
+ *   Nothing waits past an evaluation, so a thread ending has nothing waiting; if it had, it is collected
+ *   before the worklist goes, the thread out of the mode for good — the worklist's own pieces are let go of
+ *   last, and in the mode they would wait on a worklist made for them, carved where nothing is armed.
+ *   `MEASURED` (test/src_host_worklist_threads.cpp): a let-go that only collected left the thread in the
+ *   mode, and a chunk was carved as the thread ended.
+ * ────────────────────────────────────────────────────────────────────────────────────────────────── */
+static __thread uint64_t sys__heap_object__zzprivate_worklist            = 0ull;
+static __thread uint32_t sys__heap_object__zzprivate_worklist_generation = 0u;
+static sys__os__key      sys__heap_object__zzprivate_worklist_key;
+static sys__os__once     sys__heap_object__zzprivate_worklist_once       = SYS__OS__ONCE_INIT;
+
+/* The thread's worklist, or a fresh one if the heap has been reset: zero, and the release's transfer makes it. */
+static __device__ inline uint64_t sys__heap_object__zzprivate_worklist_kept(void) {
+    if (sys__heap_object__zzprivate_worklist != 0ull
+        && sys__heap_object__zzprivate_worklist_generation != sys__heap__zzengine_generation())
+        sys__heap_object__zzprivate_worklist = 0ull;              /* it went with the pool it was made in */
+    return sys__heap_object__zzprivate_worklist;
+}
+
+/* As a thread that kept one ends, or for a caller that wants the heap back to what its objects hold. */
+static void sys__heap_object__zzprivate_worklist_let_go(void* held) {
+    (void)held;
+    if (sys__heap__zzpackage_published()) sys__garbage_collection__zzpackage_thread_ends();
+    const uint64_t kept = sys__heap_object__zzprivate_worklist_kept();
+    sys__heap_object__zzprivate_worklist = 0ull;
+    if (kept == 0ull || !sys__heap__zzpackage_published()) return;
+    uint64_t spent = 0ull;
+    (void)sys__stack__zzpackage_worklist_pop_at(kept, &spent);    /* the bottom value, which holds nothing */
+    if (spent != 0ull) (void)sys__heap_object__release(spent);
+    (void)sys__heap_object__release(kept);
+}
+
+static void sys__heap_object__zzprivate_worklist_key_make(void) {
+    (void)sys__os__key_make(&sys__heap_object__zzprivate_worklist_key, sys__heap_object__zzprivate_worklist_let_go);
+}
+
+/* A drained worklist, its bottom value alone: kept as this thread's, unless the thread keeps another — a
+ * release reached from inside another's drain makes its own — and then it answers false and is ended. */
+/* A worklist made as this thread's, under this publish, let go of as the thread ends. */
+static __device__ inline void sys__heap_object__zzprivate_worklist_adopt(uint64_t worklist) {
+    sys__os__once_run(&sys__heap_object__zzprivate_worklist_once, sys__heap_object__zzprivate_worklist_key_make);
+    sys__os__key_set(sys__heap_object__zzprivate_worklist_key, (void*)1);
+    sys__heap_object__zzprivate_worklist            = worklist;
+    sys__heap_object__zzprivate_worklist_generation = sys__heap__zzengine_generation();
+}
+
+static __device__ inline bool sys__heap_object__zzprivate_worklist_keep(uint64_t drained) {
+    const uint64_t kept = sys__heap_object__zzprivate_worklist_kept();
+    if (kept != 0ull) return kept == drained;
+    sys__heap_object__zzprivate_worklist_adopt(drained);
+    return true;
+}
+
+/* A dying object put on `*worklist`, the thread's, to wait in the manual mode. It goes in first and is
+ * held after, so a refusal leaves the count where the release took it — at zero, to be taken apart at
+ * once — and in between nothing can reach it but this thread. Answers whether it went in.
+ * ⛔ A WORKLIST MADE HERE IS THE THREAD'S ONLY IF THE VALUE WENT IN. One made without room for its first
+ * chunk is an empty stack, which the release's lap ends — so it is handed to that teardown in `*worklist`,
+ * as a stack `transfer` made there would be, and never named as the thread's: named and then ended, the
+ * slot would name room given back. */
+static __device__ inline bool sys__heap_object__zzprivate_worklist_wait(uint64_t offset, uint64_t* worklist) {
+    const bool had = *worklist != 0ull;
+    const sys__heap_node waiting = sys__heap_object__reference_to(offset);
+    if (!sys__stack__zzpackage_worklist_put(worklist, &waiting)) return false;
+    if (!had) sys__heap_object__zzprivate_worklist_adopt(*worklist);
+    (void)sys__heap_object__retain(offset);                       /* the worklist's hold */
+    return true;
+}
+
+static __device__ inline void sys__heap_object__zzpackage_collect(void) {
+    /* One waiting value is taken off and let go of, and its teardown drains the rest: a drain runs to the
+     * worklist's bottom. The loop is for a value whose release did not drain — none does today. */
+    for (;;) {
+        const uint64_t kept = sys__heap_object__zzprivate_worklist_kept();
+        if (kept == 0ull || sys__stack__zzpackage_worklist_left_at(kept) != 2u) return;
+        uint64_t spent = 0ull;
+        const sys__heap_node waiting = sys__stack__zzpackage_worklist_pop_at(kept, &spent);
+        if (spent != 0ull) (void)sys__heap_object__release(spent);
+        if (sys__heap_node__carries_reference(waiting.dtype)) (void)sys__heap_object__release(waiting.args[0]);
+    }
+}
+
 /* ── GIVING SOMETHING UP, AND FINISHING THE JOB ──────────────────────────────────────────────────────
  * ⚖ ARCHITECT: *"i want something that i can call directly as sys__heap_object__release(reference) and this
  * method will have the internal loop, where we call each object's release that does return the stack of
@@ -619,15 +747,15 @@ static __device__ inline uint64_t sys__heap_object__clone(uint64_t offset, sys__
  * hands to calls that write through it. A compiler asked to reason about a nest like that does not
  * decline: it tries, and it can try for a very long time. Kept out of line, a caller sees a call and
  * the nest never exists.
- * ⛳ WHAT IT COSTS, SAID PLAINLY: a call on every release that reaches zero. What that buys or costs
- * on the host is `ASSUMED` rather than measured; the figures behind the choice are device figures
- * (▶ the note at the top).
+ * ⛳ WHAT IT COSTS, SAID PLAINLY: a call on every release that reaches zero — and on the host that is
+ * what the compiler chooses anyway. `MEASURED` node03, g++ -O2 (setup.py's line): without the marker it
+ * inlines this function at 1 of its 581 call sites, the build takes 27.5 s against 27.2 s, and
+ * Flash-Next decodes at the same rate within the noise — 25.12 against 25.04 tokens/s, the means of
+ * eight interleaved runs, a permutation p of 0.63 (measurements/2026-11-03_teardown_rest_manual_node03.md).
+ * The device figures behind the choice are the note's at the top.
  * ⚠ THE MARKER IS KEPT AS A GUARANTEE RATHER THAN AS A MECHANISM, so that a future version of this
  * function small enough to tempt the inliner does not silently start being inlined into every teardown
- * site.
- * ⛳ WHETHER OUT OF LINE IS THE RIGHT TRADE AT ALL IS AN OPEN QUESTION AND NOT A SETTLED ONE: a spill
- * is a cost and so is a call, and which is cheaper here cannot be read off a spill count. It needs a
- * program worth timing on the host. */
+ * site. */
 static __device__ SYS__NOINLINE uint32_t sys__heap_object__release(uint64_t offset) {
     if (!sys__heap__zzpackage_published()) {
         sys__fault__raise(0ull, SYS__HEAP__FAULT_NOT_PUBLISHED);
@@ -637,19 +765,23 @@ static __device__ SYS__NOINLINE uint32_t sys__heap_object__release(uint64_t offs
     if (!sys__heap_object__zzprivate_reference_decrement(offset, &left)) return 0u;   /* it said which way it was wrong */
     if (left != 0u) return left;                                /* somebody else still wants it */
 
-    /* Nothing yet, and on most releases nothing ever: a dying object that held nothing moves nothing, so
-     * the slot stays empty and the whole teardown allocates not one node. The first thing moved is what
-     * turns this into a stack. */
-    uint64_t releaser = 0ull;
+    /* This thread's worklist, or nothing until a release first moves something (▶ the worklist a thread
+     * keeps, above). A dying object that held nothing moves nothing, and allocates nothing. */
+    uint64_t releaser = sys__heap_object__zzprivate_worklist_kept();
+    /* In the manual mode it waits there instead, the worklist holding it, until the program collects; a
+     * worklist with no room for it leaves it to be taken apart now. */
+    if (sys__garbage_collection__zzpackage_manual() && sys__heap_object__zzprivate_worklist_wait(offset, &releaser))
+        return 0u;
     sys__heap_object__zzprivate_deallocate(offset, &releaser);
 
-    /* ⭐⭐ ONE LAP, AND EACH PASS DOES ONE OF TWO THINGS: it takes the next thing off the stack, or —
-     * when there is nothing left to take — it ends the stack itself and picks up whatever that ending
-     * moved. So a hand-over that produces another stack is another pass rather than another frame,
-     * and nothing here calls this function again.
-     * ⛔ THE DISTINCTION THAT MATTERS IS BETWEEN THE DATA AND THE CODE. A stack that has been drained
-     * holds nothing, so on every teardown anyone has yet written the outer lap runs exactly once and
-     * the second pass finds nothing to do — that is true, and it is a fact about the VALUES. Whether
+    /* ⭐⭐ ONE LAP, AND EACH PASS DOES ONE OF THREE THINGS: it takes the next thing off the stack; or, at
+     * the stack's bottom value, it keeps the stack as the thread's worklist and stops; or — when nothing
+     * is left in it, which only a stack whose bottom could not go in reaches — it ends the stack itself
+     * and picks up whatever that ending moved. So a hand-over that produces another stack is another pass
+     * rather than another frame, and nothing here calls this function again.
+     * ⛔ THE DISTINCTION THAT MATTERS IS BETWEEN THE DATA AND THE CODE. A worklist drained to its bottom
+     * is kept and the lap ends there, so on every teardown anyone has yet written no stack is ended and
+     * nothing is picked up after it — that is true, and it is a fact about the VALUES. Whether
      * this function can reach itself is a fact about the TEXT, and only the second one is visible to a
      * compiler: one call back into here makes the emitted graph cyclic, and a cyclic graph cannot be
      * inlined and cannot have its stack bounded.
@@ -663,14 +795,18 @@ static __device__ SYS__NOINLINE uint32_t sys__heap_object__release(uint64_t offs
      * calls do to it, and what they do is the whole of the teardown dispatch. Flat, there is one
      * condition and one body. */
     while (releaser != 0ull) {
-        if (!sys__stack__zzpackage_empty_at(releaser)) {
+        /* Work while more than the bottom value is in it. Drained to its bottom it is kept for the next
+         * release, or, where the thread keeps another, the bottom comes off too and the stack is ended. */
+        const uint32_t waiting = sys__stack__zzpackage_worklist_left_at(releaser);
+        if (waiting == 1u && sys__heap_object__zzprivate_worklist_keep(releaser)) break;
+        if (waiting != 0u) {
             /* ⭐⭐ THE POP THAT DISPOSES OF NOTHING, AND IT IS WHAT KEEPS THIS FUNCTION OUT OF ITS OWN
              * CALL GRAPH. Taking the last value out of a worklist chunk leaves that chunk empty, and
              * the ordinary pop would give it up — which runs this function. So the chunk is handed back
              * instead and ended right here, with the same two steps every other death in this loop
              * gets. ⇒ ★ THE COLLECTOR IS THE ONE CALLER THAT CANNOT ASK FOR A THING TO BE COLLECTED. */
             uint64_t spent = 0ull;
-            const sys__heap_node value = sys__stack__zzpackage_pop_deferring_at(releaser, &spent);
+            const sys__heap_node value = sys__stack__zzpackage_worklist_pop_at(releaser, &spent);
             if (spent != 0ull) {
                 uint32_t chunk_left = 0u;
                 if (sys__heap_object__zzprivate_reference_decrement(spent, &chunk_left) && chunk_left == 0u)

@@ -58,16 +58,22 @@ import numpy as np
 
 from .model_folder import Refused
 
+QWEN = ("qwen3_5", "qwen4_exp")   # the families a Qwen template frames: <|im_start|> … <|im_end|>, the reasoning effort
+
+REPL = ("A Lisp REPL on the user's machine, in a working folder the user gave it: one form a call, and its value is "
+        "the answer. It gives you agentic capabilities, if a task needs them: its commands act on this machine and the "
+        "web for you. Answer simple queries directly, without a call. (tools) lists the commands, each with what it "
+        "does, and (help 'name) says more about one; a path is absolute, or relative to the working folder. A "
+        "command that reads elsewhere or writes may be asked of the user first: call it, and the answer comes back "
+        "once the user has allowed it, or refused. To make a command of your own, a skill in Python or a program that "
+        "stays for later conversations, (guide) says how. (whoami) says which model you are.")
+
+
 TOOL = {"type": "function", "function": {
     "name": "lisp",
-    "description": "A Lisp REPL on the user's machine, in a working folder the user gave it: one form a call, and its "
-                   "value is the answer. It gives you a series of tools, but answer simple queries directly, without a call. "
-                   "Start with (help), which lists the commands; a path is absolute, or relative to "
-                   "the working folder. A command that reads elsewhere or writes may be asked of the user first: call it, and the "
-                   "answer comes back once the user has allowed it, or refused. To make a command of your own, a skill in Python or "
-                   "a program that stays for later conversations, (guide) says how. (whoami) says which model you are.",
+    "description": REPL,
     "parameters": {"type": "object", "properties": {"form": {
-        "type": "string", "description": "one Lisp form, such as (help) or (ls \"docs\")"}}, "required": ["form"]}}}
+        "type": "string", "description": "one Lisp form, such as (tools) or (ls \"docs\")"}}, "required": ["form"]}}}
 
 _QWEN_TOOLS = ("# Tools\n\nYou have access to the following functions:\n\n<tools>\n%s\n</tools>\n\nIf you choose to call a "
                "function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>"
@@ -102,7 +108,7 @@ class Chat:
         self.arch = folder.architecture
         self.tok = Tokenizer.from_file(os.path.join(folder.path, "tokenizer.json"))
         self.stop = set(folder.end_tokens())
-        if self.arch.startswith("qwen3_5"):
+        if self.arch.startswith(QWEN):
             self.stop.add(self.tok.token_to_id("<|im_end|>"))
             self.reasoning = _reasoning(folder.path)
         elif self.arch.startswith("glm5"):
@@ -164,7 +170,7 @@ class Chat:
                     + "".join("<|vision_start|>" + "".join("<%.1f seconds><|vision_start|>" % t + "<|video_pad|>" * n
                                                            + "<|vision_end|>" for n, t in v) + "<|vision_end|>"
                               for v in videos) + text)
-        if self.arch.startswith("qwen3_5"):
+        if self.arch.startswith(QWEN):
             if first:
                 system = system or "You are a helpful AI assistant."
                 if tools:
@@ -285,22 +291,35 @@ class Chat:
     def close_call(self):
         """The tokens that end a turn after a call left unanswered (an answer stopped there), where the template has the
         turn end after the call: Qwen's `<|im_end|>` — the next turn's framing follows it."""
-        return self.encode("<|im_end|>") if self.arch.startswith("qwen3_5") else []
+        return self.encode("<|im_end|>") if self.arch.startswith(QWEN) else []
 
-    def tool_response(self, answers, thinking=True):
+    def tool_response(self, answers, thinking=True, pictures=None):
         """The tokens that answer a stretch's calls, `answers` the value of each, written — and open the model's turn
-        again, as the template's generation prompt does."""
+        again, as the template's generation prompt does. `pictures`: for each answer, the token counts of the pictures it
+        shows the model (`(ui 'look …)`), framed before its text as a message's are."""
+        pictures = pictures or [()] * len(answers)
+        if any(pictures) and not self.sees_in_answers():
+            raise Refused("a %r model is not shown pictures in a tool's answer here" % self.arch)
         if self.arch.startswith("ministral3"):
             return self.encode("".join("[TOOL_RESULTS]%s[/TOOL_RESULTS]" % a for a in answers))
         if self.arch.startswith("deepseek_v41"):
-            return self.encode("<｜User｜>" + "\n\n".join("<tool_result>%s</tool_result>" % a for a in answers)
-                               + "<｜Assistant｜>" + ("<think>" if thinking else "</think>"))
+            return self.encode("<｜User｜>" + "\n\n".join(
+                "<tool_result>%s%s</tool_result>" % ("".join("<｜deepseek_image｜>" * n + "\n\n" for n in ps), a)
+                for a, ps in zip(answers, pictures)) + "<｜Assistant｜>" + ("<think>" if thinking else "</think>"))
         if self.arch.startswith("glm5"):
-            return self.encode("<|observation|>" + "".join("<tool_response>%s</tool_response>" % a for a in answers)
-                               + "<|assistant|><think>")
-        return self.encode("<|im_end|>\n<|im_start|>user" + "".join("\n<tool_response>\n%s\n</tool_response>" % a
-                                                                  for a in answers)
-                           + "<|im_end|>\n<|im_start|>assistant\n" + ("<think>\n" if thinking else "<think>\n\n</think>\n\n"))
+            return self.encode("<|observation|>" + "".join(
+                "<tool_response>%s%s</tool_response>"
+                % ("".join("<|begin_of_image|>" + "<|image|>" * n + "<|end_of_image|>" for n in ps), a)
+                for a, ps in zip(answers, pictures)) + "<|assistant|><think>")
+        return self.encode("<|im_end|>\n<|im_start|>user" + "".join(
+            "\n<tool_response>\n%s%s\n</tool_response>" % ("".join("<|vision_start|>" + "<|image_pad|>" * n + "<|vision_end|>"
+                                                                   for n in ps), a)
+            for a, ps in zip(answers, pictures))
+            + "<|im_end|>\n<|im_start|>assistant\n" + ("<think>\n" if thinking else "<think>\n\n</think>\n\n"))
+
+    def sees_in_answers(self):
+        """Whether this model's tool answers can carry pictures: the families whose messages do."""
+        return self.arch.startswith(("qwen3_5", "glm5", "deepseek_v41"))
 
 
 class ToolMarkup(str):

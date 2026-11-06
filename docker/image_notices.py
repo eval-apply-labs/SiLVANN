@@ -72,7 +72,7 @@ def main():
     for r in sorted(r for r in rows if r not in rocm):
         print("| %s | %s |" % (r[0], r[1]))
     print("\n## Python packages\n")
-    print("In `/opt/silvann/venv`, installed from PyPI by `requirements.txt` and what it requires. Each one's licence "
+    print("In `/opt/silvann/venv`, installed from PyPI by `scripts/requirements.txt` and what it requires. Each one's licence "
           "files are in its `.dist-info` folder under `venv/lib/python3.10/site-packages/`.\n")
     print("| package | version | licence |\n|---|---|---|")
     seen = set()

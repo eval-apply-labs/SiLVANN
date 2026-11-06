@@ -279,8 +279,22 @@ if [ "$ACTION" = update ] && exists; then
     # the port let go before the new one binds it (Podman 3.4 can still hold it a moment)
     [ $DRY = 1 ] || for i in $(seq 1 20); do busy "$PORT" || break; sleep 1; done
 fi
+# the companions' network (install_companions.sh): SiLVANN on it finds them by name, and their firewalls keep them from it
+NET=silvann-companions
+# the companions' network, made where it is not — ⛳ at CNI's config version 0.4.0 under Podman 3, which writes 1.0.0 and
+#   ships plugins that refuse it (Ubuntu 22.04's 3.4.4: "plugin firewall does not support config version 1.0.0")
+make_net() {
+    "$ENGINE" network inspect "$NET" >/dev/null 2>&1 && return 0
+    run "$ENGINE" network create "$NET" >/dev/null
+    if [ $DRY = 0 ] && [ "$ENGINE" = podman ] && [ "$(podman version -f '{{.Client.Version}}' 2>/dev/null | cut -d. -f1)" = 3 ]; then
+        for f in "${XDG_CONFIG_HOME:-$HOME/.config}/cni/net.d/$NET.conflist" "/etc/cni/net.d/$NET.conflist"; do
+            [ -w "$f" ] && sed -i 's/"cniVersion": "1.0.0"/"cniVersion": "0.4.0"/' "$f"
+        done
+    fi
+}
+make_net
 say "Starting SiLVANN…"
-run "$ENGINE" run -d --name "$NAME" "${FLAGS[@]}" -p "127.0.0.1:$PORT:8080" -v "$VOLUME" "$IMAGE" >/dev/null
+run "$ENGINE" run -d --name "$NAME" --network "$NET" "${FLAGS[@]}" -p "127.0.0.1:$PORT:8080" -v "$VOLUME" "$IMAGE" >/dev/null
 if [ $DRY = 0 ]; then
     for i in $(seq 1 90); do answers "$PORT" && break; sleep 2; done
     answers "$PORT" || stop_here "SiLVANN did not answer on port $PORT." \
@@ -293,5 +307,7 @@ note "In Options, 'Download models' fetches a model and 'start' runs it."
 note "Put files for the model in $DATA/workspace."
 note "Stop: $ENGINE stop -t 300 $NAME     Start again: $ENGINE start $NAME"
 note "Newest version: this same line with 'bash -s -- update' in place of 'bash'."
+note "A browser and a search engine of the model's own, in containers beside this one (docker/advanced.md), once:"
+note "  $FETCH https://raw.githubusercontent.com/eval-apply-labs/SiLVANN/HEAD/docker/install_companions.sh | bash"
 note "To read MP4 and other video files (PyAV, which the image leaves out), once:"
 note "  $FETCH https://raw.githubusercontent.com/eval-apply-labs/SiLVANN/HEAD/docker/install_nonfree.sh | bash"

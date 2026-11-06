@@ -37,6 +37,7 @@
 #include "cpu/opcodes/hyper__abi.cuh"
 #include "cpu/opcodes/mlp__abi.cuh"
 #include "cpu/opcodes/partials__abi.cuh"
+#include "cpu/opcodes/ngram__abi.cuh"
 #include "cpu/abi_surface__impl.cuh"    /* its C interface, as data for a host language to bind */
 
 /* The second half of the roll call. */

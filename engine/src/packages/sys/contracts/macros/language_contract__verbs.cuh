@@ -138,13 +138,13 @@
     /* A scope, as one word rather than three forms a program has to place in the right order. It is the   */ \
     /* environment's, beside `set!`, because binding and unbinding is what it does.                        */ \
     X(PKG, 17, "sys__let",            sys__bindings__zzpackage_apply_let,            SYS__BINDINGS__LET)          \
-    /* Dispatch, and the one word that makes an argument for it. A program sends a COPY of its program   */ \
-    /* and a COPY of what its names mean; the block that receives them builds its own of each, so two    */ \
-    /* blocks share a snapshot and neither writes anything the other reads.                              */ \
+    /* The word that makes the names a dispatch sends (`sys__scheduler__add`, below), and the two that read  */ \
+    /* what it answers. A program sends a COPY of its program and a COPY of what its names mean; the block   */ \
+    /* that receives them builds its own of each, so two blocks share a snapshot and neither writes anything  */ \
+    /* the other reads.                                                                                      */ \
     X(PKG, 18, "sys__bindings__viewonly", sys__opcodes__zzabi_adapter_viewonly,  SYS__BINDINGS__VIEWONLY)  \
-    X(PKG, 19, "sys__compute",        sys__opcodes__zzabi_adapter_compute,  SYS__COMPUTING_BASE__COMPUTE) \
     X(PKG, 20, "sys__result",         sys__opcodes__zzabi_adapter_result,   SYS__COMPUTING_BASE__RESULT) \
-    X(PKG, 21, "sys__completed",      sys__opcodes__zzabi_adapter_completed, SYS__COMPUTING_BASE__COMPLETED) \
+    X(PKG, 21, "sys__wait",           sys__opcodes__zzabi_adapter_wait,     SYS__COMPUTING_BASE__WAIT) \
     /* Standing this package up, which is a call in a list the boot evaluates rather than a C entry     */ \
     /* point the boot knows the name of. It is published like any other word because that is how a      */ \
     /* package hands one over, and because a package that wants to run another's init has no other      */ \
@@ -184,7 +184,21 @@
     /* `cpu/silicon/pad.cuh` (NN-115).                                                                            */ \
     X(PKG, 41, "sys__pad__open",      sys__opcodes__zzabi_adapter_pad_open,          SYS__PAD__OPEN) \
     X(PKG, 42, "sys__pad__move",      sys__opcodes__zzabi_adapter_pad_move,          SYS__PAD__MOVE) \
-    X(PKG, 43, "sys__pad__close",     sys__opcodes__zzabi_adapter_pad_close,         SYS__PAD__CLOSE)
+    X(PKG, 43, "sys__pad__close",     sys__opcodes__zzabi_adapter_pad_close,         SYS__PAD__CLOSE) \
+    /* ⭐ THE MANUAL MODE — a thread's teardowns waiting, and everything waiting done now, ▶              */ \
+    /* `cpu/garbage_collection__header.cuh` (NN-151).                                                     */ \
+    X(PKG, 44, "sys__garbage_collection__collect", sys__opcodes__zzabi_adapter_gc_collect, SYS__GARBAGE_COLLECTION__COLLECT) \
+    X(PKG, 45, "sys__garbage_collection__manual",  sys__opcodes__zzabi_adapter_gc_manual,  SYS__GARBAGE_COLLECTION__MANUAL) \
+    /* ⭐ A LIST SEVERAL BLOCKS SHARE, under its lock — ▶ `cpu/list__header.cuh`.                           */ \
+    X(PKG, 46, "sys__list__shared_append", sys__opcodes__zzabi_adapter_list_shared_append, SYS__LIST__SHARED_APPEND) \
+    X(PKG, 47, "sys__list__shared_take",   sys__opcodes__zzabi_adapter_list_shared_take,   SYS__LIST__SHARED_TAKE)   \
+    X(PKG, 48, "sys__list__shared_length", sys__opcodes__zzabi_adapter_list_shared_length, SYS__LIST__SHARED_LENGTH) \
+    /* ⭐ THE SCHEDULER — work queued on a block into an answer, and a computation going on as its next     */ \
+    /* step once the answers it names are filled, ▶ `cpu/scheduler__header.cuh`.                           */ \
+    X(PKG, 49, "sys__scheduler__add",      sys__opcodes__zzabi_adapter_scheduler_add,      SYS__SCHEDULER__ADD)      \
+    X(PKG, 51, "sys__scheduler__continue", sys__opcodes__zzabi_adapter_scheduler_continue, SYS__SCHEDULER__CONTINUE) \
+    /* the dictionary's third door: a key taken out (▶ `cpu/dictionary.cuh`, "WHAT A WRITE CLEARS")         */ \
+    X(PKG, 52, "sys__dictionary__remove",  sys__opcodes__zzabi_adapter_dict_remove,        SYS__DICTIONARY__REMOVE)
 
 /* ── AND THE OPCODES, NAMED ──────────────────────────────────────────────────────────────────────────
  * ⚖ ARCHITECT: *"the enum addition on the opcodes."* A published verb had a number and no name, so every

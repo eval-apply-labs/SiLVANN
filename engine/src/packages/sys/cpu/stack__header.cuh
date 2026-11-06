@@ -170,7 +170,8 @@
  * The stack chunks are internal by definition, so the access control is moved at the holder. A chunk is
  * reachable only through the stack that owns it, so holding the stack excludes everybody from every 
  * chunk in it — and the chunk tier takes nothing, which is why there is no pair of these held at 
- * once and no order to get wrong.
+ * once and no order to get wrong. A list several blocks share is held the same way, by its own three verbs
+ * and nothing beneath them (▶ `list__header.cuh`, "A LIST SEVERAL BLOCKS SHARE").
  * ══════════════════════════════════════════════════════════════════════════════════════════════════ */
 
 /* ── THE CONTRACT ────────────────────────────────────────────────────────────────────────────────────
@@ -254,8 +255,17 @@ static __device__ inline bool       sys__stack__empty  (const sys__heap_node* st
 /* The same two an offset apart, for a holder that has an offset and not a node — the teardown's
  * worklist handle is one. */
 static __device__ inline bool       sys__stack__zzpackage_empty_at(uint64_t stack_offset);
+/* What is left in a worklist: 0 nothing, 1 its bottom value alone, 2 something to drain. */
+static __device__ inline uint32_t   sys__stack__zzpackage_worklist_left_at(uint64_t stack_offset);
 static __device__ inline sys__heap_node sys__stack__zzpackage_pop_deferring_at(uint64_t stack_offset,
                                                                           uint64_t* out_spent);
+/* The same pop for a worklist, with no lock: a worklist is one thread's. Its callers are pinned
+ * (`scripts/claim_rules/unlocked_stack_callers.py`), and the argument is beside the definition. */
+static __device__ inline sys__heap_node sys__stack__zzpackage_worklist_pop_at(uint64_t stack_offset,
+                                                                          uint64_t* out_spent);
+/* A value put on a worklist without taking a hold, answering whether it went in, with no lock. */
+static __device__ inline bool           sys__stack__zzpackage_worklist_put(uint64_t* stack_offset,
+                                                                       const sys__heap_node* value);
 static __device__ inline void       sys__stack__replace(const sys__heap_node* stack_reference,
                                                         const sys__heap_node* value);
 
@@ -277,9 +287,10 @@ static __device__ inline void       sys__stack__replace(const sys__heap_node* st
  * layer above is written out of, and the chunk arithmetic is tested through them.
  *
  * What the OBJECT TEARDOWN in `heap_object__impl.cuh` reaches for is not those: it is the HOLDER-level
- * pair, `sys__stack__zzpackage_empty_at` and `sys__stack__zzpackage_pop_deferring_at`, which take an
- * offset because a worklist handle has one and not a node. The unwinding borrows a stack, whose LIFO
- * shape is what a worklist wants, rather than growing a second kind of list to do the same thing.
+ * pair, `sys__stack__zzpackage_worklist_left_at` and `sys__stack__zzpackage_worklist_pop_at`, which take
+ * an offset because a worklist handle has one and not a node, and take no lock because a worklist is one
+ * thread's. The unwinding borrows a stack, whose LIFO shape is what a worklist wants, rather than growing
+ * a second kind of list to do the same thing.
  *
  * ⛳ AND THE FILE'S ELEVEN `zzprivate_` VERBS ARE NOT HERE, WHICH IS THE MARKER DOING ITS JOB — the
  * chunk's cursor and previous with a setter each, peek, init, create and replace, and the holder's three

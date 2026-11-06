@@ -23,6 +23,11 @@
   (picture xf_ready (let ((s (- (sys__worker) FIRST_SOCKET)))
                       (nn__buffer__copy hand CARD (nth C_HAND s) HAND_BYTES 1)
                       (ai_z__glm_5_3__experts (nth C_HAND s) picks (nth (nth EX s) (nth HERE 0)) (nth C_ROUTED s))))
+  ;; a seat's (▶ glm5.lisp's two seats): the seat in HERE's second cell, its hand, its picks and its own buffers here
+  (picture xf2 (let ((s (- (sys__worker) FIRST_SOCKET)) (k (nth HERE 1)))
+                 (nn__buffer__copy (nth HAND_OF k) CARD (nth (nth C_HAND_OF k) s) HAND_BYTES 1)
+                 (ai_z__glm_5_3__experts (nth (nth C_HAND_OF k) s) (nth PICKS_OF k) (nth (nth EX s) (nth HERE 0))
+                                         (nth (nth C_ROUTED_OF k) s))))
   (picture xr (let ((s (- (sys__worker) FIRST_SOCKET)))
                 (nn__buffer__copy hands CARD (nth C_HANDS s) (* (nth nrows 0) HAND))   ; the chunk's rows, not a whole chunk's
                 (ai_z__glm_5_3__experts_rows (nth C_HANDS s) (nth (nth EXR s) (nth HERE 0)) (nth C_RROWS s) (nth nrows 0))))

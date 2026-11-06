@@ -37,6 +37,15 @@ def read_at(fd, size, offset):
         return os.read(fd, size)
 
 
+def resident():
+    """This process's resident memory, in bytes — what it holds now; 0 where the system does not say (Windows here)."""
+    try:
+        with open("/proc/self/status") as f:
+            return next(int(l.split()[1]) << 10 for l in f if l.startswith("VmRSS:"))
+    except (OSError, StopIteration, ValueError):
+        return 0
+
+
 def memory():
     """(total, available) in bytes: the machine's RAM, and what the system says it can give without swapping."""
     if WINDOWS:

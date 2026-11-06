@@ -26,13 +26,15 @@ static inline void sys__os__thread_detach(sys__os__thread thread);
 
 /* ── locks and conditions ────────────────────────────────────────────────────────────────────────────────────────
  *   sys__os__lock       SYS__OS__LOCK_INIT       taken and given by one thread, never twice by it
- *   sys__os__condition  SYS__OS__CONDITION_INIT  waited on with its lock taken; a wait may end with no wake */
+ *   sys__os__condition  SYS__OS__CONDITION_INIT  waited on with its lock taken; a wait may end with no wake, and
+ *                                                `wait_for` ends after `ns` nanoseconds at the latest */
 static inline void sys__os__lock_init(sys__os__lock* lock);
 static inline void sys__os__lock_take(sys__os__lock* lock);
 static inline bool sys__os__lock_try(sys__os__lock* lock);
 static inline void sys__os__lock_give(sys__os__lock* lock);
 static inline void sys__os__condition_init(sys__os__condition* condition);
 static inline void sys__os__condition_wait(sys__os__condition* condition, sys__os__lock* lock);
+static inline void sys__os__condition_wait_for(sys__os__condition* condition, sys__os__lock* lock, uint64_t ns);
 static inline void sys__os__condition_wake_one(sys__os__condition* condition);
 static inline void sys__os__condition_wake_all(sys__os__condition* condition);
 

@@ -108,7 +108,7 @@ class Ministral3(Generates):
             raise Refused("embed_on is 'auto', 'card' or 'cpu', not %r" % (embed_on,))
         #   A folder whose lisp/ predates mistral3_cpu.lisp keeps the table where it was under "auto".
         self.EMBED_CPU = embed_on == "cpu" or (embed_on == "auto" and machine.silicon == "khronos_opencl1_igpu"
-                                               and os.path.isfile(os.path.join(folder.path, "lisp", "mistral3_cpu.lisp")))
+                                               and folder.has_program("mistral3_cpu"))
         self.run_layers = list(range(self.LAYERS)) if layers is None else sorted(layers)
         g = pickle.load(open(os.path.join(folder.path, "global.pkl"), "rb"))
         self.global_ = g
@@ -386,7 +386,7 @@ class Ministral3(Generates):
 
     def _run(self, text, what):
         """A program's answer. ⛳ With the embedding on the CPU it runs with every block standing — it hands the CPU's work
-        (`sys__compute`) — and a program that does not would find the CPU's block never started."""
+        (`sys__scheduler__add`) — and a program that does not would find the CPU's block never started."""
         if self.EMBED_CPU:
             return self.m.grid(text)[1]
         return self.m.must(text, what)

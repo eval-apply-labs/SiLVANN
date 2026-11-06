@@ -18,11 +18,12 @@ def buffers(m):
     m.buffer(2 * K_MOST, "sample_weights")
 
 
-def remember(m, tokens):
-    """The recent tokens of a conversation `tokens` long into `seen`, each at its position's slot — what a turn does first
-    when its sampler's penalty reads them. Sixty-four to a program: a program is one form, and a form must fit a chunk."""
+def remember(m, tokens, seen="seen"):
+    """The recent tokens of a conversation `tokens` long into `seen` (a seat's own, by its name), each at its position's
+    slot — what a turn does first when its sampler's penalty reads them. Sixty-four to a program: a program is one form,
+    and a form must fit a chunk."""
     first = max(0, len(tokens) - SEEN)
-    sets = ["(sys__node_array__set seen %d %d)" % (p % SEEN, tokens[p]) for p in range(first, len(tokens))]
+    sets = ["(sys__node_array__set %s %d %d)" % (seen, p % SEEN, tokens[p]) for p in range(first, len(tokens))]
     for at in range(0, len(sets), 64):
         m.must("(begin %s 0)" % " ".join(sets[at:at + 64]), "the recent tokens")
 

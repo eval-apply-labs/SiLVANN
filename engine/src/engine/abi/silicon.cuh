@@ -40,12 +40,12 @@ int eng_abi_choose_workers(unsigned int n, const char* const* names, const unsig
     return 1;
 }
 
-/* ⭐ THE CALLER'S THREAD ACTS AS WORKER `w` — its device bound, and every verb it runs through this door's machine
- * reading worker `w`'s context, hatch and settings — until told `-1`, back to worker 0. What a program run from
- * out here uses to load a worker's weights into its own arena and fill its own tables. 1 when it took, 0 for a
- * worker the machine does not have, or while a resident launch is up. */
+/* ⭐ THE CALLER'S THREAD ACTS AS WORKER `w` — its device bound for the bytes it moves, and every program it runs
+ * through this door's machine run on block `w`, which runs as worker `w` (▶ `engine/abi/running.cuh`) — until told
+ * `-1`, back to worker 0 and block 0. What a program run from out here uses to load a worker's weights into its own
+ * arena and fill its own tables. 1 when it took, 0 for a worker the machine does not have. */
 int eng_abi_act_as(int w) {
-    if (!eng__abi__zzpackage_free_to_launch() || w >= (int)eng__abi__zzpackage_worker_count) return 0;
+    if (!eng__abi__zzpackage_live() || w >= (int)eng__abi__zzpackage_worker_count) return 0;
     const unsigned int as = w < 0 ? 0u : (unsigned int)w;
     if (!sys__silicon__bind_device(eng__abi__zzpackage_workers[as].family, eng__abi__zzpackage_workers[as].device)) return 0;
     sys__silicon__host_act_as(w < 0 ? -1 : w);

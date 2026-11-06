@@ -2,7 +2,7 @@
 SiLVANN's installer on Windows: the release, its Python environment and its libraries, in a folder of its own under the
 current one, and a `silvann` command - install.sh's counterpart. The libraries are the release's own, prebuilt on
 GitHub for every card the families list (silvann_windows_x64.zip, attached to the release): taken when they were built
-from this folder's engine and build.py, else built here as build.ps1 builds them.
+from this folder's engine and scripts\build.py, else built here as scripts\build.ps1 builds them.
 
   powershell -ExecutionPolicy Bypass -File install.ps1
 
@@ -12,7 +12,7 @@ that installs it, and the installer stops. Run it again to update; models, user_
   Python 3.10 to 3.14       python.org, or: winget install -e --id Python.Python.3.12
   Git                       winget install -e --id Git.Git
   a card's own driver       NVIDIA's for an NVIDIA card; AMD's or Intel's, whose OpenCL.dll the OpenCL families use
-and, only to build the libraries here (build.ps1, or a release whose libraries do not match):
+and, only to build the libraries here (scripts\build.ps1, or a release whose libraries do not match):
   Visual Studio's C++ tools and its "C++ Clang tools for Windows" (the Build Tools are enough)
   CUDA's toolkit (12 or 13), for an NVIDIA card: developer.nvidia.com/cuda-downloads - without it the CPU runs the models
 
@@ -24,10 +24,10 @@ and, only to build the libraries here (build.ps1, or a release whose libraries d
                             CUDA's for an NVIDIA card of compute 7.5 or newer
 
   install.ps1               fetch (or update), the environment, the libraries, the command
-  install.ps1 -FromSource   the same, the libraries built here (build.ps1 runs this)
-  install.ps1 -Build        the build alone, the cards and compilers looked for again (`silvann build`, build.ps1 -Build)
+  install.ps1 -FromSource   the same, the libraries built here (scripts\build.ps1 runs this)
+  install.ps1 -Build        the build alone, the cards and compilers looked for again (`silvann build`, scripts\build.ps1 -Build)
 
-requirements-nonfree.txt (PyAV, for video files) is install_nonfree.ps1's, beside this file.
+scripts\requirements-nonfree.txt (PyAV, for video files) is scripts\install_nonfree.ps1's.
 MEASURED 2026-10-19 on one PC (an RTX 5070 Ti, CUDA 13.4): the build from source; the prebuilt libraries ASSUMED until
 a release's are taken (NN-94). This file is ASCII on purpose: Windows PowerShell 5.1 reads a script without a
 byte-order mark in the PC's code page.
@@ -175,14 +175,14 @@ function Fetch {
         if ($LASTEXITCODE -ne 0) { Fail "git could not update $Dir (a change made in it by hand?)" }
         return
     }
-    if (Test-Path (Join-Path $Dir "build.py")) {
+    if (Test-Path (Join-Path $Dir "scripts\build.py")) {
         # a release unpacked here without git (a zip): built as it is, never mixed with one fetched over it
         Say "the release already in $Dir (no git: an update is a new copy, or a git clone)"
         return
     }
     # a folder of its own, or one this installer filled before: never files it did not write
     $others = Get-ChildItem -Force $Dir | Where-Object { @("models", "venv", "user_sessions") -notcontains $_.Name }
-    if (-not (Test-Path (Join-Path $Dir "build.py")) -and $others) {
+    if (-not (Test-Path (Join-Path $Dir "scripts\build.py")) -and $others) {
         Fail "$Dir already holds other files: install into a folder of its own (the default, .\silvann)"
     }
     Say "fetching SiLVANN into $Dir"
@@ -205,7 +205,7 @@ function Make-Environment {
         if ($LASTEXITCODE -ne 0) { Fail "Python could not make its environment in $Dir\venv" }
     }
     & $py -m pip install --quiet --upgrade pip
-    & $py -m pip install --quiet -r (Join-Path $Dir "requirements.txt")
+    & $py -m pip install --quiet -r (Join-Path $Dir "scripts\requirements.txt")
     if ($LASTEXITCODE -ne 0) { Fail "pip could not install requirements.txt (the lines above)" }
 }
 
@@ -219,12 +219,12 @@ $SmartAppControl = ("Windows' Smart App Control refuses SiLVANN's libraries, whi
                     "(Windows Security > App & browser control > Smart App Control settings > Off; on most PCs it cannot " +
                     "be turned on again without resetting Windows), or run SiLVANN on Linux (docs\users.md)")
 
-# the release's own libraries, when they were built from this folder's engine and build.py (git's hashes, which the
+# the release's own libraries, when they were built from this folder's engine and scripts\build.py (git's hashes, which the
 # zip's windows_libraries.txt carries): true when they are in lib\ and the evaluator loads them
 function Get-Libraries {
     $m = Select-String -Path (Join-Path $Dir "README.md") -Pattern "Developer preview, (v[0-9]+\.[0-9]+\.[0-9]+)" `
                        -ErrorAction SilentlyContinue | Select-Object -First 1
-    $want = @(& git -C $Dir rev-parse HEAD:engine HEAD:build.py 2>$null)
+    $want = @(& git -C $Dir rev-parse HEAD:engine HEAD:scripts/build.py 2>$null)
     if (-not $m -or $LASTEXITCODE -ne 0 -or $want.Count -ne 2) {
         Note "not a release's git checkout: the libraries are built here"
         return $false
@@ -285,7 +285,7 @@ function Build-Engine {
     $py = Join-Path $Dir "venv\Scripts\python.exe"
     $log = Join-Path $Dir "build.log"
     $err = Join-Path $Dir "build.err"
-    $p = Start-Process -FilePath $py -ArgumentList "`"$(Join-Path $Dir 'build.py')`"" -WorkingDirectory $Dir -NoNewWindow -Wait `
+    $p = Start-Process -FilePath $py -ArgumentList "`"$(Join-Path $Dir 'scripts\build.py')`"" -WorkingDirectory $Dir -NoNewWindow -Wait `
                        -PassThru -RedirectStandardOutput $log -RedirectStandardError $err
     $shown = Get-Content -Encoding UTF8 $log | Where-Object { $_ -match '^==|->|skipped|failed|would not|does not|^ {6}\S' }
     foreach ($l in $shown) { Write-Host "   $l" }
@@ -314,6 +314,7 @@ set "WHAT=%~1"
 if "%WHAT%"=="" set "WHAT=help"
 if /i "%WHAT%"=="list"     goto list
 if /i "%WHAT%"=="download" goto download
+if /i "%WHAT%"=="check"    goto check
 if /i "%WHAT%"=="token"    goto token
 if /i "%WHAT%"=="serve"    goto serve
 if /i "%WHAT%"=="ui"       goto ui
@@ -330,6 +331,10 @@ goto help
 exit /b %errorlevel%
 :download
 "%PY%" "%HERE%\silvann_core.py" download-model %2 %3 %4 %5 %6 %7 %8 %9
+exit /b %errorlevel%
+:check
+if "%~2"=="" ("%PY%" "%HERE%\silvann_core.py" check-versions & exit /b %errorlevel%)
+"%PY%" "%HERE%\silvann_core.py" check-model %2 %3 %4 %5 %6 %7 %8 %9
 exit /b %errorlevel%
 :token
 "%PY%" "%HERE%\silvann_core.py" hf-token %2 %3 %4 %5 %6 %7 %8 %9
@@ -356,7 +361,7 @@ echo the models, the conversations and the rest are kept in %TO% from now on - w
 exit /b 0
 :build
 set "SILVANN_DIR=%HERE%"
-powershell -NoProfile -ExecutionPolicy Bypass -File "%HERE%\build.ps1" -Build
+powershell -NoProfile -ExecutionPolicy Bypass -File "%HERE%\scripts\build.ps1" -Build
 exit /b %errorlevel%
 :update
 set "SILVANN_DIR=%HERE%"
@@ -367,7 +372,8 @@ echo %HERE%
 exit /b 0
 :help
 echo silvann list                        the models this release can fetch, and which are here
-echo silvann download ^<model^>            a model into %%SILVANN_DATA%%\models
+echo silvann download ^<model^>            a model into %%SILVANN_DATA%%\models - when it is there, what changed in its pack
+echo silvann check [model]               update or done, each model here - with one, the files its update fetches
 echo silvann token [--set ^| --forget]    the Hugging Face token the downloads use (faster than none)
 echo silvann serve ^<model^> [config]      the server, on port 8765 (--port to change it)
 echo silvann ui                          the chat in a browser, on port 8090, talking to the server
@@ -397,7 +403,7 @@ exit /b 0
 Check-Machine
 # run from a release's folder (a clone), that folder; downloaded alone, a folder of its own under the current one
 $Dir = if ($env:SILVANN_DIR) { $env:SILVANN_DIR } `
-       elseif ($PSScriptRoot -and (Test-Path (Join-Path $PSScriptRoot "build.py"))) { $PSScriptRoot } `
+       elseif ($PSScriptRoot -and (Test-Path (Join-Path $PSScriptRoot "scripts\build.py"))) { $PSScriptRoot } `
        else { Join-Path (Get-Location) "silvann" }
 New-Item -ItemType Directory -Force -Path $Dir | Out-Null
 $Dir = (Resolve-Path $Dir).Path
@@ -418,6 +424,18 @@ if (-not $prebuilt) {
     Build-Engine
 }
 Command-Files
+if (-not $Build) {
+    # the models here: each one's program for this release, from its pack (a boot fetches it otherwise)
+    $data = if ($env:SILVANN_DATA) { $env:SILVANN_DATA } `
+            elseif (Test-Path (Join-Path $Dir "data_folder")) { (Get-Content (Join-Path $Dir "data_folder") -Raw).Trim() } `
+            else { $Dir }
+    if (Test-Path (Join-Path $data "models")) {
+        Say "The models here: each one's program for this release"
+        $env:SILVANN_DATA = $data
+        & (Join-Path $Dir "venv\Scripts\python.exe") (Join-Path $Dir "silvann_core.py") update-programs
+        if ($LASTEXITCODE -ne 0) { Note "not checked now - each model's boot checks its program again" }
+    }
+}
 Say "done: SiLVANN is in $Dir, and 'silvann' with it"
 if (-not $Build) {
     Write-Host @"
@@ -428,6 +446,6 @@ if (-not $Build) {
    silvann ui                                         the chat, at http://localhost:8090
    silvann_cli                                        or the chat in this terminal
    silvann help                                       every command
-   install_nonfree.ps1                                once, to read video files other than animated pictures (PyAV)
+   scripts\install_nonfree.ps1                        once, to read video files other than animated pictures (PyAV)
 "@
 }

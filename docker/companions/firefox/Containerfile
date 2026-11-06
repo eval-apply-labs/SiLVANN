@@ -1,0 +1,19 @@
+# SiLVANN's browser companion: Firefox, headless, driven over WebDriver BiDi by the REPL's (browser …) — in a container
+# of its own, beside SiLVANN's and never in it, its firewall letting it reach the public internet and nothing private:
+# not SiLVANN, not the machine, not the network it is on (▶ docker/advanced.md "A browser of its own").
+FROM docker.io/library/debian:trixie-slim
+# Violentmonkey (MIT), the userscripts' manager, in every profile: fetched here, checked against addons.mozilla.org's hash,
+# and installed by Firefox's policies from the image (▶ policies.json) — never fetched as a session starts
+ARG VM_URL=https://addons.mozilla.org/firefox/downloads/file/5170937/violentmonkey-2.50.0.xpi
+ARG VM_SHA256=5e074465c7fdd31934e5b4664e3d2eac54269df575a0c0db52c843fe9afd81df
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        firefox-esr nftables socat util-linux ca-certificates fonts-dejavu-core fonts-noto-color-emoji curl \
+    && mkdir -p /opt/silvann && curl -fsSL "$VM_URL" -o /opt/silvann/violentmonkey.xpi \
+    && echo "$VM_SHA256  /opt/silvann/violentmonkey.xpi" | sha256sum -c - \
+    && apt-get purge -y curl && apt-get autoremove -y && rm -rf /var/lib/apt/lists/* \
+    && useradd --create-home --uid 10001 browser
+COPY policies.json /usr/lib/firefox-esr/distribution/policies.json
+COPY firewall.nft user.js entrypoint.sh run.sh /etc/silvann/
+RUN chmod 0755 /etc/silvann/entrypoint.sh /etc/silvann/run.sh
+EXPOSE 9222
+ENTRYPOINT ["/etc/silvann/entrypoint.sh"]

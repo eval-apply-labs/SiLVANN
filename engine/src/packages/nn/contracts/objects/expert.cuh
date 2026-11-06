@@ -284,7 +284,9 @@ typedef struct nn__expert__backing {
 #define NN__EXPERT__FAULT_TIER       0x4E455452ull   /* "NETR" — no tier for this worker, or not a tier's cells */
 
 /* ⭐ THE LOADER — reads in flight at once, the threads that do them, and what it counts. ▶ `cpu/loader__impl.cuh`. */
-#define NN__EXPERT__FLIGHT_MAX        64u   /* reads queued or in flight at once, over every layer */
+#define NN__EXPERT__FLIGHT_MAX        64u   /* a worker's reads queued or in flight at once, over every layer */
+#define NN__EXPERT__FLIGHT_OWNERS      4u   /* the workers whose reads the table holds at once, each its own MAX */
+#define NN__EXPERT__FLIGHT_RECORDS    (NN__EXPERT__FLIGHT_MAX * NN__EXPERT__FLIGHT_OWNERS)
 #define NN__EXPERT__LOADERS_STANDARD   4u    /* threads, unless SILVANN_EXPERT_LOADERS says otherwise */
 #define NN__EXPERT__LOADERS_MAX       32u
 #define NN__EXPERT__COUNT_MISSES          0u   /* reads a pick had to ask for itself            */

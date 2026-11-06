@@ -162,6 +162,8 @@
     X(PKG, 28, "sys__dictionary",          SYS__KIND__DICTIONARY)                                           \
     X(PKG, 29, "sys__tree_routing_node",   SYS__KIND__TREE_ROUTING_NODE)                                    \
     X(PKG, 30, "sys__dictionary_leaf",     SYS__KIND__DICTIONARY_LEAF)                                      \
+    /* Where a computation's value goes, made before the computation is asked for (▶ `cpu/answer.cuh`). */ \
+    X(PKG, 36, "sys__answer",              SYS__KIND__ANSWER)                                               \
                                                                                                        \
     /* ── WHAT THE ALLOCATOR SAYS ABOUT ITS OWN ROOM ────────────────────────────────────────────── */ \
     /* These are stamped into the first node of a chunk and never into anything a program holds. A  */ \

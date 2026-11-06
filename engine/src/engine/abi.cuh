@@ -9,9 +9,10 @@
  *   the narrowest useful shape: no templates, no classes, no exceptions, no ownership that has to be
  *   explained. Anything that can call C can call this, and a binding for one particular language
  *   becomes a thin thing written against it rather than the only door.
- * ⛳ THE DOORS ARE HOST CALLS. Every one reaches the machine through `ENG__ABI__ON_THE_MACHINE` (the
- *   caller's own thread as runner zero), `ENG__LAUNCH_MANY` (a runner per block, joined before it returns)
- *   or `ENG__LAUNCH_RESIDENT` (runners left running) — ▶ `engine/launch.cuh`.
+ * ⛳ THE DOORS ARE HOST CALLS. The boot stands the machine up through `ENG__LAUNCH_MANY` (a runner per block,
+ *   joined before it returns) and ends by leaving a runner per block resident (`ENG__LAUNCH_RESIDENT`, ▶
+ *   `engine/launch.cuh`); from there every door builds as the host (`ENG__ABI__AS_THE_HOST`, the caller's own
+ *   thread a caller of its own) and runs a program by queueing it on a block (▶ `abi/running.cuh`).
  *
  * ⛳ ONE MACHINE, HELD IN A STATIC, AND THAT IS HONEST RATHER THAN LAZY. A handle per machine would cost
  *   nothing to write and would mean nothing to use: a machine is a pool and a register, and everything

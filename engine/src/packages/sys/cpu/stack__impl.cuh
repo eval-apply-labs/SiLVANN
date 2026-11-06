@@ -404,7 +404,7 @@ static __device__ inline sys__stack_chunk* sys__stack_chunk__zzpackage_pop(sys__
  * It exists because doing the same thing with a pop and a push is not merely longer, it is expensive at
  * exactly the wrong moment. When the top is a chunk's only value, popping releases that chunk and hands
  * back its predecessor with a full cursor, so the push that follows finds no room and claims a fresh
- * chunk — a disposal, a queued object, a take off the free carousel and the compare-and-swap that
+ * chunk — a disposal, a queued object, a pop off the free stack and the compare-and-swap that
  * claims what came off it, to change one word. Replacing writes the word.
  *
  * The new value is retained before the old one is released, and the order is not defensive. Handing a
@@ -452,19 +452,24 @@ static __device__ SYS__NOINLINE void sys__stack_chunk__zzpackage_release_interna
      * it alive to be read out of, which costs it a written-back count and a second death later; moving
      * its values out before this returns costs neither, and an object that is dead stays dead.
      *
-     * ⛳ THE WALK IS BOUNDED BY THE CURSOR, so a cell above it is never read — those are cells a pop has
-     * already handed to somebody, and reading one would move a value out twice. */
-    const uint64_t cursor = sys__stack_chunk__zzprivate_cursor(chunk);
-    for (uint64_t i = 0ull; i < cursor; ++i)
-        sys__stack__transfer(releaser_stack, &chunk->cell[i]);
-
-    /* And the chunk behind this one, which is an object like any other and is held by the link. */
+     * ⛳ THE CHUNK BEHIND THIS ONE MOVES FIRST, so it comes off the worklist last: this chunk's values are
+     * let go of before the next chunk is taken apart, and the worklist holds one chunk's values at a time
+     * however long the chain. Moved last, it would come off first and the walk would reach the end of the
+     * chain with every chunk's values still waiting — `MEASURED` on the host harness, a stack of 1,500
+     * errors reached 1,500 on the worklist that way and 16 this way
+     * (measurements/2026-11-02_teardown_worklist_node03.md). */
     const uint64_t previous = sys__stack_chunk__zzprivate_previous(chunk);
     if (previous != 0ull) {
         sys__stack_chunk__zzprivate_set_previous(chunk, 0ull);
         sys__heap_node behind = sys__heap_object__reference_to(previous);
         sys__stack__transfer(releaser_stack, &behind);
     }
+
+    /* ⛳ THE WALK IS BOUNDED BY THE CURSOR, so a cell above it is never read — those are cells a pop has
+     * already handed to somebody, and reading one would move a value out twice. */
+    const uint64_t cursor = sys__stack_chunk__zzprivate_cursor(chunk);
+    for (uint64_t i = 0ull; i < cursor; ++i)
+        sys__stack__transfer(releaser_stack, &chunk->cell[i]);
 }
 
 /* Returns the stack at an offset, or nothing as a fallback. What is checked here is what an offset can
@@ -562,14 +567,15 @@ static __device__ inline bool sys__stack__push(const sys__heap_node* stack_refer
  *
  * ⛳ AND IT MAKES THE STACK IF THERE IS NOT ONE, which is what keeps a teardown that frees a leaf object
  * allocation-free. Most releases hand over nothing at all, and a stack made in advance for those would
- * be a chunk carved and given back on every one of them. The slot arrives holding nothing and the first
- * value is what turns it into a stack.
+ * be made for nothing. The slot arrives holding nothing and the first value is what turns it into a
+ * stack, its bottom value under that first one — and the stack is then the thread's worklist, kept for
+ * every release after (▶ the worklist a thread keeps, in `heap_object__impl.cuh`).
  *
  * ⭐⭐ AND IT TAKES NO LOCK, FOR THE REASON `sys__stack__zzpackage_empty_at` TAKES NONE: there is nobody
  * to exclude. Every caller hands it the slot a release chain is draining into, and that stack is made
- * here on the first value and ended by the chain that made it — its offset is never written anywhere
- * another block could read, so no second thread can name it. `push` above is the verb for a stack a
- * caller has published and it keeps its lock; this one is for a stack that has not been.
+ * here and kept in its thread's own slot — its offset is never written anywhere another thread could
+ * read, so no second thread can name it. `push` above is the verb for a stack a caller has published
+ * and it keeps its lock; this one is for a stack that has not been.
  * ⛳ THAT IS A REACHABILITY CLAIM — *"no second THREAD"*, not "no second block": the offset is never
  * written anywhere another reader could find it, and reachability does not care what the readers are.
  * ⛔ WHAT WOULD MAKE THAT FALSE, because it is a property of the CALLERS and not of this function: a
@@ -630,18 +636,43 @@ static __device__ inline sys__heap_node sys__stack__zzengine_compute_stack_pop(c
     return out;
 }
 
-static __device__ inline void sys__stack__transfer(uint64_t* stack_offset, const sys__heap_node* value) {
-    if (value == 0) { sys__fault__raise(0ull, SYS__STACK__FAULT_CONTRACT); return; }
-    if (stack_offset == 0) { sys__fault__raise(0ull, SYS__STACK__FAULT_CONTRACT); return; }
+/* The body of `transfer`, answering whether the value went in — what the worklist's put needs and a
+ * teardown arm does not. */
+static __device__ inline bool sys__stack__zzprivate_transfer_went_in(uint64_t* stack_offset, const sys__heap_node* value) {
+    if (value == 0) { sys__fault__raise(0ull, SYS__STACK__FAULT_CONTRACT); return false; }
+    if (stack_offset == 0) { sys__fault__raise(0ull, SYS__STACK__FAULT_CONTRACT); return false; }
     if (*stack_offset == 0ull) {
         const sys__heap_node made = sys__stack__create();
-        if (made.dtype != SYS__KIND__OBJECT_REFERENCE) return;               /* the making raised */
+        if (made.dtype != SYS__KIND__OBJECT_REFERENCE) return false;         /* the making raised */
         *stack_offset = made.args[0];
+        /* ⭐ A WORKLIST STARTS WITH ITS BOTTOM, a value that holds nothing, in the chunk the first value
+         * needs anyway: the drain stops at it, so the stack is kept for the next release rather than ended
+         * (▶ the worklist a thread keeps, in `heap_object__impl.cuh`). */
+        const sys__heap_node bottom = sys__heap_node__nothing();
+        sys__heap_node* fields = sys__stack__zzpackage_fields_at(*stack_offset);
+        if (fields != 0)
+            sys__stack__zzprivate_set_current_chunk(fields,
+                sys__stack_chunk__zzpackage_transfer(sys__stack__zzprivate_current_chunk(fields), &bottom));
     }
     sys__heap_node* stack_fields = sys__stack__zzpackage_fields_at(*stack_offset);
-    if (stack_fields == 0) { sys__fault__raise(0ull, SYS__STACK__FAULT_CONTRACT); return; }
-    sys__stack__zzprivate_set_current_chunk(stack_fields,
-        sys__stack_chunk__zzpackage_transfer(sys__stack__zzprivate_current_chunk(stack_fields), value));
+    if (stack_fields == 0) { sys__fault__raise(0ull, SYS__STACK__FAULT_CONTRACT); return false; }
+    sys__stack_chunk* was = sys__stack__zzprivate_current_chunk(stack_fields);
+    const uint64_t cursor_was = sys__stack_chunk__zzprivate_cursor(was);
+    sys__stack_chunk* now = sys__stack_chunk__zzpackage_transfer(was, value);
+    sys__stack__zzprivate_set_current_chunk(stack_fields, now);
+    return sys__stack_chunk__zzprivate_went_in(was, cursor_was, now);
+}
+
+static __device__ inline void sys__stack__transfer(uint64_t* stack_offset, const sys__heap_node* value) {
+    (void)sys__stack__zzprivate_transfer_went_in(stack_offset, value);
+}
+
+/* A value put on a worklist without taking a hold of it, answering whether it went in; a slot holding
+ * nothing becomes a worklist, its bottom value under the first, as `transfer` makes one. It is what the
+ * manual mode's release puts a dying object on the worklist with (▶ `garbage_collection__header.cuh`), and
+ * it takes no lock for the reason `sys__stack__zzpackage_worklist_pop_at` takes none. */
+static __device__ inline bool sys__stack__zzpackage_worklist_put(uint64_t* stack_offset, const sys__heap_node* value) {
+    return sys__stack__zzprivate_transfer_went_in(stack_offset, value);
 }
 
 static __device__ inline sys__heap_node sys__stack__zzpackage_pop_deferring_at(uint64_t stack_offset,
@@ -656,6 +687,28 @@ static __device__ inline sys__heap_node sys__stack__zzpackage_pop_deferring_at(u
     sys__stack__zzprivate_set_current_chunk(stack_fields,
         sys__stack_chunk__zzpackage_pop_deferring_disposal(chunk, &out, out_spent));
     sys__heap_object__lock_release(stack_offset);
+    return out;
+}
+
+/* ── A WORKLIST'S POP, WITH NO LOCK ──────────────────────────────────────────────────────────────────
+ * ⭐ NO LOCK, FOR THE REASON `transfer` TAKES NONE: a worklist is made by `transfer` and kept in its
+ * thread's own slot (▶ the worklist a thread keeps, in `heap_object__impl.cuh`), its offset is written
+ * nowhere another thread could read, and so nothing can pop or push it but the thread draining it.
+ * `MEASURED` node03, Flash-Next's three turns: the drain's pops took the object lock 2.1 million times,
+ * and nobody else ever asked for it (measurements/2026-11-02_teardown_worklist_node03.md).
+ * ⛔ A NEW CALLER HERE IS A DECISION AND NOT AN ADDITION, as for `transfer`: an unlocked pop racing a
+ * push corrupts the cursor. The callers are the release and the worklist's own let-go and collect, all
+ * in `heap_object__impl.cuh`, and `scripts/claim_rules/unlocked_stack_callers.py` pins them there. */
+static __device__ inline sys__heap_node sys__stack__zzpackage_worklist_pop_at(uint64_t stack_offset,
+                                                                          uint64_t* out_spent) {
+    if (out_spent != 0) *out_spent = 0ull;
+    sys__heap_node* stack_fields = sys__stack__zzpackage_fields_at(stack_offset);
+    if (stack_fields == 0) { sys__fault__raise(0ull, SYS__STACK__FAULT_CONTRACT); return sys__heap_node__nothing(); }
+    sys__stack_chunk* chunk = sys__stack__zzprivate_current_chunk(stack_fields);
+    if (chunk == 0) { sys__fault__raise(0ull, SYS__STACK__FAULT_EMPTY); return sys__heap_node__nothing(); }
+    sys__heap_node out;
+    sys__stack__zzprivate_set_current_chunk(stack_fields,
+        sys__stack_chunk__zzpackage_pop_deferring_disposal(chunk, &out, out_spent));
     return out;
 }
 
@@ -692,6 +745,19 @@ static __device__ inline bool sys__stack__zzpackage_empty_at(uint64_t stack_offs
     sys__heap_node* stack_fields = sys__stack__zzpackage_fields_at(stack_offset);
     if (stack_fields == 0) { sys__fault__raise(0ull, SYS__STACK__FAULT_CONTRACT); return true; }
     return sys__stack__zzprivate_current_chunk(stack_fields) == 0;
+}
+
+/* What is left in a worklist, counted as the drain needs it: 0 nothing; 1 one value that holds nothing, which
+ * is its bottom; 2 anything else, which is something to drain. A lone value that holds a reference counts as
+ * work, so a stack whose bottom could not go in is still drained to empty. It takes no lock for the reason
+ * `empty_at` takes none: a worklist is one thread's. */
+static __device__ inline uint32_t sys__stack__zzpackage_worklist_left_at(uint64_t stack_offset) {
+    sys__heap_node* stack_fields = sys__stack__zzpackage_fields_at(stack_offset);
+    if (stack_fields == 0) { sys__fault__raise(0ull, SYS__STACK__FAULT_CONTRACT); return 0u; }
+    const sys__stack_chunk* chunk = sys__stack__zzprivate_current_chunk(stack_fields);
+    if (chunk == 0) return 0u;
+    if (sys__stack_chunk__zzprivate_previous(chunk) != 0ull || sys__stack_chunk__zzprivate_cursor(chunk) != 1ull) return 2u;
+    return sys__heap_node__carries_reference(chunk->cell[0].dtype) ? 2u : 1u;
 }
 
 static __device__ inline bool sys__stack__empty(const sys__heap_node* stack_reference) {

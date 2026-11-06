@@ -534,6 +534,8 @@ class DeepSeek4(Generates):
     # ── ② the load ───────────────────────────────────────────────────────────────────────────────────────────
     def load(self, progress=None):
         m, b = self.m, self.b
+        if self.P > 1:                                # the cards' group first: refused before a weight is read
+            m.join_group(self.GROUP, self.P)
         self.ring_at, self.cache_at, self.ang_at, self.CB, self.MASK_CELLS = {}, {}, {}, {}, {}
         for k in range(self.P):
             m.act_as(k)
@@ -599,14 +601,11 @@ class DeepSeek4(Generates):
             m.act_as(CARD)
             expert_tier.bind(m, {k: self.sfx("tier_card", k) for k in range(self.P)}, len(self.workers()))
         if self.P > 1:
-            # ⭐ THE GROUP: each card joins it on its own worker, card 0 first (▶ nn's `nn__partials__join`)
+            # ⭐ THE GROUP: each card joins it on its own worker, card 0 first (▶ `Machine.join_group`)
             m.node_array("TP_POS", 1)
             if self.CHUNK:
                 m.node_array("TP_ROWS", 2)          # a chunk's first position and its rows (▶ `_tp_rows`)
-            for k in range(self.P):
-                m.act_as(k)
-                m.must("(nn__partials__join %d %d %d %d)" % (self.GROUP, k, self.P, min(4, self.P)),
-                       "card %d joining the group" % k, "sys__value_true")
+            m.join_group(self.GROUP, self.P)
         m.act_as(CARD)
         if self.CARD_EXCLUSIVE:
             # a chunk's promotion line, bound before the programs are defined: a card's block reads its bindings then
@@ -1133,7 +1132,7 @@ class DeepSeek4(Generates):
             return (engram + "(ai_deepseek_4__attention streams at%d pos%s) (ai_deepseek_4__route streams mo%d hand picks) %s"
                     "(ai_deepseek_4__shared hand mo%d) (ai_deepseek_4__close streams mo%d routed_k%s)" % (l, tp, l, mine, l, l, tp))
         return (engram + "(ai_deepseek_4__attention streams at%d pos%s) (ai_deepseek_4__route streams mo%d hand picks) %s"
-                "(sys__compute %d names xf%d_0) %s(ai_deepseek_4__shared hand mo%d) (sys__result %d)%s "
+                "(sys__scheduler__add %d names xf%d_0) %s(ai_deepseek_4__shared hand mo%d) (sys__wait %d)%s "
                 "(nn__buffer__copy c_routed %d routed %d)%s (ai_deepseek_4__close streams mo%d routed%s)"
                 % (l, tp, l, tier, CPU, l, mine, l, CPU, written, CPU, 2 * H, add, l, tp))
 
@@ -1165,8 +1164,8 @@ class DeepSeek4(Generates):
                       "(nn__vector__range c_embedding (+ %d tok) 1) c_emb 1 %d %d))"
                       % (self.EMB_ROW_BYTES // 2, self.EMB_ROW_BYTES // 2, self.EMB_DATA_BYTES // 2, H, self.EMB_BITS))
             m.act_as(CARD)
-            m.defun("(defun (embed_e tok) (begin (sys__node_array__set EMB_TOK 0 tok) (sys__compute %d names xe) "
-                    "(sys__result %d) (nn__buffer__copy c_emb %d u %d) (nn__hadamard__rotate u ones512 hu %d) "
+            m.defun("(defun (embed_e tok) (begin (sys__node_array__set EMB_TOK 0 tok) (sys__scheduler__add %d names xe) "
+                    "(sys__wait %d) (nn__buffer__copy c_emb %d u %d) (nn__hadamard__rotate u ones512 hu %d) "
                     "(nn__vector__pointwise_mul hu signs_row e %d)))" % (self.CPU, self.CPU, self.CPU, 2 * H, H, H))
         else:
             m.defun("(defun (embed_e tok) (begin (nn__turboquant__decode (nn__vector__range EMBEDDING (* tok %d) %d) "
@@ -1213,8 +1212,8 @@ class DeepSeek4(Generates):
             if self.CHUNK:
                 self._rows_procedures()
             return
-        start = lambda pic: " ".join("(sys__compute %d names %s)" % (k, self.sfx(pic, k)) for k in range(1, self.P))
-        wait = " ".join("(sys__result %d)" % k for k in range(1, self.P))
+        start = lambda pic: " ".join("(sys__scheduler__add %d names %s)" % (k, self.sfx(pic, k)) for k in range(1, self.P))
+        wait = " ".join("(sys__wait %d)" % k for k in range(1, self.P))
         m.defun("(defun (layers pos) (begin (sys__node_array__set TP_POS 0 pos) %s %s %s (type streams)))"
                 % (start("tp_given"), lays, wait))
         m.defun("(defun (position tok pos) (begin (sys__node_array__set TP_POS 0 pos) %s (embed_e tok) "
@@ -1229,8 +1228,8 @@ class DeepSeek4(Generates):
         matrices once a chunk, each row's attention in position order, its mix in its record of `amix`); the router over
         every row (`route_rows`, the picks in the rows' hands, the rotated inputs in `xrows`); the routed experts on the
         CPU once over the chunk; the shared expert and the close over the rows (`close_rows`) — and leaves the last row's
-        streams and mix where the head reads them. A chunk's experts can take longer than `sys__result` waits, so the card
-        asks `sys__completed` until the CPU says so, then collects (as GLM's chunks do). Over a group (`start` and `wait`
+        streams and mix where the head reads them. A chunk's experts can take longer than `sys__wait` waits, so the card
+        asks `sys__result` until the CPU says so, then collects (as GLM's chunks do). Over a group (`start` and `wait`
         the other cards' `tp_rows`, ▶ `_tp_rows`): the chunk's place and length in TP_ROWS, its embedding the group's sum,
         and both sites' rows each the group's sum."""
         m, H, MH2, MIXH = self.m, self.H, 2 * self.MULT * self.H, MIX_BYTES // 2
@@ -1247,7 +1246,7 @@ class DeepSeek4(Generates):
             m.defun("(defun (%s%d first n) (let ((t 0)) %s"
                     "(ai_deepseek_4__attention_rows srows at%d first n amix bmix awork%s)"
                     " (ai_deepseek_4__route_rows srows %s%d hands n amix bmix xrows awork) %s"
-                    "(sys__compute %d names xr%d_0) %s(while '(sys__eq (sys__completed %d) (< 1 0)) '(< 0 1)) (sys__result %d)"
+                    "(sys__scheduler__add %d names xr%d_0) %s(while '(sys__eq (sys__result %d) (< 1 0)) '(< 0 1)) (sys__wait %d)"
                     " (nn__buffer__copy c_rrows %d rrows (* n %d))%s"
                     " (ai_deepseek_4__close_rows srows %s%d xrows rrows n bmix awork%s)%s"
                     " n))"

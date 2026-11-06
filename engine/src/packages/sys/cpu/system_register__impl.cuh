@@ -61,8 +61,10 @@ static __device__ inline bool sys__system_register__publish(sys__heap_node* room
      * reaching inside a kind. ⇒ ★ THE BOOT OWNS THE MEMORY; THE PACKAGE OWNS WHAT IS IN IT.
      * ⛳ AND THE ORDER INSIDE IS FORCED: the array has to exist before a row can name it, and the row
      * cannot be written before the register does. Two placements and one write, in the only sequence
-     * that works, in the one function that knows all three. */
-    const uint64_t bases = sys__node_array__zzpackage_place(bases_room, (uint64_t)blocks);
+     * that works, in the one function that knows all three.
+     * ⭐ A SLOT A BLOCK AND ONE AFTER THEM, THE HOST'S (▶ `sys__computing_base__host`): the caller outside the
+     * runners carves from a base of its own there, so it runs sys's code beside them without being one. */
+    const uint64_t bases = sys__node_array__zzpackage_place(bases_room, (uint64_t)blocks + 1ull);
     if (bases == 0ull) return false;           /* the placing raised, and said which of its reasons */
     const uint64_t at = sys__node_array__zzpackage_place(room, (uint64_t)SYS__SYSTEM_REGISTER__ROWS);
     if (at == 0ull) return false;

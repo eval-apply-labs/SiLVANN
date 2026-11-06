@@ -191,6 +191,88 @@ static __device__ inline void nn__rmsnorm__zzabi_body_fp32(uint16_t* o, const fl
     }
 }
 
+/* `rows` rows of `n` floats one after another, each normed as the one-row body norms it — row `r` by the gain's row
+ * `r mod period`, `n` halves each (`period` 1: one gain for every row) — a block a row: so a row is the bytes the one-row
+ * door gives it. A chunk's rows of a model's fp32 streams, a stream a row and a gain a stream (Flash-Next's gated
+ * residual), are one launch where a launch a row and stream took them. */
+static __device__ inline void nn__rmsnorm__zzabi_body_fp32_rows(uint16_t* o, const float* x, const uint16_t* w, uint64_t n, uint64_t rows,
+                                                                 uint64_t period, float eps, unsigned int* over) {
+    for (uint64_t r = nn__silicon__block(); r < rows; r += nn__silicon__blocks())
+        nn__rmsnorm__zzabi_body_fp32(o + r * n, x + r * n, w + (period != 0u ? r % period : 0u) * n, n, eps, over);
+}
+
+/* ⭐ FLASH-NEXT'S GATED RESIDUAL, ITS RANK (`gated_rank`): the down map's answer `a`, `rank` halves — `act` its activation,
+ *   silu(a · scale) rounded as `vector_scale` and then `swiglu_combine` with a gain of ones round it, and `rot` that rotated in
+ *   the pack's ladder (blocks of 512, then a 256, then a 128, a multiple of 128 in all), each block `hadamard_blocks`' own
+ *   with the signs from the vector's start. A lane an output: its activation, and its rotated output summed as that body
+ *   sums it from its block's activations, each computed where it is read — no lane waits on another, and one launch
+ *   answers what four did, to their bits — where the family's `hadamard_blocks` is this body's; a family with a butterfly of
+ *   its own answers as its four doors only where it overrides this door too (AMD's, in one block). */
+static __device__ inline uint16_t nn__gated__zzabi_act(const uint16_t* a, uint64_t i, float scale, bool* hit) {
+    const float s = nn__silicon__half_to_float(nn__primitives__zzpackage_float_to_half(nn__silicon__half_to_float(a[i]) * scale, hit));
+    const float clamped = (s < -88.0f) ? -88.0f : ((s > 88.0f) ? 88.0f : s);
+    return nn__primitives__zzpackage_float_to_half(clamped / (1.0f + nn__silicon__expf(-clamped)) * 1.0f, hit);
+}
+/* The ladder's block that holds element `i` of a vector of `rank`: its first element and its width. */
+static __device__ inline uint64_t nn__gated__zzprivate_block(uint64_t i, uint64_t rank, uint64_t* width) {
+    const uint64_t whole = rank / 512ull * 512ull, rest = rank - whole;
+    if (i < whole) { *width = 512ull; return i - i % 512ull; }
+    if (rest >= 256ull && i < whole + 256ull) { *width = 256ull; return whole; }
+    *width = 128ull;
+    return whole + (rest >= 256ull ? 256ull : 0ull);
+}
+static __device__ inline void nn__gated__zzabi_body_rank(uint16_t* rot, uint16_t* act, const uint16_t* a, const uint16_t* sign,
+                                                          uint64_t rank, float scale, unsigned int* over) {
+    for (uint64_t i = nn__kernels__zzprivate_first(); i < rank; i += nn__kernels__zzprivate_stride()) {
+        bool hit = false;
+        uint64_t b = 0ull;
+        const uint64_t at = nn__gated__zzprivate_block(i, rank, &b), r = i - at;
+        float s0 = 0.0f, s1 = 0.0f;
+        for (uint64_t c = 0ull; c < b; c += 2ull) {
+            uint64_t p0 = r & c, p1 = r & (c + 1ull);
+            p0 ^= p0 >> 8; p0 ^= p0 >> 4; p0 ^= p0 >> 2; p0 ^= p0 >> 1;
+            p1 ^= p1 >> 8; p1 ^= p1 >> 4; p1 ^= p1 >> 2; p1 ^= p1 >> 1;
+            const float v0 = nn__silicon__half_to_float(nn__gated__zzabi_act(a, at + c, scale, &hit)) * nn__silicon__half_to_float(sign[c]);
+            const float v1 = nn__silicon__half_to_float(nn__gated__zzabi_act(a, at + c + 1ull, scale, &hit))
+                           * nn__silicon__half_to_float(sign[c + 1ull]);
+            s0 += (p0 & 1ull) ? -v0 : v0;
+            s1 += (p1 & 1ull) ? -v1 : v1;
+        }
+        rot[i] = nn__primitives__zzpackage_float_to_half((s0 + s1) * (1.0f / nn__silicon__sqrtf((float)(uint32_t)b)), &hit);
+        act[i] = nn__gated__zzabi_act(a, i, scale, &hit);
+        if (hit) *over = NN__KERNELS__OVERFLOWED;
+    }
+}
+
+/* ⭐ FLASH-NEXT'S GATED RESIDUAL, ITS MEAN (`gated_mean`): the up map's answer `gt` over `streams` streams of `hidden`
+ *   gating the normed streams `an` — into[j] = the mean over k of σ(gt[k·hidden + j]) · an[k·hidden + j], each step rounded
+ *   as `sigmoid`, `vector_pointwise_mul`, the `vector_add`s a stream after another and `vector_scale` by `mean` round it —
+ *   and where `ij` is given (the injection map's `streams` answers), inj = 2 · σ(ij · mean), as `vector_scale`, `sigmoid`
+ *   and `vector_scale` round them. A lane an output, its streams' values its own: one launch answers what eight did, to
+ *   their bits. */
+static __device__ inline void nn__gated__zzabi_body_mean(uint16_t* into, uint16_t* inj, const uint16_t* gt, const uint16_t* an,
+                                                          const uint16_t* ij, uint64_t hidden, uint64_t streams, float mean,
+                                                          unsigned int* over) {
+    for (uint64_t j = nn__kernels__zzprivate_first(); j < hidden; j += nn__kernels__zzprivate_stride()) {
+        bool hit = false;
+        float m = 0.0f;
+        for (uint64_t k = 0ull; k < streams; ++k) {
+            const uint64_t i = k * hidden + j;
+            const float gs = nn__silicon__half_to_float(nn__primitives__zzpackage_float_to_half(
+                                 1.0f / (1.0f + nn__silicon__expf(-nn__silicon__half_to_float(gt[i]))), &hit));
+            const float gn = nn__silicon__half_to_float(nn__primitives__zzpackage_float_to_half(gs * nn__silicon__half_to_float(an[i]), &hit));
+            m = k == 0ull ? gn : nn__silicon__half_to_float(nn__primitives__zzpackage_float_to_half(m + gn, &hit));
+        }
+        into[j] = nn__primitives__zzpackage_float_to_half(m * mean, &hit);
+        if (inj != 0 && ij != 0 && j < streams) {
+            const float s = nn__silicon__half_to_float(nn__primitives__zzpackage_float_to_half(nn__silicon__half_to_float(ij[j]) * mean, &hit));
+            const float g = nn__silicon__half_to_float(nn__primitives__zzpackage_float_to_half(1.0f / (1.0f + nn__silicon__expf(-s)), &hit));
+            inj[j] = nn__primitives__zzpackage_float_to_half(g * 2.0f, &hit);
+        }
+        if (hit) *over = NN__KERNELS__OVERFLOWED;
+    }
+}
+
 static __device__ inline void nn__vector__zzabi_body_l2norm(uint16_t* o, const uint16_t* x,
                                                              uint64_t n, unsigned int* over) {
     const uint64_t lane = nn__silicon__lane(), lanes = nn__silicon__lanes();
@@ -546,13 +628,13 @@ static __device__ inline void nn__deltanet__zzabi_body_conv_step(uint16_t* o, ui
     }
 }
 
-/* One value head's step: its state `Sh`, its `q`, `k`, `v` and `zh`, its gate and decay. A block runs it with every
- * lane, so each lane reaches both folds. ⛳ Shared by the one-position door and the T-position one, so the
- * two do the same arithmetic. */
+/* One value head's step: its state `Sh`, its `q`, `k`, `v` and `zh`, its write strength and decay, and the output
+ * gate's function `gate` (`NN__DELTANET__GATE_*`). A block runs it with every lane, so each lane reaches both folds.
+ * ⛳ Shared by the one-position door and the T-position ones, so they do the same arithmetic. */
 static __device__ inline void nn__deltanet__zzprivate_step_head(float* Sh, const uint16_t* q, const uint16_t* k,
                                                                 const uint16_t* v, const uint16_t* zh, float beta_h,
                                                                 float g_h, const uint16_t* w, uint16_t* oh,
-                                                                uint64_t d, bool* hit_out) {
+                                                                uint64_t d, unsigned int gate, bool* hit_out) {
     const uint64_t lane = nn__silicon__lane(), lanes = nn__silicon__lanes();
     float qq = 0.0f, kk = 0.0f;
     for (uint64_t i = lane; i < d; i += lanes) {
@@ -584,8 +666,10 @@ static __device__ inline void nn__deltanet__zzprivate_step_head(float* Sh, const
     for (uint64_t j = lane; j < d; j += lanes) {
         const float zr = nn__silicon__half_to_float(zh[j]);
         const float zc = (zr < -88.0f) ? -88.0f : ((zr > 88.0f) ? 88.0f : zr);
+        const float gz = gate == NN__DELTANET__GATE_SIGMOID ? 1.0f / (1.0f + nn__silicon__expf(-zc))
+                                                            : zc / (1.0f + nn__silicon__expf(-zc));
         oh[j] = nn__primitives__zzpackage_float_to_half(nn__silicon__half_to_float(oh[j]) * scale
-                    * nn__silicon__half_to_float(w[j]) * (zc / (1.0f + nn__silicon__expf(-zc))), &hit);
+                    * nn__silicon__half_to_float(w[j]) * gz, &hit);
     }
     if (hit) *hit_out = true;
 }
@@ -596,7 +680,8 @@ static __device__ inline void nn__deltanet__zzprivate_step_head(float* Sh, const
  *     kn = k / |k| · qs = q / |q| / √d        (l2norm, eps 1e-6 under the root, as `l2norm`)
  *     δ  = (v − e^g · Sᵀkn) · β               (the state read before its decay, then decayed: HF's order)
  *     S  ← e^g · S + kn δᵀ
- *     o  = rmsnorm(Sᵀqs) · w · silu(z)         (eps 1e-6 in the mean, silu clamped at ±88, as the verbs)
+ *     o  = rmsnorm(Sᵀqs) · w · silu(z)         (eps 1e-6 in the mean, z clamped at ±88, as the verbs; σ(z) in
+ *                                              `deltanet_steps_gate` where its gate says so)
  *   ⛳ A BLOCK A HEAD AND A LANE A COLUMN `j` OF ITS STATE (`j = lane, lane + lanes, …`): the lane reads and
  *   writes its columns alone, so the update races with nothing, and `kn[i]`, `qs[i]` are formed from `k`, `q`
  *   as each is needed — their norms come from the fold, which hands every lane the sum — so nothing is
@@ -612,7 +697,7 @@ static __device__ inline void nn__deltanet__zzabi_body_step(float* S, const uint
     for (uint64_t h = nn__silicon__block(); h < v_heads; h += nn__silicon__blocks())
         nn__deltanet__zzprivate_step_head(S + h * d * d, conved + (h / rep) * d, conved + k_heads * d + (h / rep) * d,
                                           conved + 2ull * k_heads * d + h * d, z + h * d, nn__silicon__half_to_float(beta[h]),
-                                          nn__silicon__half_to_float(g[h]), w, out + h * d, d, &hit);
+                                          nn__silicon__half_to_float(g[h]), w, out + h * d, d, NN__DELTANET__GATE_SILU, &hit);
     if (hit) *over = NN__KERNELS__OVERFLOWED;
 }
 
@@ -2017,10 +2102,11 @@ static __device__ inline void nn__deltanet__zzabi_body_conv_steps(uint16_t* o, u
  *   so each head's block walks the positions in order, its state carried from one to the next in place — the
  *   one-position step, `rows` times, with no launch between. Row `t` reads `conved`, `z`, `beta` and `g` at
  *   its own row and writes `out`'s. */
-static __device__ inline void nn__deltanet__zzabi_body_steps(float* S, const uint16_t* conved, const uint16_t* z,
-                                                             const uint16_t* beta, const uint16_t* g, const uint16_t* w,
-                                                             uint16_t* out, uint64_t k_heads, uint64_t v_heads,
-                                                             uint64_t head_dim, uint64_t rows, unsigned int* over) {
+static __device__ inline void nn__deltanet__zzprivate_steps(float* S, const uint16_t* conved, const uint16_t* z,
+                                                            const uint16_t* beta, const uint16_t* g, const uint16_t* w,
+                                                            uint16_t* out, uint64_t k_heads, uint64_t v_heads,
+                                                            uint64_t head_dim, uint64_t rows, unsigned int gate,
+                                                            unsigned int* over) {
     const uint64_t d = head_dim, rep = v_heads / k_heads, ch = (2ull * k_heads + v_heads) * d, vd = v_heads * d;
     bool hit = false;
     for (uint64_t h = nn__silicon__block(); h < v_heads; h += nn__silicon__blocks())
@@ -2029,9 +2115,27 @@ static __device__ inline void nn__deltanet__zzabi_body_steps(float* S, const uin
             nn__deltanet__zzprivate_step_head(S + h * d * d, c + (h / rep) * d, c + k_heads * d + (h / rep) * d,
                                               c + 2ull * k_heads * d + h * d, z + t * vd + h * d,
                                               nn__silicon__half_to_float(beta[t * v_heads + h]),
-                                              nn__silicon__half_to_float(g[t * v_heads + h]), w, out + t * vd + h * d, d, &hit);
+                                              nn__silicon__half_to_float(g[t * v_heads + h]), w, out + t * vd + h * d, d,
+                                              gate, &hit);
         }
     if (hit) *over = NN__KERNELS__OVERFLOWED;
+}
+static __device__ inline void nn__deltanet__zzabi_body_steps(float* S, const uint16_t* conved, const uint16_t* z,
+                                                             const uint16_t* beta, const uint16_t* g, const uint16_t* w,
+                                                             uint16_t* out, uint64_t k_heads, uint64_t v_heads,
+                                                             uint64_t head_dim, uint64_t rows, unsigned int* over) {
+    nn__deltanet__zzprivate_steps(S, conved, z, beta, g, w, out, k_heads, v_heads, head_dim, rows, NN__DELTANET__GATE_SILU,
+                                  over);
+}
+
+/* ⭐ THE SAME OVER `rows` POSITIONS WITH THE OUTPUT GATE NAMED — `gate` silu(z) or σ(z) (`NN__DELTANET__GATE_*`):
+ *   Flash-Next's readout is gated by σ(z) where Qwen 3.5's is by silu(z), and the rest of the step is the same. */
+static __device__ inline void nn__deltanet__zzabi_body_steps_gate(float* S, const uint16_t* conved, const uint16_t* z,
+                                                                  const uint16_t* beta, const uint16_t* g, const uint16_t* w,
+                                                                  uint16_t* out, uint64_t k_heads, uint64_t v_heads,
+                                                                  uint64_t head_dim, uint64_t rows, unsigned int gate,
+                                                                  unsigned int* over) {
+    nn__deltanet__zzprivate_steps(S, conved, z, beta, g, w, out, k_heads, v_heads, head_dim, rows, gate, over);
 }
 
 /* ── THE HADAMARD ROTATION ──────────────────────────────────────────────────────────────────────── */

@@ -3,22 +3,22 @@ What SiLVANN reads more with and runs without, into its own Python environment o
 (PyAV, for video files other than animated pictures), whose wheels carry binaries under copyleft licences (the LGPL,
 the GPL: ATTRIBUTION.md). install.ps1 leaves it out; this adds it, once, from PyPI.
 
-  powershell -ExecutionPolicy Bypass -File install_nonfree.ps1
+  powershell -ExecutionPolicy Bypass -File scripts\install_nonfree.ps1
 
-  SILVANN_DIR   the installed SiLVANN    default the folder this file is in
+  SILVANN_DIR   the installed SiLVANN    default the folder whose scripts\ this file is in
 
 Run it again after an update that changes the environment's Python. ASSUMED until a Windows PC has run it (NN-94).
 This file is ASCII on purpose: Windows PowerShell 5.1 reads a script without a byte-order mark in the PC's code page.
 #>
 $ErrorActionPreference = "Continue"
-$Dir = if ($env:SILVANN_DIR) { $env:SILVANN_DIR } else { $PSScriptRoot }
+$Dir = if ($env:SILVANN_DIR) { $env:SILVANN_DIR } else { Split-Path -Parent $PSScriptRoot }
 $py = Join-Path $Dir "venv\Scripts\python.exe"
-$req = Join-Path $Dir "requirements-nonfree.txt"
+$req = Join-Path $Dir "scripts\requirements-nonfree.txt"
 if (-not (Test-Path $py)) {
     Write-Host "STOPPED: no SiLVANN environment in $Dir - install.ps1 first, or SILVANN_DIR set to where it installed" -ForegroundColor Red
     exit 1
 }
-if (-not (Test-Path $req)) { Write-Host "STOPPED: no requirements-nonfree.txt in $Dir" -ForegroundColor Red; exit 1 }
+if (-not (Test-Path $req)) { Write-Host "STOPPED: no scripts\requirements-nonfree.txt in $Dir" -ForegroundColor Red; exit 1 }
 Write-Host "requirements-nonfree.txt into $Dir\venv" -ForegroundColor Cyan
 & $py -m pip install --quiet -r $req
 if ($LASTEXITCODE -ne 0) {
