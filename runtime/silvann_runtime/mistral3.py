@@ -28,7 +28,7 @@ import pickle
 import numpy as np
 
 from . import sampling
-from .generate import Generates
+from .generate import STOPS_MOST, Generates
 from .model_folder import NL, Refused
 
 ARCHITECTURES = ("ministral3",)
@@ -316,7 +316,7 @@ class Ministral3(Generates):
         values = dict(HIDDEN=H, INTER=self.INTER, EPS=self.EPS, VOCAB=self.VOCAB, RUN=len(run), Q_HEADS=self.QH,
                       KV_HEADS=self.KVH, HEAD_DIM=self.AH, Q_WIDTH=self.QW, KV_WIDTH=self.KVW,
                       EMB_HALVES=self.EMB_ROW_BYTES // 2, EMB_SCALES=self.EMB_DATA_BYTES // 2,
-                      EMB_BITS=self.EMB_BITS, CS_HALVES=self.AH * 2, STOPS=0, SEEN=sampling.SEEN,
+                      EMB_BITS=self.EMB_BITS, CS_HALVES=self.AH * 2, STOPS=STOPS_MOST, SEEN=sampling.SEEN,
                       HEAD_CODES=head(self.HPLAN.at_up_data, self.HPLAN.up_data),
                       HEAD_SCALES=head(self.HPLAN.at_down_lut, self.HPLAN.down_lut), HEAD_BITS=self.HEAD_BITS,
                       KV_TYPE=self.T_KV, KEYS_AT=self.KVPLAN.at_up_data, VALUES_AT=self.KVPLAN.at_down_data,

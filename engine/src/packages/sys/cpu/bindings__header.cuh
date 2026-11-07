@@ -273,6 +273,10 @@ static __device__ inline bool sys__bindings__set(uint64_t bindings, const sys__h
  * are released when that table is, which is what keeps a structure this deep unwinding at one depth. */
 /* The environment a binding form names: `env`, or for 0 the one the computation running it keeps in its base. */
 static __device__ inline uint64_t sys__bindings__zzpackage_named(const sys__heap_node* base, uint64_t env);
+/* Whether one computation holds it alone, and saying so (▶ `SYS__BINDINGS__ALONE`): only `begin`, over a snapshot,
+ * says it is, and a continuation that shares it with the step still running says it is not. */
+static __device__ inline bool sys__bindings__zzpackage_alone(uint64_t bindings);
+static __device__ inline void sys__bindings__zzpackage_set_alone(uint64_t bindings, bool alone);
 
 static __device__ SYS__NOINLINE void sys__bindings__zzpackage_release_internal(sys__heap_node* head,
                                                                         uint64_t* releaser_stack);

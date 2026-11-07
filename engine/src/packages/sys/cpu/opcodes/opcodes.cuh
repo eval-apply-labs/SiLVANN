@@ -43,7 +43,10 @@
 
 /* ── WHAT EVERY ONE OF THEM DOES TO FINISH ───────────────────────────────────────────────────────────
  * Leave the form holding exactly one thing. Two helpers rather than a copy of the same three lines in
- * every verb, because the three lines are where an off-by-one would be invisible.
+ * every verb, because the three lines are where an off-by-one would be invisible. ⛳ ONE VERB MAY LEAVE ITS FORM AS IT
+ * STOOD, AND ONLY HANDING ITS COMPUTATION ON: `sys__wait` parked on an answer (`sys__scheduler__zzpackage_park_on`) —
+ * the evaluator reads the hand-off after every verb and stops, and the form is applied again on the block that takes it,
+ * once the answer is there; a park that finds no room waits where it stands the next time, and writes the form.
  * ────────────────────────────────────────────────────────────────────────────────────────────────── */
 
 /* Empty the form and put one value in it. That value is what the form BECAME, so the evaluator writes it
@@ -308,6 +311,44 @@ static __device__ SYS__NOINLINE void sys__opcodes__zzpackage_apply_while(sys__he
     if (sys__heap_node__carries_reference(last.dtype)) (void)sys__heap_object__retain(last.args[0]);
     sys__opcodes__becomes(form, &last);
     if (sys__heap_node__carries_reference(last.dtype)) (void)sys__heap_object__release(last.args[0]);
+}
+
+/* `(sys__scheduler__compute_inline 'form)` — `form`, run with this computation never given up at a slice, and its value
+ * (▶ "INLINE", `scheduler__impl.cuh`).
+ * ⭐ ONE FORM, AS `while` IS: handed its own form, it lays the form's picture on the end to run and enters the section;
+ * handed it back with the value, it leaves and becomes the value — an error is a value, and leaves too. A step that ends
+ * any other way (a fault, a kill) is put away, and the next begins inline nowhere.
+ * ```
+ *   (compute_inline 'f)       the first entry: f's picture laid on the end, frozen, the section entered
+ *   (compute_inline 'f V)     V is f's value: the section left, the form becomes V
+ * ``` */
+static __device__ SYS__NOINLINE void sys__opcodes__zzpackage_apply_compute_inline(sys__heap_node* base, uint64_t form) {
+    (void)base;
+    const uint64_t n = sys__sublist__length(form);
+    if (n == 2ull) {
+        const sys__heap_node arg = sys__sublist__nth(form, 1ull);
+        uint64_t picture = 0ull;
+        if (arg.dtype == SYS__KIND__QUOTED_LIST) {
+            picture = sys__sublist__deep_copy_to_node_array(arg.args[0]);
+        } else if (arg.dtype == SYS__KIND__QUOTED_ARRAY) {
+            picture = arg.args[0];
+            (void)sys__heap_object__retain(picture);
+        }
+        if (picture == 0ull) { sys__opcodes__fails(form, SYS__OPCODES__FAULT_TYPE); return; }
+        sys__heap_node run;
+        run.dtype = SYS__KIND__FROZEN_LIST; run.num_args = 0u; run.op_code = 0ull; run.args[0] = picture;
+        const bool laid = sys__sublist__append(form, &run);
+        (void)sys__heap_object__release(picture);              /* the cell holds it now */
+        if (laid) sys__scheduler__zzpackage_inline_enter();
+        else sys__opcodes__fails(form, SYS__OPCODES__FAULT_ARITY);
+        return;
+    }
+    if (n != 3ull) { sys__opcodes__fails(form, SYS__OPCODES__FAULT_ARITY); return; }
+    sys__scheduler__zzpackage_inline_leave();
+    const sys__heap_node value = sys__sublist__nth(form, 2ull);
+    if (sys__heap_node__carries_reference(value.dtype)) (void)sys__heap_object__retain(value.args[0]);
+    sys__opcodes__becomes(form, &value);
+    if (sys__heap_node__carries_reference(value.dtype)) (void)sys__heap_object__release(value.args[0]);
 }
 
 /* `(prog1 a b c)` — do these in order and become the FIRST. It is `begin`'s mirror, and it exists for one

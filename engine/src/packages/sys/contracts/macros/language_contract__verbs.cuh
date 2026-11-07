@@ -144,7 +144,7 @@
     /* the other reads.                                                                                      */ \
     X(PKG, 18, "sys__bindings__viewonly", sys__opcodes__zzabi_adapter_viewonly,  SYS__BINDINGS__VIEWONLY)  \
     X(PKG, 20, "sys__result",         sys__opcodes__zzabi_adapter_result,   SYS__COMPUTING_BASE__RESULT) \
-    X(PKG, 21, "sys__wait",           sys__opcodes__zzabi_adapter_wait,     SYS__COMPUTING_BASE__WAIT) \
+    X(PKG, 21, "sys__wait",           sys__opcodes__zzpackage_apply_wait,   SYS__COMPUTING_BASE__WAIT) \
     /* Standing this package up, which is a call in a list the boot evaluates rather than a C entry     */ \
     /* point the boot knows the name of. It is published like any other word because that is how a      */ \
     /* package hands one over, and because a package that wants to run another's init has no other      */ \
@@ -198,7 +198,15 @@
     X(PKG, 49, "sys__scheduler__add",      sys__opcodes__zzabi_adapter_scheduler_add,      SYS__SCHEDULER__ADD)      \
     X(PKG, 51, "sys__scheduler__continue", sys__opcodes__zzabi_adapter_scheduler_continue, SYS__SCHEDULER__CONTINUE) \
     /* the dictionary's third door: a key taken out (▶ `cpu/dictionary.cuh`, "WHAT A WRITE CLEARS")         */ \
-    X(PKG, 52, "sys__dictionary__remove",  sys__opcodes__zzabi_adapter_dict_remove,        SYS__DICTIONARY__REMOVE)
+    X(PKG, 52, "sys__dictionary__remove",  sys__opcodes__zzabi_adapter_dict_remove,        SYS__DICTIONARY__REMOVE) \
+    /* a computation moved to a block — its environment and its program as it stands (▶ `cpu/scheduler__header.cuh`) */ \
+    X(PKG, 53, "sys__scheduler__continue_on", sys__opcodes__zzabi_adapter_scheduler_continue_on, SYS__SCHEDULER__CONTINUE_ON) \
+    /* the processes: the one a computation is of, and one killed (▶ `cpu/scheduler__header.cuh`)                    */ \
+    X(PKG, 54, "sys__scheduler__pid",         sys__opcodes__zzabi_adapter_scheduler_pid,         SYS__SCHEDULER__PID)         \
+    X(PKG, 55, "sys__scheduler__kill",        sys__opcodes__zzabi_adapter_scheduler_kill,        SYS__SCHEDULER__KILL)         \
+    /* a form run never given up at a slice, and whether this computation may be (▶ `cpu/scheduler__header.cuh`)       */ \
+    X(PKG, 56, "sys__scheduler__compute_inline", sys__opcodes__zzpackage_apply_compute_inline,  SYS__SCHEDULER__COMPUTE_INLINE) \
+    X(PKG, 57, "sys__scheduler__preemptive",  sys__opcodes__zzabi_adapter_scheduler_preemptive,  SYS__SCHEDULER__PREEMPTIVE)
 
 /* ── AND THE OPCODES, NAMED ──────────────────────────────────────────────────────────────────────────
  * ⚖ ARCHITECT: *"the enum addition on the opcodes."* A published verb had a number and no name, so every

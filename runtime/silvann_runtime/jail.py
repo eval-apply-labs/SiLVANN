@@ -137,12 +137,39 @@ def spec_except(closed, abi, read_only=()):
     return {"abi": abi, "rules": rules, "closed": [c for c in closed if c not in read_only], "read_only": read_only}
 
 
-def spec(workspace, abi, read_only=(), run_also=()):
+def _granted_but(root, closed, rights):
+    """Rules granting `rights` on `root`, but on nothing of `closed` beneath it: `root` whole where none of `closed` is
+    under it; nothing where it is one; else each of its entries so, in its turn — a folder on the way down to a closed
+    one opened, its other entries granted."""
+    root = os.path.realpath(root)
+    under = lambda p, c: p == c or p.startswith(c.rstrip(os.sep) + os.sep)        # noqa: E731
+    if any(under(root, c) for c in closed):
+        return []
+    if not any(under(c, root) for c in closed):
+        return [(root, rights)]
+    out = []
+    try:
+        names = sorted(os.listdir(root))
+    except OSError:
+        return out
+    for name in names:
+        out += _granted_but(os.path.join(root, name), closed, rights)
+    return out
+
+
+def spec(workspace, abi, read_only=(), run_also=(), follow_links=True, closed=()):
     """The rules for a command confined to `workspace`: [(path, rights)], and the ABI they are made under — besides,
-    what it reads and runs: the skill folders (`read_only`) and what a tool the model added needs to run (`run_also`)."""
+    what it reads and runs: the skill folders (`read_only`) and what a tool the model added needs to run (`run_also`).
+    With `follow_links` false, a link at the workspace's top is not followed (a user's: ▶ users.py — a link the model
+    made would be its way out); `closed`, folders the system's folders are granted without (a user's data folder, where
+    it lies under one of them, /opt say): what is granted besides, the workspace and the tools, stays granted."""
+    closed = [os.path.realpath(c) for c in closed]
     rules = [(os.path.realpath(workspace), EVERYTHING)]
-    rules += [(target, EVERYTHING) for target in links(workspace).values()]
-    rules += [(p, RUN) for p in SYSTEM] + [(p, READ | READ_DIR) for p in READABLE]
+    if follow_links:
+        rules += [(target, EVERYTHING) for target in links(workspace).values()]
+    for p in SYSTEM:
+        rules += _granted_but(p, closed, RUN) if closed else [(p, RUN)]
+    rules += [(p, READ | READ_DIR) for p in READABLE]
     rules += [(p, READ | WRITE | IOCTL_DEV) for p in DEVICES]
     rules += [(os.path.realpath(p), RUN) for p in list(read_only) + list(run_also)]
     return {"abi": abi, "rules": rules, "read_only": [os.path.realpath(p) for p in read_only]}

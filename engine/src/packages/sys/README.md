@@ -14,8 +14,38 @@ for it. `MEASURED` on node03: a request there and back ~9 µs on the host, and a
 block run within milliseconds of its last answer, where the doze alone would leave it up to 100 ms
 (measurements/2026-11-05_callbacks_node03.md). ⛳ The scheduling is **cooperative multitasking**, as in Windows 3.x
 or the classic Mac OS: a step runs to its end once begun, and gives its block back by ending or by queuing the step
-that continues it (`sys__scheduler__continue`, the yield); a queue is first in, first out. Nothing preempts a step and
+that continues it (`sys__scheduler__continue`, the yield) or by moving the computation itself
+(`sys__scheduler__continue_on`); a queue is first in, first out. Booted without a slice nothing preempts a step and
 nothing bounds how long it runs, so a long step holds its block — that one worker, not the machine — until it ends.
+⭐ **Booted with a slice it is preemptive multitasking, though not protected**: `sys__scheduler__slice_us:<n>` or
+`sys__scheduler__slice_cycles:<n>` in `boot_commands` (0 or absent, the engine's default, for none; the runtime's
+`Machine.boot` says `slice_us:50000`, 50 ms), and a computation that has run `n` microseconds — or `n` cycles of the
+processor's clock — since its evaluation began gives its block up at the end of a verb — to the back of the queue, as
+`(sys__scheduler__continue_on <its block>)` would — when something waits there and it may move: an answer to fill and
+an environment of its own, never the host's. Each evaluation starts a whole slice, a moved one's where it goes on.
+The slice is the machine's: only its `boot_commands` say it, and a worker booting on a section of its own (a model's
+card and CPU do) leaves it as it is. ⛔ Not protected: a slice is as fine as the longest verb, and a program whose steps
+keep a worker's scratch between verbs — a model's do — runs them inside `(sys__scheduler__compute_inline 'form)`: there
+a spent slice gives nothing up (`(sys__scheduler__preemptive)` says `#f`), a section inside another leaves the outer one
+inline, and a kill still ends it at its next slice. `MEASURED` on node03: two of DeepSeek's seats on one card at a
+slice of 1 µs gave the block up 1,846 times mid-step and one answered another seat's tokens; with each step on the card
+inline, both answered their own (measurements/2026-11-06_kill_node03.md). ⛔ **A verb never waits on another
+computation** (⚖ 2026-11-07 *"c opcodes do not wait but return and let the wait be done in lisp"*): it returns, and the
+program waits — `sys__result` in a `while`, or a step that ends continued on the answer (`sys__scheduler__continue …
+'(r)`), its block free meanwhile. ⭐ **`sys__wait` parks** (NN-158): on an answer not there yet, a computation that may
+move is handed to its own block's queue with the answer its gate, its form left to be applied again, and the block runs
+what else waits until the answer fills; one that may not move — the host's, one inside `compute_inline` — waits where it
+stands, up to fifteen seconds by the clock, and a wait that runs out answers `ANSR`, an error, never nothing.
+⚠ A step that keeps a worker's scratch between verbs and waits mid-way runs inline: parked, another program on its
+block would run in the gap. ⭐ **A process can be killed**: a request carries the
+process it is of — the asker's, inherited by what it asks and what it goes on as, or a new one from the host's doors —
+`(sys__scheduler__pid)` says which, and `(sys__scheduler__kill pid)` takes its requests off every queue, their answers
+filled with `SCKL`; a block refuses one taken later and drops its parked steps; a step of it still running ends at its
+next move or slice, and an answer it fills at its end is `SCKL`. Nothing it did is undone (measurements/
+2026-11-06_kill_node03.md). `MEASURED` on node03: a short computation
+queued behind a loop that never yields answered in 1.2 ms at a 1 ms slice, against 806 ms without; two such loops
+interleave and take what the two take one after the other; the clock costs a loop 1-2%
+(measurements/2026-11-06_slice_node03.md).
 
 **What it asks of the host: primitive calls**, in one contract (`contracts/abi/os.cuh`) that each host
 answers in one file (`../../operating_systems/linux/os.cuh`, `../../operating_systems/windows/os.cuh`):
@@ -82,9 +112,10 @@ names        let defun bindings__set bindings__viewonly add_bindings remove_bind
 objects      create type clone
 node arrays  node_array__get node_array__set
 lists        list__shared_append list__shared_take list__shared_length
-computation  compute result wait worker scheduler__continue scheduler__gate
+computation  compute result wait worker scheduler__continue scheduler__continue_on scheduler__gate scheduler__pid
+             scheduler__kill scheduler__compute_inline scheduler__preemptive
 the machine  system_register__get system_register__set package__init
-dictionary   dictionary__put dictionary__get
+dictionary   dictionary__put dictionary__get dictionary__remove
 files        file__open file__close
 memory       garbage_collection__manual garbage_collection__collect
 ```
@@ -117,7 +148,17 @@ step that does not continue fills it. Asked with the names of answers — `(let 
 (sys__scheduler__add …))) (sys__scheduler__continue CARD names second_half '(ra rb)))` — the next step runs once every
 one of them is filled, its block parking it and running what is behind it until the block that fills the last one
 rings it, and finds `ra` and `rb` bound to what they came to in its environment — the results themselves, read
-straight, the answers behind them let go of when the step ends. The host does the same from outside (`place`,
+straight, the answers behind them let go of when the step ends. A computation may move instead:
+`(sys__scheduler__continue_on cu)` names a block and nothing else — the computation itself goes there, its environment
+(the scopes its block built over the names it was asked with, every `let`, `set!` and `defun` in them) and its program
+as it stands, and goes on from its next form, into the same answer; nothing of it runs where it was after. Nothing in a
+program can name a second program over that environment, so no two ever hold it (⚖ 2026-11-06 *"as long as we never
+maintain two programs to reference the same live bindings we are good both to send the rest of the compute somewhere
+else and to send it on the back of your own queue"* · *"it has to be itself so it has to be (sys__scheduler__continue_on
+cu) and the bindings and the program are implicit. this guarantees no double live bindings"*). Moved onto its own block
+it goes to the back of the queue. What it asked of each block and its collection mode go with it. Only that environment
+moves: the host's, or one a `continue` in its own names shares with a step on another block, is refused (`SCSH`).
+`MEASURED` on node03: a move between two blocks ~6.3 µs (measurements/2026-11-06_continue_on_node03.md). The host does the same from outside (`place`,
 `poll`, `take`). A value that could not be computed arrives as an error, a value like any other. A shared list is
 reached only through the `list__shared_` verbs, each the list's own lock around one append, take or count.
 ▶ `cpu/scheduler__header.cuh`, `cpu/answer.cuh`.

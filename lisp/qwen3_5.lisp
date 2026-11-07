@@ -305,5 +305,6 @@
     (< 0 1))
 
 ;; what a seat's step continues as: the layer's close and the next one's ask — a top-level form, the machine's (▶
-;; machine.py `load_source`), frozen whether or not the model holds seats and run only where it does
-(picture c_close (chain_close))
+;; machine.py `load_source`), frozen whether or not the model holds seats and run only where it does; inline, as every
+;; step of a seat's (▶ qwen3_5.py `_run`): it keeps the card's scratch between its verbs (NN-159)
+(picture c_close (sys__scheduler__compute_inline '(chain_close)))

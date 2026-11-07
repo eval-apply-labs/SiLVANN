@@ -294,6 +294,7 @@ static __device__ inline uint64_t sys__bindings__create(uint64_t symbols, uint64
     head[1].args[SYS__BINDINGS__SCOPES]  = 0ull;
     head[1].args[SYS__BINDINGS__BASE]    = 0ull;
     head[1].args[SYS__BINDINGS__UNBOUND] = 0ull;
+    head[1].args[SYS__BINDINGS__ALONE]   = 0ull;   /* somebody's to share, until `begin` says it is one computation's */
     const uint64_t bindings = sys__heap__offset(head + 1);
 
     const uint64_t scopes = sys__node_array__zzpackage_create_run(width + SYS__BINDINGS__FIRST_NAME);
@@ -604,6 +605,15 @@ static __device__ inline sys__heap_node sys__bindings__zzpackage_construct(sys__
 static __device__ inline uint64_t sys__bindings__zzpackage_named(const sys__heap_node* base, uint64_t env) {
     if (env != 0ull) return env;
     return base == 0 ? 0ull : base->args[SYS__COMPUTING_BASE__BINDINGS];
+}
+
+static __device__ inline bool sys__bindings__zzpackage_alone(uint64_t bindings) {
+    return sys__bindings__is(bindings)
+        && sys__heap__object_full_address(bindings)->args[SYS__BINDINGS__ALONE] == 1ull;
+}
+
+static __device__ inline void sys__bindings__zzpackage_set_alone(uint64_t bindings, bool alone) {
+    if (sys__bindings__is(bindings)) sys__heap__object_full_address(bindings)->args[SYS__BINDINGS__ALONE] = alone ? 1ull : 0ull;
 }
 
 static __device__ SYS__NOINLINE void sys__bindings__zzpackage_apply_let(sys__heap_node* base, uint64_t form) {

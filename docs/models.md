@@ -235,6 +235,7 @@ of the RAM, so 30 GB is its least. In the chat on the RTX 5060 Ti from the disk:
 <!-- rates:model DeepSeek-V4.1-Flash -->
 | GPU | RAM | CPU | Disk | Setup | Prefill | Decode | Max context | Version |
 |---|---|---|---|---|---|---|---|---|
+| [32 GB · MI50](results.md#a-24-or-32-gb-card) | 1.5 TB (PMem 100) | 2× Xeon Gold 6252 (48 cores) | — | `D8E4` · every expert in RAM, a CPU worker a socket | 27.6-29.5 positions/s | 10.9-11.6 tokens/s after 2k | 2,320 as run | v0.25.0 |
 | [none](results.md#no-graphics-card) | 60 GB | 2× Xeon E5-2680 v4 (28 cores) | NVMe array, 6.6 GB/s | `D8E4` · the experts from the disk | 3.4 positions/s | 1.2 tokens/s after 1k | — | v0.21.2 |
 | [none](results.md#no-graphics-card) | 30 GB | 2× Xeon E5-2680 v4 (28 cores) | NVMe array, 6.6 GB/s | `D8E4` · the experts from the disk | 3.1 positions/s | 0.7 tokens/s after 1k | — | v0.21.2 |
 | [12 GB · MI50 held to 20 GiB](results.md#a-12-gb-card) | 60 GB | 2× Xeon E5-2680 v4 (28 cores) | NVMe array, 6.6 GB/s | `D8E4` · the experts from the disk | 8.2 positions/s | 2.7 tokens/s after 1k | — | v0.21.2 |

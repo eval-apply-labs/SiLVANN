@@ -19,7 +19,9 @@
  *     (sys__scheduler__add cu names program)         queue it on block `cu`: a new answer, handed back
  *     (sys__scheduler__add cu names program answer)  the same, into `answer`, which is handed back
  *     (sys__result answer)                           #t once the value is there, #f while it is on its way
- *     (sys__wait answer)                             the value, once it is there — waited for, bounded
+ *     (sys__wait answer)                             the value, once it is there — the computation parked on the
+ *                                                    answer meanwhile, its block free; where it may not move (the
+ *                                                    host's, inline), waited for where it stands, bounded
  *     (sys__scheduler__continue cu names program)    this computation goes on as `program` on block `cu` in `names` (0:
  *                                                    the names it runs in), into the same answer; this step fills
  *                                                    nothing, the next does
@@ -27,6 +29,17 @@
  *                                                    the same, run once the answers the names `ra` and `rb` mean here
  *                                                    are filled — `ra` and `rb` bound to what they came to in its
  *                                                    environment
+ *     (sys__scheduler__pid)                          the process this computation is of: the asker's, inherited by
+ *                                                    what it asks and what it goes on as
+ *     (sys__scheduler__kill pid)                     its requests off every queue, their answers SCKL; its steps
+ *                                                    still running ended at their next move or slice
+ *     (sys__scheduler__compute_inline 'form)         `form`'s value, the form run with this computation never given
+ *                                                    up at a slice; after it, preempted as it was before
+ *     (sys__scheduler__preemptive)                   #t, or #f inside `compute_inline`: whether a spent slice may
+ *                                                    give this computation's block up
+ *     (sys__scheduler__continue_on cu)               this computation moves to block `cu` — its environment, and the
+ *                                                    program as it stands — and goes on there from the next form,
+ *                                                    into the same answer; nothing of it runs here after
  *
  * ⚖ 2026-11-05 *"sys__compute should specify a new closure to compute against ... (sys__scheduler__add CU names expert
  * result) repeated with as much as the async results are needed and the result variables become inserted in the
@@ -85,6 +98,51 @@ static __device__ inline bool sys__scheduler__add(uint32_t cu, uint64_t bindings
  * answer to fill, its step went on already, or `gate` names an answer nobody asked into. */
 static __device__ inline bool sys__scheduler__continue(sys__heap_node* base, uint32_t cu, uint64_t names, uint64_t program,
                                                        uint64_t gate);
+
+/* The computation on `base` moves to block `cu`: its environment, the program as it stands and where its evaluation
+ * stands, into the same answer. This says where, and the evaluator, finding it after the verb (`zzengine_handed`: the
+ * block plus one, or 0, the word cleared), hands over what it holds (`zzengine_move`) and stops; the block that takes
+ * it runs the evaluation on from the same form (`zzengine_resumed`: the places and the form, the places' hold handed
+ * over). Its collection mode and what it asked each block go with it. False, having raised, where `base` has no
+ * answer to fill or its step went on already (SCNQ), or where another program shares its environment (SCSH: the
+ * host's, or one a continuation shares). */
+static __device__ inline bool     sys__scheduler__continue_on(sys__heap_node* base, uint32_t cu);
+static __device__ inline uint64_t sys__scheduler__zzengine_handed(void);
+static __device__ inline bool     sys__scheduler__zzengine_move(sys__heap_node* base, uint32_t cu, uint64_t program,
+                                                                uint64_t places, uint64_t current);
+static __device__ inline bool     sys__scheduler__zzengine_resumed(uint64_t* places, uint64_t* current);
+
+/* The slice (▶ "THE SLICE" in `scheduler__impl.cuh`): how many cycles a computation runs before it gives its block up to
+ * what waits there — 0 for never — set by sys's host init from `boot_commands`' `sys__scheduler__slice_cycles`, or
+ * `sys__scheduler__slice_us` in the clock's ticks of that many microseconds; the clock it is counted on; and whether the
+ * computation on `base` should give its block up now its slice is spent — something waits there, and it may move. */
+static __device__ inline void     sys__scheduler__zzpackage_set_slice(uint64_t cycles);
+static inline uint64_t            sys__scheduler__zzpackage_ticks_of_us(uint64_t us);
+static __device__ inline uint64_t sys__scheduler__zzengine_slice(void);
+static __device__ inline uint64_t sys__scheduler__zzengine_clock(void);
+static __device__ inline bool     sys__scheduler__zzengine_should_yield(sys__heap_node* base);
+
+/* The processes (▶ "THE PROCESSES" in `scheduler__impl.cuh`): the process of the step this runner runs (0 where none
+ * runs); a process killed — its requests taken off every queue, their answers SCKL, and remembered, so a block refuses
+ * one taken later and a step still running ends at its next move or slice — answering how many it took off; whether one
+ * is killed; and for the evaluator, after a move refused or a slice spent, whether the running step is of one killed —
+ * its answer filled with SCKL then, and the step to end. */
+static __device__ inline uint64_t sys__scheduler__pid(void);
+static __device__ inline uint64_t sys__scheduler__kill(uint64_t pid);
+static __device__ inline bool     sys__scheduler__zzpackage_killed(uint64_t pid);
+static __device__ inline bool     sys__scheduler__zzengine_killed(sys__heap_node* base);
+
+/* The inline sections (▶ "INLINE" in `scheduler__impl.cuh`): one entered and one left, by `compute_inline`; and whether
+ * the computation this runner runs may be given up at a slice — not inside one. */
+/* A wait parked (▶ "A WAIT PARKED" in `scheduler__impl.cuh`): whether the computation on `base` may be parked on an
+ * answer not there yet — one with an answer to fill and an environment of its own, not inline, not refused a park in
+ * this step — and the hand-off that parks it, on its own block with `answer` its gate. */
+static __device__ inline bool     sys__scheduler__zzpackage_may_park(sys__heap_node* base);
+static __device__ inline void     sys__scheduler__zzpackage_park_on(uint64_t answer);
+
+static __device__ inline void     sys__scheduler__zzpackage_inline_enter(void);
+static __device__ inline void     sys__scheduler__zzpackage_inline_leave(void);
+static __device__ inline bool     sys__scheduler__preemptive(void);
 
 /* The gate of the step block `me` is running, BORROWED — the block holds it until the step is put away — or 0.
  * `zzengine_bind_gate`: its names bound to its answers' values in the step's environment (`enter`), once `begin` has

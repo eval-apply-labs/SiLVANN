@@ -19,5 +19,7 @@
                                                    on its way: Busy                                          */
 #define SYS__ANSWER__FAULT_LATE 0x414E534Cull   /* "ANSL" — a value filed into an answer nobody was waiting on:
                                                    Late, or filed twice                                      */
+#define SYS__ANSWER__FAULT_RAN_OUT 0x414E5352ull   /* "ANSR" — waited for where it stood, past the wait's bound, and
+                                                   its value still not there: the wait Ran out                */
 
 #endif /* SILVANN__PACKAGES_SYS_CONTRACTS_OBJECTS_ANSWER_CUH */

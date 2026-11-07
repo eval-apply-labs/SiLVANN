@@ -1,21 +1,27 @@
 # SiLVANN
 
-> **Developer preview, v0.24.0.** It runs the models below well on the hardware it was tested on, and it is shared
+> **Developer preview, v0.25.0.** It runs the models below well on the hardware it was tested on, and it is shared
 > for people who can find their way around a build and a stack trace. NVIDIA cards are tested on two, a GeForce
 > RTX 5060 Ti and an RTX 5070 Ti; Windows natively on one PC; macOS is not supported.
 
 **Silicon Linked Virtualized Architecture for Neural Networks** — a from-scratch inference engine for large language
-models, and the two things it is made of:
+models, and the three things it is made of:
 
-- **the Eval-Apply GPU Interpreter** — a small Lisp, and the operating system its programs run in, virtualized over the
-  host's. It keeps its own heap of reference-counted objects and a run queue on every worker — a CPU socket, a graphics
-  card — and a program hands work to a worker with the answer that work will fill. Its scheduling is cooperative
-  multitasking: a step runs to its end, and gives its worker back by ending or by queuing the step that continues it. A
-  step that waits for answers is parked, and its worker runs other work until they are filled; an idle worker sleeps
-  until work is queued for it. The evaluator runs on the CPU and hands arithmetic to whichever silicon holds the data.
-  Of the host it asks only primitive calls — threads, locks and conditions, a clock, memory, files, and opening a
-  library: a silicon family is such a library, wrapping a driver's functions (HIP, CUDA, OpenCL) or the CPU's vector
-  units — answered for Linux and for Windows in one file each;
+- **a virtualized architecture, as the JVM is one** — the Eval-Apply GPU Interpreter: a machine of its own, run over the
+  host's. Its programs are written in a small Lisp and evaluated on the CPU, which hands their arithmetic to whichever
+  silicon holds the data. It keeps its own heap of reference-counted objects and a run queue on every worker — a CPU
+  socket, a graphics card — and a program hands work to a worker with the answer that work will fill. Its multitasking
+  is **preemptive, but not protected**: a computation gives its worker up, at the end of a verb, once it has run 50 ms
+  and something else waits there (the slice every machine boots with; booted with none, a step runs until it ends or
+  queues the step that continues it); a computation waiting on an answer not there yet is parked, and its worker runs
+  other work until it fills; an idle worker sleeps until work is queued for it; a process can be killed, its queued work
+  answered with an error. Not protected: a verb runs to its end, and every program shares one heap. Of the host it asks
+  only primitive calls — threads, locks and conditions, a clock, memory, files, and opening a library: a silicon family
+  is such a library, wrapping a driver's functions (HIP, CUDA, OpenCL) or the CPU's vector units — answered for Linux
+  and for Windows in one file each;
+- **its language's verbs** (`sys`) — what a program says to that machine: names and environments, objects, arrays and
+  lists, a dictionary, files, and computations — handed to a worker, waited on, moved to another worker, run without
+  being preempted, killed;
 - **the Neural Network library** (`nn`) — the arithmetic, the memory structures and the words a model is written in.
 
 A model is a program in that language (`engine/src/packages/ai_qwen_3`, `engine/src/packages/ai_z__glm_5_3`), and the
@@ -40,15 +46,19 @@ measured on, how fast it reads a prompt and answers after one:
 | [16 GB](docs/results.md#a-16-gb-card) | 16 GB | 4 cores | — | [Qwen 3.8 27B](docs/models.md#qwen-38-27b) `D4` | on the card | 221.3 positions/s | 14.32 tokens/s after 35k | 35,840 |
 | [2× 16 GB](docs/results.md#two-cards-or-more) | 125 GB | 28 cores | — | [Qwen 3.6 35B-A3B](docs/models.md#qwen-36-35b-a3b) `D8E4` | every layer over both cards, a tier on each | 85.9 positions/s | 32.22 tokens/s after 100k | 262,144 |
 | [32 GB](docs/results.md#a-24-or-32-gb-card) | 160 GB | 28 cores | — | [GLM 5.3 Flash](docs/models.md#glm-53-flash) `D8E4` | every expert in RAM, a tier on the card | 72.1 positions/s | 9.86 tokens/s after 100k | 1,048,576 |
-| [2× 32 GB](docs/results.md#two-cards-or-more) | 251 GB | 28 cores | — | [DeepSeek-V4.1-Flash](docs/models.md#deepseek-v41-flash) `D8E4` | every expert in RAM, exclusive tiers | 31.3 positions/s | 9.72 tokens/s after 100k | 1,048,576 |
+| [32 GB](docs/results.md#a-24-or-32-gb-card) | 1.5 TB (PMem 100) | 48 cores | — | [DeepSeek-V4.1-Flash](docs/models.md#deepseek-v41-flash) `D8E4` | every expert in RAM, a CPU worker a socket | 27.6-29.5 positions/s | 10.9-11.6 tokens/s after 2k | 2,320 as run |
 <!-- /rates -->
+
+Several conversations at once are served too (`multi_user` "yes") by the Qwen MoE models, GLM 5.3 Flash and
+DeepSeek-V4.1-Flash, usually at around 1.6-1.8× one conversation's tokens a second together — each model's, and on which
+machine, in [`docs/results.md`](docs/results.md#several-conversations-at-once).
 
 Every model measured on each kind of machine, and how: [`docs/results.md`](docs/results.md#which-model-for-your-machine);
 every machine one model was measured on, its packs and its notes: [`docs/models.md`](docs/models.md). A model whose config
 names no setup chooses its own when the server starts, by trying it on the card: where its experts go, how much of the
 card holds the ones used most, the context the card has room for ([`docs/config.md`](docs/config.md)).
 
-**New in v0.24.0**, and in every release before it: [`docs/release_logs/v0.md`](docs/release_logs/v0.md).
+**New in v0.25.0**, and in every release before it: [`docs/release_logs/v0.md`](docs/release_logs/v0.md).
 
 ## Platforms
 

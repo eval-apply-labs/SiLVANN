@@ -11,6 +11,8 @@
 #include "opcodes/opcodes.cuh"              /* how a verb answers, and how it refuses */
 #include "heap__header.cuh"         /* a form is a heap object, and so is the list it names */
 #include "silicon/pad.cuh"          /* a card's landing pad, given back at the teardown */
+#include "settings.cuh"             /* the slice, out of `boot_commands` */
+#include "scheduler__header.cuh"    /* where the slice is kept */
 /* ══ THE INIT LIST, WALKED AND REWRITTEN ═════════════════════════════════════════════════════════════
  * The reasoning is beside this, in the file that declares these. What is here is the three operations
  * every package's init is written out of.
@@ -230,17 +232,36 @@ static __device__ inline bool sys__package__come_back_later(uint64_t list, uint6
     return sys__sublist__append(list, &again);
 }
 
-/* ── sys's HOST INIT: IT TAKES NOTHING, AND SAYS SO ──────────────────────────────────────────────────
+/* ── sys's HOST INIT: IT TAKES NO ROOM, AND SAYS SO ──────────────────────────────────────────────────
  * ⛔ `sys` IS ZERO AND WILL STAY THERE — its memory IS the heap, and the boot takes that already. A
  * second span for the language would be a second allocator nobody asked for.
  * ⛳ IT EXISTS ANYWAY, for the reason every uniform list has one: the loop pastes the name, so the
  * roster names this whether or not the package wants room. Answering "nothing" is an answer, and it is
  * a different one from having no host init at all — which would be a build error naming this package. */
 static inline bool sys__package__host_init(const char* config, uint64_t length, sys__package_room* room) {
-    (void)config; (void)length;
     if (room == 0) return false;
     room->at = 0; room->bytes = 0ull;
     room->ram_at = 0; room->ram_card_at = 0; room->ram_bytes = 0ull;
+    /* ⭐ AND THE ONE SETTING sys READS ITSELF: the slice, a count of cycles or of microseconds — 0 or absent for none
+     *   (▶ "THE SLICE", `scheduler__impl.cuh`). Said and unreadable refuses the boot, as every figure does, and so do both
+     *   said at once: a machine preempting at a slice nobody chose is the failure.
+     * ⛔ IT IS THE MACHINE'S, SAID IN THE MACHINE'S `boot_commands`, and only a file that has them sets it. A worker with
+     *   a section of its own reads a file of that section alone — `device_params{…}`, no `boot_commands` (▶ the
+     *   engine's `worker_config`) — and its "absent" would set the machine's slice back to 0 after worker 0 set it: a
+     *   model's machine, a card and the CPU each with its own section, would never preempt. The teardown sets it to 0,
+     *   so a machine booted again without it preempts nothing. */
+    uint64_t slice = 0ull, us = 0ull;
+    const int said = sys__settings__host_count(config, length, "boot_commands", "sys__scheduler__slice_cycles", &slice);
+    const int timed = sys__settings__host_count(config, length, "boot_commands", "sys__scheduler__slice_us", &us);
+    if (said != SYS__SETTINGS__READ_FOUND && said != SYS__SETTINGS__READ_ABSENT) return false;
+    if (timed != SYS__SETTINGS__READ_FOUND && timed != SYS__SETTINGS__READ_ABSENT) return false;
+    if (said == SYS__SETTINGS__READ_FOUND && timed == SYS__SETTINGS__READ_FOUND) return false;
+    if (timed == SYS__SETTINGS__READ_FOUND) slice = us == 0ull ? 0ull : sys__scheduler__zzpackage_ticks_of_us(us);
+    const char* commands = 0;
+    uint64_t commands_length = 0ull;
+    if (said == SYS__SETTINGS__READ_FOUND || timed == SYS__SETTINGS__READ_FOUND) sys__scheduler__zzpackage_set_slice(slice);
+    else if (sys__settings__host_section(config, length, "boot_commands", &commands, &commands_length) == SYS__SETTINGS__READ_FOUND)
+        sys__scheduler__zzpackage_set_slice(0ull);
     return true;
 }
 
@@ -251,6 +272,7 @@ static inline void sys__package__host_teardown(sys__package_room* room) {
     /* a card's pad, given back on its own worker — the packages after this one, whose threads use it, are down already */
     sys__pad__close(room->family, sys__silicon__bound_device(room->family));
     room->at = 0; room->bytes = 0ull;
+    sys__scheduler__zzpackage_set_slice(0ull);          /* the machine down, its slice with it */
 }
 
 #endif /* SILVANN__PACKAGES_SYS_CPU_PACKAGE__IMPL_CUH */

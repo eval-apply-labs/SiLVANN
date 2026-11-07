@@ -51,20 +51,21 @@
  * a real provider slot. */
 #define SYS__COMPUTING_BASE__UNREGISTERED 0xFFFFFFFEu
 
-/* How long a collector waits before answering nothing.
+/* How long `sys__wait` waits where it stands before answering ANSR — a computation that may not move: the host's, or
+ * one inside `compute_inline` (one that may move is parked, ▶ "A WAIT PARKED" in `cpu/scheduler__impl.cuh`).
  *
  * ⛳ IT IS A BOUND AND NOT A TIMEOUT POLICY. What it buys is that a computation which never finishes
  * cannot park the block that asked for it; `CLAUDE.md`'s own warning is that nothing in this runtime
  * detects a block that never arrives, so the only defence is never to wait forever on purpose.
  *
- * ⛔⛔ AND THE NUMBER IS DERIVED FROM A MEASUREMENT RATHER THAN CHOSEN. One try — two compare-and-swaps and
- * the back-off between them — costs ~1.28 us on the host (`MEASURED`, ▶ `ENG__ABI__DISPATCH_TRIES` in
- * `engine/abi/running.cuh`), so the figure here bounds a wait at about fifteen seconds: generous beside
- * anything this engine has evaluated, and short enough that a bound reached is a bound somebody notices.
+ * ⛔⛔ AND IT IS THE CLOCK'S, IN NANOSECONDS, NOT A COUNT OF TRIES. A try is a read and the back-off, and the back-off
+ * costs what the processor's pause costs: a count of 12,000,000 tries ran out at 3.0 s on node03's E5-2680 v4
+ * (`MEASURED` 2026-11-07, test/src_runtime_wait.py ⑤, where it had been priced at fifteen seconds through the
+ * dispatcher's dearer try), and a processor whose pause is ten times dearer stretches it ten times. Fifteen
+ * seconds: generous beside anything this engine has evaluated, and short enough that a bound reached is noticed.
  * ⇒ ★ A BOUND NOBODY HAS PRICED IS NOT A BOUND. */
-#ifndef SYS__COMPUTING_BASE__RESULT_TRIES
-/* ⛳ Priced at the ~1.28 us a try costs the host's dispatch wait, whose count is the same number. */
-#define SYS__COMPUTING_BASE__RESULT_TRIES 12000000ull   /* x ~1.28 us = about fifteen seconds */
+#ifndef SYS__COMPUTING_BASE__WAIT_NS
+#define SYS__COMPUTING_BASE__WAIT_NS 15000000000ull     /* fifteen seconds, by the clock */
 #endif
 
 /* How long an idle block waits before asking again whether anything has been scheduled for it. Turned in

@@ -26,12 +26,13 @@ class Reply:
 class Link:
     """A subagent's session on the server at `endpoint`: `first`, the reply to the task; `say`, `answer`, `close`."""
 
-    def __init__(self, endpoint, model, config, task, user="agent", progress=None):
+    def __init__(self, endpoint, model, config, task, user="agent", progress=None, token=None):
         self.endpoint, self.model, self.config = endpoint.rstrip("/"), model, config
         self.name = model + (" (%s)" % config["lora"] if config.get("lora") else "")
         self.progress = progress                  # (text) said as the subagent works, or None
-        self.http = httpx.Client(base_url=self.endpoint, timeout=httpx.Timeout(30.0, read=None),
-                                 headers={"X-Web-User-Id": user})
+        # a server with users: the caller's sign-in, so the subagent's conversation is the caller's (▶ users.py)
+        headers = {"X-Web-User-Id": user, **({"Authorization": "Bearer " + token} if token else {})}
+        self.http = httpx.Client(base_url=self.endpoint, timeout=httpx.Timeout(30.0, read=None), headers=headers)
         self.ask, self.cid = None, None
         made = self.http.post("/cartridges", json={"name": "agent: " + task[:60], "lora": config.get("lora"),
                                                    "system": config.get("system"),

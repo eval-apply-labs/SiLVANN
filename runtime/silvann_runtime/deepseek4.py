@@ -28,15 +28,17 @@ begin-of-sentence token's largest |stream| 48,104 after layer 20, 307,505 after 
 `MEASURED` node03 2026-10-21, measurements/2026-10-21_deepseek_streams_fp32_node03.md), which DeepSeek's bf16 holds and a
 half does not. A sublayer's input is normed before it is a half, and its output is added to the streams as a float.
 """
+import contextlib
 import json
 import os
 import pickle
+import threading
 
 import numpy as np
 
 from . import experts_file, expert_tier, sampling
-from .generate import Generates
-from .machine import own_memory
+from .generate import STOPS_MOST, Generates
+from .machine import EngineError, own_memory
 from .model_folder import NL, Refused
 
 ARCHITECTURES = ("deepseek_v41_text",)
@@ -79,9 +81,14 @@ class DeepSeek4(Generates):
                  experts_from="ram", experts_in_ram=0, experts_ram_gb=None, experts_dir=None, experts_lock=False, experts_register="auto", socket=None, card=0, cards=None,
                  card_experts=0, chunk=128, card_experts_gb=0, card_shared="auto", card_landing="auto", card_landing_line=3,
                  card_exclusive=False, card_free=16, card_duplex_line=1200, card_duplex=None, card_line=8,
-                 picture_pixels=1 << 22, embed_on="auto"):
+                 picture_pixels=1 << 22, embed_on="auto", seats=1, seat_cards=None, sockets=None):
         if folder.architecture not in ARCHITECTURES:
             raise Refused("%s is a %r model, not one of %s" % (folder.path, folder.architecture, ARCHITECTURES))
+        # ⭐ SEATS (NN-155 ④, as the Qwen MoE's): `seats` conversations held on a card at once, the weights one — what each
+        #   is checked against comes once the rest is known (▶ before `_plan`)
+        if not isinstance(seats, int) or isinstance(seats, bool) or not 1 <= seats <= self.SEATS_MOST:
+            raise Refused("seats is a count from 1 to %d, not %r" % (self.SEATS_MOST, seats))
+        self.CARD_SEATS = seats                  # a card's seats; every card's, SEATS (▶ `seat_cards` below)
         c, b = folder.config, folder.bundle
         self.folder, self.m, self.b, self.c = folder, machine, b, c
         self.H, self.LAYERS, self.MULT = c["hidden_size"], c["num_hidden_layers"], c["hc_mult"]
@@ -119,7 +126,6 @@ class DeepSeek4(Generates):
                               "its tables" % sorted(self.ENGRAM))
             from .engram_ds4 import Engram
             self.ENG = Engram(c, os.path.join(folder.path, "tokenizer.json"), engram_from)
-        self.history = []                 # the conversation's tokens, which the n-gram memory hashes
         for l in self.run_layers:
             r = self.RATIO[l]
             if r and self.source(l) not in self.run_layers:
@@ -149,6 +155,27 @@ class DeepSeek4(Generates):
         self.CARD_DEVS = [int(card)] if cards is None else [int(x) for x in cards]
         self.P, self.GROUP = len(self.CARD_DEVS), 0
         self.CPU = self.P                         # the CPU worker: after the cards
+        # ⭐ A CONVERSATION A CARD (`seat_cards`, the boot's num_cards with multi_user "yes", ▶ `with_cards`), as the Qwen MoE's
+        #   `cards`: each card the whole dense model and its own seat, a card a worker, the CPU worker after the cards the
+        #   routed experts of every card's. Card k's program is card 0's, its buffers and tables bound under the program's
+        #   own names and frozen in its seat's views, each card's over the one after's and card 0's last (▶
+        #   `_load_seat_cards`). A group (`cards`) is one conversation over its cards; this is one a card.
+        self.NC = 1
+        if seat_cards is not None:
+            sc = list(seat_cards)
+            if len(sc) < 2 or len(set(sc)) != len(sc) or not all(isinstance(x, int) and not isinstance(x, bool) and x >= 0
+                                                                 for x in sc):
+                raise Refused("seat_cards is a list of two cards or more, each once, not %r" % (seat_cards,))
+            if cards is not None:
+                raise Refused("cards is a group's, one conversation over them, and seat_cards a conversation a card: not both")
+            if seats > 1:
+                raise Refused("a conversation a card takes a seat a card (seats 1)")
+            self.CARD_DEVS, self.NC, self.CPU = sc, len(sc), len(sc)
+        self.SEATS = self.NC * self.CARD_SEATS   # every seat: card k's seat s is seat k·CARD_SEATS + s (▶ `place`)
+        # the card a step's hand lies on and its chain goes on on, as the programs name it: card 0, or — a conversation a
+        #   card — SEAT_CARD, which each card's views bind to its own (▶ `_load_seat_cards`)
+        self.HAND_CARD = "SEAT_CARD" if self.NC > 1 else str(CARD)
+        self._histories = [[] for _ in range(self.SEATS)]   # each seat's conversation's tokens (▶ `history`)
         n512, tail = divmod(self.MINTER, 512)
         if self.QH % self.P or self.G % self.P or n512 % self.P:
             raise Refused("%d cards do not split %d heads, %d output groups and %d 512-blocks of the shared expert evenly"
@@ -231,6 +258,56 @@ class DeepSeek4(Generates):
             raise Refused("an exclusive tier deals the layers in RAM, and none is — experts_in_ram")
         if self.CARD_EXCLUSIVE and self.P > 1 and self.CARD_SHARED is None:
             self.CARD_SHARED = 0.0             # an exclusive group's slice is dealt at boot, before the speeds are timed
+        # ⭐ A SEAT IS ITS OWN STATE, ITS OWN BUFFERS AND ITS OWN VIEW: its slot of every layer's window ring and of every
+        #   source's compressed latents (▶ `_plan`, `ring`, `cache`), the buffers alive across a step's end or handed from one
+        #   of a step's verbs to the next (▶ SEAT_FIXED),
+        #   and the program's names bound to them in the view its steps run in (▶ `_seat_views`). A seat's position is a
+        #   chain of steps (▶ `_chain_procedures`): a layer's experts handed to the CPU between two, so the card runs the
+        #   other seat's step while the CPU computes. Held only where that is the overlap — every routed expert on the CPU
+        #   and one card — and where nothing else is one conversation's: the experts in RAM (or mapped), no mask, the
+        #   embedding on the card
+        if self.SEATS > 1:
+            why = [w for w, on in (("one card (no cards group)", self.P > 1),
+                                   ("every routed expert on the CPU (card_experts 0)", bool(self.NK)),
+                                   ("no card tier (card_experts_gb 0)", bool(self.CARD_GB)),
+                                   ("the embedding on the card (embed_on 'card')", self.EMBED_CPU),
+                                   ("no rank-1 mask", b.mask is not None)) if on]
+            if why:
+                raise Refused("%s take%s %s" % ("seats above 1" if self.NC == 1 else "a conversation a card", "" if self.NC == 1
+                                                else "s", ", ".join(why)))
+            if experts_from == "disk":
+                raise Refused(experts_file.SEATED_FROM_DISK)
+            self.SAMPLES_ON_CARD = False    # the sampler's buffers are one: a seat's token is drawn on the host
+            self.BINDINGS = 512 * self.SEATS    # each other seat's buffers, tables and views are names too
+        # ⭐ THE ROUTED EXPERTS ON EVERY SOCKET, EACH ITS PART OF EVERY EXPERT IN ITS OWN MEMORY (NN-163, as GLM's): a CPU
+        #   worker a NUMA node — x86_avx2's devices 1 and 2, each its threads and its memory on its node — holding its part
+        #   of each expert's inner width in whole rotation blocks (of 2304, 1024 and 1280, as the cards' parts of the shared
+        #   expert), all six picks run at that width on each, and the parts' sums added on the card. `MEASURED` (node03,
+        #   layers 0-4, measurements/2026-11-07_deepseek_sockets_node03.md): a layer's experts ~1.67 ms on the whole
+        #   machine, ~1.05 and ~1.23 ms on the two sockets at once, a token 1.20x sooner. `sockets` None: two where the
+        #   machine has two and the placement is theirs — every routed expert in RAM on the CPU, one card, no card tier, no
+        #   pipeline `socket` — else one.
+        held = [w for w, on in (("every routed expert in RAM (experts_from 'ram')", experts_from != "ram"),
+                                ("one card (no cards group, no conversation a card)", self.P > 1 or self.NC > 1),
+                                ("every routed expert on the CPU (card_experts 0)", bool(self.NK)),
+                                ("no card tier (card_experts_gb 0)", bool(self.CARD_GB)),
+                                ("no pipeline stage a socket (socket None)", socket is not None)) if on]
+        if sockets is None:
+            sockets = 2 if not held and machine is not None and machine.e.devices("x86_avx2") >= 3 else 1
+        if not isinstance(sockets, int) or isinstance(sockets, bool) or not 1 <= sockets <= 2:
+            raise Refused("sockets is 1 or 2, not %r" % (sockets,))
+        if sockets > 1 and held:
+            raise Refused("two sockets take %s" % ", ".join(held))
+        self.SOCKETS = sockets
+        each = 512 * ((self.MINTER // 512) // sockets)
+        if not each:
+            raise Refused("an expert's inner width %d has no whole rotation block for each of %d sockets" % (self.MINTER, sockets))
+        self.SPARTS = [(s * each, each if s < sockets - 1 else self.MINTER - s * each) for s in range(sockets)]
+        if sockets > 1:
+            self.CPUS = [dict(w=self.CPU + s, dev=1 + s, part=s) for s in range(sockets)]
+        # a prompt's rows are a card's: one seat's prompt at a time on it (▶ `prefill`)
+        self._card_locks = [threading.Lock() for _ in range(self.NC)]
+        self._seat_base = 0                      # the first seat of the card a load binds (▶ `_card_buffers`)
         self._plan()
         # ⭐ A PROMPT AS ROWS (▶ `prefill`): `chunk` positions a step, a layer at a time — each row's attention in order,
         #   the routed experts once over the chunk on the CPU; over a group every card's rows sites taking the group's sum of
@@ -253,6 +330,7 @@ class DeepSeek4(Generates):
         close = [24 * R, 4 * R * I, 2 * R * I, 2 * R * I, 2 * R * self.H]
         self.AWORK = max(sum(att) + 256 * len(att), sum(close) + 256 * len(close), 2 * R * self.H) if R else 0
         self.ERWS = {}                    # each engram layer's rows for a chunk, on every card: (card, layer) -> address
+        self.ERWS_OF = {}                 # a conversation a card: each card's ERWS (▶ `_load_seat_cards`)
         self.ISEL_AT = {}                 # each index source's choices, on card 0: a row's `index_topk` and their count
         self.ISCORES_AT, self.CAND_AT = {}, None   # each index source's scores and the candidate blocks' list, on card 0
         # ⭐ A MASK, where the folder's LoRA is one (▶ `nn_rank1_mask_from_projection.py`): `W' = W + Σ r_i·v_iᵀ` beside wo_b
@@ -270,6 +348,9 @@ class DeepSeek4(Generates):
         self.VC, self.IMAGE_TOKEN = whole.get("vision_config"), whole.get("image_token_id")
         self.VIS = bool(self.PICTURE_PIXELS and self.CHUNK and self.P == 1 and 0 in self.run_layers and self.VC
                         and self.IMAGE_TOKEN is not None and os.path.isfile(os.path.join(folder.path, "vision.pkl")))
+        if self.VIS and self.SEATS > 1:
+            # ⛳ the tower's scratch is one, and its words run as the host's program rather than a seat's step
+            raise Refused("a seated boot reads no pictures yet: picture_pixels 0 with seats above 1")
         if self.VIS:
             self._vision_plan()
 
@@ -375,11 +456,13 @@ class DeepSeek4(Generates):
         self.T_ANG = self.T_CACHE + len(ratios)
         self.ANG_BYTES = self.max_context * self.RD * 4
         self.APLAN = NL.SlotPlan(2 * self.ANG_BYTES, 0, 0, 256)
-        # every card's collections — the head card 0's alone, a slot of a few bytes on the others
+        # every card's collections — the head card 0's alone, a slot of a few bytes on the others; a layer's ring and a
+        #   source's cache a slot a seat (▶ `load`)
         self.COLLECTIONS = [([(t, self.PLANS[s][members[0]], slots[t]) for t, members in enumerate(groups.values())]
                              + [(self.T_HEAD, self.HPLAN if s == 0 else NL.SlotPlan(256, 0, 0, 256), 1),
-                                (self.T_RING, self.RPLAN, max(1, len(run)))]
-                             + [(self.CTYPE[r], self.CPLANS[r], max(1, sum(1 for l in self.CACHE_ROWS if self.RATIO[l] == r)))
+                                (self.T_RING, self.RPLAN, max(1, len(run)) * self.CARD_SEATS)]
+                             + [(self.CTYPE[r], self.CPLANS[r],
+                                 max(1, sum(1 for l in self.CACHE_ROWS if self.RATIO[l] == r)) * self.CARD_SEATS)
                                 for r in ratios]
                              + [(self.T_ANG, self.APLAN, 1)])
                             for s in range(self.P)]
@@ -429,6 +512,14 @@ class DeepSeek4(Generates):
                 raise Refused("%d experts is too few for a cache of them — a prompt reads two batches of 16 at once"
                               % self.SLOTS)
         self.cpu_arena = self.EPLAN.slot_bytes * self.cpu_slots
+        # each socket's slot of an expert: its part's gate and up rows, their scales, its columns of every down row, every
+        #   down row's scale; one socket's the whole expert's, EPLAN
+        if any(dn.row_bytes * w % self.MINTER for _, w in self.SPARTS):
+            raise Refused("a socket's part of the down rows does not end on a byte")
+        self.SPLANS = ([self.EPLAN] if self.SOCKETS == 1 else
+                       [NL.SlotPlan(2 * w * gr.row_bytes, 2 * w * 2, dn.rows * (dn.row_bytes * w // self.MINTER), dn.rows * 2)
+                        for _, w in self.SPARTS])
+        self.CPU_ARENAS = [p.slot_bytes * self.cpu_slots for p in self.SPLANS]
         # `experts_lock`: the layers copied into RAM locked there, so the system cannot swap them out — a mapped layer is
         #   its file's (▶ `experts_file.lock_check`)
         experts_file.lock_check(self.EXPERTS_LOCK, "ram" if ram else self.EXPERTS_FROM,
@@ -505,6 +596,9 @@ class DeepSeek4(Generates):
         if any(self.candidate_role(l) for l in self.run_layers):
             idx.append(4 * (self.CAND_REACH + 1) * max(1, self.CHUNK))
         rows, other = rows + idx, other + idx
+        # each other seat's candidate lists, on its one card (▶ `_card_buffers`); its small buffers take the 1 MB class
+        if any(self.candidate_role(l) for l in self.run_layers):
+            rows = rows + [4 * (self.CAND_REACH + 1) * max(1, self.CHUNK)] * (self.CARD_SEATS - 1)
         # an exclusive tier over a chunk, on every card: `experts_rows`' scratch and the routed rows of the picks it holds
         if self.CARD_EXCLUSIVE and R:
             rows, other = rows + [self.RSCRATCH, R * self.H * 2], other + [self.RSCRATCH, R * self.H * 2]
@@ -515,17 +609,24 @@ class DeepSeek4(Generates):
             mine = rows if k == 0 else other
             large = [n for n in mine if n > (4 << 20)]
             out[k] = self._section(max([big, ask] + large), self.ARENAS[k], self.COLLECTIONS[k], kinds,
-                                   bigs=(4 if ask else 3) + len(large),
+                                   many=128 + 32 * (self.CARD_SEATS - 1), bigs=(4 if ask else 3) + len(large),
                                    mains=2 + sum(1 for n in mine if (2 << 20) < n <= (4 << 20)),
                                    resids=8 + sum(1 for n in mine if (1 << 20) < n <= (2 << 20)))
             out[k] += ("nn__ram_buffer_result__size_bytes:64\nnn__ram_buffer_result__qty:1\n"
                        "nn__ram_buffer_experts__size_bytes:64\nnn__ram_buffer_experts__qty:1\n"
                        "nn__ram_buffer_table__size_bytes:%d\nnn__ram_buffer_table__qty:1\n"
                        % (self.TABLE_BYTES if k == 0 and not self.EMBED_CPU else 256))
+        for k in range(1, self.NC):                     # a conversation a card: every card the whole model, as card 0
+            out[k] = out[0]
+        # the CPU's: each card past the first its own hand-off too (▶ `_load_seat_cards`) — a prompt's hands, routed rows and
+        #   scratch, and the small buffers
+        more = self.NC - 1
         for c in self.CPUS:
-            out[c["w"]] = self._section(max(1 << 20, R * self.HANDB, R * self.H * 2, self.RSCRATCH if R else 0), self.cpu_arena,
-                                        [(0, self.EPLAN, self.cpu_slots)], kinds, many=16, bigs=3 + (3 if R else 0))
-            if self.EMBED_CPU:                         # the embedding's table, the CPU worker's (▶ `__init__`)
+            out[c["w"]] = self._section(max(1 << 20, R * self.HANDB, R * self.H * 2, self.RSCRATCH if R else 0),
+                                        self.CPU_ARENAS[c["part"]], [(0, self.SPLANS[c["part"]], self.cpu_slots)], kinds,
+                                        many=16 + 4 * (self.CARD_SEATS - 1) + 8 * more,
+                                        bigs=3 + (3 if R else 0) + (more if R else 0), resids=8 + (2 * more if R else 0))
+            if self.EMBED_CPU and c["part"] == 0:      # the embedding's table, the CPU worker's (▶ `__init__`)
                 out[c["w"]] += ("nn__ram_buffer_result__size_bytes:64\nnn__ram_buffer_result__qty:1\n"
                                 "nn__ram_buffer_experts__size_bytes:64\nnn__ram_buffer_experts__qty:1\n"
                                 "nn__ram_buffer_table__size_bytes:%d\nnn__ram_buffer_table__qty:1\n" % self.TABLE_BYTES)
@@ -533,10 +634,15 @@ class DeepSeek4(Generates):
 
     # ── ② the load ───────────────────────────────────────────────────────────────────────────────────────────
     def load(self, progress=None):
+        if self.NC > 1:
+            return self._load_seat_cards(progress)
         m, b = self.m, self.b
         if self.P > 1:                                # the cards' group first: refused before a weight is read
             m.join_group(self.GROUP, self.P)
         self.ring_at, self.cache_at, self.ang_at, self.CB, self.MASK_CELLS = {}, {}, {}, {}, {}
+        # seat -> (card, layer) -> its slot of the layer's ring, and of a source's cache; seat 0's are ring_at and cache_at
+        self.ring_seats, self.cache_seats = {s: {} for s in range(self.SEATS)}, {s: {} for s in range(self.SEATS)}
+        self.SEAT_AT = {}                 # (buffer, seat) -> its address, a seat's own buffers (▶ `_card_buffers`)
         for k in range(self.P):
             m.act_as(k)
             loader = m.loader()
@@ -559,14 +665,21 @@ class DeepSeek4(Generates):
                         loader.load_dense(b, self.PLANS[k][n], self.TYPE[n], n, l, which=self.WHICH[n])
                     else:
                         loader.load_bytes(self.PLANS[k][n], self.TYPE[n], l, got[0], got[1], which=self.WHICH[n])
-                loader.layer_width(l, self.T_RING, 1)
-                self.ring_at[(k, l)] = loader.reserve(self.T_RING)
-                loader.assign(l, self.T_RING, 0, self.ring_at[(k, l)])
+                # seat s's ring its layer's slot s, and its cache its source's: the plane's expert is the seat
+                loader.layer_width(l, self.T_RING, self.CARD_SEATS)
+                for seat in range(self.CARD_SEATS):
+                    at = loader.reserve(self.T_RING)
+                    loader.assign(l, self.T_RING, seat, at)
+                    self.ring_seats[seat][(k, l)] = at
+                self.ring_at[(k, l)] = self.ring_seats[0][(k, l)]
                 if l in self.CACHE_ROWS:
                     ct = self.cache_plan(l)[0]
-                    loader.layer_width(l, ct, 1)
-                    self.cache_at[(k, l)] = loader.reserve(ct)
-                    loader.assign(l, ct, 0, self.cache_at[(k, l)])
+                    loader.layer_width(l, ct, self.CARD_SEATS)
+                    for seat in range(self.CARD_SEATS):
+                        at = loader.reserve(ct)
+                        loader.assign(l, ct, seat, at)
+                        self.cache_seats[seat][(k, l)] = at
+                    self.cache_at[(k, l)] = self.cache_seats[0][(k, l)]
             l0 = self.run_layers[0]
             loader.layer_width(l0, self.T_ANG, 1)
             self.ang_at[k] = loader.reserve(self.T_ANG)
@@ -588,9 +701,11 @@ class DeepSeek4(Generates):
             self._mask_buffers(k)
         self.head_data = self.head_lut = self.emb_data = self.emb_lut = None
         self._load_experts(progress)
+        for c in self.CPUS:
+            m.act_as(c["w"])
+            self._cpu_buffers(c["part"])
         m.act_as(self.CPU)
-        self._cpu_buffers(0)
-        m.bind_values(dict(VOCAB=self.VOCAB, STOPS=0, SEEN=sampling.SEEN, GROUP=self.GROUP))
+        m.bind_values(dict(VOCAB=self.VOCAB, STOPS=STOPS_MOST, SEEN=sampling.SEEN, GROUP=self.GROUP))
         for k in range(self.P):
             m.act_as(k)
             self._tables(k)
@@ -612,8 +727,73 @@ class DeepSeek4(Generates):
             m.must("(sys__add_bindings %d '%s %d)" % (m.env, expert_tier.THRESHOLD, self.CARD_LINE), "the promotion threshold",
                    "sys__value_true")
         m.define_programs(self._procedures)
+        if self.SEATS > 1:
+            self._seat_views(0)
         if self.CARD_GB and ((self.P > 1 and self.CARD_SHARED is None) or self.CARD_LANDING is None):
             self._from_speeds()
+        self.global_ = None
+        self.b.release()                            # every layer's file let go (▶ `Bundle.release`)
+
+    def _load_seat_cards(self, progress=None):
+        """⭐ A CONVERSATION A CARD (`seat_cards`): each card, the last first, its head and embedding, its whole dense model,
+        its seat's rings and caches and its angles into its own collections, its buffers and tables, and the CPU worker's
+        hand-off for it — its copies of the hand and the rows, its routed sums, its scratch and its experts tables, so
+        two cards' prompts never share a routed row — all bound under the program's names, its SEAT_CARD among them; the
+        programs defined over the first card loaded, each card's views frozen over its own (▶ `_seat_views`). Card 0's
+        come last, so the bindings as they stand are card 0's. The routed experts once, into the CPU worker's memory,
+        after every card."""
+        m, b = self.m, self.b
+        self.ring_at, self.cache_at, self.ang_at, self.CB, self.MASK_CELLS = {}, {}, {}, {}, {}
+        self.ring_seats, self.cache_seats = {s: {} for s in range(self.SEATS)}, {s: {} for s in range(self.SEATS)}
+        self.SEAT_AT, self.ERWS_OF = {}, {}
+        for card in reversed(range(self.NC)):
+            m.act_as(card)
+            self._seat_base = seat = card * self.CARD_SEATS
+            loader = m.loader()
+            loader.layer_width(0, self.T_HEAD, 1)
+            self.HEAD_AT = loader.load_bytes(self.HPLAN, self.T_HEAD, 0, self.head_data, self.head_lut)
+            self.EMB_AT = m.buffer(self.TABLE_BYTES, "EMBEDDING", ram=True)
+            m.write(self.EMB_AT, self.emb_data)
+            m.write(self.EMB_AT + self.EMB_DATA_BYTES, self.emb_lut)
+            for l in self.run_layers:
+                for t in sorted({self.TYPE[n] for n in self.dense_names(l)}):
+                    loader.layer_width(l, t, self.WIDTH[t])
+                for n in self.dense_names(l):
+                    loader.load_dense(b, self.PLANS[0][n], self.TYPE[n], n, l, which=self.WHICH[n])
+                # the card's seat's ring its layer's slot, and its cache its source's — the seat's own, as a card's
+                loader.layer_width(l, self.T_RING, 1)
+                self.ring_seats[seat][(0, l)] = at = loader.reserve(self.T_RING)
+                loader.assign(l, self.T_RING, 0, at)
+                if l in self.CACHE_ROWS:
+                    ct = self.cache_plan(l)[0]
+                    loader.layer_width(l, ct, 1)
+                    self.cache_seats[seat][(0, l)] = at = loader.reserve(ct)
+                    loader.assign(l, ct, 0, at)
+            l0 = self.run_layers[0]
+            loader.layer_width(l0, self.T_ANG, 1)
+            self.ang_at[0] = loader.reserve(self.T_ANG)
+            loader.write(self.ang_at[0], angles(self.max_context, self.RD, self.THETA).tobytes()
+                         + angles(self.max_context, self.RD, **self.YARN).tobytes())
+            loader.assign(l0, self.T_ANG, 0, self.ang_at[0])
+            if loader.handed() != 0:
+                raise Refused("card %d: %d slots were reserved and never published" % (card, loader.handed()))
+            self._card_buffers(0)                   # under the program's names: card 0's, as each card is a whole model
+            self.ERWS_OF[card] = {(card, l): at for (_, l), at in self.ERWS.items()}
+            m.act_as(self.CPU)
+            self._cpu_buffers(0)                    # the card's hand-off on the CPU
+            m.bind_values(dict(VOCAB=self.VOCAB, STOPS=STOPS_MOST, SEEN=sampling.SEEN, GROUP=self.GROUP, SEAT_CARD=card))
+            m.act_as(card)
+            self._tables(0)                         # its sites over its own planes and buffers, and its CPU tables
+            m.act_as(card)
+            if card == self.NC - 1:
+                m.define_programs(self._procedures)
+                m.act_as(card)
+            self._seat_views(card)
+        self.ring_at, self.cache_at = dict(self.ring_seats[0]), dict(self.cache_seats[0])
+        self.head_data = self.head_lut = self.emb_data = self.emb_lut = None
+        self._load_experts(progress)
+        self._seat_base = 0
+        m.act_as(CARD)
         self.global_ = None
         self.b.release()                            # every layer's file let go (▶ `Bundle.release`)
 
@@ -664,12 +844,53 @@ class DeepSeek4(Generates):
     def _expert_pieces(self, view, l, x, part):
         """Expert `x` of layer `l` as its slot's pieces (▶ `experts_file`)."""
         g, u, d = (self.b.record(l, EXPERT % (x, w)) for w in ("gate", "up", "down"))
-        return expert_tier.part_pieces(view, g, u, d, self.EPLAN, 0, 1, self.MINTER)
+        first, width = self.SPARTS[part]
+        return expert_tier.part_pieces_at(view, g, u, d, self.SPLANS[part], first, width, self.MINTER)
+
+    def _load_socket_experts(self, progress):
+        """Every layer's routed experts into each socket's slots, its part of every expert, copied in from the mapped
+        bundle — a layer at a time for every socket, so a layer's file is read once (▶ GLM's `_load_experts`)."""
+        m, b = self.m, self.b
+        loaders = {}
+        for c in self.CPUS:
+            m.act_as(c["w"])
+            loaders[c["w"]] = m.loader()
+        held = {c["w"]: [] for c in self.CPUS}
+        for i, l in enumerate(self.run_layers):
+            view = np.frombuffer(b.blob(l), dtype=np.uint8)
+            for c in self.CPUS:
+                m.act_as(c["w"])
+                loader = loaders[c["w"]]
+                loader.layer_width(l, 0, self.EXPERTS)
+                for x in range(self.EXPERTS):
+                    at = loader.reserve(0)
+                    for into, piece in self._expert_pieces(view, l, x, c["part"]):
+                        m.write_from(at + into, piece.ctypes.data, piece.nbytes)
+                    loader.assign(l, 0, x, at)
+                    held[c["w"]].append(at)
+            view = piece = None                   # a slice left bound keeps the map open: `release` refuses it
+            b.release(l)
+            if progress:
+                progress(i + 1, len(self.run_layers))
+        for c in self.CPUS:
+            m.act_as(c["w"])
+            if loaders[c["w"]].handed() != 0:
+                raise Refused("%d expert slots were reserved and never published" % loaders[c["w"]].handed())
+        self.SRC = {}
+        self.LOCKED_GB = sum(experts_file.lock_experts(self.EXPERTS_LOCK, held[c["w"]], self.SPLANS[c["part"]].slot_bytes)
+                             for c in self.CPUS)
+        self.REGISTERED_GB = sum(experts_file.register_experts(m, self.EXPERTS_REGISTER, range(self.P), held[c["w"]],
+                                                               self.SPLANS[c["part"]].slot_bytes, self.REGISTER_REQUIRED)
+                                 for c in self.CPUS)
+        m.act_as(CARD)
 
     def _load_experts(self, progress):
         """Every layer's routed experts into the CPU worker's slots: copied in from the mapped bundle, or — `"mapped"`, past
         the first `experts_in_ram` layers — their file mapped over them; from the disk, none, the slots a cache."""
         m, b, p = self.m, self.b, self.EPLAN
+        if self.SOCKETS > 1:
+            self._load_socket_experts(progress)
+            return
         if self.EXPERTS_FROM == "disk":
             self.SRC = {}
             self._cache_experts(progress)
@@ -746,18 +967,32 @@ class DeepSeek4(Generates):
         final_w = np.frombuffer(np.asarray(self.global_["model.language_model.norm.weight"]["vbr_data"]).tobytes(),
                                 dtype="<f2").astype(np.float64)[:H]
         cb = self.CB[k] = {}
+
+        def own(nbytes, name):
+            """Card k's buffer `name` and each other seat's beside it (▶ SEAT_FIXED): seat 0's address."""
+            got = [m.buffer(nbytes, self.seat_name(n(name), seat)) for seat in range(self.CARD_SEATS)]
+            if k == 0:
+                self.SEAT_AT.update(((name, self._seat_base + seat), at) for seat, at in enumerate(got))
+            return got[0]
         m.buffer(1024, n("signs"), _half(signs[:512]))
         m.buffer(1024, n("ones512"), _half(np.ones(512)))
         m.buffer(H * 2, n("signs_row"), _half(np.tile(signs[:512], H // 512)))
         m.buffer(H * 2, n("fnw"), _half(final_w))
         m.buffer(H * 2, n("zero_h"), _half(np.zeros(H)))
-        cb["streams"] = m.buffer(self.MULT * H * 4, n("streams"))
-        for nm in ("u", "hu", "e", "hn", "hnr", "routed"):
-            cb[nm] = m.buffer(H * 2, n(nm))
-        cb["hm"] = m.buffer(H * 4, n("hm"))             # the head's collapse, floats like the streams
+        cb["streams"] = own(self.MULT * H * 4, "streams")
+        # ⛔ A SEAT'S OWN, AND NOT FOR SURVIVING A STEP'S END: the embedding's `u` `hu` `e` and the head's `hm` `hn` `hnr` are
+        #   each handed from one verb to the next inside a step, so another seat's step run between two of them — a slice
+        #   giving the card's block up mid-step — would write them (NN-159, `MEASURED`: at a slice of 1 µs, one card's
+        #   copy of them, seat 1 answered another's tokens)
+        for nm in ("u", "hu", "e", "hn", "hnr"):
+            cb[nm] = own(H * 2, nm)
+        cb["routed"] = own(H * 2, "routed")
+        for s in range(1, self.SOCKETS):              # every other socket's share of the routed sum, then added (NN-163)
+            own(H * 2, "routed%d" % s)
+        cb["hm"] = own(H * 4, "hm")                     # the head's collapse, floats like the streams
         # the two sites' mixes, handed from one site to the next, and the first layer's one-hot `pre`
-        cb["mixa"] = m.buffer(MIX_BYTES, n("mixa"))
-        cb["mixb"] = m.buffer(MIX_BYTES, n("mixb"))
+        cb["mixa"] = own(MIX_BYTES, "mixa")
+        cb["mixb"] = own(MIX_BYTES, "mixb")
         # what the first layer this machine runs collapses by: the model's one-hot `pre` at layer 0, or — a later stage of a
         # pipeline — the mix the stage before it handed on with the streams (▶ `forward`)
         first = np.zeros(MIX_BYTES // 4, dtype="<f4")
@@ -769,10 +1004,10 @@ class DeepSeek4(Generates):
             cb["tsum"] = m.buffer(H * 2, n("tsum"))
         if k == 0:
             m.buffer(64, "weights")
-            m.buffer(64, "res")
+            own(64, "res")                              # the head's argmax, read back by the next verb: a seat's own
             sampling.buffers(m)
             self._answer_buffers()
-            self.LOGITS_AT = m.buffer(self.VOCAB * 2, "logits_h")
+            self.LOGITS_AT = own(self.VOCAB * 2, "logits_h")
         if any(self.RATIO[l] for l in self.run_layers):
             m.buffer((self.W + self.TOPK_C) * self.HD * 2, n("gather"))
             m.buffer(2 * 64 * self.HD, n("czero"), _half(np.zeros(64 * self.HD)))
@@ -782,14 +1017,16 @@ class DeepSeek4(Generates):
                     at = m.buffer(4 * (self.CACHE_ROWS[self.source(l)] + 1), n("iscores%d" % l))
                     if k == 0:
                         self.ISCORES_AT[l] = at
-                    # a choice a row: a chunk's rows each keep theirs (▶ the package's A PROMPT AS ROWS)
-                    at = m.buffer(4 * (self.TOPK_C + 1) * max(1, self.CHUNK), n("isel%d" % l))
+                    # a choice a row: a chunk's rows each keep theirs (▶ the package's A PROMPT AS ROWS) — a seat's own, as
+                    #   the layers after the index source read it (the scores the source's verb alone reads)
+                    at = own(4 * (self.TOPK_C + 1) * max(1, self.CHUNK), "isel%d" % l)
                     if k == 0:
                         self.ISEL_AT[l] = at
             if any(self.candidate_role(l) for l in self.run_layers):
-                # the candidate blocks: a list a row, the source's and read by the index sources after it, and a scratch
-                #   for the source's block scores or a later source's scores of its candidates and its choice among them
-                at = m.buffer(4 * (self.CAND_REACH + 1) * max(1, self.CHUNK), n("cand"))
+                # the candidate blocks: a list a row, the source's and read by the index sources after it — a seat's own —
+                #   and a scratch for the source's block scores or a later source's scores of its candidates and its
+                #   choice among them, which its verb alone reads
+                at = own(4 * (self.CAND_REACH + 1) * max(1, self.CHUNK), "cand")
                 if k == 0:
                     self.CAND_AT = at
                 m.buffer(max(4 * (max(self.CACHE_ROWS.values()) // self.CAND_BLOCK + 1), 4 * self.CAND_REACH + 4 * (self.TOPK_C + 1)),
@@ -798,8 +1035,10 @@ class DeepSeek4(Generates):
         QW, ON, I = self.QH * self.HD, self.G * self.OR, self.MINTER
         m.buffer(2 * (5 * H + 3 * self.QR + self.HD + 3 * QW + 2 * ON + 4 * self.HD + self.ID + self.IH * self.ID + self.IH) + 256,
                  n("ascratch"))
-        m.buffer(2 * (4 * H + self.EXPERTS) + 8 * I + 256, n("mscratch"))
-        cb["hand"] = m.buffer(2 * (H + self.TOPK), n("hand"))
+        # the MoE site's scratch: its first `hidden` halves the shared expert's answer, kept from `shared` to `close` —
+        #   across a seat's step's end (▶ `_chain_procedures`), so a seat's own
+        own(2 * (4 * H + self.EXPERTS) + 8 * I + 256, "mscratch")
+        cb["hand"] = own(2 * (H + self.TOPK), "hand")
         if k == 0 and self.EMBED_CPU:
             m.node_array("EMB_TOK", 1)              # the token the CPU worker decodes the row of (▶ `_procedures`)
         if k == 0 and self.CHUNK:
@@ -811,6 +1050,8 @@ class DeepSeek4(Generates):
             m.buffer(R * MIX_BYTES, "bmix")
             m.buffer(R * self.HANDB, "hands")
             m.buffer(R * H * 2, "rrows")
+            for s in range(1, self.SOCKETS):          # every other socket's share of a chunk's routed rows
+                m.buffer(R * H * 2, "rrows%d" % s)
             m.buffer(R * H * 2, "xrows")
             m.buffer(self.AWORK, "awork")
             m.node_array("TOKS", R)
@@ -837,12 +1078,15 @@ class DeepSeek4(Generates):
             # an exclusive tier over a chunk: `experts_rows`' scratch, and the routed rows of the picks this card holds
             m.buffer(self.RSCRATCH, n("krscratch"))
             m.buffer(self.CHUNK * H * 2, n("rrows_k"))
-        m.node_array(n("picks"), self.TOPK)
+        for seat in range(self.CARD_SEATS):
+            m.node_array(self.seat_name(n("picks"), seat), self.TOPK)
+            if self.SEATS > 1:          # a seat's chain carries its position and how it ends (▶ `_chain_procedures`)
+                m.node_array(self.seat_name("HERE", seat), 2)
         if self.ENG is not None:
             cb["eng"] = {}
             for l in self.run_layers:
                 if l in self.ENGRAM:
-                    cb["eng"][l] = m.buffer(self.ENG.width * 2, n("eng%d" % l))
+                    cb["eng"][l] = own(self.ENG.width * 2, "eng%d" % l)     # written by the host before a seat's position
                     rec = lambda name: self.b.record(l, name)
                     import nn_unpack_model as NU
                     q, kk = (np.asarray(NU.decode_record(rec(x).rec, self.b.blob(l)), dtype=np.float64)
@@ -861,9 +1105,13 @@ class DeepSeek4(Generates):
     def _cpu_buffers(self, i):
         m, H, c = self.m, self.H, lambda name: self.cn(i, name)
         m.buffer(1024, c("signs"), _half(self.signs[:512]))
-        for nm in ("e", "routed") + (("emb",) if self.EMBED_CPU and i == 0 else ()):
+        for nm in ("e",) + (("emb",) if self.EMBED_CPU and i == 0 else ()):
             self.at[c(nm)] = m.buffer(H * 2, c(nm))
-        m.buffer(2 * (H + self.TOPK), c("hand"))
+        for seat in range(self.CARD_SEATS):         # a seat's copy of its hand, and its routed sum (▶ SEAT_FIXED)
+            got = m.buffer(H * 2, self.seat_name(c("routed"), seat))
+            if seat == 0:
+                self.at[c("routed")] = got
+            m.buffer(2 * (H + self.TOPK), self.seat_name(c("hand"), seat))
         if self.CHUNK:
             m.buffer(self.CHUNK * self.HANDB, c("hands"))
             m.buffer(self.CHUNK * H * 2, c("rrows"))
@@ -882,23 +1130,25 @@ class DeepSeek4(Generates):
         return "(nn__expert__plane %d %d 0 %d %d)" % (self.run_layers[0], self.T_ANG, self.ANG_BYTES if compressed else 0,
                                                        self.ANG_BYTES)
 
-    def ring(self, l):
-        return "(nn__expert__plane %d %d 0 %d %d)" % (l, self.T_RING, self.RPLAN.at_up_data, self.RING_BYTES)
+    def ring(self, l, seat=0):
+        """Layer `l`'s window ring — seat `seat`'s: that seat's slot of the layer's."""
+        return "(nn__expert__plane %d %d %d %d %d)" % (l, self.T_RING, seat, self.RPLAN.at_up_data, self.RING_BYTES)
 
     def cache_plan(self, s):
         """Source layer `s`'s cache: its collection, its slot's plan and where its index keys start in the slot."""
         r = self.RATIO[s]
         return self.CTYPE[r], self.CPLANS[r], self.KEYS[r]
 
-    def cache(self, l, which):
-        """Source layer `l`'s compressed latents (`c`) or its partial group's ring (`r`)."""
+    def cache(self, l, which, seat=0):
+        """Source layer `l`'s compressed latents (`c`), their index keys (`k`) or its partial group's ring (`r`) — seat
+        `seat`'s: that seat's slot of the source's cache."""
         s = self.source(l)
         t, p, keys = self.cache_plan(s)
         if which == "c":
-            return "(nn__expert__plane %d %d 0 %d %d)" % (s, t, p.at_up_data, self.CACHE_ROWS[s] * self.HD * 2)
+            return "(nn__expert__plane %d %d %d %d %d)" % (s, t, seat, p.at_up_data, self.CACHE_ROWS[s] * self.HD * 2)
         if which == "k":
-            return "(nn__expert__plane %d %d 0 %d %d)" % (s, t, p.at_up_data + keys, self.CACHE_ROWS[s] * self.ID * 2)
-        return "(nn__expert__plane %d %d 0 %d %d)" % (s, t, p.at_down_data, 2 * self.RATIO[s] * self.HD * 2)
+            return "(nn__expert__plane %d %d %d %d %d)" % (s, t, seat, p.at_up_data + keys, self.CACHE_ROWS[s] * self.ID * 2)
+        return "(nn__expert__plane %d %d %d %d %d)" % (s, t, seat, p.at_down_data, 2 * self.RATIO[s] * self.HD * 2)
 
     def rng(self, buf, at, n):
         return "(nn__vector__range %s %d %d)" % (buf, at, n)
@@ -974,29 +1224,34 @@ class DeepSeek4(Generates):
         d = lambda l, x: b.record(l, x).d
         hc = lambda l, site: [data(l, "hc_%s_%s" % (site, x)) for x in ("fn", "base", "scale")]
         head = [H, self.MULT, self.ITERS]
-        for i, l in enumerate(self.run_layers):
-            earlier = n("mix_in") if i == 0 else n("mixb")
-            mats = [s + x + ".weight" for x in ("wq_a", "wkv", "wq_b", "wo_a", "wo_b")]
-            m.table(n("at%d" % l), hc(l, "attn") + [data(l, "input_layernorm.weight"), n("mixa"), earlier]
-                    + [c for x in mats for c in pair(l, x)]
-                    + [data(l, s + "q_norm.weight"), data(l, s + "kv_norm.weight"), data(l, s + "attn_sink"), self.ring(l),
-                       self.angle_plane(bool(self.RATIO[l])), n("scores"), n("signs"), n("ascratch")]
-                    + head + [self.QHC, self.HD, self.RD, self.QR, self.OR, self.GC, self.W] + [d(l, x) for x in mats]
-                    + [self.EPS, self.HC_EPS] + self._compressed(l, k) + self._masked(k, l, "attn"))
-            mats = ["mlp.shared_experts.%s_proj.weight" % x for x in ("gate", "up", "down")]
-            mo = (hc(l, "ffn") + [data(l, "post_attention_layernorm.weight"), n("mixb"), n("mixa"),
-                                  data(l, "mlp.gate.weight"), data(l, "mlp.gate.e_score_correction_bias")]
-                  + [c for x in mats for c in pair(l, x)] + [n("signs"), n("mscratch")]
-                  + head + [self.EXPERTS, self.TOPK, self.I_OF[k]] + [d(l, x) for x in mats]
-                  + [self.EPS, self.HC_EPS, self.RSCALE, self.LIMIT] + self._masked(k, l, "shared"))
-            m.table(n("mo%d" % l), mo)
-            if self.VIS and k == 0:
-                # a picture's rows: the same site, the router's bias the layer's for pictures (▶ AI_DEEPSEEK_4__MOE__BIAS)
-                m.table("mv%d" % l, mo[:7] + [self._vplane("bias_vl.%d" % l)] + mo[8:])
-        for l in self.run_layers:
-            if l in self.ENGRAM:
-                m.table(n("en%d" % l), [n("eng%d" % l)] + pair(l, "engram.wkv.weight") + [n("engw%d" % l), n("signs"), n("escratch")]
-                        + [H, self.MULT, self.ENG.width, d(l, "engram.wkv.weight"), self.EPS])
+        # each seat's sites (▶ SEAT_FIXED): the same planes over its own mixes, its ring and cache, its selections and its
+        #   MoE scratch, under its own names; seat 0's the names themselves, and in a group only seat 0
+        for seat in range(self.CARD_SEATS):
+            sn = lambda name, seat=seat: self.seat_name(n(name), seat)              # noqa: E731
+            for i, l in enumerate(self.run_layers):
+                earlier = n("mix_in") if i == 0 else sn("mixb")
+                mats = [s + x + ".weight" for x in ("wq_a", "wkv", "wq_b", "wo_a", "wo_b")]
+                m.table(sn("at%d" % l), hc(l, "attn") + [data(l, "input_layernorm.weight"), sn("mixa"), earlier]
+                        + [c for x in mats for c in pair(l, x)]
+                        + [data(l, s + "q_norm.weight"), data(l, s + "kv_norm.weight"), data(l, s + "attn_sink"), self.ring(l, seat),
+                           self.angle_plane(bool(self.RATIO[l])), n("scores"), n("signs"), n("ascratch")]
+                        + head + [self.QHC, self.HD, self.RD, self.QR, self.OR, self.GC, self.W] + [d(l, x) for x in mats]
+                        + [self.EPS, self.HC_EPS] + self._compressed(l, k, seat) + self._masked(k, l, "attn"))
+                mats = ["mlp.shared_experts.%s_proj.weight" % x for x in ("gate", "up", "down")]
+                mo = (hc(l, "ffn") + [data(l, "post_attention_layernorm.weight"), sn("mixb"), sn("mixa"),
+                                      data(l, "mlp.gate.weight"), data(l, "mlp.gate.e_score_correction_bias")]
+                      + [c for x in mats for c in pair(l, x)] + [n("signs"), sn("mscratch")]
+                      + head + [self.EXPERTS, self.TOPK, self.I_OF[k]] + [d(l, x) for x in mats]
+                      + [self.EPS, self.HC_EPS, self.RSCALE, self.LIMIT] + self._masked(k, l, "shared"))
+                m.table(sn("mo%d" % l), mo)
+                if self.VIS and k == 0:
+                    # a picture's rows: the same site, the router's bias the layer's for pictures (▶ AI_DEEPSEEK_4__MOE__BIAS)
+                    m.table("mv%d" % l, mo[:7] + [self._vplane("bias_vl.%d" % l)] + mo[8:])
+            for l in self.run_layers:
+                if l in self.ENGRAM:
+                    m.table(sn("en%d" % l), [sn("eng%d" % l)] + pair(l, "engram.wkv.weight")
+                            + [n("engw%d" % l), n("signs"), n("escratch")]
+                            + [H, self.MULT, self.ENG.width, d(l, "engram.wkv.weight"), self.EPS])
         if self.NK:
             kp = self.KPLANS[k]
             for l in self.run_layers:
@@ -1027,15 +1282,17 @@ class DeepSeek4(Generates):
             self._tier(k)
         if k != 0:
             return
-        p = self.EPLAN
-        m.act_as(self.CPU)
-        c = lambda name: self.cn(0, name)
-        for l in self.run_layers:
-            cells = [l, 0, p.at_up_lut - p.at_up_data, p.at_down_data - p.at_up_data, p.at_down_lut - p.at_up_data, H, self.MINTER,
-                     self.EXPERTS, self.TOPK, self.E_D, self.NK, self.EXPERTS - self.NK, 1 if self.EXPERTS_INT8 else 0, self.LIMIT]
-            m.table("ex%d_0" % l, [c("signs"), c("zero"), c("scratch")] + cells + self._backing(l))
-            if self.CHUNK:                    # a chunk's: the same experts, `experts_rows`' scratch
-                m.table("exr%d_0" % l, [c("signs"), c("zero"), c("rscratch")] + cells + self._backing(l))
+        for cpu in self.CPUS:                 # each socket's over its part of every expert: its plan, its width
+            s = cpu["part"]
+            p, width = self.SPLANS[s], self.SPARTS[s][1]
+            m.act_as(cpu["w"])
+            c = lambda name, s=s: self.cn(s, name)
+            for l in self.run_layers:
+                cells = [l, 0, p.at_up_lut - p.at_up_data, p.at_down_data - p.at_up_data, p.at_down_lut - p.at_up_data, H, width,
+                         self.EXPERTS, self.TOPK, self.E_D, self.NK, self.EXPERTS - self.NK, 1 if self.EXPERTS_INT8 else 0, self.LIMIT]
+                m.table("ex%d_%d" % (l, s), [c("signs"), c("zero"), c("scratch")] + cells + self._backing(l))
+                if self.CHUNK:                # a chunk's: the same experts, `experts_rows`' scratch
+                    m.table("exr%d_%d" % (l, s), [c("signs"), c("zero"), c("rscratch")] + cells + self._backing(l))
         m.act_as(k)
 
     def _tier(self, k):
@@ -1086,31 +1343,34 @@ class DeepSeek4(Generates):
                                                      for i, v in enumerate(values[at:at + 100], at)),
                    "the array %s" % name, "sys__value_true")
 
-    def _compressed(self, l, k=0):
+    def _compressed(self, l, k=0, seat=0):
         """A compressing layer's cells past its table (▶ AI_DEEPSEEK_4__CMP__*): its source's cache, the source's own
-        compressor where this is the source (its maps, norm and ring), and the rows it gathers to attend — card `k`'s."""
+        compressor where this is the source (its maps, norm and ring), and the rows it gathers to attend — card `k`'s,
+        over seat `seat`'s cache, selection and candidates."""
         r, n = self.RATIO[l], lambda name: self.sfx(name, k)
+        sn = lambda name: self.seat_name(n(name), seat)                                   # noqa: E731
         if not r:
             return []
         cw = lambda x: "self_attn.compressor.%s.weight" % x
         if l in self.SOURCES:
             gate = [self.plane(l, cw("wgate"), "data", k), self.plane(l, cw("wgate"), "lut", k)] if r > 1 else [n("signs"), n("signs")]
             comp = ([self.plane(l, cw("wkv"), "data", k), self.plane(l, cw("wkv"), "lut", k)] + gate
-                    + [self.plane(l, cw("norm"), "data", k), self.cache(l, "r"), n("czero")])
+                    + [self.plane(l, cw("norm"), "data", k), self.cache(l, "r", seat), n("czero")])
             d = [self.b.record(l, cw("wkv")).d, self.b.record(l, cw("wgate")).d if r > 1 else 0]
         else:
             comp, d = [n("signs")] * 7, [0, 0]
         ix, data = "self_attn.indexer.", lambda x: self.plane(l, x, "data", k)
         pair = lambda x: [self.plane(l, x, "data", k), self.plane(l, x, "lut", k)]
         own = [ix + "wq_b.weight", ix + "weights_proj.weight"]
-        idx = ([self.cache(l, "k")] + (pair(own[0]) + pair(own[1]) if l in self.INDEXERS else [n("signs")] * 4)
+        idx = ([self.cache(l, "k", seat)] + (pair(own[0]) + pair(own[1]) if l in self.INDEXERS else [n("signs")] * 4)
                + (pair(ix + "wk.weight") + [data(ix + "k_norm.weight")] if l in self.SOURCES else [n("signs")] * 3)
-               + [n("iscores%d" % self.indexer(l)), n("isel%d" % self.indexer(l)), 1 if l in self.INDEXERS else 0, self.IH, self.ID]
+               + [n("iscores%d" % self.indexer(l)), sn("isel%d" % self.indexer(l)), 1 if l in self.INDEXERS else 0, self.IH,
+                  self.ID]
                + [self.b.record(l, x).d if l in self.INDEXERS else 0 for x in own]
                + [self.b.record(l, ix + "wk.weight").d if l in self.SOURCES else 0])
         role = self.candidate_role(l)
-        cand = [n("cand"), n("cscratch"), role, self.CAND_BLOCKS, self.CAND_BLOCK] if role else []
-        return ([self.cache(l, "c")] + comp + [n("gather"), r, 1 if l in self.SOURCES else 0, self.CACHE_ROWS[self.source(l)],
+        cand = [sn("cand"), n("cscratch"), role, self.CAND_BLOCKS, self.CAND_BLOCK] if role else []
+        return ([self.cache(l, "c", seat)] + comp + [n("gather"), r, 1 if l in self.SOURCES else 0, self.CACHE_ROWS[self.source(l)],
                                                self.TOPK_C] + d + idx + cand)
 
     # ── ③ the program ────────────────────────────────────────────────────────────────────────────────────────
@@ -1132,9 +1392,35 @@ class DeepSeek4(Generates):
             return (engram + "(ai_deepseek_4__attention streams at%d pos%s) (ai_deepseek_4__route streams mo%d hand picks) %s"
                     "(ai_deepseek_4__shared hand mo%d) (ai_deepseek_4__close streams mo%d routed_k%s)" % (l, tp, l, mine, l, l, tp))
         return (engram + "(ai_deepseek_4__attention streams at%d pos%s) (ai_deepseek_4__route streams mo%d hand picks) %s"
-                "(sys__scheduler__add %d names xf%d_0) %s(ai_deepseek_4__shared hand mo%d) (sys__wait %d)%s "
-                "(nn__buffer__copy c_routed %d routed %d)%s (ai_deepseek_4__close streams mo%d routed%s)"
-                % (l, tp, l, tier, CPU, l, mine, l, CPU, written, CPU, 2 * H, add, l, tp))
+                "%s %s(ai_deepseek_4__shared hand mo%d) %s%s %s%s (ai_deepseek_4__close streams mo%d routed%s)"
+                % (l, tp, l, tier, self._socket_starts("xf%d" % l), mine, l, self._socket_waits(), written,
+                   self._socket_gather("routed", "routed", 2 * H, H), add, l, tp))
+
+    def _chain_answers(self):
+        """The names a seat's chain step binds its sockets' answers to and gates its next step on."""
+        return ["r"] if self.SOCKETS == 1 else ["r%d" % c["part"] for c in self.CPUS]
+
+    def _socket_starts(self, program):
+        """Every socket handed its part of `program` (`xf{l}`, `xr{l}`): `(sys__scheduler__add <its worker> names <program>_<part>)`."""
+        return " ".join("(sys__scheduler__add %d names %s_%d)" % (c["w"], program, c["part"]) for c in self.CPUS)
+
+    def _socket_waits(self):
+        """Every socket waited for."""
+        return " ".join("(sys__wait %d)" % c["w"] for c in self.CPUS)
+
+    def _socket_gather(self, cpu_name, into, nbytes, halves):
+        """Every socket's share of a sum on the CPU (`routed`, `rrows`) copied across and added into the card's `into` — the
+        first socket's straight in, every other's into `into<part>` and then added; `nbytes` and `halves` its length (an
+        expression where it is a chunk's)."""
+        out = []
+        for c in self.CPUS:
+            s = c["part"]
+            if s == 0:
+                out.append("(nn__buffer__copy %s %d %s %s)" % (self.cn(0, cpu_name), c["w"], into, nbytes))
+            else:
+                out.append("(nn__buffer__copy %s %d %s%d %s) (nn__vector__add %s %s%d %s %s)"
+                           % (self.cn(s, cpu_name), c["w"], into, s, nbytes, into, into, s, into, halves))
+        return " ".join(out)
 
     def _tp_layers(self, k):
         """Every layer at the position in TP_POS on card `k` past the first, by its own names: the same sites as card 0's,
@@ -1184,13 +1470,18 @@ class DeepSeek4(Generates):
         m.defun("(defun (logits) (begin %s))" % logits)
         m.load_source(self.folder.program("sampling"))
         m.load_source(self.folder.program("generate"))
+        for cpu in self.CPUS:                 # each socket its own: its hand's copy, its part of the six, its share
+            s = cpu["part"]
+            c = lambda name, s=s: self.cn(s, name)
+            m.act_as(cpu["w"])
+            for l in self.run_layers:
+                m.picture("xf%d_%d" % (l, s), "(begin (nn__buffer__copy hand %s %s %d) (ai_deepseek_4__experts %s picks ex%d_%d %s))"
+                          % (self.HAND_CARD, c("hand"), 2 * (self.H + self.TOPK), c("hand"), l, s, c("routed")))
+                if self.CHUNK:                # a chunk's experts: its hands across, every expert they picked once
+                    m.picture("xr%d_%d" % (l, s), "(begin (nn__buffer__copy hands %s %s (* (nth ROWS_N 0) %d)) "
+                              "(ai_deepseek_4__experts_rows %s exr%d_%d %s (nth ROWS_N 0)))"
+                              % (self.HAND_CARD, c("hands"), self.HANDB, c("hands"), l, s, c("rrows")))
         m.act_as(self.CPU)
-        for l in self.run_layers:
-            m.picture("xf%d_0" % l, "(begin (nn__buffer__copy hand %d c_hand %d) (ai_deepseek_4__experts c_hand picks ex%d_0 c_routed))"
-                      % (CARD, 2 * (self.H + self.TOPK), l))
-            if self.CHUNK:                    # a chunk's experts: its hands across, every expert they picked once
-                m.picture("xr%d_0" % l, "(begin (nn__buffer__copy hands %d c_hands (* (nth ROWS_N 0) %d)) "
-                          "(ai_deepseek_4__experts_rows c_hands exr%d_0 c_rrows (nth ROWS_N 0)))" % (CARD, self.HANDB, l))
         # ⭐ EVERY OTHER CARD OF THE GROUP: its layers, a picture — from card 0's embedding (`tp_first`: the group's reduce of
         #   its zeros with card 0's embedding, into every stream) or from the streams already there (`tp_given`)
         for k in range(1, self.P):
@@ -1211,6 +1502,8 @@ class DeepSeek4(Generates):
             m.defun("(defun (position tok pos) (begin (embed tok) %s (type streams)))" % lays)
             if self.CHUNK:
                 self._rows_procedures()
+            if self.SEATS > 1:
+                self._chain_procedures()
             return
         start = lambda pic: " ".join("(sys__scheduler__add %d names %s)" % (k, self.sfx(pic, k)) for k in range(1, self.P))
         wait = " ".join("(sys__wait %d)" % k for k in range(1, self.P))
@@ -1220,6 +1513,34 @@ class DeepSeek4(Generates):
                 "(nn__partials__reduce GROUP e e %d) %s %s %s (type streams)))" % (start("tp_first"), H, self._spread(0), lays, wait))
         if self.CHUNK:
             self._rows_procedures(start("tp_rows"), wait)
+
+    def _chain_procedures(self):
+        """⭐ A SEAT'S POSITION AS A CHAIN OF STEPS (NN-155 ④, as the Qwen MoE's): `lay{l}` cut where it waits. A step runs
+        a layer's n-gram memory, its attention and its router, hands the CPU the layer's experts, runs the shared expert
+        and ends continued on the CPU's answer (▶ sys's `sys__scheduler__continue`); the next step — `chain_close{l}`, once
+        that answer is filled — copies the routed sum across, closes the layer and asks the next layer's experts. So the
+        card's block is free while the CPU computes, and another seat's step runs meanwhile. The same verbs over the same
+        buffers in the same order as `lay{l}`: the chain's arithmetic is the whole position's. Each seat runs in a view of
+        its own (▶ `_seat_views`): the program's names bound to that seat's buffers and tables, `names` the view the CPU
+        computes its experts in. What its steps carry between them is in HERE: 0 the position, 1 how it ends (▶
+        `chain_ends`). ⛔ A PARAMETER IS A NAME LIKE ANY OTHER, bound while its procedure runs: hence `ending`, not `e`."""
+        m, H, run = self.m, self.H, self.run_layers
+        m.defun("(defun (chain_ends ending) (if (eq? ending 1) (head) (begin (if (eq? ending 2) (head_logits) (type streams)) 0)))")
+        for i, l in enumerate(run):
+            engram = "(ai_deepseek_4__engram streams en%d) " % l if l in self.ENGRAM else ""
+            m.defun("(defun (chain_ask%d) (begin %s(ai_deepseek_4__attention streams at%d (nth HERE 0)) "
+                    "(ai_deepseek_4__route streams mo%d hand picks) (let (%s) "
+                    "(begin (ai_deepseek_4__shared hand mo%d) (sys__scheduler__continue %s 0 chain_close%d '(%s))))))"
+                    % (l, engram, l, l, " ".join("(%s (sys__scheduler__add %d names xf%d_%d))" % (r, c["w"], l, c["part"])
+                                                 for r, c in zip(self._chain_answers(), self.CPUS)),
+                       l, self.HAND_CARD, l, " ".join(self._chain_answers())))
+            after = "(chain_ask%d)" % run[i + 1] if i + 1 < len(run) else "(chain_ends (nth HERE 1))"
+            # inline, as every step of a seat's (▶ `_run`): it keeps the card's scratch between its verbs (NN-159)
+            m.picture("chain_close%d" % l, "(sys__scheduler__compute_inline '(begin %s "
+                      "(ai_deepseek_4__close streams mo%d routed) %s))" % (self._socket_gather("routed", "routed", 2 * H, H), l, after))
+        # the position's first step: its token in, the first layer's experts asked
+        m.defun("(defun (chain_position tok pos ending) (begin (sys__node_array__set HERE 0 pos) "
+                "(sys__node_array__set HERE 1 ending) (embed tok) (chain_ask%d)))" % run[0])
 
     def _rows_procedures(self, start="", wait=""):
         """A chunk of positions as rows (▶ `prefill`): `(rows_chunk first n)` embeds the chunk's tokens (TOKS) into the
@@ -1246,13 +1567,16 @@ class DeepSeek4(Generates):
             m.defun("(defun (%s%d first n) (let ((t 0)) %s"
                     "(ai_deepseek_4__attention_rows srows at%d first n amix bmix awork%s)"
                     " (ai_deepseek_4__route_rows srows %s%d hands n amix bmix xrows awork) %s"
-                    "(sys__scheduler__add %d names xr%d_0) %s(while '(sys__eq (sys__result %d) (< 1 0)) '(< 0 1)) (sys__wait %d)"
-                    " (nn__buffer__copy c_rrows %d rrows (* n %d))%s"
+                    "%s %s%s"
+                    " %s%s"
                     " (ai_deepseek_4__close_rows srows %s%d xrows rrows n bmix awork%s)%s"
                     " n))"
-                    % (name, l, eng, l, tp, mo, l, note(l) if ex else "", self.CPU, l,
+                    % (name, l, eng, l, tp, mo, l, note(l) if ex else "", self._socket_starts("xr%d" % l),
                        "(ai_deepseek_4__experts_rows hands exkr%d rrows_k n %s) " % (l, expert_tier.BINDING) if ex else "",
-                       self.CPU, self.CPU, self.CPU, 2 * H, " (nn__vector__add rrows rrows_k rrows (* n %d))" % H if ex else "",
+                       " ".join("(while '(sys__eq (sys__result %d) (< 1 0)) '(< 0 1)) (sys__wait %d)" % (c["w"], c["w"])
+                                for c in self.CPUS),
+                       self._socket_gather("rrows", "rrows", "(* n %d)" % (2 * H), "(* n %d)" % H),
+                       " (nn__vector__add rrows rrows_k rrows (* n %d))" % H if ex else "",
                        mo, l, tp, " (nn__expert_tier__written %s)" % expert_tier.BINDING if ex else ""))
         for l in self.run_layers:
             eng = ""
@@ -1337,16 +1661,145 @@ class DeepSeek4(Generates):
         return " ".join("(nn__vector__widen %s %s %d)" % (n("e"), self.rng(n("streams"), 2 * j * H, 2 * H), H)
                         for j in range(self.MULT))
 
+    # ── seats (NN-155 ④, ▶ `seats` in the setup) ───────────────────────────────────────────────────────────────
+    SEATS_MOST = 4
+    # ⭐ EVERY SEAT STEPS ON ITS OWN: a seat's position and prompt run on the card's block in its own view (`step`,
+    #   `prefill`), so the session drives each seat from a thread of its own (▶ session's `ALONE`)
+    ALONE = True
+    SEATS_ON_A_CARD = True              # multi_user "yes" on one card seats two (▶ `with_cards`)
+    # multi_user "yes" over several cards a conversation a card, by the option that says so — `cards` is a group's here
+    CONVERSATION_A_CARD, CONVERSATION_A_CARD_OPTION = True, "seat_cards"
+    # what a seat's view binds (▶ `_seat_views`): the names its programs read a conversation by and carry across a step's
+    #   end — its streams and the two sites' mixes, the router's hand and picks, the routed sum, the logits its head
+    #   leaves, what its chain carries, the CPU's copy of its hand and its routed sum — and every layer's tables over its
+    #   own state (▶ `_seat_names_of`). The scratch a step uses and leaves is every seat's (a card's block runs one step at
+    #   a time); a prompt's rows are the card's, under its lock (▶ `prefill`)
+    SEAT_FIXED = ("streams", "mixa", "mixb", "hand", "picks", "routed", "logits_h", "HERE", "c_hand", "c_routed",
+                  "u", "hu", "e", "hm", "hn", "hnr", "res")
+
+    @property
+    def SEAT(self):
+        """The seat `on_seat` chose on this thread, 0 where it chose none: each seat's thread steps its own."""
+        return getattr(self.__dict__.setdefault("_seat_thread", threading.local()), "seat", 0)
+
+    @SEAT.setter
+    def SEAT(self, seat):
+        self.__dict__.setdefault("_seat_thread", threading.local()).seat = seat
+
+    @property
+    def history(self):
+        """The tokens of the conversation on the seat `on_seat` chose, which the n-gram memory hashes (a picture's
+        positions -1)."""
+        return self._histories[self.SEAT]
+
+    @history.setter
+    def history(self, tokens):
+        self._histories[self.SEAT] = tokens
+
+    @staticmethod
+    def seat_name(name, seat):
+        """Seat `seat`'s own name for a buffer, a table or an array: seat 0's is the name itself."""
+        return name if seat == 0 else "%s_s%d" % (name, seat)
+
+    @staticmethod
+    def view_of(seat):
+        """The view seat `seat`'s steps run in (▶ `_seat_views`)."""
+        return "names_s%d" % seat
+
+    def _seat_names_of(self):
+        """Every name a seat's view binds to that seat's own: SEAT_FIXED, and each layer's attention and MoE tables, its
+        n-gram memory's table and the rows it reads."""
+        per = [x % l for l in self.run_layers for x in ("at%d", "mo%d")]
+        per += [x % l for l in self.run_layers if l in self.ENGRAM for x in ("en%d", "eng%d")]
+        per += [n for s in range(1, self.SOCKETS) for n in ("routed%d" % s, self.cn(s, "hand"), self.cn(s, "routed"))]
+        return list(self.SEAT_FIXED) + per
+
+    def _seat_names(self, seat, enter):
+        """Seat `seat`'s own names bound over the program's — or left again — for its views; thirty-two to a program, as a
+        program must fit one heap chunk."""
+        m, names = self.m, self._seat_names_of()
+        for at in range(0, len(names), 32):
+            part = names[at:at + 32]
+            if enter:
+                text = " ".join("(sys__add_bindings %d '%s %s)" % (m.env, x, self.seat_name(x, seat)) for x in part)
+            else:
+                text = " ".join("(sys__remove_bindings %d '%s)" % (m.env, x) for x in part)
+            m.must("(begin %s (< 0 1))" % text, "seat %d's names" % seat, "sys__value_true")
+
+    def _seat_views(self, card):
+        """⭐ A SEAT'S NAMES ARE THE PROGRAM'S OWN: each of card `card`'s seats past its first has its own bound over the
+        program's, its two views frozen — `names`, the one the CPU computes its experts in, and `names_s<seat>`, the one
+        its steps run in, which holds that `names` — and left again; the card's first seat's are made last, so the
+        bindings as they stand, and `names`, are its. A view is a snapshot, which nothing bound after it reaches."""
+        for local in reversed(range(self.CARD_SEATS)):
+            if local:
+                self._seat_names(local, True)
+            self.m.view("names")
+            self.m.view(self.view_of(card * self.CARD_SEATS + local))
+            if local:
+                self._seat_names(local, False)
+
+    def place(self, seat):
+        """Seat `seat`'s card (its worker) and its slot there."""
+        return divmod(seat, self.CARD_SEATS)
+
+    @contextlib.contextmanager
+    def on_seat(self, seat):
+        """What runs inside runs on seat `seat`'s conversation — its reset, its prompt, its steps — and on seat 0 after."""
+        if not 0 <= seat < self.SEATS:
+            raise Refused("seat %r of %d" % (seat, self.SEATS))
+        was, self.SEAT = self.SEAT, seat
+        try:
+            yield self
+        finally:
+            self.SEAT = was
+
+    def seat_state_regions(self, length, seat):
+        """`state_regions` of seat `seat`'s conversation: its slot of every layer's ring and every source's cache."""
+        return self.state_regions(length, seat=seat)
+
+    @contextlib.contextmanager
+    def _as_card_of(self, seat):
+        """What runs inside acts as seat `seat`'s card, and as it did after — a conversation a card's; one card's seats
+        are all its own."""
+        if self.NC == 1:
+            yield
+            return
+        was = self.m.worker
+        self.m.act_as(self.place(seat)[0])
+        try:
+            yield
+        finally:
+            self.m.act_as(was)
+
+    def seat_state_read(self, length, seat):
+        """`state_read` of seat `seat`'s conversation: its slots, and its tokens, which the n-gram memory hashes."""
+        with self._as_card_of(seat):
+            return ([self.m.read(at, n) for at, n in self.state_regions(length, seat=seat) if n]
+                    + [np.asarray(self._histories[seat][:length], dtype="<i8").tobytes()])
+
+    def seat_state_write(self, length, blobs, seat):
+        """`state_write` of seat `seat`'s conversation, as `seat_state_read` read it."""
+        *rows, tokens = blobs
+        with self._as_card_of(seat):
+            for (at, _), blob in zip([r for r in self.state_regions(length, seat=seat) if r[1]], rows):
+                self.m.write(at, blob)
+        self._histories[seat] = [int(t) for t in np.frombuffer(tokens, dtype="<i8")]
+
     # ── ④ running ─────────────────────────────────────────────────────────────────────────────────────────────
     def reset(self):
-        """A conversation from nothing: every layer's ring to zero (a position reads only the rows it has written, so this
-        is for a clean state rather than for the answer)."""
-        zeros = ["(nn__vector__zero %s %d)" % (self.ring(l), self.RING_BYTES // 2) for l in self.run_layers]
-        zeros += ["(nn__vector__zero %s %d)" % (self.cache(l, "c"), self.CACHE_ROWS[l] * self.HD) for l in self.CACHE_ROWS]
-        for k in range(self.P):
-            self.m.act_as(k)
-            self.m.must("(begin %s (type %s))" % (" ".join(zeros), self.sfx("streams", k)), "card %d's reset" % k)
-        self.m.act_as(CARD)
+        """A conversation from nothing on the seat `on_seat` chose: every layer's ring to zero (a position reads only the
+        rows it has written, so this is for a clean state rather than for the answer)."""
+        seat, local = self.SEAT, self.place(self.SEAT)[1]          # the seat, and its slot on its card
+        zeros = ["(nn__vector__zero %s %d)" % (self.ring(l, local), self.RING_BYTES // 2) for l in self.run_layers]
+        zeros += ["(nn__vector__zero %s %d)" % (self.cache(l, "c", local), self.CACHE_ROWS[l] * self.HD) for l in self.CACHE_ROWS]
+        if self.SEATS > 1:                               # on the seat's card's block, in the seat's view
+            self._run("(begin %s (type streams))" % " ".join(zeros), "seat %d's reset" % seat)
+        else:
+            for k in range(self.P):
+                self.m.act_as(k)
+                self.m.must("(begin %s (type %s))" % (" ".join(zeros), self.sfx("streams", k)), "card %d's reset" % k)
+            self.m.act_as(CARD)
         self.history = []
 
     def engram_rows(self, token, pos):
@@ -1359,6 +1812,10 @@ class DeepSeek4(Generates):
         for i, l in enumerate(self.ENG.layers):
             if l in self.ENG_AT:
                 row = _half(rows[l])
+                if self.SEATS > 1:                       # the seat's own rows, on its card
+                    with self._as_card_of(self.SEAT):
+                        self.m.write(self.SEAT_AT[("eng%d" % l, self.SEAT)], row)
+                    continue
                 for k in range(self.P):
                     self.m.act_as(k)
                     self.m.write(self.CB[k]["eng"][l], row)
@@ -1376,11 +1833,29 @@ class DeepSeek4(Generates):
         if pos >= self.max_context:
             raise Refused("position %d is past the context of %d" % (pos, self.max_context))
         head = sample or ("(head)" if greedy else "(head_logits)")
+        if self.SEATS > 1:
+            # ⭐ A SEAT'S POSITION, A CHAIN OF STEPS (▶ `_chain_procedures`) on the card's block in the seat's view
+            if sample is not None:
+                raise Refused("a seat's token is drawn on the host: its logits, not a sampler on the card")
+            self.engram_rows(token, pos)
+            value = self._run("(chain_position %d %d %d)" % (token, pos, 1 if greedy else 2),
+                              "seat %d's position %d" % (self.SEAT, pos))
+            return value if greedy else None
         self.engram_rows(token, pos)
         value = self._run("(begin (position %d %d) %s)" % (token, pos, head), "position %d" % pos)
         return value if greedy or sample else None
 
     def prefill(self, tokens, first, greedy=True, sample=None, rows=None):
+        """`_prefill` — with seats, on the seat `on_seat` chose, under the card's lock: a prompt's rows, their scratch and
+        the CPU's copies of them are the card's, one seat's at a time."""
+        if self.SEATS == 1:
+            return self._prefill(tokens, first, greedy, sample, rows)
+        if sample is not None:
+            raise Refused("a seat's token is drawn on the host: its logits, not a sampler on the card")
+        with self._card_locks[self.place(self.SEAT)[0]]:
+            return self._prefill(tokens, first, greedy, sample, rows)
+
+    def _prefill(self, tokens, first, greedy=True, sample=None, rows=None):
         """A prompt from `first`: as rows, `chunk` positions a step (▶ `_rows_procedures`), where the machine has them; else a
         position at a time. The last position's head as `step`'s. A picture's tokens come with `rows` {index in `tokens`:
         its span's row, ▶ vision_ds4.py}: a run of them its own chunks, read with the router's bias for pictures and no
@@ -1418,12 +1893,17 @@ class DeepSeek4(Generates):
         self.history[pos:] = [-1] * n if pictures else list(part)
         if self.ENG is not None and not pictures:
             rows = self.ENG.chunk_rows(self.history, pos, n)
-            for (k, l), at in self.ERWS.items():
-                self.m.act_as(k)
+            card = self.place(self.SEAT)[0]               # a conversation a card: the seat's card's rows (▶ ERWS_OF)
+            for (k, l), at in self.ERWS_OF.get(card, self.ERWS).items():
+                self.m.act_as(k if self.NC == 1 else card)
                 self.m.write(at, _half(rows[l]))
             self.m.act_as(CARD)
-        self.m.must("(begin %s (sys__node_array__set ROWS_N 0 %d) 0)"
-                    % (" ".join("(sys__node_array__set TOKS %d %d)" % (i, t) for i, t in enumerate(part)), n), "the chunk's tokens")
+        text = "(begin %s (sys__node_array__set ROWS_N 0 %d) 0)" % (
+            " ".join("(sys__node_array__set TOKS %d %d)" % (i, t) for i, t in enumerate(part)), n)
+        if self.SEATS > 1:                               # on the card's block, beside the other seats' steps
+            self._run(text, "the chunk's tokens")
+        else:
+            self.m.must(text, "the chunk's tokens")
         if pictures:
             self._run("(begin (rows_embed %d) 0)" % n, "the picture's chunk embedded")
             block = np.repeat(np.asarray(pictures, dtype=np.float32)[:, None, :], self.MULT, axis=1)
@@ -1576,7 +2056,9 @@ class DeepSeek4(Generates):
         (`x`), then the next token (the last stage) or what to hand on. ⭐ WHAT CROSSES BETWEEN STAGES IS ONE BLOB — the
         streams (MULT·H floats), the mix the stage before ended on (MIX_BYTES) and the position's token (8 bytes), which the
         n-gram memory hashes — so a ring (▶ `pipeline`) carries it as any model's residual. `x` and `mix` apart are taken
-        too."""
+        too. A stage holds one conversation: seats 1."""
+        if self.SEATS > 1:
+            raise Refused("a stage of a pipeline holds one conversation: seats 1")
         m, SB = self.m, self.MULT * self.H * 4
         if x is not None and mix is None:
             x, mix, given = x[:SB], x[SB:SB + MIX_BYTES], int(np.frombuffer(x[SB + MIX_BYTES:SB + MIX_BYTES + 8], "<i8")[0])
@@ -1598,29 +2080,43 @@ class DeepSeek4(Generates):
         return m.read(self.STREAMS_AT, SB) + m.read(self.MIXB_AT, MIX_BYTES) + np.array([token], "<i8").tobytes()
 
     def _run(self, text, what):
+        """A program's answer, run with every block standing — it hands the CPU work. With seats, on the card's block in the
+        view of the seat `on_seat` chose (▶ `_seat_views`), beside the other seats' steps — inline (NN-159): a seat's
+        program keeps the card's scratch between its verbs, so no slice gives its block to another seat's step in the
+        middle of it, nor does a wait park it there (▶ sys's `sys__scheduler__compute_inline`)."""
+        if self.SEATS > 1:
+            kind, value = self.m.run_in(self.place(self.SEAT)[0], "(sys__scheduler__compute_inline '%s)" % text,
+                                        view=self.view_of(self.SEAT))
+            if kind == self.m.K["sys__error"]:
+                raise EngineError("%s did not run on seat %d: %s" % (what, self.SEAT, value))
+            return value
         return self.m.grid(text)[1]
 
-    def logits(self):
-        return np.frombuffer(self.m.read(self.LOGITS_AT, self.VOCAB * 2), dtype="<f2").astype(np.float32)
+    def logits(self, seat=None):
+        """The logits a head left — seat `seat`'s, the seat `on_seat` chose's by default."""
+        seat = self.SEAT if seat is None else seat
+        with self._as_card_of(seat):
+            got = self.m.read(self.SEAT_AT[("logits_h", seat)], self.VOCAB * 2)
+        return np.frombuffer(got, dtype="<f2").astype(np.float32)
 
     def read(self, name, n):
         """`n` halves of a buffer, by name — the card's, or the CPU's for a `c_` one, read as that worker."""
-        if name.startswith("c_"):
-            self.m.act_as(self.CPU)
+        if name.startswith("c_") or (name.startswith("c") and name[1:2].isdigit()):
+            self.m.act_as(self.CPU + (int(name[1:name.index("_")]) if name[1:2].isdigit() else 0))
         try:
             return np.frombuffer(self.m.read(self.at[name], n * 2), dtype="<f2").astype(np.float64)
         finally:
             self.m.act_as(CARD)
 
     # ── a conversation's state: put away and brought back (▶ session.py's `_state_read` / `_state_write`) ─────────
-    def state_regions(self, length, where=None, card=0):
+    def state_regions(self, length, where=None, card=0, seat=0):
         """(address, bytes) on card `card` of everything a conversation of `length` positions has written there that a
         later position reads: each layer's window ring, its rows written so far — and each source layer's compressed
         latents and their index keys to its last whole group, and its partial group's ring whole. A position reads only
         rows it has written, so what lies past them is no one's. `where` (a table of zeros) answers the sizes before the
-        boot. Every card of a group holds the same, each in its own slots."""
-        ring = (lambda l: 0) if where is not None else (lambda l: self.ring_at[(card, l)])
-        cache = (lambda l: 0) if where is not None else (lambda l: self.cache_at[(card, l)])
+        boot. Every card of a group holds the same, each in its own slots; with seats, seat `seat`'s slots."""
+        ring = (lambda l: 0) if where is not None else (lambda l: self.ring_seats[seat][(card, l)])
+        cache = (lambda l: 0) if where is not None else (lambda l: self.cache_seats[seat][(card, l)])
         out = [(ring(l) + self.RPLAN.at_up_data, min(length, self.W) * self.HD * 2) for l in self.run_layers]
         for s in sorted(self.CACHE_ROWS):
             _, p, keys = self.cache_plan(s)

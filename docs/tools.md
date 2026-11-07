@@ -244,6 +244,13 @@ JSON (`null`, `1`), else as text. The environment's is over the file's. The file
 (`/data/tools/default.json` inside, `~/SiLVANN/tools/default.json` outside in [`docker/README.md`](../docker/README.md)):
 edit it there, and press Rebuild the tools.
 
+**On a server with users**, each user's `users/<name>/tools.json` is set over this file for their conversations alone:
+their own search (`search`'s `searxng` and `brave_key`), `fetch`'s `contact`, the registry's `registry` and `key`, a
+skill's setting this file leaves `null`, and a tool switched off — what else it asks stays this file's
+([`users.md`](users.md#several-people-on-one-server-a-user-each)). A user's REPL and commands see the machine as from a
+chroot — their workspace to write; the system's programs, the tools they have on and the runtime to read; the rest
+closed — whatever `bash`'s `confined` says here, and `add_tool` is off for them.
+
 ## Where the model's commands reach
 
 ⚖ *"we only secure the docker as that is the intended usage of the tool"*: a container is how SiLVANN is meant to run

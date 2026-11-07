@@ -498,6 +498,70 @@ static inline void amd_rocm6_wave64__zzprivate_launch_rows(amd_rocm6_wave64__row
                         AMD_ROCM6_WAVE64__ZZPRIVATE_ROWS * AMD_ROCM6_WAVE64__ZZPRIVATE_WAVE, args, sizes, 1u);
 }
 
+/* ⭐ A ROUTER'S MATRIX OF HALVES — `nn__expert__multiply_fp16`, `out[r] = half(Σ_c W[r][c] · x[c])`, every operand a half
+ *   (DeepSeek's router: 384 × 5120 a layer at every position). nn's generic body gives a block of 256 lanes a row: lane
+ *   `l` sums the runs of eight columns `l`, `l + 256`, … — each run's eight products onto its running sum in the run's
+ *   order — and the block's fold adds the 256 parts, a wave's 64 by shuffles 1, 2, 4 … 32 apart and then the four waves'
+ *   in pairs (▶ `amd_rocm6_wave64__zzprivate_fold`). `MEASURED` (rocprof, DeepSeek's decode on node03): 22.6 µs a call.
+ *   Here a WAVE takes a row and each of its lanes plays four of those 256 — `l`, `l + 64`, `l + 128`, `l + 192` — over
+ *   the same runs in the same order, a run's sixteen bytes one read and the four quarters' reads issued before their
+ *   products; each quarter's parts added by the same shuffles, and the quarters as the fold adds them,
+ *   `(q0 + q1) + (q2 + q3)`: nn's sums in nn's order. No barrier: a row is a wave's alone. */
+static __global__ AMD_ROCM6_WAVE64__ZZPRIVATE_BOUNDS void amd_rocm6_wave64__zzprivate_multiply_fp16(uint16_t* out, const uint16_t* W,
+                                                                                                    const uint16_t* x, uint64_t rows,
+                                                                                                    uint64_t cols, unsigned int* over) {
+    const uint32_t WV = AMD_ROCM6_WAVE64__ZZPRIVATE_WAVE;
+    const uint32_t lane = (uint32_t)(nn__silicon__lane() % WV), wave = (uint32_t)(nn__silicon__lane() / WV);
+    const uint64_t played = 4u * WV, runs = cols / 8u;                 /* the generic body's lanes a row; a run, eight halves */
+    const uint4* xr = (const uint4*)(const void*)x;
+    for (uint64_t r = nn__silicon__block() * AMD_ROCM6_WAVE64__ZZPRIVATE_ROWS + wave; r < rows;
+         r += nn__silicon__blocks() * AMD_ROCM6_WAVE64__ZZPRIVATE_ROWS) {
+        const uint4* row = (const uint4*)(const void*)(W + r * cols);
+        float q[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+        for (uint64_t k0 = lane; k0 < runs; k0 += played) {
+            uint4 c[4], v[4];
+#pragma unroll
+            for (uint32_t s = 0u; s < 4u; ++s) {
+                const uint64_t j = k0 + (uint64_t)s * WV;
+                c[s] = row[j < runs ? j : k0];
+                v[s] = xr[j < runs ? j : k0];
+            }
+#pragma unroll
+            for (uint32_t s = 0u; s < 4u; ++s) {
+                if (k0 + (uint64_t)s * WV >= runs) continue;
+                const uint32_t cw[4] = { c[s].x, c[s].y, c[s].z, c[s].w }, vw[4] = { v[s].x, v[s].y, v[s].z, v[s].w };
+#pragma unroll
+                for (uint32_t e = 0u; e < 4u; ++e) {         /* the run's halves in its order: a word's low, then its high */
+                    q[s] += nn__silicon__half_to_float((uint16_t)(cw[e] & 0xFFFFu)) * nn__silicon__half_to_float((uint16_t)(vw[e] & 0xFFFFu));
+                    q[s] += nn__silicon__half_to_float((uint16_t)(cw[e] >> 16)) * nn__silicon__half_to_float((uint16_t)(vw[e] >> 16));
+                }
+            }
+        }
+#pragma unroll
+        for (uint32_t s = 0u; s < 4u; ++s)
+            for (uint32_t off = 1u; off < WV; off <<= 1) q[s] += __shfl_xor(q[s], (int)off);
+        if (lane == 0u) out[r] = nn__kernels__zzabi_to_half((q[0] + q[1]) + (q[2] + q[3]), over);
+    }
+}
+
+/* The router's matrix of halves: rows of whole runs, the matrix and `x` on sixteen bytes — as nn's body reads them in
+ * runs — or nn's body. */
+static void amd_rocm6_wave64__override_expert_multiply_fp16(uint16_t* out, const uint16_t* W, const uint16_t* x, uint64_t rows,
+                                                            uint64_t cols, unsigned int* over) {
+    if (rows == 0u || cols == 0u || cols % 8u != 0u || ((uint64_t)(uintptr_t)W) % 16u != 0u || ((uint64_t)(uintptr_t)x) % 16u != 0u) {
+        nn__expert__zzabi_launch_multiply_fp16(out, W, x, rows, cols, over);
+        return;
+    }
+    const uint32_t threads = AMD_ROCM6_WAVE64__ZZPRIVATE_ROWS * AMD_ROCM6_WAVE64__ZZPRIVATE_WAVE;
+    const uint64_t want = (rows + AMD_ROCM6_WAVE64__ZZPRIVATE_ROWS - 1u) / AMD_ROCM6_WAVE64__ZZPRIVATE_ROWS;
+    const uint32_t most = amd_rocm6_wave64__zzpackage_resident((const void*)amd_rocm6_wave64__zzprivate_multiply_fp16, threads, 0u);
+    const uint32_t blocks = want < most ? (uint32_t)want : most;
+    void* args[] = { &out, &W, &x, &rows, &cols, &over };
+    const size_t sizes[] = { sizeof out, sizeof W, sizeof x, sizeof rows, sizeof cols, sizeof over };
+    nn__silicon__launch((const void*)amd_rocm6_wave64__zzprivate_multiply_fp16, "amd_rocm6_wave64__zzprivate_multiply_fp16", blocks,
+                        threads, args, sizes, 6u);
+}
+
 static void amd_rocm6_wave64__override_expert_rows(uint16_t* out, const uint8_t* weights, uint64_t w_room, const uint8_t* luts, uint64_t l_room,
                                                    const uint16_t* x, const uint32_t* rows, uint64_t count, uint64_t d, uint64_t out_rows,
                                                    uint64_t cols, unsigned int* over) {

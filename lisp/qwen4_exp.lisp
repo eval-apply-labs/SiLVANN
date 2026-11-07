@@ -526,8 +526,9 @@
          ((nth FRONTS 0) (nth LT 0) 0 pos)
          (chain_ask (nth LT 0) 0)))
 
-;; what a step continues as: the layer's close and the next one's front
-(picture c_close (chain_close))
+;; what a step continues as: the layer's close and the next one's front — inline, as every step of a seat's (▶
+;; qwen4_exp.py `_inline`): it keeps the card's scratch between its verbs (NN-159)
+(picture c_close (sys__scheduler__compute_inline '(chain_close)))
 
 
 ;; ── each layer's front, chosen when the file loads ──────────────────────────────────────────────────────────────────

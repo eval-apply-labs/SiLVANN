@@ -1202,6 +1202,20 @@ static __device__ inline bool sys__list__shared_take_cells(uint64_t list, sys__h
     return there;
 }
 
+static __device__ inline uint64_t sys__list__shared_take_matching(uint64_t list, uint64_t n, uint64_t at, uint64_t word,
+                                                                  sys__heap_node* out, uint64_t most) {
+    if (n == 0ull || at >= n || !sys__heap_object__zzpackage_lock_shared(list)) return 0ull;
+    uint64_t taken = 0ull, i = 0ull;
+    while (taken < most && i + n <= sys__sublist__length(list)) {
+        const sys__heap_node mark = sys__sublist__nth(list, i + at);
+        if (mark.dtype != SYS__KIND__VALUE_INT || mark.args[0] != word) { i += n; continue; }
+        for (uint64_t k = 0ull; k < n; ++k) out[taken * n + k] = sys__list__zzprivate_extract(list, i, true);
+        taken += 1ull;                                     /* what was after it is at `i` now */
+    }
+    sys__heap_object__lock_release(list);
+    return taken;
+}
+
 static __device__ inline uint64_t sys__list__shared_length(uint64_t list) {
     if (!sys__heap_object__zzpackage_lock_shared(list)) return 0ull;
     const uint64_t n = sys__sublist__length(list);

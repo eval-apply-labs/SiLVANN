@@ -447,11 +447,17 @@ class SeatedRuntime(Runtime):
 
     # ── the seats' state ──────────────────────────────────────────────────────────────────────────────────────
     def _seat_read(self, k, length):
+        """Seat `k`'s conversation's state: its regions on the card — and what else the model keeps of it, where it reads
+        it itself (DeepSeek's tokens, which its n-gram memory hashes: ▶ its `seat_state_read`)."""
         m = self.model
+        if hasattr(m, "seat_state_read"):
+            return m.seat_state_read(length, k)
         return [m.m.read(at, n) for at, n in m.seat_state_regions(length, k) if n]
 
     def _seat_write(self, k, length, blobs):
         m = self.model
+        if hasattr(m, "seat_state_write"):
+            return m.seat_state_write(length, blobs, k)
         for (at, _), blob in zip([(at, n) for at, n in m.seat_state_regions(length, k) if n], blobs):
             m.m.write(at, blob)
 

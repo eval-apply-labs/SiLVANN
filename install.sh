@@ -197,6 +197,7 @@ silvann list                        the models this release can fetch, and which
 silvann download <model>            a model into \$SILVANN_DATA/models — when it is there, what changed in its pack
 silvann check [model]               update or done, each model here — with one, the files its update fetches
 silvann token [--set | --forget]    the Hugging Face token the downloads use (faster than none)
+silvann users [add|passwd|remove|adopt] <name>   the users: each a sign-in, a folder and their own conversations
 silvann serve <model> [config]      the server, on port 8765 (--port to change it)
 silvann ui                          the chat in a browser, on port 8090, talking to the server
 silvann_cli                         the chat in this terminal (--notools, --nothink), talking to the server
@@ -215,6 +216,7 @@ case "\$cmd" in
     check|check-model)         [ \$# -eq 0 ] && exec "\$PY" "\$HERE/silvann_core.py" check-versions
                                exec "\$PY" "\$HERE/silvann_core.py" check-model "\$@" ;;
     token|hf-token)            exec "\$PY" "\$HERE/silvann_core.py" hf-token "\$@" ;;
+    users|user)                exec "\$PY" "\$HERE/silvann_core.py" users "\$@" ;;
     serve)
         [ \$# -gt 0 ] || { echo "silvann serve <model> [config] [--port 8765]   — a model in \$SILVANN_DATA/models"; exit 1; }
         model=\$1; shift

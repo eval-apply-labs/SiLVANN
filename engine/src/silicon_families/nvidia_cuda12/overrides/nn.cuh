@@ -5,16 +5,17 @@
 #include "kernels.cuh"      /* what the overrides share */
 #include "turboquant.cuh"   /* the gemvs, on the tensor cores */
 #include "hadamard.cuh"     /* the rotations */
-#include "deltanet.cuh"     /* a prompt's rows */
+#include "deltanet.cuh"     /* a prompt's rows, either output gate; the gates over rows */
 #include "attention.cuh"    /* a prompt's causal attention: the scores on the tensor cores; a latent's; MLA's absorb and expand */
 #include "result.cuh"       /* argmax */
 #include "expert.cuh"       /* the expert-major GEMM, on the tensor cores */
 #include "conv.cuh"         /* a convolution's rows */
-#include "vector.cuh"       /* a sampler's top k, a scored router's, a group's sum */
-#include "primitives.cuh"   /* the norm of a row of floats */
+#include "vector.cuh"       /* a sampler's top k, a scored router's, a group's sum, the repetition penalty */
+#include "primitives.cuh"   /* the norms of a row, of rows, of floats; the norm with its rotation */
 #include "index.cuh"        /* the indexer's pool scores and top k */
 #include "kda.cuh"          /* KDA's steps over a prompt's rows, and a decoded position's step */
 #include "hyper.cuh"        /* the hyper-connections' logits and their `pre`, over halves and floats */
+#include "gated.cuh"        /* Flash-Next's gated residual: the rank's activation and rotation, the streams' gated mean */
 #include "doors.cuh"        /* into nn's table */
 
 /* ══ ⭐⭐ OVERRIDES — THE DOORS THIS FAMILY RUNS FASTER THAN THE GENERIC BODY ══════════════════════════

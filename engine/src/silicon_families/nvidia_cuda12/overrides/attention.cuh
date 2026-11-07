@@ -1313,4 +1313,47 @@ static void nvidia_cuda12__override_attention_expand_rows(uint16_t* out, const u
     nvidia_cuda12__zzprivate_expand_launch(out, o, W, heads, width, stride, offset, rows, over);
 }
 
+/* ⭐ TWO RESIDUALS INTO ONE, A WARP A HEAD — what the tiered cache does once a tier is in: nn's `attention_merge` gives a
+ *   lane a whole head and walks its `d + 2` floats alone, one lane of a block busy for each head. Here, as
+ *   amd_rocm6_wave64's, a warp takes a head and each lane every 32nd element of it. The head's two `m` and `l` are read by
+ *   the first lane alone and handed to the others by shuffle, and that lane writes the merged pair after its elements, so
+ *   `into` may be `a` or `b` as nn allows with no lane reading what another writes — a warp's lanes are not in step here, as
+ *   a wave's are on AMD. A head is one warp's alone. Each value is nn's own expression, so the output is nn's generic
+ *   kernel's to the bit (`REASONED`; `MEASURED` so on gfx906). */
+#define NVIDIA_CUDA12__ZZPRIVATE_MERGE_WARPS 8u
+#define NVIDIA_CUDA12__ZZPRIVATE_MERGE_BOUNDS __launch_bounds__(256)
+static __global__ NVIDIA_CUDA12__ZZPRIVATE_MERGE_BOUNDS void nvidia_cuda12__zzprivate_merge(float* into, const float* a, const float* b, uint64_t q_heads,
+                                                                              uint64_t head_dim) {
+    const uint32_t lane = (uint32_t)nn__silicon__lane() % NVIDIA_CUDA12__ZZPACKAGE_WARP;
+    const uint32_t warp = (uint32_t)nn__silicon__lane() / NVIDIA_CUDA12__ZZPACKAGE_WARP;
+    const uint64_t w = NN__ATTENTION__RESIDUAL_FLOATS(head_dim);
+    for (uint64_t h = (uint64_t)nn__silicon__block() * NVIDIA_CUDA12__ZZPRIVATE_MERGE_WARPS + warp; h < q_heads;
+         h += (uint64_t)nn__silicon__blocks() * NVIDIA_CUDA12__ZZPRIVATE_MERGE_WARPS) {
+        float ma = 0.0f, la = 0.0f, mb = 0.0f, lb = 0.0f;
+        if (lane == 0u) { ma = a[h * w]; la = a[h * w + 1ull]; mb = b[h * w]; lb = b[h * w + 1ull]; }
+        ma = __shfl_sync(0xFFFFFFFFu, ma, 0);
+        mb = __shfl_sync(0xFFFFFFFFu, mb, 0);
+        const float m = ma > mb ? ma : mb;
+        const float fa = nn__silicon__expf(ma - m), fb = nn__silicon__expf(mb - m);
+        for (uint64_t e = lane; e < head_dim; e += NVIDIA_CUDA12__ZZPACKAGE_WARP)
+            into[h * w + 2ull + e] = a[h * w + 2ull + e] * fa + b[h * w + 2ull + e] * fb;
+        if (lane == 0u) {
+            into[h * w] = m;
+            into[h * w + 1ull] = la * fa + lb * fb;
+        }
+    }
+}
+static void nvidia_cuda12__override_attention_merge(float* into, const float* a, const float* b, uint64_t q_heads, uint64_t head_dim) {
+    if (q_heads == 0u || head_dim == 0u) {
+        nn__attention__zzabi_launch_merge(into, a, b, q_heads, head_dim);
+        return;
+    }
+    const uint64_t want = (q_heads + NVIDIA_CUDA12__ZZPRIVATE_MERGE_WARPS - 1u) / NVIDIA_CUDA12__ZZPRIVATE_MERGE_WARPS;
+    const uint32_t blocks = want < NN__KERNELS__BLOCKS_MAX ? (uint32_t)want : NN__KERNELS__BLOCKS_MAX;
+    void* args[] = { &into, &a, &b, &q_heads, &head_dim };
+    const size_t sizes[] = { sizeof into, sizeof a, sizeof b, sizeof q_heads, sizeof head_dim };
+    nn__silicon__launch((const void*)nvidia_cuda12__zzprivate_merge, "nvidia_cuda12__zzprivate_merge", blocks,
+                        NVIDIA_CUDA12__ZZPRIVATE_MERGE_WARPS * NVIDIA_CUDA12__ZZPACKAGE_WARP, args, sizes, 5u);
+}
+
 #endif /* SILVANN__SILICON_FAMILIES_NVIDIA_CUDA12_OVERRIDES_ATTENTION_CUH */

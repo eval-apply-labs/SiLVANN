@@ -20,6 +20,10 @@
 #define SYS__BINDINGS__SCOPES  0u   /* the per-symbol stacks: the width in place, the rest behind the hatch */
 #define SYS__BINDINGS__BASE    1u   /* the flat table underneath, shared and read-only, or nothing    */
 #define SYS__BINDINGS__UNBOUND 2u   /* the one error every name that nobody has bound answers with    */
+/* ⭐ ONE COMPUTATION'S ALONE, OR NOT: 1 for the environment `begin` builds over a snapshot — nobody else names it, so it
+ *   may move with its computation to another block (`sys__scheduler__continue_on`); 0 for one somebody made to keep and
+ *   share, the host's among them, which never moves. A word, not a hold: nothing is given up for it. */
+#define SYS__BINDINGS__ALONE   3u
 
 #define SYS__BINDINGS__FAULT_EMPTY    0x424E4445ull /* "BNDE" — asked for a bindings with no symbols  */
 #define SYS__BINDINGS__FAULT_KIND     0x424E444Eull /* "BNDN" — asked of something that is Not one    */

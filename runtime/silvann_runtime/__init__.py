@@ -107,9 +107,11 @@ def with_cards(path, num_cards, options, multi_user=None):
         if apart and float(options.get("card_experts_gb") or 0):
             raise Refused("a conversation a card takes no tier of experts on its card yet: no card_experts_gb with "
                           "multi_user \"yes\" over %d cards" % n)
-        if "cards" in options and list(options["cards"]) != list(range(n)):
-            raise Refused("num_cards %d and options.cards %s say two things: num_cards alone" % (n, options["cards"]))
-        options["experts_from"], options["cards"] = "ram", list(range(n))
+        # the option a conversation a card is: `cards`, or the family's own where `cards` is its group's (DeepSeek's)
+        key = getattr(arch, "CONVERSATION_A_CARD_OPTION", "cards") if apart else "cards"
+        if key in options and list(options[key]) != list(range(n)):
+            raise Refused("num_cards %d and options.%s %s say two things: num_cards alone" % (n, key, options[key]))
+        options["experts_from"], options[key] = "ram", list(range(n))
         if apart:                                       # the experts the CPU's, the cards' tiers none (▶ qwen3_5.py)
             options["card_experts_gb"] = 0
             if "experts_on" in takes:

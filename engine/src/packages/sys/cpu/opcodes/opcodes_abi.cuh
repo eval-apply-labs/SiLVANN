@@ -483,7 +483,8 @@ static __device__ sys__heap_node sys__opcodes__zzabi_scheduler_add(const sys__he
     if (answer == 0ull) return sys__engine__abi__error(SYS__SCHEDULER__FAULT_NOT_QUEUED);
     if (argc == 4u) (void)sys__heap_object__retain(answer);
     if (!sys__scheduler__add(cu, argv[1].args[0], argv[2].args[0], answer)) {
-        const uint64_t why = sys__answer__state(answer) == SYS__ANSWER__WAITING ? SYS__ANSWER__FAULT_BUSY
+        const uint64_t why = sys__scheduler__zzpackage_killed(sys__scheduler__pid()) ? SYS__SCHEDULER__FAULT_KILLED
+                           : sys__answer__state(answer) == SYS__ANSWER__WAITING ? SYS__ANSWER__FAULT_BUSY
                                                                                 : SYS__SCHEDULER__FAULT_NOT_QUEUED;
         (void)sys__heap_object__release(answer);
         return sys__engine__abi__error(why);
@@ -538,25 +539,38 @@ SYS__ENGINE__ABI__BRIDGE(sys__opcodes__zzabi_adapter_result, sys__opcodes__zzabi
 
 /* `(sys__wait answer)` — the value, once the answer has it.
  * ⭐ IT LENDS THE VALUE OUT RATHER THAN TAKING IT: the answer keeps it, so a second reader is handed the same value —
- * ⚖ *"several readers of one answer"*.
- * ⛳ IT WAITS, BOUNDED. A value not filed yet is waited for up to `SYS__COMPUTING_BASE__RESULT_TRIES` tries with a
- * back-off; one that never comes answers NOTHING rather than parking the block that asked. A program that knows the
- * value may take longer polls with `sys__result` and reads once it says `#t`. A block in place of the answer is what
- * this computation last asked of it. */
-static __device__ sys__heap_node sys__opcodes__zzabi_wait(const sys__heap_node* argv, unsigned argc,
-                                                           sys__engine__ctx* ctx) {
-    (void)ctx;
+ * ⚖ *"several readers of one answer"*. A block in place of the answer is what this computation last asked of it.
+ * ⭐⭐ NOT THERE YET, IT DOES NOT WAIT IN C (⚖ 2026-11-07 *"c opcodes do not wait but return and let the wait be done in
+ * lisp"*, NN-158): a computation that may move is parked on the answer (▶ "A WAIT PARKED", `scheduler__impl.cuh`) — this
+ * form left as it stands, the evaluator handing the computation to its own block with the answer its gate, and the form
+ * applied again there once the answer fills. ⛳ What may not move — the host's, one inside `compute_inline`, one whose
+ * park found no room — waits where it stands, up to `SYS__COMPUTING_BASE__WAIT_NS` by the clock with a back-off, and a
+ * value that never comes answers ANSR, an error, never nothing. */
+static __device__ SYS__NOINLINE void sys__opcodes__zzpackage_apply_wait(sys__heap_node* base, uint64_t form) {
+    if (sys__sublist__length(form) != 2ull) { sys__opcodes__fails(form, SYS__OPCODES__FAULT_ARITY); return; }
+    const sys__heap_node arg = sys__sublist__nth(form, 1ull);
     uint64_t why = 0ull;
-    const uint64_t answer = sys__opcodes__zzabi_answer_of(argv, argc, &why);
-    if (answer == 0ull) return sys__engine__abi__error(why);
-    for (uint64_t k = 0ull; k < SYS__COMPUTING_BASE__RESULT_TRIES; ++k) {
-        if (sys__answer__state(answer) == SYS__ANSWER__READY)
-            return sys__answer__read(answer);                    /* ⛳ a hold handed over; the bridge gives it back */
-        sys__silicon__wait_cycles(SYS__COMPUTING_BASE__POLL_CYCLES);
+    const uint64_t answer = sys__opcodes__zzabi_answer_of(&arg, 1u, &why);
+    if (answer == 0ull) { sys__opcodes__fails(form, why); return; }
+    if (sys__answer__state(answer) != SYS__ANSWER__READY && sys__scheduler__zzpackage_may_park(base)) {
+        sys__scheduler__zzpackage_park_on(answer);      /* ⛳ the form stays as it stands: the next block applies it */
+        return;
     }
-    return sys__heap_node__nothing();
+    struct timespec since, now;
+    sys__os__clock(&since);
+    bool there = sys__answer__state(answer) == SYS__ANSWER__READY;
+    uint64_t waited = 0ull;
+    while (!there && waited <= SYS__COMPUTING_BASE__WAIT_NS) {
+        sys__silicon__wait_cycles(SYS__COMPUTING_BASE__POLL_CYCLES);
+        there = sys__answer__state(answer) == SYS__ANSWER__READY;
+        sys__os__clock(&now);
+        waited = (uint64_t)(now.tv_sec - since.tv_sec) * 1000000000ull + (uint64_t)now.tv_nsec - (uint64_t)since.tv_nsec;
+    }
+    if (!there) { sys__opcodes__fails(form, SYS__ANSWER__FAULT_RAN_OUT); return; }
+    const sys__heap_node value = sys__answer__read(answer);   /* a hold handed over */
+    sys__opcodes__becomes(form, &value);
+    if (sys__heap_node__carries_reference(value.dtype) && value.args[0] != 0ull) (void)sys__heap_object__release(value.args[0]);
 }
-SYS__ENGINE__ABI__BRIDGE(sys__opcodes__zzabi_adapter_wait, sys__opcodes__zzabi_wait)
 
 /* ── THE DICTIONARY'S THREE DOORS ────────────────────────────────────────────────────────────────────── */
 
@@ -806,6 +820,67 @@ static __device__ sys__heap_node sys__opcodes__zzabi_scheduler_continue(const sy
     return went ? sys__opcodes__truth(true) : sys__engine__abi__error(SYS__SCHEDULER__FAULT_NOT_QUEUED);
 }
 SYS__ENGINE__ABI__BRIDGE(sys__opcodes__zzabi_adapter_scheduler_continue, sys__opcodes__zzabi_scheduler_continue)
+
+/* `(sys__scheduler__continue_on cu)` -> #t, on block `cu`: this computation MOVES there — its environment, every `let`,
+ * `set!` and `defun` in it, and the program as it stands — and goes on from the next form, into the same answer;
+ * nothing of it runs on this block after (▶ `sys__scheduler__continue_on`). Its own block among them: there it goes
+ * to the back of the queue, behind what came before it. ⚖ 2026-11-06 *"actually program should be non specified in
+ * the code, it has to be itself so it has to be (sys__scheduler__continue_on cu) and the bindings and the program are
+ * implicit. this guarantees no double live bindings"*.
+ * ⛔ ONLY A COMPUTATION'S OWN ENVIRONMENT MOVES — the one its block built over the names it was asked with. The host's,
+ * or one a `continue` in its own names shares with a step on another block, is refused (SCSH); so is a step that went
+ * on already, or a base with no answer to fill (SCNQ). */
+static __device__ sys__heap_node sys__opcodes__zzabi_scheduler_continue_on(const sys__heap_node* argv, unsigned argc,
+                                                                           sys__engine__ctx* ctx) {
+    if (argc != 1u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
+    if (argv[0].dtype != SYS__KIND__VALUE_INT) return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
+    if (argv[0].args[0] >= (uint64_t)sys__silicon__block_count())
+        return sys__engine__abi__error(SYS__COMPUTING_BASE__FAULT_NO_BLOCK);
+    if (ctx == 0 || ctx->base == 0) return sys__engine__abi__error(SYS__SCHEDULER__FAULT_NOT_QUEUED);
+    if (!sys__bindings__zzpackage_alone(ctx->base->args[SYS__COMPUTING_BASE__BINDINGS]))
+        return sys__engine__abi__error(SYS__SCHEDULER__FAULT_SHARED);
+    return sys__scheduler__continue_on(ctx->base, (uint32_t)argv[0].args[0])
+         ? sys__opcodes__truth(true) : sys__engine__abi__error(SYS__SCHEDULER__FAULT_NOT_QUEUED);
+}
+SYS__ENGINE__ABI__BRIDGE(sys__opcodes__zzabi_adapter_scheduler_continue_on, sys__opcodes__zzabi_scheduler_continue_on)
+
+/* `(sys__scheduler__pid)` -> the process this computation is of, an integer: the one its request carried — the asker's,
+ * inherited by everything it asks and goes on as — or 0 where no request runs (▶ "THE PROCESSES"). */
+static __device__ sys__heap_node sys__opcodes__zzabi_scheduler_pid(const sys__heap_node* argv, unsigned argc,
+                                                                   sys__engine__ctx* ctx) {
+    (void)argv; (void)ctx;
+    if (argc != 0u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
+    sys__heap_node n;
+    n.dtype = SYS__KIND__VALUE_INT; n.num_args = 0u; n.op_code = 0ull; n.args[0] = sys__scheduler__pid();
+    return n;
+}
+SYS__ENGINE__ABI__BRIDGE(sys__opcodes__zzabi_adapter_scheduler_pid, sys__opcodes__zzabi_scheduler_pid)
+
+/* `(sys__scheduler__kill pid)` -> how many of the process's requests it took off the queues: each answer filled with
+ * SCKL; and the process remembered — a block refuses a request of it taken later and drops its steps parked, a step of it
+ * still running ends at its next move or slice, and what it comes to is SCKL. Nothing it did is undone. ⛔ A process is a
+ * positive integer: anything else is refused, OPCT. A computation may kill its own. */
+static __device__ sys__heap_node sys__opcodes__zzabi_scheduler_kill(const sys__heap_node* argv, unsigned argc,
+                                                                    sys__engine__ctx* ctx) {
+    (void)ctx;
+    if (argc != 1u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
+    if (argv[0].dtype != SYS__KIND__VALUE_INT || argv[0].args[0] == 0ull || argv[0].args[0] > 0xFFFFFFFFull)
+        return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
+    sys__heap_node n;
+    n.dtype = SYS__KIND__VALUE_INT; n.num_args = 0u; n.op_code = 0ull; n.args[0] = sys__scheduler__kill(argv[0].args[0]);
+    return n;
+}
+SYS__ENGINE__ABI__BRIDGE(sys__opcodes__zzabi_adapter_scheduler_kill, sys__opcodes__zzabi_scheduler_kill)
+
+/* `(sys__scheduler__preemptive)` -> `#t`, or `#f` inside `sys__scheduler__compute_inline`: whether a spent slice may give
+ * this computation's block up (▶ "INLINE"). The slice itself is the machine's, said at its boot, and off by default. */
+static __device__ sys__heap_node sys__opcodes__zzabi_scheduler_preemptive(const sys__heap_node* argv, unsigned argc,
+                                                                          sys__engine__ctx* ctx) {
+    (void)argv; (void)ctx;
+    if (argc != 0u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
+    return sys__opcodes__truth(sys__scheduler__preemptive());
+}
+SYS__ENGINE__ABI__BRIDGE(sys__opcodes__zzabi_adapter_scheduler_preemptive, sys__opcodes__zzabi_scheduler_preemptive)
 
 /* ── ⭐ A CARD'S LANDING PAD (NN-115, ▶ `silicon/pad.cuh`) ─────────────────────────────────────────────────────────────
  * `(sys__pad__open up down chunk_bytes)` -> the chunks: the calling worker's card's pad, pinned now — `up` chunks up,

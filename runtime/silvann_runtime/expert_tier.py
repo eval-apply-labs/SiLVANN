@@ -217,13 +217,21 @@ def part_pieces(view, gate, up, down, plan, s, parts, inter):
     """Part `s` of `parts` of one expert as (offset in its slot, bytes) pieces out of a layer's mapped blob `view`, from its
     gate, up and down records: its `inter` gate rows and up rows as one matrix, their scales, its columns of every down
     row, every down row's scale — the layout nn's tier stitches whole again (▶ `nn__expert_tier__stitch`)."""
+    return part_pieces_at(view, gate, up, down, plan, s * inter, inter, parts * inter)
+
+
+def part_pieces_at(view, gate, up, down, plan, first, inter, whole):
+    """The part of one expert from inner row `first`, `inter` of them, of `whole` — `part_pieces`, its parts not even (a
+    socket's of DeepSeek's 2304: 1024 and 1280, whole rotation blocks each)."""
     span = lambda at, n: view[at:at + n]
-    rb, (d_at, _) = down.row_bytes // parts, down.data_span()
+    if (first * down.row_bytes) % whole or (inter * down.row_bytes) % whole:
+        raise ValueError("a part from %d of %d inner rows of %d does not cut a down row on a byte" % (first, inter, whole))
+    c0, rb, (d_at, _) = first * down.row_bytes // whole, inter * down.row_bytes // whole, down.data_span()
     # this part's columns of every down row, cut out of the rows — the one piece that is not contiguous
-    cols = np.ascontiguousarray(view[d_at:d_at + down.rows * down.row_bytes].reshape(down.rows, down.row_bytes)[:, s * rb:(s + 1) * rb]).reshape(-1)
-    return [(plan.at_up_data, span(gate.data_span()[0] + s * inter * gate.row_bytes, inter * gate.row_bytes)),
-            (plan.at_up_data + inter * gate.row_bytes, span(up.data_span()[0] + s * inter * up.row_bytes, inter * up.row_bytes)),
-            (plan.at_up_lut, span(gate.lut_span()[0] + s * inter * 2, inter * 2)),
-            (plan.at_up_lut + inter * 2, span(up.lut_span()[0] + s * inter * 2, inter * 2)),
+    cols = np.ascontiguousarray(view[d_at:d_at + down.rows * down.row_bytes].reshape(down.rows, down.row_bytes)[:, c0:c0 + rb]).reshape(-1)
+    return [(plan.at_up_data, span(gate.data_span()[0] + first * gate.row_bytes, inter * gate.row_bytes)),
+            (plan.at_up_data + inter * gate.row_bytes, span(up.data_span()[0] + first * up.row_bytes, inter * up.row_bytes)),
+            (plan.at_up_lut, span(gate.lut_span()[0] + first * 2, inter * 2)),
+            (plan.at_up_lut + inter * 2, span(up.lut_span()[0] + first * 2, inter * 2)),
             (plan.at_down_data, cols),
             (plan.at_down_lut, span(*down.lut_span()))]

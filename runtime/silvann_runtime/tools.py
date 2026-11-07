@@ -572,12 +572,19 @@ class Classifier:
     def inside(self, target):
         return any(target == a or target.startswith(a.rstrip(os.sep) + os.sep) for a in self.allowed)
 
+    def closed_to(self, target, touches="read"):
+        """Whether `target` is sealed to a read or a write: under a sealed folder — or, where the sealed list can say so
+        itself (a user's fence, ▶ users.Fence), closed by it, a path not made yet as well."""
+        covers = getattr(self.sealed, "covers", None)
+        if covers is not None:
+            return covers(target, touches)
+        return any(target == a or target.startswith(a.rstrip(os.sep) + os.sep) for a in self.sealed)
+
     def check(self, touches, target):
         """Nothing when the command may go; `Asked` when the user is to say. ⛔ A read or a write of a sealed folder — the
         machine's tools file, its keys and passwords — is refused in every mode, and a command line that names it: it is
         not the model's."""
-        if touches in ("read", "write") and any(target == a or target.startswith(a.rstrip(os.sep) + os.sep)
-                                                for a in self.sealed):
+        if touches in ("read", "write") and self.closed_to(target, touches):
             raise Fault("%s is closed to the model: the machine's tools file and the server's own process are not its "
                         "to %s" % (target, touches))
         if touches == "write" and any(target == a or target.startswith(a.rstrip(os.sep) + os.sep)
@@ -694,8 +701,10 @@ def confinement(toolbox, closed, home):
             " — the container's seccomp profile must let Landlock's calls through (docs/tools.md)"
             if _jail.in_container() else ""))
     read_only = toolbox.writable_folders()             # the tools' folders: read and run, written by (add_tool …) alone
-    rules = (_jail.spec(home, abi, read_only, run_also=[sys.prefix, RUNNER]) if shape == "workspace"
-             else _jail.spec_except(closed, abi, read_only))
+    # a user's toolbox (▶ users.UserToolbox) follows no link the model could make, and closes its data folder
+    rules = (_jail.spec(home, abi, read_only, run_also=[sys.prefix, RUNNER],
+                        follow_links=getattr(toolbox, "follows_links", True), closed=getattr(toolbox, "closed", ()))
+             if shape == "workspace" else _jail.spec_except(closed, abi, read_only))
     return Confinement(rules, shape, True)
 # what each mode asks of the user, as (help) ends by saying it (▶ the classifier)
 MODE_SAID = {"ask": "a read outside your workspace and the folders allowed, a write, a command and the web are asked of the "
@@ -1912,6 +1921,9 @@ class Session:
         if c.shape == "workspace":
             if not page:
                 return "inside your workspace alone"
+            if not getattr(self.toolbox, "follows_links", True):     # a user's (▶ users.py): no link followed
+                return ("It runs inside your workspace, %s, alone; it reads and runs the system's programs and the tools "
+                        "this server lets you use, and the rest of the machine it cannot read or write." % self.home)
             given = _jail.links(self.home)
             return ("It runs inside your workspace, %s, alone, and inside what the machine's owner linked at its top: "
                     "%s. It reads and runs the system's programs; the rest of the machine it cannot read or write. A "

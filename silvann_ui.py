@@ -102,9 +102,35 @@ class Client:
     def __init__(self, endpoint: str, passwords: Optional[dict] = None,
                  web_user_id: Optional[str] = None):
         self.endpoint = endpoint.rstrip("/")
-        self.http = httpx.AsyncClient(timeout=httpx.Timeout(30, read=None))
+        self.http = httpx.AsyncClient(timeout=httpx.Timeout(30, read=None), event_hooks={"response": [self._seen]})
         self.passwords: dict = passwords if passwords is not None else {}
         self.web_user_id = web_user_id or ""
+        self.on_signed_out = None          # called when a server with users answers 401: the sign-in is asked for
+
+    # ── a server with users (NN-150): a sign-in, its token on every request ─────────────────────────────
+    def use_token(self, token: Optional[str]):
+        if token:
+            self.http.headers["Authorization"] = "Bearer " + token
+        else:
+            self.http.headers.pop("Authorization", None)
+
+    async def _seen(self, response):
+        if response.status_code == 401 and not response.request.url.path.endswith("/users/sign_in") \
+                and self.on_signed_out is not None:
+            await self.on_signed_out()
+
+    async def sign_in(self, name: str, password: str) -> dict:
+        r = await self.http.post(f"{self.endpoint}/users/sign_in", json={"name": name, "password": password})
+        r.raise_for_status()
+        got = r.json()
+        self.use_token(got["token"])
+        return got
+
+    async def sign_out(self):
+        try:
+            await self.http.post(f"{self.endpoint}/users/sign_out")
+        finally:
+            self.use_token(None)
 
     def set_endpoint(self, endpoint: str):
         self.endpoint = endpoint.rstrip("/")
@@ -1121,6 +1147,7 @@ async def page():
     client = Client(state["endpoint"],
                     passwords=state.setdefault("passwords", {}),
                     web_user_id=web_user_id)
+    client.use_token(state.get("user_token"))             # this browser's sign-in, where the server has users
 
     # Capture the page-level NiceGUI Client now (while the slot stack is set up) so event-handler
     # tasks — which run with an empty slot stack — can still trigger downloads/notifications by
@@ -3017,11 +3044,69 @@ async def page():
                 ui.button("delete", on_click=do_delete).props("color=negative")
         dlg.open()
 
+    # ⭐ A SERVER WITH USERS (NN-150): a sign-in asked for before anything else, and again when a request answers 401 — a
+    #   token this browser keeps, its conversations the signed-in user's alone
+    sign_in_dialog = ui.dialog().props("persistent").mark("sign-in")
+    with sign_in_dialog, ui.card().classes("w-80 gap-2"):
+        ui.label("Sign in").classes("text-lg")
+        ui.label("This server has users: each sees their own conversations.").classes("text-sm opacity-70")
+        sign_in_name = ui.input("name").classes("w-full")
+        sign_in_password = ui.input("password", password=True, password_toggle_button=True).classes("w-full")
+        sign_in_said = ui.label("").classes("text-sm text-red-700")
+
+        async def do_sign_in():
+            try:
+                got = await client.sign_in(sign_in_name.value or "", sign_in_password.value or "")
+            except httpx.HTTPStatusError as ex:
+                sign_in_said.text = "wrong name or password" if ex.response.status_code == 401 else ex.response.text[:200]
+                return
+            except httpx.HTTPError as ex:
+                sign_in_said.text = "the server does not answer: %s" % ex
+                return
+            state["user_token"], state["user_name"] = got["token"], got["name"]
+            sign_in_dialog.close()
+            ui.navigate.reload()                          # every panel again, as the signed-in user
+
+        sign_in_password.on("keydown.enter", lambda: asyncio.create_task(do_sign_in()))
+        ui.button("Sign in", on_click=do_sign_in).classes("w-full")
+
+    async def need_sign_in():
+        if state.get("user_token"):
+            state.pop("user_token", None)
+            state.pop("user_name", None)
+            client.use_token(None)
+        signed_row.set_visibility(False)
+        sign_in_said.text = ""
+        sign_in_dialog.open()
+    client.on_signed_out = need_sign_in
+
+    async def do_sign_out():
+        await client.sign_out()
+        state.pop("user_token", None)
+        state.pop("user_name", None)
+        ui.navigate.reload()
+
+    with chat_header.parent_slot.parent:
+        with ui.row().classes("items-center gap-1 no-wrap") as signed_row:
+            signed_label = ui.label("").classes("text-xs opacity-70")
+            ui.button("sign out", on_click=do_sign_out).props("flat dense size=sm")
+    signed_row.set_visibility(False)
+    try:
+        h_users = await client.health()
+    except Exception:
+        h_users = {}
+    if h_users.get("users") and not h_users.get("user"):
+        await need_sign_in()
+    elif h_users.get("user"):
+        signed_label.text = "signed in as %s" % h_users["user"]
+        signed_row.set_visibility(True)
+
     # Initial render
     update_view()
     render_chat()
     await ping()
-    await render_convs()
+    if not (h_users.get("users") and not h_users.get("user")):
+        await render_convs()
     # a streaming answer drawn at most ten times a second, whatever the tokens' rate
     ui.timer(0.1, lambda: refresh_live() if live_answer.get("dirty") else None)
 

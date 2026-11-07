@@ -382,6 +382,11 @@ static __device__ inline uint64_t       sys__list__shared_length(uint64_t list);
  * only it takes from: a yes may find nothing by the time it takes (the take says so), a no is the next look's
  * to correct, and the look writes nothing, so a poller never holds up the blocks appending. */
 static __device__ inline bool           sys__list__shared_waiting(uint64_t list);
+/* Out of the list, under one hold of its lock, the groups of `n` cells — a request's — whose cell `at` is the integer
+ * `word`, at most `most` of them, into `out` (`n` × `most` cells), their holds with them; the others left in their order.
+ * Answers how many groups it took. */
+static __device__ inline uint64_t       sys__list__shared_take_matching(uint64_t list, uint64_t n, uint64_t at, uint64_t word,
+                                                                        sys__heap_node* out, uint64_t most);
 
 /* ── THE TWO ROW METHODS ─────────────────────────────────────────────────────────────────────────────
  * What each kind's row names, and none is called by hand: one runs when the last hold goes, the other

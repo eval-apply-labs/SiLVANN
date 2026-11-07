@@ -19,11 +19,14 @@ at once — `"multi_user": "yes"` with `num_cards` above 1, a conversation a car
 one — answers them together (▶ session's `SeatedRuntime`): a turn is 503 only when every seat is answering. On disk each lives in
 `user_sessions/<model>/<id>/`: `cartridge.npz` (its tokens, and its state when it was put away), `meta.json` (what
 model it belongs to), `server_meta.json` (its name, history and password) and `conversation_config.json` (its own
-settings: a system prompt, where the config's `user_system_prompt` lets its creator give one).
+settings: a system prompt, where the config's `user_system_prompt` lets its creator give one). With users made
+(`silvann users add`, ▶ silvann_runtime/users.py) every request but /health carries a sign-in, and a user's conversations
+are `users/<name>/user_sessions/<model>/<id>/`, theirs alone.
 """
 import argparse
 import asyncio
 import base64
+import contextvars
 import hashlib
 import hmac
 import io
@@ -62,6 +65,7 @@ from silvann_core import default_config                                   # noqa
 sys.path.insert(0, str(RUNTIME))
 import silvann_runtime as SR                                              # noqa: E402
 from silvann_runtime import autotune, experts_file, registry, skills, tools, tools_config     # noqa: E402
+from silvann_runtime import users                                         # noqa: E402
 from silvann_runtime.chat import Chat, ToolMarkup                         # noqa: E402
 from silvann_runtime.fetch import ensure_model                            # noqa: E402
 from silvann_runtime.session import Busy, Cartridge, Runtime, SeatedRuntime, _state_read, sampler, state_bytes     # noqa: E402
@@ -128,20 +132,7 @@ def _loading():
     return tick
 
 
-def _hash_password(password):
-    salt = secrets.token_bytes(16)
-    h = hashlib.scrypt(password.encode(), salt=salt, n=16384, r=8, p=1, dklen=32)
-    return {"alg": "scrypt", "salt": base64.b64encode(salt).decode(), "hash": base64.b64encode(h).decode(),
-            "n": 16384, "r": 8, "p": 1, "dklen": 32}
-
-
-def _verify_password(password, stored):
-    try:
-        h = hashlib.scrypt(password.encode(), salt=base64.b64decode(stored["salt"]), n=stored.get("n", 16384),
-                           r=stored.get("r", 8), p=stored.get("p", 1), dklen=stored.get("dklen", 32))
-        return hmac.compare_digest(h, base64.b64decode(stored["hash"]))
-    except Exception:
-        return False
+_hash_password, _verify_password = users.hash_password, users.verify_password   # a conversation's, as a user's
 
 
 # ── the server's state ──────────────────────────────────────────────────────────────────────────────────────
@@ -152,6 +143,8 @@ class State:
         self.model_id = ""
         self.dir = DATA / "user_sessions"
         self.owner = {}                     # cartridge id -> the web user who has it open
+        self.where = {}                     # cartridge id -> (its folder, its user or None), as found (▶ `_locate`)
+        self.user_boxes = {}                # a user -> their tools over the machine's (▶ users.UserToolbox)
         self.last_ping = {}
         self.turns = {}                     # cartridge id -> its turn in flight
         self.busy_cart = None
@@ -179,9 +172,60 @@ class State:
 
 S = State()
 
+# ── the users (NN-150, ▶ silvann_runtime/users.py) ─────────────────────────────────────────────
+# ⚖ 2026-11-02 *"users have a folder with at least a password and they get in and only see their chat folder"*. With no
+#   user made, a server is as it was: no sign-in, every conversation the machine's. With one, every request but /health
+#   and the sign-in carries a token (`Authorization: Bearer …`, ▶ `_UsersGate`), and a user's conversations are the ones
+#   in their folder — another user's answers 404, as one that is not there.
+USERS = users.Users(DATA)
+_ME = contextvars.ContextVar("silvann_user", default=None)    # who the request in hand is from, set by the gate
+CID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")                     # a conversation's id: a name, never a path
+
+
+def _me():
+    return _ME.get()
+
+
+def _folder_of(name):
+    """Where `name`'s conversations of this model are — a user's folder — or, for None, the machine's."""
+    return Path(USERS.sessions(name, S.model_id)) if name else S.dir
+
+
+def _locate(cid):
+    """A conversation's folder and its user — the machine's (None) or the user whose folder holds it — as remembered
+    from its making (▶ `_made_by`) or found on disk; one moved since (`silvann users adopt`) found where it is now.
+    ⛔ ONE THE SERVER KNOWS IS NEVER ANOTHER'S: its folder gone from under it, it is made again where it was, its user's;
+    only a conversation never made is the folder of whoever asks."""
+    if not CID.match(cid or ""):
+        raise HTTPException(404, "cartridge %r not found" % cid)
+    got = S.where.get(cid)
+    if got is not None and got[0].is_dir():
+        return got
+    for name in [None] + USERS.names():
+        d = _folder_of(name) / cid
+        if d.is_dir():
+            S.where[cid] = (d, name)
+            return S.where[cid]
+    if got is not None:
+        return got
+    return _folder_of(_me()) / cid, _me()
+
+
+def _made_by(cid):
+    """A conversation just made or imported: its folder and its user, the one who asked — remembered from now on."""
+    S.where[cid] = (_folder_of(_me()) / cid, _me())
+
+
+def _cdir(cid):
+    return _locate(cid)[0]
+
+
+def _owner(cid):
+    return _locate(cid)[1]
+
 
 def _sidecar(cid):
-    p = S.dir / cid / "server_meta.json"
+    p = _cdir(cid) / "server_meta.json"
     try:
         return json.load(open(p)) if p.exists() else {}
     except Exception:
@@ -189,8 +233,8 @@ def _sidecar(cid):
 
 
 def _write_sidecar(cid, meta):
-    (S.dir / cid).mkdir(parents=True, exist_ok=True)
-    json.dump(meta, open(S.dir / cid / "server_meta.json", "w"), indent=2)
+    _cdir(cid).mkdir(parents=True, exist_ok=True)
+    json.dump(meta, open(_cdir(cid) / "server_meta.json", "w"), indent=2)
 
 
 def _user_system():
@@ -201,7 +245,7 @@ def _user_system():
 
 def _conversation_config(cid):
     """A conversation's own settings, `conversation_config.json` in its folder — exported and imported with it."""
-    p = S.dir / cid / "conversation_config.json"
+    p = _cdir(cid) / "conversation_config.json"
     try:
         return json.load(open(p)) if p.exists() else {}
     except Exception:
@@ -226,13 +270,13 @@ def _check_password(cid, provided):
 
 
 def _meta(cid):
-    p = S.dir / cid / "meta.json"
+    p = _cdir(cid) / "meta.json"
     return json.load(open(p)) if p.exists() else None
 
 
 def _persist(c, with_state=True):
     """A cartridge to its folder: its tokens (and its state, read off the card if it is there) and what it belongs to."""
-    d = S.dir / c.id
+    d = _cdir(c.id)
     d.mkdir(parents=True, exist_ok=True)
     S.runtime.save(c, str(d / "cartridge.npz"), with_state=with_state)
     json.dump({"model_id": S.model_id, "identity": c.identity, "lora": c.lora, "current_pos": c.length,
@@ -284,7 +328,7 @@ def _load(cid):
     c = S.runtime.cartridges.get(cid)
     if c is not None:
         return c
-    p = S.dir / cid / "cartridge.npz"
+    p = _cdir(cid) / "cartridge.npz"
     if not p.exists():
         raise HTTPException(404, "cartridge %r not found" % cid)
     try:
@@ -396,11 +440,12 @@ def _boot(args):
         named = options                                   # the config's own: what a second choice is made around
         options, max_context, why = autotune.choose(str(folder), asked, named, video_tokens=S.video_tokens,
                                                     margin_mb=cfg.get("vram_margin_mb"))
-        n = int(options.get("tensor_parallel") or len(options.get("cards") or ()) or 1)
+        arch = SR.ARCHITECTURES.get(SR.architecture_of(str(folder)))
+        apart = getattr(arch, "CONVERSATION_A_CARD_OPTION", "cards")          # a conversation a card's option (▶ with_cards)
+        n = int(options.get("tensor_parallel") or len(options.get("cards") or options.get(apart) or ()) or 1)
         if n > 1:
-            arch = SR.ARCHITECTURES.get(SR.architecture_of(str(folder)))
-            seated = getattr(arch, "CARDS_ARE_SEATS", False) or ("cards" in options and getattr(arch, "CONVERSATION_A_CARD",
-                                                                                                False))
+            seated = getattr(arch, "CARDS_ARE_SEATS", False) or (apart in options and getattr(arch, "CONVERSATION_A_CARD",
+                                                                                              False))
             why = ("a conversation on each of %d cards; %s" if seated else "every layer over %d cards; %s") % (n, why)
         S.why = why
         print("[silvann_server] the setup: %s" % why, flush=True)
@@ -456,6 +501,7 @@ def _boot(args):
         print("[silvann_server] %s" % line, flush=True)
     S.dir = DATA / "user_sessions" / folder.name
     S.dir.mkdir(parents=True, exist_ok=True)
+    S.where.clear()
     lent = S.model.lent() if hasattr(S.model, "lent") else None
     print("[silvann_server] %s (%s) booted in %.0f s — context %d, LoRA %s%s"
           % (folder.name, S.model.folder.architecture, time.time() - t0, S.model.max_context, cfg.get("lora"),
@@ -656,7 +702,7 @@ def _tool_picture(cid, text):
         try:
             # on the text model's card, which is free now, every card this process sees draws; on a card of its own, that
             #   card alone, the pictures one after another
-            made = image_session.pictures(rt, prompt, settings, str(S.dir / cid / "pictures"), progress,
+            made = image_session.pictures(rt, prompt, settings, str(_cdir(cid) / "pictures"), progress,
                                           cards=_picture_cards() if switch else None)
         finally:
             rt.close()
@@ -717,7 +763,7 @@ def _picture_from(p, cid, text, answering):
             names = re.findall(r"!\[picture\]\(picture:([A-Za-z0-9_.-]+\.png)\)", said)
             if not names:
                 raise SR.Refused("the picture server %s made no picture: %s" % (host, said[:300]))
-            folder = S.dir / cid / "pictures"
+            folder = _cdir(cid) / "pictures"
             folder.mkdir(parents=True, exist_ok=True)
             for name in names:
                 got = http.get("/cartridges/%s/pictures/%s" % (there, name))
@@ -779,7 +825,9 @@ def _tool_agent(cid, model, config, task):
         endpoint = S.endpoint
     busy = S.busy_cart
     try:
-        link = agents.Link(endpoint, model, conf, task, user="agent-%s" % cid, progress=say)
+        owner = _owner(cid)                           # a user's conversation: its subagent's on this server is theirs
+        token = USERS.issue(owner) if owner and endpoint == S.endpoint else None
+        link = agents.Link(endpoint, model, conf, task, user="agent-%s" % cid, progress=say, token=token)
     finally:
         if restore is not None:
             restore()                                 # the card back to the caller, who reads the answer
@@ -1075,6 +1123,7 @@ def _lend(folder, conf, rt=None):
     S.model, S.runtime, S.chat, S.model_id = m, rt, Chat(m.folder), Path(folder).name
     S.dir = DATA / "user_sessions" / S.model_id
     S.dir.mkdir(parents=True, exist_ok=True)
+    S.where.clear()                                       # another model's conversations, found again
     print("[agent] the card lent to %s in %.0f s (%s)" % (S.model_id, time.time() - t0, why), flush=True)
 
     def restore():
@@ -1083,6 +1132,7 @@ def _lend(folder, conf, rt=None):
             _put_down()                               # the subagent's conversation parked in its runtime, its model off
         finally:
             S.model_id, S.runtime, S.chat, S.dir = saved["model_id"], saved["runtime"], saved["chat"], saved["dir"]
+            S.where.clear()
             try:
                 _bring_back()
             finally:
@@ -1128,6 +1178,7 @@ def _boot_image(folder, cfg, t0):
     S.model_id = folder.name
     S.dir = DATA / "user_sessions" / folder.name
     S.dir.mkdir(parents=True, exist_ok=True)
+    S.where.clear()
     print("[silvann_server] %s (a picture model, %s) ready in %.0f s — a picture %s"
           % (folder.name, S.model.folder.architecture, time.time() - t0, S.model.settings), flush=True)
 
@@ -1180,6 +1231,88 @@ async def lifespan(app):
 app = FastAPI(title="SiLVANN server", lifespan=lifespan)
 
 
+def _bearer(value):
+    """The token of an `Authorization: Bearer …` header, or None."""
+    value = (value or "").strip()
+    return value[7:].strip() or None if value[:7].lower() == "bearer " else None
+
+
+class _UsersGate:
+    """⭐ EVERY REQUEST THROUGH ONE DOOR (NN-150): who it is from — the sign-in its `Authorization: Bearer` token names —
+    set for the request (`_me`); with users on, one without a sign-in refused 401 but /health and the sign-in itself, and
+    a conversation that is not the signer's answered 404, as one that is not there. One door rather than a check in each
+    endpoint, so an endpoint added later is behind it too."""
+    OPEN = ("/health", "/users/sign_in", "/admin/save-all")   # the last saves what is open and reads nothing: a UI
+                                                              #   stopping the server it started calls it unsigned
+    NOT_A_CONVERSATION = ("estimate", "import")           # /cartridges/estimate and /cartridges/import
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers", [])}
+        me = USERS.signed(_bearer(headers.get("authorization")))
+        path = scope.get("path", "")
+        if USERS.on():
+            if me is None and path not in self.OPEN:
+                return await self._refuse(send, 401, "sign in: this server has users (POST /users/sign_in)")
+            m = re.match(r"^/cartridges/([^/]+)(?:/|$)", path)
+            if m and m.group(1) not in self.NOT_A_CONVERSATION:
+                cid = m.group(1)
+                if not CID.match(cid) or _owner(cid) != me or not _cdir(cid).is_dir():
+                    return await self._refuse(send, 404, "cartridge %r not found" % cid)
+        held = _ME.set(me)
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            _ME.reset(held)
+
+    @staticmethod
+    async def _refuse(send, status, detail):
+        body = json.dumps({"detail": detail}).encode()
+        await send({"type": "http.response.start", "status": status,
+                    "headers": [(b"content-type", b"application/json"), (b"content-length", str(len(body)).encode())]})
+        await send({"type": "http.response.body", "body": body})
+
+
+app.add_middleware(_UsersGate)
+
+
+class SignInReq(BaseModel):
+    name: str
+    password: str
+
+
+@app.post("/users/sign_in")
+def users_sign_in(req: SignInReq):
+    """A sign-in: a token the requests that follow carry (`Authorization: Bearer <token>`), good until it is unused for
+    twelve hours, its user's password changes, or the server stops."""
+    if not USERS.on():
+        raise HTTPException(409, "this server has no users: nothing to sign in to")
+    name = req.name.strip().lower()
+    token = USERS.sign_in(name, req.password)
+    if token is None:
+        raise HTTPException(401, "wrong name or password")
+    return {"token": token, "name": name}
+
+
+@app.post("/users/sign_out")
+def users_sign_out(authorization: Optional[str] = Header(default=None)):
+    USERS.sign_out(_bearer(authorization))
+    return {"signed_out": True}
+
+
+@app.get("/users/me")
+def users_me():
+    """Who is signed in, how many conversations they hold, and what their settings ask that the machine keeps."""
+    me = _me()
+    if me is None:
+        return {"user": None, "users": USERS.on()}
+    return {"user": me, "users": True, "conversations": USERS.conversations(me), "kept": _user_box(me).kept()}
+
+
 # ── endpoints ───────────────────────────────────────────────────────────────────────────────────────────────
 @app.get("/health")
 def health():
@@ -1192,7 +1325,8 @@ def health():
             "model_dir": m.folder.path if m else None, "pp_slice": "all", "num_gpus": _cards(m),
             "max_context": m.max_context if m else 0,
             "adapter": "silvann_runtime", "images": _reads_pictures(), "files": not S.image, "pictures": S.image,
-            "picture_settings": S.model.settings if S.image else None, "user_system_prompt": _user_system()}
+            "picture_settings": S.model.settings if S.image else None, "user_system_prompt": _user_system(),
+            "users": USERS.on(), "user": _me()}
 
 
 def _reads_pictures():
@@ -1221,13 +1355,14 @@ async def save_all():
         for cid, c in list(S.runtime.cartridges.items()):
             await asyncio.to_thread(_persist, c)
             saved.append(cid)
-    return {"saved": saved}
+    return {"saved": saved} if not USERS.on() or _me() else {"saved": len(saved)}   # no ids to a caller not signed in
 
 
 @app.get("/cartridges")
 def list_cartridges():
     out = []
-    for d in sorted(S.dir.iterdir()) if S.dir.exists() else []:
+    here = _folder_of(_me())                              # a user's own, or the machine's where there are no users
+    for d in sorted(here.iterdir()) if here.exists() else []:
         meta = _meta(d.name) if d.is_dir() else None
         if meta is None:
             continue
@@ -1249,13 +1384,14 @@ async def create_cartridge(req: CreateConvReq, x_web_user_id: Optional[str] = He
             c = S.runtime.new_cartridge(lora=req.lora if req.lora is not None else S.config.get("lora"))
         except SR.Refused as ex:
             raise HTTPException(409, str(ex))
+        _made_by(c.id)
         name = req.name or "chat-%s" % time.strftime("%H%M%S")
         _write_sidecar(c.id, {"id": c.id, "name": name, "created": time.time(),
                               "extra": {"history": [],
                                         "enable_thinking": S.config.get("thinking", True),
                                         "tools_allowed": req.tools_allowed, "agent": req.agent}})
         if _user_system() and req.system:
-            json.dump({"system": req.system}, open(S.dir / c.id / "conversation_config.json", "w"), indent=2)
+            json.dump({"system": req.system}, open(_cdir(c.id) / "conversation_config.json", "w"), indent=2)
         await asyncio.to_thread(_persist, c, False)
         if x_web_user_id:
             S.owner[c.id] = x_web_user_id
@@ -1333,8 +1469,9 @@ async def delete_cartridge(cid: str, x_cart_password: Optional[str] = Header(def
     _check_password(cid, x_cart_password)
     async with S.lock:
         await _put_away(cid, persist=False)
-        if (S.dir / cid).exists():
-            shutil.rmtree(S.dir / cid)
+        if _cdir(cid).exists():
+            shutil.rmtree(_cdir(cid))
+        S.where.pop(cid, None)
         S.tool_sessions.pop(cid, None)                        # its REPL, and an ask it left waiting
         S.asks.pop(cid, None)
     return {"deleted": cid}
@@ -1375,7 +1512,7 @@ async def export_cartridge(cid: str, x_cart_password: Optional[str] = Header(def
         async with S.lock:
             await _idle()
             await asyncio.to_thread(_persist, c)
-    d = S.dir / cid
+    d = _cdir(cid)
     if not d.exists():
         raise HTTPException(404, "cartridge %r not found" % cid)
     buf = io.BytesIO()
@@ -1390,7 +1527,8 @@ async def export_cartridge(cid: str, x_cart_password: Optional[str] = Header(def
 async def import_cartridge(file: UploadFile = File(...)):
     blob = await file.read()
     new_id = uuid.uuid4().hex[:12]
-    d = S.dir / new_id
+    _made_by(new_id)
+    d = _cdir(new_id)
     d.mkdir(parents=True)
     try:
         with tarfile.open(fileobj=io.BytesIO(blob), mode="r") as tar:
@@ -1403,9 +1541,11 @@ async def import_cartridge(file: UploadFile = File(...)):
             raise HTTPException(409, "the cartridge belongs to %s, and this server runs %s" % (c.identity, S.runtime.identity))
     except HTTPException:
         shutil.rmtree(d)
+        S.where.pop(new_id, None)
         raise
     except Exception as ex:
         shutil.rmtree(d)
+        S.where.pop(new_id, None)
         raise HTTPException(400, "invalid cartridge archive: %s" % ex)
     c.id = new_id
     c.save(str(d / "cartridge.npz"))
@@ -1583,7 +1723,7 @@ def _picture_message(cid, req):
 
     def make():
         try:
-            made = image_session.pictures(S.runtime, prompt, settings, str(S.dir / cid / "pictures"), progress,
+            made = image_session.pictures(S.runtime, prompt, settings, str(_cdir(cid) / "pictures"), progress,
                                           cards=_picture_cards())
             answer = "\n\n".join(image_session.caption(name, st, seconds) for name, seconds, st in made)
             emit("token", {"token_id": -1, "text": answer})
@@ -1640,7 +1780,7 @@ async def get_picture(cid: str, name: str, format: str = "png", x_cart_password:
     _check_password(cid, x_cart_password)
     if not re.fullmatch(r"[A-Za-z0-9_.-]+\.png", name):
         raise HTTPException(404, "no picture %r" % name)
-    p = S.dir / cid / "pictures" / name
+    p = _cdir(cid) / "pictures" / name
     if not p.exists():
         raise HTTPException(404, "no picture %r in this conversation" % name)
     if format == "jpeg":
@@ -1675,20 +1815,47 @@ def _tools_mode(extra):
     return extra.get("tools_mode") or (S.tools if S.tools in tools.MODES else "ask")
 
 
+def _user_box(name):
+    """A user's tools — the machine's with their settings over them (▶ users.UserToolbox) — made once a machine's toolbox."""
+    got = S.user_boxes.get(name)
+    if got is None or got.machine is not S.toolbox:
+        got = S.user_boxes[name] = users.UserToolbox(S.toolbox, USERS.tools_file(name), data=DATA)
+    return got
+
+
+def _repl_place(cid):
+    """Where a conversation's REPL works and what fences it: the machine's workspace, classifier and tools for a
+    conversation of the machine's; for a user's, their own workspace and kept definitions, a classifier that allows
+    their workspace and seals what is not theirs (▶ users.Fence), and their tools. (workspace, classifier, library, box)."""
+    owner = _owner(cid)
+    if owner is None:
+        return S.workspace, S.classifier, S.library, S.toolbox
+    home = Path(USERS.workspace(owner))
+    k = tools.Classifier(str(Path(USERS.folder(owner)) / "tools_allowed.json"), S.classifier.mode, allowed=[str(home)],
+                         sealed=[S.toolbox.file.folder()])
+    # ⛔ A CHROOT'S VIEW (▶ users.Fence): the user's workspace to write; to read, besides, the system's programs, the
+    #   tools they have switched on, the runtime and the venv — looked at afresh at each command
+    box = _user_box(owner)
+    k.sealed = users.Fence(USERS, owner, machine_sealed=list(k.sealed), keep=[os.path.dirname(tools.RUNNER), sys.prefix],
+                           tools=box.tool_folders)
+    return home, k, Path(USERS.folder(owner)) / "tools_library.json", box
+
+
 def _tool_session(cid):
     s = S.tool_sessions.get(cid)
     if s is None:
-        S.workspace.mkdir(parents=True, exist_ok=True)
+        home, classifier, library, box = _repl_place(cid)
+        home.mkdir(parents=True, exist_ok=True)
         extra = _sidecar(cid).get("extra", {})
         mode = _tools_mode(extra)
-        s = S.tool_sessions[cid] = tools.Session(str(S.workspace), S.classifier.conversation(mode),
-                                                 library=str(S.library),
+        s = S.tool_sessions[cid] = tools.Session(str(home), classifier.conversation(mode),
+                                                 library=str(library),
                                                  guide=str(TOOLS_GUIDE),
                                                  image=lambda text: _tool_picture(cid, text),
                                                  agent=None if extra.get("agent") else
                                                  lambda model, config, task: _tool_agent(cid, model, config, task),
                                                  allowed=extra.get("tools_allowed"),
-                                                 whoami=lambda: _whoami(cid), web=S.web, toolbox=S.toolbox,
+                                                 whoami=lambda: _whoami(cid), web=S.web, toolbox=box,
                                                  sees=lambda: hasattr(S.model, "vision") and S.chat.sees_in_answers())
     return s
 
@@ -1910,6 +2077,12 @@ def tools_settings():
     """The config's tools — a new conversation's mode ("ask", "chill", "full-auto"), or "no": no conversation has the
     tool — the modes, the folders every conversation reads unasked, where its REPL starts, and the machine's tools file
     (▶ `_tools_listed`)."""
+    me = _me()
+    if me:                                                # a user's own workspace and the folders their REPL allowed
+        home = Path(USERS.workspace(me))
+        k = tools.Classifier(str(Path(USERS.folder(me)) / "tools_allowed.json"), S.classifier.mode, allowed=[str(home)])
+        return {"tools": S.tools, "modes": list(tools.MODES), "allowed": k.allowed, "workspace": str(home),
+                **_tools_listed()}
     return {"tools": S.tools, "modes": list(tools.MODES), "allowed": S.classifier.allowed,
             "workspace": str(S.workspace), **_tools_listed()}
 
@@ -1936,10 +2109,15 @@ def _tools_listed():
     its settings, a key, a password or a token said only as set or not (the file holds them, the UI never shows them)."""
     if S.toolbox is None:
         return {"tools_file": None, "entries": {}}
-    out = S.toolbox.listing()
+    me = _me()
+    box = _user_box(me) if me else S.toolbox             # a user sees the tools as they have them
+    out = box.listing()
     for e in out.values():
         e["config"] = {k: ("(set)" if v not in (None, "") else None) if _secret(k) else v for k, v in e["config"].items()}
-    return {"tools_file": S.toolbox.file.path, "entries": out}
+    got = {"tools_file": S.toolbox.file.path, "entries": out}
+    if me:
+        got.update(user_tools_file=USERS.tools_file(me), kept=box.kept())
+    return got
 
 
 def _secret(key):

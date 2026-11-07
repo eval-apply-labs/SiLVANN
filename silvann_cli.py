@@ -217,12 +217,23 @@ def main():
                     help="the most tokens an answer runs (default: until it ends or fills the context; Ctrl-C stops it)")
     ap.add_argument("--system", default=None, help="a system prompt for the conversation")
     ap.add_argument("--user", default="cli-" + uuid.uuid4().hex[:8], help="the session the conversation belongs to")
+    ap.add_argument("--sign-in", dest="sign_in", default=None, metavar="NAME",
+                    help="a server with users: whose conversation it is — the password asked for, or SILVANN_PASSWORD")
     a = ap.parse_args()
 
     chat = Chat(a)
     system = a.system
     try:
         h = chat.http.get("/health").json()
+        if h.get("users"):                              # a server with users (NN-150): signed in before anything
+            import getpass
+            name = a.sign_in or input("[silvann] this server has users — name: ").strip()
+            password = os.environ.get("SILVANN_PASSWORD") or getpass.getpass("[silvann] %s's password: " % name)
+            r = chat.http.post("/users/sign_in", json={"name": name, "password": password})
+            if r.status_code == 401:
+                sys.exit("[silvann] wrong name or password")
+            r.raise_for_status()
+            chat.http.headers["Authorization"] = "Bearer " + r.json()["token"]
         print("%s[silvann] %s at %s, a context of %s — /new · /sys <prompt> · /mode ask|chill|full-auto · /quit%s"
               % (DIM, h.get("model_id"), a.endpoint, h.get("max_context"), RESET))
         if system and not h.get("user_system_prompt"):

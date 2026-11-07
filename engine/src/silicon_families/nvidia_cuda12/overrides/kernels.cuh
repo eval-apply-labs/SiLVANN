@@ -9,6 +9,28 @@
 
 #define NVIDIA_CUDA12__ZZPACKAGE_WARP 32u
 
+/* ⭐ A FLOAT AS THE HALF AN OUTPUT HOLDS — nn's `zzabi_to_half`, the same bits and the same fault word, without its
+ *   branches where the answer is a normal half: a float from 2^-14 up to 65520 is a normal half, rounded to nearest even
+ *   at the 13th bit of its mantissa, in integers on the float's bits; anything else, and so every subnormal, zero,
+ *   infinity, NaN and overflow, is nn's own conversion. amd_rocm6_wave64's `zzpackage_to_half`, the same integers —
+ *   `MEASURED` there over all 2^32 floats, 0 halves and 0 fault words apart from nn's; `REASONED` the same here, since only
+ *   integer arithmetic on the float's bits decides it. ⛔ NOT `__float2half_rn`, though it rounds the same way: a multiply
+ *   before a conversion may then be folded into one rounding where nn's has two, and integers cannot be folded. */
+static __device__ __forceinline__ uint16_t nvidia_cuda12__zzpackage_to_half(float f, unsigned int* over) {
+    const uint32_t u = __float_as_uint(f), a = u & 0x7FFFFFFFu;
+    if (a - 0x38800000u < 0x477FF000u - 0x38800000u)    /* 2^-14 <= |f| < 65520 */
+        return (uint16_t)(((u >> 16) & 0x8000u) | (((a + 0x0FFFu + ((a >> 13) & 1u)) >> 13) - (112u << 10)));
+    return nn__kernels__zzabi_to_half(f, over);
+}
+
+/* The sum of `v` over the warp's 32 lanes, handed to every lane: partners one lane apart, then two, … then sixteen — the
+ * pairs of the block's fold over those 32 lanes, so the same float the fold makes of them. */
+static __device__ __forceinline__ float nvidia_cuda12__zzpackage_warp_sum(float v) {
+#pragma unroll
+    for (uint32_t m = 1u; m < NVIDIA_CUDA12__ZZPACKAGE_WARP; m <<= 1) v += __shfl_xor_sync(0xFFFFFFFFu, v, (int)m);
+    return v;
+}
+
 /* ⭐ THE TENSOR CORES' PRODUCT: `c += A · B`, A sixteen rows by sixteen columns of halves, B sixteen columns by eight of
  *   halves, `c` sixteen by eight floats — `mma.sync.aligned.m16n8k16`, the warp's 32 lanes each holding a part of every
  *   operand. Lane `4g + t` holds, of A, rows `g` and `g + 8` at columns `2t, 2t + 1` (`a0`, `a1`) and `2t + 8, 2t + 9`

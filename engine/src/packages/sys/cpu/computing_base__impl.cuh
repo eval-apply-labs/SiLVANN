@@ -233,6 +233,12 @@ static __device__ inline sys__heap_node* sys__computing_base__claim(sys__heap_no
  * rival to fall out of phase with, and skewing would only make high-numbered blocks notice their work
  * later for no reason. The number itself lives in `contracts/defaults.cuh`, because it is a dial and not a
  * conclusion. */
+static __thread bool sys__computing_base__zzprivate_under_way = false;
+
+static __device__ inline void sys__computing_base__zzpackage_under_way(bool under_way) {
+    sys__computing_base__zzprivate_under_way = under_way;
+}
+
 static __device__ inline sys__heap_node* sys__computing_base__begin(sys__heap_node* computing_base,
                                                                 uint32_t block_id) {
     if (!sys__computing_base__zzprivate_advance(computing_base, SYS__COMPUTING_BASE__SCHEDULED,
@@ -259,6 +265,14 @@ static __device__ inline sys__heap_node* sys__computing_base__begin(sys__heap_no
      * holds their own, so letting this one go does not take the picture out from under the other blocks
      * that have not started yet. */
     const uint64_t picture = computing_base->args[SYS__COMPUTING_BASE__PROGRAM];
+    /* ⭐ A PROGRAM ALREADY UNDER WAY IS RUN AS IT STANDS: a computation that moved here brings the copy it was rewriting
+     *   (▶ `sys__scheduler__continue_on`), and a thaw would start it over. It is this base's hold that `init` took. */
+    const bool under_way = sys__computing_base__zzprivate_under_way;
+    sys__computing_base__zzprivate_under_way = false;
+    if (under_way && picture != 0ull && sys__sublist__is(picture)) {
+        sys__bindings__zzpackage_reach_arm(computing_base->args[SYS__COMPUTING_BASE__BINDINGS]);
+        return computing_base;
+    }
     /* ⭐ THE EVALUATOR'S DOOR — this copy is read by `eng__eval` and by nothing else. ▶ the two
      * doors in `list__impl.cuh`: the host's stays eager because nothing out there knows the tag. */
     const uint64_t run     = sys__list__thaw_running(picture);
@@ -319,6 +333,9 @@ static __device__ inline sys__heap_node* sys__computing_base__begin(sys__heap_no
          * something built over it, and the other blocks that have not started yet hold their own. */
         (void)sys__heap_object__release(given);
         computing_base->args[SYS__COMPUTING_BASE__BINDINGS] = mine;
+        /* ⭐ AND IT IS THIS COMPUTATION'S ALONE: nobody else was handed it, so it may move with the computation to
+         *   another block (▶ `sys__scheduler__continue_on`). An environment handed over as itself is never marked. */
+        sys__bindings__zzpackage_set_alone(mine, true);
     }
 
     /* And the reach, on the environment this block will actually read names out of — which is only known

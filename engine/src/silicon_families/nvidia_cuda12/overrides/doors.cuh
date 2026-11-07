@@ -16,6 +16,7 @@
 #include "index.cuh"
 #include "kda.cuh"
 #include "hyper.cuh"
+#include "gated.cuh"
 
 /* Into nn's table, once, when the family is first asked for it. */
 static inline void nvidia_cuda12__override_doors(nn__doors* doors) {
@@ -68,6 +69,18 @@ static inline void nvidia_cuda12__override_doors(nn__doors* doors) {
     doors->attention_absorb_rows         = nvidia_cuda12__override_attention_absorb_rows;
     doors->attention_expand              = nvidia_cuda12__override_attention_expand;
     doors->attention_expand_rows         = nvidia_cuda12__override_attention_expand_rows;
+    doors->turboquant_gemv_groups_n  = nvidia_cuda12__override_turboquant_gemv_groups_n;
+    doors->turboquant_gemv_int8      = nvidia_cuda12__override_turboquant_gemv_int8;
+    doors->rmsnorm                   = nvidia_cuda12__override_rmsnorm;
+    doors->rmsnorm_rows              = nvidia_cuda12__override_rmsnorm_rows;
+    doors->rmsnorm_rotate            = nvidia_cuda12__override_rmsnorm_rotate;
+    doors->rmsnorm_fp32_rows         = nvidia_cuda12__override_rmsnorm_fp32_rows;
+    doors->deltanet_steps_gate       = nvidia_cuda12__override_deltanet_steps_gate;
+    doors->deltanet_gates_rows       = nvidia_cuda12__override_deltanet_gates_rows;
+    doors->gated_rank                = nvidia_cuda12__override_gated_rank;
+    doors->gated_mean                = nvidia_cuda12__override_gated_mean;
+    doors->attention_merge           = nvidia_cuda12__override_attention_merge;
+    doors->vector_penalize           = nvidia_cuda12__override_vector_penalize;
 }
 
 #endif /* SILVANN__SILICON_FAMILIES_NVIDIA_CUDA12_OVERRIDES_DOORS_CUH */

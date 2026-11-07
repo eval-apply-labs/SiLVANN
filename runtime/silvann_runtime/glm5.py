@@ -38,7 +38,7 @@ import numpy as np
 
 from . import experts_file, expert_tier, sampling
 from .vision import video_ram
-from .generate import GENERATE_MOST, Generates
+from .generate import GENERATE_MOST, STOPS_MOST, Generates
 from .autotune import card_memory
 from .machine import own_memory
 from .model_folder import NL, Refused
@@ -731,7 +731,7 @@ class Glm5(Generates):
         if self.SOURCE:
             self._bindings()
         else:
-            m.bind_values(dict(VOCAB=self.VOCAB, STOPS=0, SEEN=sampling.SEEN))      # what the sampler and `generate` read
+            m.bind_values(dict(VOCAB=self.VOCAB, STOPS=STOPS_MOST, SEEN=sampling.SEEN))      # what the sampler and `generate` read
         m.define_programs(self._procedures)
         if self.CPLAN is not None and self.CH and self.EPLAN is not None:
             self._calibrate_line()
@@ -1563,7 +1563,7 @@ class Glm5(Generates):
         tier = self.CPLAN is not None and not self.ON_CARD
         m.bind_values(dict(HIDDEN=H, HIDDEN_BYTES=2 * H, MULT=self.MULT, MEAN=1.0 / self.MULT, VOCAB=self.VOCAB, EPS=self.EPS,
                            RUN=len(run) - (1 if self.MTP is not None else 0), EMB_HALVES=self.EMB_ROW_BYTES // 2, EMB_SCALES=self.EMB_DATA_BYTES // 2,
-                           EMB_BITS=self.EMB_BITS, STOPS=0, SEEN=sampling.SEEN,
+                           EMB_BITS=self.EMB_BITS, STOPS=STOPS_MOST, SEEN=sampling.SEEN,
                            HEAD_CODES=head(self.HPLAN.at_up_data, self.HPLAN.up_data),
                            HEAD_SCALES=head(self.HPLAN.at_down_lut, self.HPLAN.down_lut), HEAD_BITS=self.HEAD_BITS,
                            HAND=self.HAND, HAND_PICKS_AT=self.HAND - 8 * K, HAND_BYTES=2 * (H + K),

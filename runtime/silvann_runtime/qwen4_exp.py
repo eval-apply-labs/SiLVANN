@@ -21,7 +21,7 @@ import threading
 import numpy as np
 
 from . import expert_tier, experts_file
-from .generate import Generates
+from .generate import STOPS_MOST, Generates
 from .model_folder import NL, Refused
 from .ngram_qwen4 import NGram
 
@@ -811,7 +811,7 @@ class Qwen4Exp(Generates):
                       RUN=len(self.run_layers), CONV_K=self.CONV_K, DIL=self.DIL, HIDDEN_BYTES=2 * H,
                       HAND_BYTES=2 * (H + 16), CPU=self.CPU, CARDS=self.CARDS, SOCKETS=self.SOCKETS, ACT_BYTES=self.ACT_BYTES,
                       VERBS=self.VERBS, SEATS=self.CARD_SEATS, PROMPT_CARD=self.PROMPT_CARD, CARD_TIER=self.CARD_GB > 0,
-                      STOPS=0,
+                      STOPS=STOPS_MOST,
                       NOTE_STREAM=expert_tier.NOTE_STREAM,
                       QUARTER=1.0 / self.HC, TWO=2.0, NEG=-1.0, GATE_SIGMOID=1,
                       EMB_HALVES=self.EMB_ROW_BYTES // 2, EMB_SCALES=self.EMB_DATA_BYTES // 2, EMB_BITS=self.EMB_BITS,
@@ -947,7 +947,13 @@ class Qwen4Exp(Generates):
         # ⭐ A CHAIN OF STEPS (▶ qwen4_exp.lisp's chain), the last answering; the experts over two sockets a position whole
         text = ("(chain_position %d %d %d)" % (token, pos, e) if self.SOCKETS == 1
                 else "(begin (position %d %d) (ends %d))" % (token, pos, e))
-        return self.m.run_in(card, text, view=self.view_of(self.SEAT))[1]
+        return self.m.run_in(card, self._inline(text), view=self.view_of(self.SEAT))[1]
+
+    def _inline(self, text):
+        """A seat's program run inline (NN-159): it keeps its card's scratch between its verbs, so with seats no slice gives
+        its block to another seat's step in the middle of it, nor does a wait park it there (▶ sys's
+        `sys__scheduler__compute_inline`). One seat runs as it is."""
+        return "(sys__scheduler__compute_inline '%s)" % text if self.SEATS > 1 else text
 
     def prefill(self, tokens, first, greedy=True, sample=None, rows=True, **_):
         """Positions `first ..` for `tokens`, the next token from the last: a CHUNK at a time as rows (the program's
@@ -984,8 +990,8 @@ class Qwen4Exp(Generates):
             last = a + len(part) == len(tokens)
             on = int(self.PROMPT_CARD and len(part) >= self.CARD_FROM)
             given = " ".join("(sys__node_array__set toks %d %d)" % (r, t) for r, t in enumerate(part))
-            out = self.m.run_in(card, "(begin %s (prompt_rows %d %d %d) (ends %d))" % (given, first + a, len(part), on,
-                                                                                        self._end(greedy, last)),
+            out = self.m.run_in(card, self._inline("(begin %s (prompt_rows %d %d %d) (ends %d))"
+                                                   % (given, first + a, len(part), on, self._end(greedy, last))),
                                 view=self.view_of(self.SEAT))[1]
         return out
 
@@ -994,7 +1000,7 @@ class Qwen4Exp(Generates):
         worker takes each layer's experts — its answer."""
         card = self.place(self.SEAT)[0]
         with self._card_locks[card]:
-            return self.m.run_in(card, text, view=self.view_of(self.SEAT))[1]
+            return self.m.run_in(card, self._inline(text), view=self.view_of(self.SEAT))[1]
 
     def logits(self, seat=None):
         """The logits a head left on seat `seat`'s card — the seat `on_seat` chose's by default."""

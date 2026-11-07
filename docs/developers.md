@@ -21,7 +21,19 @@ program on the host, and each verb launches its arithmetic on the silicon that h
 cores. The machine is a set of **workers**, one a device: the card is worker 0, a CPU socket a worker of the
 `x86_avx2` family, and a program hands work to another worker with `sys__scheduler__add` and reads it with
 `sys__wait`: the work waits on that worker's queue, which several workers can hand work to at once, and its value goes
-into the answer `sys__scheduler__add` handed back (▶ `sys`'s README).
+into the answer `sys__scheduler__add` handed back (▶ `sys`'s README). A computation can also move itself:
+`(sys__scheduler__continue_on cu)` sends it — its bindings and the rest of its program — to block `cu`, where it goes on
+from its next form; onto its own block it goes to the back of the queue. And a machine preempts: a
+computation that has run 50 ms since it began, or since it went on, gives its block up to what waits there, at the end
+of a verb — the runtime boots every machine with `sys__scheduler__slice_us:50000` in `boot_commands` (`Machine.boot`'s
+`slice_us`; `sys__scheduler__slice_cycles:<n>` counts the processor's clock instead, and a machine booted with neither
+preempts nothing). Preemptive but not protected — a verb runs to its end — and a model's steps on one worker share that
+worker's buffers between verbs, so a step that does runs inside `(sys__scheduler__compute_inline 'form)`, which no
+slice gives up and a kill still ends. A verb never waits on another computation: it returns, and the program does the
+waiting — `sys__result` in a `while`, or a step continued on the answer.
+Every request carries the process it is of, inherited by what it asks: `(sys__scheduler__pid)` says which, and
+`(sys__scheduler__kill pid)` takes its queued work off every worker's queue, their answers an error (`SCKL`), and ends
+its steps still running at their next move, or slice; what it did is not undone.
 
 Every package has a README; read `engine/src/README.md` first, then `sys`'s and `nn`'s.
 
@@ -152,7 +164,8 @@ handful of arithmetic primitives (the lanes' sums, a half to a float, the tile i
 kernels are written once against those answers; a family may also override a door with its own code, as
 `amd_rocm6_wave64`, `nvidia_cuda12`, `khronos_opencl2` and `x86_avx2` do for the hottest ones — `nvidia_cuda12` runs
 the GEMMs, the gemvs and the attention's scores on the tensor cores (`mma.sync`), and `x86_avx2` its matrix products
-with AVX-512 where the processor has it, chosen when the library loads (`SILVANN_CPU_AVX512=0` keeps AVX2). Where nn
+with AVX-512 where the processor has it, and its int8 products with VNNI where it has that too, chosen when the
+library loads (`SILVANN_CPU_AVX512=0` keeps AVX2, `SILVANN_CPU_VNNI=0` AVX-512's int8). Where nn
 gives a door a one-row and a many-row form that agree to the bit — the mix of an attention and its causal form, a
 residual and its form over a prompt's rows, a norm and its rows — a family that answers one with its own arithmetic
 answers the other with the same.

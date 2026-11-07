@@ -36,7 +36,7 @@ static __device__ SYS__NOINLINE void sys__opcodes__zzabi_adapter_if(sys__heap_no
 /* The last nine. */
 static __device__ SYS__NOINLINE void sys__opcodes__zzabi_adapter_viewonly(sys__heap_node* base, uint64_t form);
 static __device__ SYS__NOINLINE void sys__opcodes__zzabi_adapter_bindings_set(sys__heap_node* base, uint64_t form);
-static __device__ SYS__NOINLINE void sys__opcodes__zzabi_adapter_wait(sys__heap_node* base, uint64_t form);
+static __device__ SYS__NOINLINE void sys__opcodes__zzpackage_apply_wait(sys__heap_node* base, uint64_t form);
 static __device__ SYS__NOINLINE void sys__opcodes__zzabi_adapter_result(sys__heap_node* base, uint64_t form);
 static __device__ SYS__NOINLINE void sys__opcodes__zzabi_adapter_dict_put(sys__heap_node* base, uint64_t form);
 static __device__ SYS__NOINLINE void sys__opcodes__zzabi_adapter_dict_get(sys__heap_node* base, uint64_t form);
@@ -52,6 +52,10 @@ static __device__ SYS__NOINLINE void sys__opcodes__zzabi_adapter_list_shared_app
 static __device__ SYS__NOINLINE void sys__opcodes__zzabi_adapter_list_shared_take(sys__heap_node* base, uint64_t form);
 static __device__ SYS__NOINLINE void sys__opcodes__zzabi_adapter_list_shared_length(sys__heap_node* base, uint64_t form);
 static __device__ SYS__NOINLINE void sys__opcodes__zzabi_adapter_scheduler_continue(sys__heap_node* base, uint64_t form);
+static __device__ SYS__NOINLINE void sys__opcodes__zzabi_adapter_scheduler_continue_on(sys__heap_node* base, uint64_t form);
+static __device__ SYS__NOINLINE void sys__opcodes__zzabi_adapter_scheduler_pid(sys__heap_node* base, uint64_t form);
+static __device__ SYS__NOINLINE void sys__opcodes__zzabi_adapter_scheduler_kill(sys__heap_node* base, uint64_t form);
+static __device__ SYS__NOINLINE void sys__opcodes__zzabi_adapter_scheduler_preemptive(sys__heap_node* base, uint64_t form);
 static __device__ SYS__NOINLINE void sys__opcodes__zzabi_adapter_scheduler_add(sys__heap_node* base, uint64_t form);
 static __device__ SYS__NOINLINE void sys__opcodes__zzabi_adapter_pad_open(sys__heap_node* base, uint64_t form);
 static __device__ SYS__NOINLINE void sys__opcodes__zzabi_adapter_pad_move(sys__heap_node* base, uint64_t form);

@@ -10,6 +10,7 @@
 #include <avx512fintrin.h>
 #include <avx512bwintrin.h>
 #include <avx512dqintrin.h>
+#include <avx512vnniintrin.h>
 #endif
 #include <stdint.h>
 #include <stdlib.h>
@@ -36,23 +37,23 @@ typedef struct x86_avx2__gemv_call {
     const float* xd;                 /* x widened and split, each run of 32 its even columns then its odd (AVX-512) */
 } x86_avx2__gemv_call;
 
-static inline float x86_avx2__zzprivate_hsum(__m256 a) {
+static inline float x86_avx2__zzpackage_hsum(__m256 a) {
     __m128 r = _mm_add_ps(_mm256_castps256_ps128(a), _mm256_extractf128_ps(a, 1));
     r = _mm_hadd_ps(r, r); r = _mm_hadd_ps(r, r);
     return _mm_cvtss_f32(r);
 }
-static inline float x86_avx2__zzprivate_row_scale(const uint8_t* luts, uint64_t r) {
+static inline float x86_avx2__zzpackage_row_scale(const uint8_t* luts, uint64_t r) {
     return _cvtsh_ss((uint16_t)((uint32_t)luts[r * 2u] | ((uint32_t)luts[r * 2u + 1u] << 8)));
 }
 /* A GEMM row's scale: its own, or none at 16 bits, where a code is the weight (the routers). */
 static inline float x86_avx2__zzprivate_gemm_scale(const uint8_t* luts, uint64_t d, uint64_t r) {
-    return d == 16u ? 1.0f : x86_avx2__zzprivate_row_scale(luts, r);
+    return d == 16u ? 1.0f : x86_avx2__zzpackage_row_scale(luts, r);
 }
-static inline void x86_avx2__zzprivate_write(const x86_avx2__gemv_call* c, uint64_t r, float sum) {
+static inline void x86_avx2__zzpackage_write(const x86_avx2__gemv_call* c, uint64_t r, float sum) {
     c->out[r] = nn__kernels__zzabi_to_half(sum, c->over);
 }
 /* The block's rows: an even share of them, by the pool's block number. */
-static inline void x86_avx2__zzprivate_rows(const x86_avx2__gemv_call* c, uint64_t* r0, uint64_t* r1) {
+static inline void x86_avx2__zzpackage_rows(const x86_avx2__gemv_call* c, uint64_t* r0, uint64_t* r1) {
     const uint64_t b = nn__silicon__block(), n = nn__silicon__blocks();
     *r0 = c->rows * b / n; *r1 = c->rows * (b + 1u) / n;
 }
@@ -66,7 +67,7 @@ static void x86_avx2__zzprivate_exact4(void* a) {
     const __m256i tlo = _mm256_broadcastsi128_si256(_mm_loadu_si128((const __m128i*)lo_b));
     const __m256i thi = _mm256_broadcastsi128_si256(_mm_loadu_si128((const __m128i*)hi_b));
     const __m128i fifteen = _mm_set1_epi8(15);
-    uint64_t r0, r1; x86_avx2__zzprivate_rows(c, &r0, &r1);
+    uint64_t r0, r1; x86_avx2__zzpackage_rows(c, &r0, &r1);
     for (uint64_t r = r0; r < r1; ++r) {
         const uint8_t* row = c->weights + r * c->row_bytes;
         __m256 a0 = _mm256_setzero_ps(), a1 = _mm256_setzero_ps(), a2 = _mm256_setzero_ps(), a3 = _mm256_setzero_ps();
@@ -81,18 +82,18 @@ static void x86_avx2__zzprivate_exact4(void* a) {
             a2 = _mm256_fmadd_ps(_mm256_cvtph_ps(_mm256_extracti128_si256(h0, 1)), _mm256_loadu_ps(c->xf + k + 16u), a2);
             a3 = _mm256_fmadd_ps(_mm256_cvtph_ps(_mm256_extracti128_si256(h1, 1)), _mm256_loadu_ps(c->xf + k + 24u), a3);
         }
-        const float sum = x86_avx2__zzprivate_hsum(_mm256_add_ps(_mm256_add_ps(a0, a1), _mm256_add_ps(a2, a3)));
-        x86_avx2__zzprivate_write(c, r, sum * x86_avx2__zzprivate_row_scale(c->luts, r));
+        const float sum = x86_avx2__zzpackage_hsum(_mm256_add_ps(_mm256_add_ps(a0, a1), _mm256_add_ps(a2, a3)));
+        x86_avx2__zzpackage_write(c, r, sum * x86_avx2__zzpackage_row_scale(c->luts, r));
     }
 }
 static float x86_avx2__zzprivate_levels8[256];
 static inline float x86_avx2__zzprivate_dot8(const uint8_t* row, const float* xf, uint64_t cols);
 static void x86_avx2__zzprivate_exact8(void* a) {
     const x86_avx2__gemv_call* c = (const x86_avx2__gemv_call*)a;
-    uint64_t r0, r1; x86_avx2__zzprivate_rows(c, &r0, &r1);
+    uint64_t r0, r1; x86_avx2__zzpackage_rows(c, &r0, &r1);
     for (uint64_t r = r0; r < r1; ++r)
-        x86_avx2__zzprivate_write(c, r, x86_avx2__zzprivate_dot8(c->weights + r * c->row_bytes, c->xf, c->cols)
-                                        * x86_avx2__zzprivate_row_scale(c->luts, r));
+        x86_avx2__zzpackage_write(c, r, x86_avx2__zzprivate_dot8(c->weights + r * c->row_bytes, c->xf, c->cols)
+                                        * x86_avx2__zzpackage_row_scale(c->luts, r));
 }
 
 /* 16 bits: a code is the weight as a half, and the row has no scale (the routers). */
@@ -104,13 +105,13 @@ static inline float x86_avx2__zzprivate_dot16(const uint16_t* row, const float* 
         a2 = _mm256_fmadd_ps(_mm256_cvtph_ps(_mm_loadu_si128((const __m128i*)(row + k + 16u))), _mm256_loadu_ps(xf + k + 16u), a2);
         a3 = _mm256_fmadd_ps(_mm256_cvtph_ps(_mm_loadu_si128((const __m128i*)(row + k + 24u))), _mm256_loadu_ps(xf + k + 24u), a3);
     }
-    return x86_avx2__zzprivate_hsum(_mm256_add_ps(_mm256_add_ps(a0, a1), _mm256_add_ps(a2, a3)));
+    return x86_avx2__zzpackage_hsum(_mm256_add_ps(_mm256_add_ps(a0, a1), _mm256_add_ps(a2, a3)));
 }
 static void x86_avx2__zzprivate_exact16(void* a) {
     const x86_avx2__gemv_call* c = (const x86_avx2__gemv_call*)a;
-    uint64_t r0, r1; x86_avx2__zzprivate_rows(c, &r0, &r1);
+    uint64_t r0, r1; x86_avx2__zzpackage_rows(c, &r0, &r1);
     for (uint64_t r = r0; r < r1; ++r)
-        x86_avx2__zzprivate_write(c, r, x86_avx2__zzprivate_dot16((const uint16_t*)(const void*)(c->weights + r * c->row_bytes), c->xf, c->cols));
+        x86_avx2__zzpackage_write(c, r, x86_avx2__zzprivate_dot16((const uint16_t*)(const void*)(c->weights + r * c->row_bytes), c->xf, c->cols));
 }
 
 /* ── the int8 route: nn's definition (`kernels.cuh`), x quantised once a call ─────────────────────── */
@@ -120,7 +121,7 @@ static void x86_avx2__zzprivate_int8_4(void* a) {
     const __m256i t8 = _mm256_broadcastsi128_si256(_mm_loadu_si128((const __m128i*)lev));
     const __m128i fifteen = _mm_set1_epi8(15);
     const __m256i ones = _mm256_set1_epi16(1);
-    uint64_t r0, r1; x86_avx2__zzprivate_rows(c, &r0, &r1);
+    uint64_t r0, r1; x86_avx2__zzpackage_rows(c, &r0, &r1);
     for (uint64_t r = r0; r < r1; ++r) {
         const uint8_t* row = c->weights + r * c->row_bytes;
         __m256 acc = _mm256_setzero_ps();
@@ -132,7 +133,7 @@ static void x86_avx2__zzprivate_int8_4(void* a) {
             const __m256i p16 = _mm256_maddubs_epi16(_mm256_abs_epi8(w), _mm256_sign_epi8(xq, w));
             acc = _mm256_fmadd_ps(_mm256_cvtepi32_ps(_mm256_madd_epi16(p16, ones)), _mm256_set1_ps(c->xs[k / 32u]), acc);
         }
-        x86_avx2__zzprivate_write(c, r, x86_avx2__zzprivate_hsum(acc) * x86_avx2__zzprivate_row_scale(c->luts, r) / 127.0f);
+        x86_avx2__zzpackage_write(c, r, x86_avx2__zzpackage_hsum(acc) * x86_avx2__zzpackage_row_scale(c->luts, r) / 127.0f);
     }
 }
 
@@ -207,15 +208,27 @@ static bool x86_avx2__zzprivate_wide8 = false;   /* ...and the 8-bit levels are 
 static X86_AVX2__ZZPRIVATE_AVX512 void x86_avx2__zzprivate_exact4_512(void* a);
 static X86_AVX2__ZZPRIVATE_AVX512 void x86_avx2__zzprivate_exact8_512(void* a);
 static X86_AVX2__ZZPRIVATE_AVX512 void x86_avx2__zzprivate_exact16_512(void* a);
-static X86_AVX2__ZZPRIVATE_AVX512 void x86_avx2__zzprivate_int8_4_512(void* a);
 static X86_AVX2__ZZPRIVATE_AVX512 void x86_avx2__zzprivate_groups_512(void* a);
 static X86_AVX2__ZZPRIVATE_AVX512 void x86_avx2__zzprivate_groups_sum_512(void* a);
-static X86_AVX2__ZZPRIVATE_AVX512 void x86_avx2__zzprivate_groups_i8_512(void* a);
-static X86_AVX2__ZZPRIVATE_AVX512 void x86_avx2__zzprivate_groups_sum_i8_512(void* a);
 static X86_AVX2__ZZPRIVATE_AVX512 void x86_avx2__zzprivate_expert_rows_512(void* a);
 static X86_AVX2__ZZPRIVATE_AVX512 void x86_avx2__zzprivate_expert_groups_512(void* a);
-static X86_AVX2__ZZPRIVATE_AVX512 void x86_avx2__zzprivate_expert_rows_i8_512(void* a);
-static X86_AVX2__ZZPRIVATE_AVX512 void x86_avx2__zzprivate_expert_groups_i8_512(void* a);
+/* ⭐ THE INT8 BODIES, AND THEIR VNNI BUILD — one text, `int8_512.cuh`, built twice under these names (▶ where it is
+ *   included). VNNI does a multiply-add of bytes in one instruction where AVX-512 takes three, the same sums:
+ *   `MEASURED` (measurements/2026-11-06_vnni_dl380.md, a Gold 6252) a prompt's rows through the experts 1.2-1.3x. */
+#define X86_AVX2__ZZPRIVATE_VNNI __attribute__((target("avx512f,avx512bw,avx512vl,avx512dq,avx512vnni,tune=skylake-avx512")))
+#define X86_AVX2__ZZPRIVATE_I8_512(name)  x86_avx2__zzpackage_##name##_512
+#define X86_AVX2__ZZPRIVATE_I8_VNNI(name) x86_avx2__zzpackage_##name##_vnni
+static bool x86_avx2__zzprivate_vnni = false;    /* ...and AVX-512 VNNI, and `SILVANN_CPU_VNNI` is not `0` */
+static X86_AVX2__ZZPRIVATE_AVX512 void X86_AVX2__ZZPRIVATE_I8_512(int8_4)(void* a);
+static X86_AVX2__ZZPRIVATE_AVX512 void X86_AVX2__ZZPRIVATE_I8_512(groups_i8)(void* a);
+static X86_AVX2__ZZPRIVATE_AVX512 void X86_AVX2__ZZPRIVATE_I8_512(groups_sum_i8)(void* a);
+static X86_AVX2__ZZPRIVATE_AVX512 void X86_AVX2__ZZPRIVATE_I8_512(expert_rows_i8)(void* a);
+static X86_AVX2__ZZPRIVATE_AVX512 void X86_AVX2__ZZPRIVATE_I8_512(expert_groups_i8)(void* a);
+static X86_AVX2__ZZPRIVATE_VNNI void X86_AVX2__ZZPRIVATE_I8_VNNI(int8_4)(void* a);
+static X86_AVX2__ZZPRIVATE_VNNI void X86_AVX2__ZZPRIVATE_I8_VNNI(groups_i8)(void* a);
+static X86_AVX2__ZZPRIVATE_VNNI void X86_AVX2__ZZPRIVATE_I8_VNNI(groups_sum_i8)(void* a);
+static X86_AVX2__ZZPRIVATE_VNNI void X86_AVX2__ZZPRIVATE_I8_VNNI(expert_rows_i8)(void* a);
+static X86_AVX2__ZZPRIVATE_VNNI void X86_AVX2__ZZPRIVATE_I8_VNNI(expert_groups_i8)(void* a);
 static X86_AVX2__ZZPRIVATE_AVX512 void x86_avx2__zzprivate_split_512(float* to, const uint16_t* x, uint64_t n);
 
 /* `n` halves of `x` widened into `xf`, and with the AVX-512 bodies split into `xd` as well. */
@@ -301,7 +314,9 @@ static void x86_avx2__override_turboquant_gemv_int8(uint16_t* out, const uint8_t
     x86_avx2__zzpackage_start();
     x86_avx2__zzprivate_quantise_x(x, cols);
     x86_avx2__gemv_call c = { out, weights, luts, row_bytes, rows, cols, d, 0, x86_avx2__zzprivate_xq, x86_avx2__zzprivate_xs, over };
-    x86_avx2__zzpackage_run(x86_avx2__zzprivate_blocks_for(rows), x86_avx2__zzprivate_wide ? x86_avx2__zzprivate_int8_4_512 : x86_avx2__zzprivate_int8_4, &c);
+    x86_avx2__zzpackage_run(x86_avx2__zzprivate_blocks_for(rows),
+                            x86_avx2__zzprivate_vnni ? X86_AVX2__ZZPRIVATE_I8_VNNI(int8_4) : x86_avx2__zzprivate_wide ? X86_AVX2__ZZPRIVATE_I8_512(int8_4)
+                            : x86_avx2__zzprivate_int8_4, &c);
 }
 
 /* ══ ⭐⭐ THE LAYER'S OTHER DOORS — the grouped gemvs, the rotation, the DeltaNet step ═════════════════════════
@@ -323,7 +338,7 @@ static inline float x86_avx2__zzprivate_dot4(const uint8_t* row, const float* xf
         a2 = _mm256_fmadd_ps(_mm256_cvtph_ps(_mm256_extracti128_si256(h0, 1)), _mm256_loadu_ps(xf + k + 16u), a2);
         a3 = _mm256_fmadd_ps(_mm256_cvtph_ps(_mm256_extracti128_si256(h1, 1)), _mm256_loadu_ps(xf + k + 24u), a3);
     }
-    return x86_avx2__zzprivate_hsum(_mm256_add_ps(_mm256_add_ps(a0, a1), _mm256_add_ps(a2, a3)));
+    return x86_avx2__zzpackage_hsum(_mm256_add_ps(_mm256_add_ps(a0, a1), _mm256_add_ps(a2, a3)));
 }
 /* ⛳ FOUR GATHERS AND FOUR SUMS A STEP of 32 columns (the fit check holds `cols` to whole runs of 32): with two, each sum
  *   waited on the FMA before it and the gathers could not overlap — `MEASURED` on the 35B on the CPU alone, ▶ the commit. */
@@ -338,7 +353,7 @@ static inline float x86_avx2__zzprivate_dot8(const uint8_t* row, const float* xf
         a2 = _mm256_fmadd_ps(_mm256_i32gather_ps(x86_avx2__zzprivate_levels8, i2, 4), _mm256_loadu_ps(xf + k + 16u), a2);
         a3 = _mm256_fmadd_ps(_mm256_i32gather_ps(x86_avx2__zzprivate_levels8, i3, 4), _mm256_loadu_ps(xf + k + 24u), a3);
     }
-    return x86_avx2__zzprivate_hsum(_mm256_add_ps(_mm256_add_ps(a0, a1), _mm256_add_ps(a2, a3)));
+    return x86_avx2__zzpackage_hsum(_mm256_add_ps(_mm256_add_ps(a0, a1), _mm256_add_ps(a2, a3)));
 }
 static inline void x86_avx2__zzprivate_tables4(__m256i* tlo, __m256i* thi) {
     const uint16_t* lev = nn__turboquant__zzabi_levels(4u);
@@ -358,7 +373,7 @@ static inline float x86_avx2__zzprivate_group_row(const nn__turboquant__groups* 
                                                   uint64_t cols, __m256i tlo, __m256i thi) {
     const uint8_t* row = (const uint8_t*)(uintptr_t)g->codes[i] + r * (cols * g->d[i] / 8u);
     const float dot = g->d[i] == 4u ? x86_avx2__zzprivate_dot4(row, xf, cols, tlo, thi) : x86_avx2__zzprivate_dot8(row, xf, cols);
-    return dot * x86_avx2__zzprivate_row_scale((const uint8_t*)(uintptr_t)g->luts[i], r);
+    return dot * x86_avx2__zzpackage_row_scale((const uint8_t*)(uintptr_t)g->luts[i], r);
 }
 
 /* the gate_ups: every group's rows, one `x`, the flat row range of this block */
@@ -430,7 +445,7 @@ static inline float x86_avx2__zzprivate_dot_i8_4(const uint8_t* row, const int8_
         const __m256i p16 = _mm256_maddubs_epi16(_mm256_abs_epi8(w), _mm256_sign_epi8(q, w));
         acc = _mm256_fmadd_ps(_mm256_cvtepi32_ps(_mm256_madd_epi16(p16, ones)), _mm256_set1_ps(xs[k / 32u]), acc);
     }
-    return x86_avx2__zzprivate_hsum(acc);
+    return x86_avx2__zzpackage_hsum(acc);
 }
 typedef struct x86_avx2__groups_i8_call {
     uint16_t* out; nn__turboquant__groups g; const int8_t* xq; const float* xs; const uint16_t* w; const uint16_t* residual;
@@ -448,7 +463,7 @@ static void x86_avx2__zzprivate_groups_i8(void* a) {
         const uint8_t* row = (const uint8_t*)(uintptr_t)c->g.codes[i] + r * (c->cols / 2u);
         const float dot = x86_avx2__zzprivate_dot_i8_4(row, c->xq, c->xs, c->cols, t8);
         c->out[c->g.out_at[i] + r] = nn__kernels__zzabi_to_half(
-            dot * x86_avx2__zzprivate_row_scale((const uint8_t*)(uintptr_t)c->g.luts[i], r) / 127.0f, c->over);
+            dot * x86_avx2__zzpackage_row_scale((const uint8_t*)(uintptr_t)c->g.luts[i], r) / 127.0f, c->over);
     }
 }
 static void x86_avx2__zzprivate_groups_sum_i8(void* a) {
@@ -461,7 +476,7 @@ static void x86_avx2__zzprivate_groups_sum_i8(void* a) {
         for (uint64_t i = 0u; i < c->g.count; ++i) {
             const uint8_t* row = (const uint8_t*)(uintptr_t)c->g.codes[i] + r * (c->cols / 2u);
             const float dot = x86_avx2__zzprivate_dot_i8_4(row, c->xq + i * c->cols, c->xs + i * (c->cols / 32u), c->cols, t8);
-            sum += dot * x86_avx2__zzprivate_row_scale((const uint8_t*)(uintptr_t)c->g.luts[i], r) / 127.0f * _cvtsh_ss(c->w[c->g.out_at[i]]);
+            sum += dot * x86_avx2__zzpackage_row_scale((const uint8_t*)(uintptr_t)c->g.luts[i], r) / 127.0f * _cvtsh_ss(c->w[c->g.out_at[i]]);
         }
         c->out[r] = nn__kernels__zzabi_to_half(_cvtsh_ss(c->residual[r]) + sum, c->over);
     }
@@ -481,7 +496,9 @@ static void x86_avx2__override_gemv_groups_int8(uint16_t* out, nn__turboquant__g
     uint64_t total = 0u;
     for (uint64_t i = 0u; i < g.count; ++i) total += g.rows[i];
     x86_avx2__groups_i8_call c = { out, g, x86_avx2__zzprivate_xq, x86_avx2__zzprivate_xs, 0, 0, total, cols, over };
-    x86_avx2__zzpackage_run(x86_avx2__zzprivate_blocks_for(total), x86_avx2__zzprivate_wide ? x86_avx2__zzprivate_groups_i8_512 : x86_avx2__zzprivate_groups_i8, &c);
+    x86_avx2__zzpackage_run(x86_avx2__zzprivate_blocks_for(total),
+                            x86_avx2__zzprivate_vnni ? X86_AVX2__ZZPRIVATE_I8_VNNI(groups_i8) : x86_avx2__zzprivate_wide ? X86_AVX2__ZZPRIVATE_I8_512(groups_i8)
+                            : x86_avx2__zzprivate_groups_i8, &c);
 }
 static void x86_avx2__override_gemv_groups_sum_int8(uint16_t* out, nn__turboquant__groups g, const uint16_t* x, const uint16_t* w,
                                                     const uint16_t* residual, uint64_t rows, uint64_t cols, unsigned int* over) {
@@ -492,7 +509,8 @@ static void x86_avx2__override_gemv_groups_sum_int8(uint16_t* out, nn__turboquan
     x86_avx2__zzprivate_quantise_x(x, g.count * cols);
     x86_avx2__groups_i8_call c = { out, g, x86_avx2__zzprivate_xq, x86_avx2__zzprivate_xs, w, residual, rows, cols, over };
     x86_avx2__zzpackage_run(x86_avx2__zzprivate_blocks_for(rows),
-                            x86_avx2__zzprivate_wide ? x86_avx2__zzprivate_groups_sum_i8_512 : x86_avx2__zzprivate_groups_sum_i8, &c);
+                            x86_avx2__zzprivate_vnni ? X86_AVX2__ZZPRIVATE_I8_VNNI(groups_sum_i8) : x86_avx2__zzprivate_wide ? X86_AVX2__ZZPRIVATE_I8_512(groups_sum_i8)
+                            : x86_avx2__zzprivate_groups_sum_i8, &c);
 }
 
 /* ── THE ROTATION: an fp32 butterfly a 512-block, a block a pool block, rounded to a half once ───────────── */
@@ -628,6 +646,63 @@ static void x86_avx2__override_vector_add(uint16_t* z, const uint16_t* x, const 
     x86_avx2__pointwise_call c = { z, x, y, n, over };
     if (n <= X86_AVX2__ZZPRIVATE_CALLER_HALVES) { x86_avx2__zzprivate_add_run(&c, 0u, n); return; }
     x86_avx2__zzpackage_run((uint32_t)((n + X86_AVX2__ZZPRIVATE_RUN_HALVES - 1u) / X86_AVX2__ZZPRIVATE_RUN_HALVES), x86_avx2__zzprivate_add, &c);
+}
+
+/* ⭐ THE CLAMPED SWIGLU A RUN OF ELEMENTS A POOL BLOCK — `act = silu(min(g, limit)) · clamp(u, −limit, limit)` for `pairs`
+ *   pairs of `n`. nn's body gives element `i` to block `i mod blocks` (a block a thread here, ▶ the zero and the add above)
+ *   and divides for its pair at every element; here a block takes a run of X86_AVX2__ZZPRIVATE_SWIGLU_RUN elements in
+ *   order, eight at a time through F16C. The arithmetic is nn's: the clamps (a NaN kept, as nn's comparisons keep it — MINPS
+ *   and MAXPS answer their second operand for a NaN), `nn__silicon__expf` an element (libm's `expf` here), the quotient and
+ *   the product in floats, rounded once — so its bytes are nn's body's. */
+#define X86_AVX2__ZZPRIVATE_SWIGLU_RUN 512u
+typedef struct x86_avx2__swiglu_call {
+    uint16_t* act; const uint16_t* gu; uint64_t pairs, n; float limit; unsigned int* over;
+} x86_avx2__swiglu_call;
+static void x86_avx2__zzprivate_swiglu_clamped(void* a) {
+    const x86_avx2__swiglu_call* c = (const x86_avx2__swiglu_call*)a;
+    const uint64_t all = c->pairs * c->n, first = (uint64_t)nn__silicon__block() * X86_AVX2__ZZPRIVATE_SWIGLU_RUN;
+    const uint64_t end = first + X86_AVX2__ZZPRIVATE_SWIGLU_RUN < all ? first + X86_AVX2__ZZPRIVATE_SWIGLU_RUN : all;
+    const __m256 top = _mm256_set1_ps(c->limit), bottom = _mm256_set1_ps(-c->limit), one = _mm256_set1_ps(1.0f);
+    const __m256 inf = _mm256_set1_ps(INFINITY), magnitude = _mm256_castsi256_ps(_mm256_set1_epi32(0x7FFFFFFF));
+    int hit = 0;
+    for (uint64_t i = first; i < end;) {
+        const uint64_t p = i / c->n, stop = (p + 1u) * c->n < end ? (p + 1u) * c->n : end, len = stop - i;
+        const uint16_t* g = c->gu + i + p * c->n;        /* element i's gate: pair p's gates at i − p·n, its ups n on */
+        const uint16_t* u = g + c->n;
+        uint16_t* o = c->act + i;
+        uint64_t k = 0u;
+        for (; k + 8u <= len; k += 8u) {
+            const __m256 gv = _mm256_min_ps(top, _mm256_cvtph_ps(_mm_loadu_si128((const __m128i*)(g + k))));
+            const __m256 uv = _mm256_max_ps(bottom, _mm256_min_ps(top, _mm256_cvtph_ps(_mm_loadu_si128((const __m128i*)(u + k)))));
+            float gf[8], e[8];
+            _mm256_storeu_ps(gf, gv);
+            for (int t = 0; t < 8; ++t) e[t] = nn__silicon__expf(-gf[t]);
+            const __m256 v = _mm256_mul_ps(_mm256_div_ps(gv, _mm256_add_ps(one, _mm256_loadu_ps(e))), uv);
+            const __m128i h = _mm256_cvtps_ph(v, _MM_FROUND_TO_NEAREST_INT);
+            _mm_storeu_si128((__m128i*)(o + k), h);
+            const __m256 finite = _mm256_cmp_ps(_mm256_and_ps(v, magnitude), inf, _CMP_LT_OQ);
+            const __m256 infinite = _mm256_cmp_ps(_mm256_and_ps(_mm256_cvtph_ps(h), magnitude), inf, _CMP_EQ_OQ);
+            hit |= _mm256_movemask_ps(_mm256_and_ps(finite, infinite));
+        }
+        for (; k < len; ++k) {
+            float gs = _cvtsh_ss(g[k]), us = _cvtsh_ss(u[k]);
+            gs = gs > c->limit ? c->limit : gs;
+            us = us > c->limit ? c->limit : (us < -c->limit ? -c->limit : us);
+            o[k] = nn__kernels__zzabi_to_half(gs / (1.0f + nn__silicon__expf(-gs)) * us, c->over);
+        }
+        i = stop;
+    }
+    if (hit) *c->over = NN__KERNELS__OVERFLOWED;
+}
+static void x86_avx2__override_swiglu_clamped(uint16_t* act, const uint16_t* gu, uint64_t pairs, uint64_t n, float limit,
+                                              unsigned int* over) {
+    if (pairs == 0u || n == 0u) {
+        nn__swiglu__zzabi_launch_clamped(act, gu, pairs, n, limit, over);
+        return;
+    }
+    x86_avx2__swiglu_call c = { act, gu, pairs, n, limit, over };
+    x86_avx2__zzpackage_run((uint32_t)((pairs * n + X86_AVX2__ZZPRIVATE_SWIGLU_RUN - 1u) / X86_AVX2__ZZPRIVATE_SWIGLU_RUN),
+                            x86_avx2__zzprivate_swiglu_clamped, &c);
 }
 
 /* ── THE DELTANET STEP: a head a pool block, eight of its state's columns at a time ──────────────────────── */
@@ -834,7 +909,7 @@ static inline float x86_avx2__zzprivate_dotf(const float* a, const float* b, uin
         a2 = _mm256_fmadd_ps(_mm256_load_ps(a + k + 16u), _mm256_loadu_ps(b + k + 16u), a2);
         a3 = _mm256_fmadd_ps(_mm256_load_ps(a + k + 24u), _mm256_loadu_ps(b + k + 24u), a3);
     }
-    return x86_avx2__zzprivate_hsum(_mm256_add_ps(_mm256_add_ps(a0, a1), _mm256_add_ps(a2, a3)));
+    return x86_avx2__zzpackage_hsum(_mm256_add_ps(_mm256_add_ps(a0, a1), _mm256_add_ps(a2, a3)));
 }
 /* A pair's product with a decoded row, weighted into the running sum or rounded into `out`. */
 static inline void x86_avx2__zzprivate_put(float v, const uint32_t* rows, const uint16_t* w, uint64_t j, uint64_t out_rows, uint64_t r,
@@ -884,7 +959,7 @@ static inline void x86_avx2__zzprivate_three_rows(const float* const* w, const f
     }
     for (int a = 0; a < 3; ++a)
         for (uint64_t q = 0; q < n; ++q)
-            v[a][q] = x86_avx2__zzprivate_hsum(_mm256_add_ps(_mm256_add_ps(keep[0][a][q], keep[1][a][q]), _mm256_add_ps(keep[2][a][q], keep[3][a][q])));
+            v[a][q] = x86_avx2__zzpackage_hsum(_mm256_add_ps(_mm256_add_ps(keep[0][a][q], keep[1][a][q]), _mm256_add_ps(keep[2][a][q], keep[3][a][q])));
 }
 /* Rows `r` to `r + 2` of a matrix against their pairs, decoded once into the thread's scratch. */
 static inline void x86_avx2__zzprivate_rows3_pairs(uint64_t d, const uint8_t* const* row, const float* scale, const float* xf,
@@ -1061,7 +1136,7 @@ static void x86_avx2__zzprivate_quantise_rows(void* a) {
  * not kept in `w8`, with the four-pair loop's lanes, its integer sums a block, its float step a block and its sum, so its
  * bytes; the row two ahead — `cols` bytes on — fetched into L2 as it is read. `MEASURED`
  * (measurements/2026-10-30_nn145_int8_bodies_dl380.md): GLM's gate+up at a row an expert through `expert_groups_int8` on
- * one core of an E5-2680 v4, 4.5 -> 5.9 GB/s. ▶ `row_few_i8_512`. */
+ * one core of an E5-2680 v4, 4.5 -> 5.9 GB/s. ▶ `row_few_i8` in `int8_512.cuh`. */
 static inline void x86_avx2__zzprivate_row_few_i8(const uint8_t* row, float scale, const int8_t* xq, const float* xs, uint64_t x0,
                                                   const uint32_t* rows, const uint16_t* w, uint64_t count, uint64_t cols,
                                                   uint64_t out_rows, uint64_t r, uint16_t* out, float* acc, unsigned int* over,
@@ -1091,7 +1166,7 @@ static inline void x86_avx2__zzprivate_row_few_i8(const uint8_t* row, float scal
         for (uint64_t q = 0; q < count; ++q) f[q] = _mm256_fmadd_ps(_mm256_cvtepi32_ps(s[q]), _mm256_set1_ps(sr[q][B]), f[q]);
     }
     for (uint64_t q = 0; q < count; ++q) {
-        const float v = x86_avx2__zzprivate_hsum(f[q]) * scale / 127.0f;
+        const float v = x86_avx2__zzpackage_hsum(f[q]) * scale / 127.0f;
         const uint64_t at = (uint64_t)rows[2u * q + 1u] * out_rows + r;
         if (out) out[at] = nn__kernels__zzabi_to_half(v, over);
         else acc[at] += v * _cvtsh_ss(w[rows[2u * q]]);
@@ -1137,7 +1212,7 @@ static inline void x86_avx2__zzprivate_row_pairs_i8(const uint8_t* row, float sc
             for (uint64_t q = 0; q < n; ++q) f[q] = _mm256_fmadd_ps(_mm256_cvtepi32_ps(s4[q]), _mm256_set1_ps(sr[q][B]), f[q]);
         }
         for (uint64_t q = 0; q < n; ++q) {
-            const float v = x86_avx2__zzprivate_hsum(f[q]) * scale / 127.0f;
+            const float v = x86_avx2__zzpackage_hsum(f[q]) * scale / 127.0f;
             const uint64_t at = (uint64_t)rows[2u * (j + q) + 1u] * out_rows + r;
             if (out) out[at] = nn__kernels__zzabi_to_half(v, over);
             else acc[at] += v * _cvtsh_ss(w[rows[2u * (j + q)]]);
@@ -1149,7 +1224,7 @@ static void x86_avx2__zzprivate_expert_rows_i8(void* a) {
     const __m256i t8 = _mm256_broadcastsi128_si256(_mm_loadu_si128((const __m128i*)nn__turboquant__zzabi_levels_i8(4u)));
     const uint64_t b = nn__silicon__block(), n = nn__silicon__blocks(), row_bytes = c->cols / 2u;
     for (uint64_t r = c->out_rows * b / n; r < c->out_rows * (b + 1u) / n; ++r)
-        x86_avx2__zzprivate_row_pairs_i8(c->weights + r * row_bytes, x86_avx2__zzprivate_row_scale(c->luts, r), c->xq, c->xs, c->x0, c->rows,
+        x86_avx2__zzprivate_row_pairs_i8(c->weights + r * row_bytes, x86_avx2__zzpackage_row_scale(c->luts, r), c->xq, c->xs, c->x0, c->rows,
                                          c->w, c->count, c->cols, c->out_rows, r, c->out, c->acc, c->over, t8);
 }
 static void x86_avx2__zzprivate_expert_groups_i8(void* a) {
@@ -1162,7 +1237,7 @@ static void x86_avx2__zzprivate_expert_groups_i8(void* a) {
         while (t >= base + c->g.out_rows[i]) { base += c->g.out_rows[i]; ++i; }
         const uint64_t r = t - base;
         x86_avx2__zzprivate_row_pairs_i8((const uint8_t*)(uintptr_t)c->g.codes[i] + r * (c->cols / 2u),
-                                         x86_avx2__zzprivate_row_scale((const uint8_t*)(uintptr_t)c->g.luts[i], r), c->xq, c->xs, c->x0,
+                                         x86_avx2__zzpackage_row_scale((const uint8_t*)(uintptr_t)c->g.luts[i], r), c->xq, c->xs, c->x0,
                                          c->rows + 2u * c->g.pairs_at[i], 0, c->g.pairs[i], c->cols, c->g.out_rows[i], r,
                                          c->out + c->g.out_at[i], 0, c->over, t8);
     }
@@ -1197,7 +1272,8 @@ static void x86_avx2__override_expert_rows_sum_int8(float* acc, const uint8_t* w
     }
     c.acc = acc; c.weights = weights; c.luts = luts; c.rows = rows; c.w = w; c.count = count; c.out_rows = out_rows;
     x86_avx2__zzpackage_run(x86_avx2__zzprivate_blocks_for(out_rows),
-                            x86_avx2__zzprivate_wide ? x86_avx2__zzprivate_expert_rows_i8_512 : x86_avx2__zzprivate_expert_rows_i8, &c);
+                            x86_avx2__zzprivate_vnni ? X86_AVX2__ZZPRIVATE_I8_VNNI(expert_rows_i8) : x86_avx2__zzprivate_wide ? X86_AVX2__ZZPRIVATE_I8_512(expert_rows_i8)
+                            : x86_avx2__zzprivate_expert_rows_i8, &c);
 }
 static void x86_avx2__override_expert_groups_int8(uint16_t* out, nn__expert__groups g, const uint16_t* x, const uint32_t* rows,
                                                   uint64_t cols, unsigned int* over) {
@@ -1215,7 +1291,8 @@ static void x86_avx2__override_expert_groups_int8(uint16_t* out, nn__expert__gro
     }
     c.out = out; c.rows = rows; c.g = g; c.total = total; c.over = over;
     x86_avx2__zzpackage_run(x86_avx2__zzprivate_blocks_for(total),
-                            x86_avx2__zzprivate_wide ? x86_avx2__zzprivate_expert_groups_i8_512 : x86_avx2__zzprivate_expert_groups_i8, &c);
+                            x86_avx2__zzprivate_vnni ? X86_AVX2__ZZPRIVATE_I8_VNNI(expert_groups_i8) : x86_avx2__zzprivate_wide ? X86_AVX2__ZZPRIVATE_I8_512(expert_groups_i8)
+                            : x86_avx2__zzprivate_expert_groups_i8, &c);
 }
 
 /* ── THE ROTATION A HEAD AT A TIME — `hadamard_blocks`, a butterfly a block ─────────────────────────────────────────
@@ -1365,18 +1442,18 @@ static X86_AVX2__ZZPRIVATE_AVX512 inline float x86_avx2__zzprivate_dot8_512(cons
 static X86_AVX2__ZZPRIVATE_AVX512 void x86_avx2__zzprivate_exact4_512(void* a) {
     const x86_avx2__gemv_call* c = (const x86_avx2__gemv_call*)a;
     __m512 t4; __m512i t8[4]; x86_avx2__zzprivate_tables_512(&t4, t8);
-    uint64_t r0, r1; x86_avx2__zzprivate_rows(c, &r0, &r1);
+    uint64_t r0, r1; x86_avx2__zzpackage_rows(c, &r0, &r1);
     for (uint64_t r = r0; r < r1; ++r)
-        x86_avx2__zzprivate_write(c, r, x86_avx2__zzprivate_dot4_512(c->weights + r * c->row_bytes, c->xd, c->cols, t4)
-                                        * x86_avx2__zzprivate_row_scale(c->luts, r));
+        x86_avx2__zzpackage_write(c, r, x86_avx2__zzprivate_dot4_512(c->weights + r * c->row_bytes, c->xd, c->cols, t4)
+                                        * x86_avx2__zzpackage_row_scale(c->luts, r));
 }
 static X86_AVX2__ZZPRIVATE_AVX512 void x86_avx2__zzprivate_exact8_512(void* a) {
     const x86_avx2__gemv_call* c = (const x86_avx2__gemv_call*)a;
     __m512 t4; __m512i t8[4]; x86_avx2__zzprivate_tables_512(&t4, t8);
-    uint64_t r0, r1; x86_avx2__zzprivate_rows(c, &r0, &r1);
+    uint64_t r0, r1; x86_avx2__zzpackage_rows(c, &r0, &r1);
     for (uint64_t r = r0; r < r1; ++r)
-        x86_avx2__zzprivate_write(c, r, x86_avx2__zzprivate_dot8_512(c->weights + r * c->row_bytes, c->xf, c->cols, t8)
-                                        * x86_avx2__zzprivate_row_scale(c->luts, r));
+        x86_avx2__zzpackage_write(c, r, x86_avx2__zzprivate_dot8_512(c->weights + r * c->row_bytes, c->xf, c->cols, t8)
+                                        * x86_avx2__zzpackage_row_scale(c->luts, r));
 }
 /* One 16-bit row's product with `xf`. */
 static X86_AVX2__ZZPRIVATE_AVX512 inline float x86_avx2__zzprivate_dot16_512(const uint16_t* row, const float* xf, uint64_t cols) {
@@ -1396,16 +1473,16 @@ static X86_AVX2__ZZPRIVATE_AVX512 inline float x86_avx2__zzprivate_dot16_512(con
 }
 static X86_AVX2__ZZPRIVATE_AVX512 void x86_avx2__zzprivate_exact16_512(void* a) {
     const x86_avx2__gemv_call* c = (const x86_avx2__gemv_call*)a;
-    uint64_t r0, r1; x86_avx2__zzprivate_rows(c, &r0, &r1);
+    uint64_t r0, r1; x86_avx2__zzpackage_rows(c, &r0, &r1);
     for (uint64_t r = r0; r < r1; ++r)
-        x86_avx2__zzprivate_write(c, r, x86_avx2__zzprivate_dot16_512((const uint16_t*)(const void*)(c->weights + r * c->row_bytes), c->xf, c->cols));
+        x86_avx2__zzpackage_write(c, r, x86_avx2__zzprivate_dot16_512((const uint16_t*)(const void*)(c->weights + r * c->row_bytes), c->xf, c->cols));
 }
 static X86_AVX2__ZZPRIVATE_AVX512 inline float x86_avx2__zzprivate_group_row_512(const nn__turboquant__groups* g, uint64_t i, uint64_t r,
                                                                                  const float* xf, const float* xd, uint64_t cols,
                                                                                  __m512 t4, const __m512i* t8) {
     const uint8_t* row = (const uint8_t*)(uintptr_t)g->codes[i] + r * (cols * g->d[i] / 8u);
     const float dot = g->d[i] == 4u ? x86_avx2__zzprivate_dot4_512(row, xd, cols, t4) : x86_avx2__zzprivate_dot8_512(row, xf, cols, t8);
-    return dot * x86_avx2__zzprivate_row_scale((const uint8_t*)(uintptr_t)g->luts[i], r);
+    return dot * x86_avx2__zzpackage_row_scale((const uint8_t*)(uintptr_t)g->luts[i], r);
 }
 static X86_AVX2__ZZPRIVATE_AVX512 void x86_avx2__zzprivate_groups_512(void* a) {
     const x86_avx2__groups_call* c = (const x86_avx2__groups_call*)a;
@@ -1430,83 +1507,6 @@ static X86_AVX2__ZZPRIVATE_AVX512 void x86_avx2__zzprivate_groups_sum_512(void* 
         for (uint64_t i = 0u; i < c->g.count; ++i)
             sum += x86_avx2__zzprivate_group_row_512(&c->g, i, r, c->xf + i * c->cols, c->xd + i * c->cols, c->cols, t4, t8)
                  * _cvtsh_ss(c->w[c->g.out_at[i]]);
-        c->out[r] = nn__kernels__zzabi_to_half(_cvtsh_ss(c->residual[r]) + sum, c->over);
-    }
-}
-
-/* ── the int8 gemvs ── */
-/* One 4-bit row against `x` quantised in blocks of 32 — a decoded position's experts (`groups_i8_512`, `groups_sum_i8_512`).
- * The row two ahead — `cols` bytes on, a row being `cols / 2` — is fetched into L2 as this one is read: a prefetch never
- * faults, so past a thread's last row or a matrix's it costs nothing, and the arithmetic is untouched. `MEASURED`
- * (measurements/2026-10-30_nn145_threads_dl380.md, a Gold 6132 socket, GLM's gate+up over memory no call has read): one
- * core 7.8 -> 12.1 GB/s, as fast as a plain read; seven 54 -> 72; fourteen 78 either way, the socket's memory. */
-static X86_AVX2__ZZPRIVATE_AVX512 inline float x86_avx2__zzprivate_dot_i8_4_512(const uint8_t* row, const int8_t* xq, const float* xs, uint64_t cols,
-                                                                                __m512i t8) {
-    const __m512i nibbles = _mm512_set1_epi16(0x0F0F), ones = _mm512_set1_epi16(1);
-    __m512 acc = _mm512_setzero_ps();
-    uint64_t k = 0;
-    for (; k + 64u <= cols; k += 64u) {
-        _mm_prefetch((const char*)(row + k / 2u + cols), _MM_HINT_T1);
-        const __m512i u = _mm512_cvtepu8_epi16(_mm256_loadu_si256((const __m256i*)(row + k / 2u)));
-        /* (u | u << 4) & 0x0F0F: the low nibble in the word's first byte, the high one in its second — the columns' order */
-        const __m512i idx = _mm512_ternarylogic_epi32(u, _mm512_slli_epi16(u, 4), nibbles, 0xA8);
-        const __m512i w = _mm512_shuffle_epi8(t8, idx);
-        const __m512i q = _mm512_loadu_si512((const void*)(xq + k));
-        const __m512i sq = _mm512_mask_sub_epi8(q, _mm512_movepi8_mask(w), _mm512_setzero_si512(), q);
-        const __m512i p = _mm512_madd_epi16(_mm512_maddubs_epi16(_mm512_abs_epi8(w), sq), ones);
-        const __m512 s = _mm512_insertf32x8(_mm512_set1_ps(xs[k / 32u]), _mm256_set1_ps(xs[k / 32u + 1u]), 1);
-        acc = _mm512_fmadd_ps(_mm512_cvtepi32_ps(p), s, acc);
-    }
-    float sum = _mm512_reduce_add_ps(acc);
-    if (k < cols) {                                     /* a last block of 32, as the AVX2 body has it */
-        const __m128i fifteen = _mm_set1_epi8(15);
-        const __m128i v = _mm_loadu_si128((const __m128i*)(row + k / 2u));
-        const __m128i lo = _mm_and_si128(v, fifteen), hi = _mm_and_si128(_mm_srli_epi16(v, 4), fifteen);
-        const __m256i w = _mm256_shuffle_epi8(_mm512_castsi512_si256(t8), _mm256_set_m128i(_mm_unpackhi_epi8(lo, hi), _mm_unpacklo_epi8(lo, hi)));
-        const __m256i q = _mm256_loadu_si256((const __m256i*)(xq + k));
-        const __m256i p16 = _mm256_maddubs_epi16(_mm256_abs_epi8(w), _mm256_sign_epi8(q, w));
-        sum += x86_avx2__zzprivate_hsum(_mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_madd_epi16(p16, _mm256_set1_epi16(1))), _mm256_set1_ps(xs[k / 32u])));
-    }
-    return sum;
-}
-static X86_AVX2__ZZPRIVATE_AVX512 inline __m512i x86_avx2__zzprivate_table_i8_512(void) {
-    return _mm512_broadcast_i32x4(_mm_loadu_si128((const __m128i*)nn__turboquant__zzabi_levels_i8(4u)));
-}
-static X86_AVX2__ZZPRIVATE_AVX512 void x86_avx2__zzprivate_int8_4_512(void* a) {
-    const x86_avx2__gemv_call* c = (const x86_avx2__gemv_call*)a;
-    const __m512i t8 = x86_avx2__zzprivate_table_i8_512();
-    uint64_t r0, r1; x86_avx2__zzprivate_rows(c, &r0, &r1);
-    for (uint64_t r = r0; r < r1; ++r)
-        x86_avx2__zzprivate_write(c, r, x86_avx2__zzprivate_dot_i8_4_512(c->weights + r * c->row_bytes, c->xq, c->xs, c->cols, t8)
-                                        * x86_avx2__zzprivate_row_scale(c->luts, r) / 127.0f);
-}
-static X86_AVX2__ZZPRIVATE_AVX512 void x86_avx2__zzprivate_groups_i8_512(void* a) {
-    const x86_avx2__groups_i8_call* c = (const x86_avx2__groups_i8_call*)a;
-    const __m512i t8 = x86_avx2__zzprivate_table_i8_512();
-    const uint64_t b = nn__silicon__block(), n = nn__silicon__blocks();
-    const uint64_t t0 = c->rows * b / n, t1 = c->rows * (b + 1u) / n;
-    uint64_t i = 0u, base = 0u;
-    for (uint64_t t = t0; t < t1; ++t) {
-        while (t >= base + c->g.rows[i]) { base += c->g.rows[i]; ++i; }
-        const uint64_t r = t - base;
-        const uint8_t* row = (const uint8_t*)(uintptr_t)c->g.codes[i] + r * (c->cols / 2u);
-        const float dot = x86_avx2__zzprivate_dot_i8_4_512(row, c->xq, c->xs, c->cols, t8);
-        c->out[c->g.out_at[i] + r] = nn__kernels__zzabi_to_half(
-            dot * x86_avx2__zzprivate_row_scale((const uint8_t*)(uintptr_t)c->g.luts[i], r) / 127.0f, c->over);
-    }
-}
-static X86_AVX2__ZZPRIVATE_AVX512 void x86_avx2__zzprivate_groups_sum_i8_512(void* a) {
-    const x86_avx2__groups_i8_call* c = (const x86_avx2__groups_i8_call*)a;
-    const __m512i t8 = x86_avx2__zzprivate_table_i8_512();
-    const uint64_t b = nn__silicon__block(), n = nn__silicon__blocks();
-    const uint64_t r0 = c->rows * b / n, r1 = c->rows * (b + 1u) / n;
-    for (uint64_t r = r0; r < r1; ++r) {
-        float sum = 0.0f;
-        for (uint64_t i = 0u; i < c->g.count; ++i) {
-            const uint8_t* row = (const uint8_t*)(uintptr_t)c->g.codes[i] + r * (c->cols / 2u);
-            const float dot = x86_avx2__zzprivate_dot_i8_4_512(row, c->xq + i * c->cols, c->xs + i * (c->cols / 32u), c->cols, t8);
-            sum += dot * x86_avx2__zzprivate_row_scale((const uint8_t*)(uintptr_t)c->g.luts[i], r) / 127.0f * _cvtsh_ss(c->w[c->g.out_at[i]]);
-        }
         c->out[r] = nn__kernels__zzabi_to_half(_cvtsh_ss(c->residual[r]) + sum, c->over);
     }
 }
@@ -1781,130 +1781,26 @@ static X86_AVX2__ZZPRIVATE_AVX512 void x86_avx2__zzprivate_expert_groups_512(voi
     }
 }
 
-/* ── the expert-major GEMM in integers: the row's levels once, 64 at a step, then its pairs four at a time ── */
-/* `n` pairs (at most 4) against a row's int8 levels `w8`: a block's products summed in integers, one float step a block,
- * `v[q]` pair `q`'s sum. ⛳ Called with a literal 4 for a full four, so the sums stay in registers. */
-static X86_AVX2__ZZPRIVATE_AVX512 inline void x86_avx2__zzprivate_pairs_i8_512(const int8_t* w8, uint64_t cols, const int8_t* const* xr,
-                                                                               const float* const* sr, uint64_t n, float* v) {
-    const __m512i ones = _mm512_set1_epi16(1);
-    const uint64_t per = cols / NN__EXPERT__INT8_BLOCK;
-    __m512 f[4] = {_mm512_setzero_ps(), _mm512_setzero_ps(), _mm512_setzero_ps(), _mm512_setzero_ps()};
-    for (uint64_t B = 0; B < per; ++B) {
-        __m512i s4[4] = {_mm512_setzero_si512(), _mm512_setzero_si512(), _mm512_setzero_si512(), _mm512_setzero_si512()};
-        for (uint64_t k = B * NN__EXPERT__INT8_BLOCK; k < (B + 1u) * NN__EXPERT__INT8_BLOCK; k += 64u) {
-            const __m512i wv = _mm512_load_si512((const void*)(w8 + k)), aw = _mm512_abs_epi8(wv);
-            const __mmask64 neg = _mm512_movepi8_mask(wv);
-            for (uint64_t q = 0; q < n; ++q) {
-                const __m512i xv = _mm512_loadu_si512((const void*)(xr[q] + k));
-                s4[q] = _mm512_add_epi32(s4[q], _mm512_madd_epi16(_mm512_maddubs_epi16(
-                            aw, _mm512_mask_sub_epi8(xv, neg, _mm512_setzero_si512(), xv)), ones));
-            }
-        }
-        for (uint64_t q = 0; q < n; ++q) f[q] = _mm512_fmadd_ps(_mm512_cvtepi32_ps(s4[q]), _mm512_set1_ps(sr[q][B]), f[q]);
-    }
-    for (uint64_t q = 0; q < n; ++q) v[q] = _mm512_reduce_add_ps(f[q]);
-}
-/* One or two pairs — an expert one or two of a chunk's rows picked: the row's levels made in a register and used at once,
- * not kept in `w8`, with `pairs_i8_512`'s lanes, its integer sums a block, its float step a block and its reduction, so its
- * bytes; the row two ahead fetched into L2. `MEASURED` (measurements/2026-10-30_nn145_int8_bodies_dl380.md): GLM's gate+up
- * at a row an expert through `expert_groups_int8` on one core of a Gold 6132, 6.1 -> 8.9 GB/s, GLM's logits the same bit
- * for bit. */
-static X86_AVX2__ZZPRIVATE_AVX512 inline void x86_avx2__zzprivate_row_few_i8_512(const uint8_t* row, float scale, const int8_t* xq,
-                                                                                 const float* xs, uint64_t x0, const uint32_t* rows,
-                                                                                 const uint16_t* w, uint64_t count, uint64_t cols,
-                                                                                 uint64_t out_rows, uint64_t r, uint16_t* out, float* acc,
-                                                                                 unsigned int* over, __m512i t8) {
-    const __m512i nibbles = _mm512_set1_epi16(0x0F0F), ones = _mm512_set1_epi16(1);
-    const uint64_t per = cols / NN__EXPERT__INT8_BLOCK;
-    const int8_t* xr[2] = { xq, xq };
-    const float* sr[2] = { xs, xs };
-    for (uint64_t q = 0; q < count; ++q) {
-        const uint64_t xrow = (uint64_t)rows[2u * q] - x0;
-        xr[q] = xq + xrow * cols; sr[q] = xs + xrow * per;
-    }
-    __m512 f[2] = {_mm512_setzero_ps(), _mm512_setzero_ps()};
-    for (uint64_t B = 0; B < per; ++B) {
-        __m512i s[2] = {_mm512_setzero_si512(), _mm512_setzero_si512()};
-        for (uint64_t k = B * NN__EXPERT__INT8_BLOCK; k < (B + 1u) * NN__EXPERT__INT8_BLOCK; k += 64u) {
-            _mm_prefetch((const char*)(row + k / 2u + cols), _MM_HINT_T1);
-            const __m512i u = _mm512_cvtepu8_epi16(_mm256_loadu_si256((const __m256i*)(row + k / 2u)));
-            const __m512i wv = _mm512_shuffle_epi8(t8, _mm512_ternarylogic_epi32(u, _mm512_slli_epi16(u, 4), nibbles, 0xA8));
-            const __m512i aw = _mm512_abs_epi8(wv);
-            const __mmask64 neg = _mm512_movepi8_mask(wv);
-            for (uint64_t q = 0; q < count; ++q) {
-                const __m512i xv = _mm512_loadu_si512((const void*)(xr[q] + k));
-                s[q] = _mm512_add_epi32(s[q], _mm512_madd_epi16(_mm512_maddubs_epi16(
-                           aw, _mm512_mask_sub_epi8(xv, neg, _mm512_setzero_si512(), xv)), ones));
-            }
-        }
-        for (uint64_t q = 0; q < count; ++q) f[q] = _mm512_fmadd_ps(_mm512_cvtepi32_ps(s[q]), _mm512_set1_ps(sr[q][B]), f[q]);
-    }
-    for (uint64_t q = 0; q < count; ++q) {
-        const float val = _mm512_reduce_add_ps(f[q]) * scale / 127.0f;
-        const uint64_t at = (uint64_t)rows[2u * q + 1u] * out_rows + r;
-        if (out) out[at] = nn__kernels__zzabi_to_half(val, over);
-        else acc[at] += val * _cvtsh_ss(w[rows[2u * q]]);
-    }
-}
-static X86_AVX2__ZZPRIVATE_AVX512 inline void x86_avx2__zzprivate_row_pairs_i8_512(const uint8_t* row, float scale, const int8_t* xq,
-                                                                                   const float* xs, uint64_t x0, const uint32_t* rows,
-                                                                                   const uint16_t* w, uint64_t count, uint64_t cols,
-                                                                                   uint64_t out_rows, uint64_t r, uint16_t* out, float* acc,
-                                                                                   unsigned int* over, __m512i t8) {
-    if (count <= 2u) {
-        x86_avx2__zzprivate_row_few_i8_512(row, scale, xq, xs, x0, rows, w, count, cols, out_rows, r, out, acc, over, t8);
-        return;
-    }
-    int8_t w8[cols] __attribute__((aligned(64)));
-    const __m512i nibbles = _mm512_set1_epi16(0x0F0F);
-    for (uint64_t k = 0; k < cols; k += 64u) {
-        _mm_prefetch((const char*)(row + k / 2u + cols), _MM_HINT_T1);
-        const __m512i u = _mm512_cvtepu8_epi16(_mm256_loadu_si256((const __m256i*)(row + k / 2u)));
-        _mm512_store_si512((void*)(w8 + k), _mm512_shuffle_epi8(t8, _mm512_ternarylogic_epi32(u, _mm512_slli_epi16(u, 4), nibbles, 0xA8)));
-    }
-    const uint64_t per = cols / NN__EXPERT__INT8_BLOCK;
-    for (uint64_t j = 0; j < count; j += 4u) {
-        const uint64_t n = count - j < 4u ? count - j : 4u;
-        const int8_t* xr[4] = { xq, xq, xq, xq };
-        const float* sr[4] = { xs, xs, xs, xs };
-        for (uint64_t q = 0; q < n; ++q) {
-            const uint64_t xrow = (uint64_t)rows[2u * (j + q)] - x0;
-            xr[q] = xq + xrow * cols; sr[q] = xs + xrow * per;
-        }
-        float v[4];
-        if (n == 4u) x86_avx2__zzprivate_pairs_i8_512(w8, cols, xr, sr, 4u, v);
-        else x86_avx2__zzprivate_pairs_i8_512(w8, cols, xr, sr, n, v);
-        for (uint64_t q = 0; q < n; ++q) {
-            const float val = v[q] * scale / 127.0f;
-            const uint64_t at = (uint64_t)rows[2u * (j + q) + 1u] * out_rows + r;
-            if (out) out[at] = nn__kernels__zzabi_to_half(val, over);
-            else acc[at] += val * _cvtsh_ss(w[rows[2u * (j + q)]]);
-        }
-    }
-}
-static X86_AVX2__ZZPRIVATE_AVX512 void x86_avx2__zzprivate_expert_rows_i8_512(void* a) {
-    const x86_avx2__int8_call* c = (const x86_avx2__int8_call*)a;
-    const __m512i t8 = x86_avx2__zzprivate_table_i8_512();
-    const uint64_t b = nn__silicon__block(), n = nn__silicon__blocks(), row_bytes = c->cols / 2u;
-    for (uint64_t r = c->out_rows * b / n; r < c->out_rows * (b + 1u) / n; ++r)
-        x86_avx2__zzprivate_row_pairs_i8_512(c->weights + r * row_bytes, x86_avx2__zzprivate_row_scale(c->luts, r), c->xq, c->xs, c->x0,
-                                             c->rows, c->w, c->count, c->cols, c->out_rows, r, c->out, c->acc, c->over, t8);
-}
-static X86_AVX2__ZZPRIVATE_AVX512 void x86_avx2__zzprivate_expert_groups_i8_512(void* a) {
-    const x86_avx2__int8_call* c = (const x86_avx2__int8_call*)a;
-    const __m512i t8 = x86_avx2__zzprivate_table_i8_512();
-    const uint64_t b = nn__silicon__block(), n = nn__silicon__blocks();
-    const uint64_t t0 = c->total * b / n, t1 = c->total * (b + 1u) / n;
-    uint64_t i = 0u, base = 0u;
-    for (uint64_t t = t0; t < t1; ++t) {
-        while (t >= base + c->g.out_rows[i]) { base += c->g.out_rows[i]; ++i; }
-        const uint64_t r = t - base;
-        x86_avx2__zzprivate_row_pairs_i8_512((const uint8_t*)(uintptr_t)c->g.codes[i] + r * (c->cols / 2u),
-                                             x86_avx2__zzprivate_row_scale((const uint8_t*)(uintptr_t)c->g.luts[i], r), c->xq, c->xs, c->x0,
-                                             c->rows + 2u * c->g.pairs_at[i], 0, c->g.pairs[i], c->cols, c->g.out_rows[i], r,
-                                             c->out + c->g.out_at[i], 0, c->over, t8);
-    }
-}
+/* ── THE INT8 BODIES ON AVX-512, AND ON VNNI (▶ int8_512.cuh): one text built twice — the multiply-add of bytes as
+ *   AVX-512 has it, and as VNNI's `dpbusd` does it in one instruction; VNNI's where the processor has it. ── */
+#define X86_AVX2__ZZPRIVATE_I8(name)          X86_AVX2__ZZPRIVATE_I8_512(name)
+#define X86_AVX2__ZZPRIVATE_I8_TARGET         X86_AVX2__ZZPRIVATE_AVX512
+#define X86_AVX2__ZZPRIVATE_I8_DOT(u, s)      _mm512_madd_epi16(_mm512_maddubs_epi16((u), (s)), _mm512_set1_epi16(1))
+#define X86_AVX2__ZZPRIVATE_I8_SUM(a, u, s)   _mm512_add_epi32((a), X86_AVX2__ZZPRIVATE_I8_DOT(u, s))
+#include "int8_512.cuh"
+#undef X86_AVX2__ZZPRIVATE_I8
+#undef X86_AVX2__ZZPRIVATE_I8_TARGET
+#undef X86_AVX2__ZZPRIVATE_I8_DOT
+#undef X86_AVX2__ZZPRIVATE_I8_SUM
+#define X86_AVX2__ZZPRIVATE_I8(name)          X86_AVX2__ZZPRIVATE_I8_VNNI(name)
+#define X86_AVX2__ZZPRIVATE_I8_TARGET         X86_AVX2__ZZPRIVATE_VNNI
+#define X86_AVX2__ZZPRIVATE_I8_DOT(u, s)      _mm512_dpbusd_epi32(_mm512_setzero_si512(), (u), (s))
+#define X86_AVX2__ZZPRIVATE_I8_SUM(a, u, s)   _mm512_dpbusd_epi32((a), (u), (s))
+#include "int8_512.cuh"
+#undef X86_AVX2__ZZPRIVATE_I8
+#undef X86_AVX2__ZZPRIVATE_I8_TARGET
+#undef X86_AVX2__ZZPRIVATE_I8_DOT
+#undef X86_AVX2__ZZPRIVATE_I8_SUM
 
 /* ══ ⭐⭐ ATTENTION OVER THE CACHE, ONE QUERY — the tiered decode's four doors ═══════════════════════════════════════
  * `attention_weights` and `attention_residual_mix` over the fp16 tier, `attention_weights_tq` and
@@ -2309,7 +2205,8 @@ static void x86_avx2__override_vector_top_k(uint64_t* values, uint64_t stride, u
 }
 
 /* Whether the AVX-512 bodies go in: the processor has the four extensions they are compiled for, and
- * `SILVANN_CPU_AVX512` is not `0`; the 8-bit ones also need the levels symmetric. */
+ * `SILVANN_CPU_AVX512` is not `0`; the 8-bit ones also need the levels symmetric; the int8 ones' VNNI build, VNNI too
+ * and `SILVANN_CPU_VNNI` not `0`. */
 static inline void x86_avx2__zzprivate_install_wide(void) {
     const uint16_t* lev = nn__turboquant__zzabi_levels(4u);
     for (int i = 0; i < 16; ++i) x86_avx2__zzprivate_levels4[i] = _cvtsh_ss(lev[i]);
@@ -2322,6 +2219,8 @@ static inline void x86_avx2__zzprivate_install_wide(void) {
     bool symmetric = true;
     for (int i = 0; i < 128; ++i) symmetric = symmetric && lev8[255 - i] == (uint16_t)(lev8[i] ^ 0x8000u);
     x86_avx2__zzprivate_wide8 = x86_avx2__zzprivate_wide && symmetric;
+    const char* vnni = getenv("SILVANN_CPU_VNNI");
+    x86_avx2__zzprivate_vnni = x86_avx2__zzprivate_wide && !(vnni != 0 && vnni[0] == '0') && __builtin_cpu_supports("avx512vnni");
 }
 
 /* Into nn's table, once, when the family is first asked for it. */
@@ -2341,6 +2240,7 @@ static inline void x86_avx2__override_doors(nn__doors* doors) {
     doors->hadamard_ladder_rows = x86_avx2__override_hadamard_ladder_rows;
     doors->vector_zero          = x86_avx2__override_vector_zero;
     doors->vector_add           = x86_avx2__override_vector_add;
+    doors->swiglu_clamped       = x86_avx2__override_swiglu_clamped;
     doors->hadamard_blocks      = x86_avx2__override_hadamard_blocks;
     doors->deltanet_step        = x86_avx2__override_deltanet_step;
     doors->deltanet_steps       = x86_avx2__override_deltanet_steps;

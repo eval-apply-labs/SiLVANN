@@ -316,6 +316,7 @@ if /i "%WHAT%"=="list"     goto list
 if /i "%WHAT%"=="download" goto download
 if /i "%WHAT%"=="check"    goto check
 if /i "%WHAT%"=="token"    goto token
+if /i "%WHAT%"=="users"    goto users
 if /i "%WHAT%"=="serve"    goto serve
 if /i "%WHAT%"=="ui"       goto ui
 if /i "%WHAT%"=="registry" goto registry
@@ -338,6 +339,9 @@ if "%~2"=="" ("%PY%" "%HERE%\silvann_core.py" check-versions & exit /b %errorlev
 exit /b %errorlevel%
 :token
 "%PY%" "%HERE%\silvann_core.py" hf-token %2 %3 %4 %5 %6 %7 %8 %9
+exit /b %errorlevel%
+:users
+"%PY%" "%HERE%\silvann_core.py" users %2 %3 %4 %5 %6 %7 %8 %9
 exit /b %errorlevel%
 :serve
 if "%~2"=="" (echo silvann serve ^<model^> [config] [--port 8765]   - a model in %SILVANN_DATA%\models & exit /b 1)
@@ -375,6 +379,7 @@ echo silvann list                        the models this release can fetch, and 
 echo silvann download ^<model^>            a model into %%SILVANN_DATA%%\models - when it is there, what changed in its pack
 echo silvann check [model]               update or done, each model here - with one, the files its update fetches
 echo silvann token [--set ^| --forget]    the Hugging Face token the downloads use (faster than none)
+echo silvann users [add^|passwd^|remove^|adopt] ^<name^>   the users: each a sign-in, a folder and their own conversations
 echo silvann serve ^<model^> [config]      the server, on port 8765 (--port to change it)
 echo silvann ui                          the chat in a browser, on port 8090, talking to the server
 echo silvann_cli                         the chat in this terminal (--notools, --nothink), talking to the server

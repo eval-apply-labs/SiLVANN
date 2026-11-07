@@ -52,10 +52,9 @@
  * it lost, and the engine's parked compute loop doing the same when it finds nothing. The second is the
  * inter-try delay of a BOUNDED spin on ANOTHER block's base while collecting a result — the compute
  * opcode's collect, and the dispatcher's in `engine/abi/running.cuh`.
- * ⛔ SO TURNING THIS MOVES A TIMEOUT. `SYS__COMPUTING_BASE__RESULT_TRIES` is priced THROUGH this number:
- * `contracts/objects/computing_base.cuh` prices one try — two compare-and-swaps and this wait — at
- * ~1.28 us on the host (`MEASURED`, as stated there), so its try count bounds the wait at about fifteen
- * seconds. Double this and that bound roughly doubles. ⇒ ★ IT IS THE ONE
+ * ⛔ SO TURNING THIS MOVES A TIMEOUT: the dispatcher's, `ENG__ABI__DISPATCH_TRIES` tries of two compare-and-swaps
+ * and this wait. `sys__wait`'s bound is not priced through it — it is the clock's (`SYS__COMPUTING_BASE__WAIT_NS`),
+ * since a try of this wait alone costs what the processor's pause costs. ⇒ ★ IT IS THE ONE
  * ENTRY HERE THAT DOES NOT KEEP THE OPENING PROMISE — it cannot be different without something else being
  * different too — so whoever turns it re-derives the try count beside it.
  *

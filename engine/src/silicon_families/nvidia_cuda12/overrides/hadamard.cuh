@@ -22,7 +22,7 @@
 #define NVIDIA_CUDA12__ZZPRIVATE_ROT_BOUNDS __launch_bounds__(256)
 
 /* One block of `E · 32` at `at`, by the whole warp: its shuffles need every lane. */
-static __device__ __forceinline__ void nvidia_cuda12__zzprivate_rotation_at(uint16_t* out, const uint16_t* in, uint64_t at,
+static __device__ __forceinline__ void nvidia_cuda12__zzpackage_rotation_at(uint16_t* out, const uint16_t* in, uint64_t at,
                                                                              const uint16_t* sign, uint64_t inverse,
                                                                              unsigned int* over, const uint32_t E) {
     const uint32_t lane = (uint32_t)nn__silicon__lane() % NVIDIA_CUDA12__ZZPACKAGE_WARP;
@@ -70,7 +70,7 @@ static __device__ __forceinline__ void nvidia_cuda12__zzprivate_rotation(uint16_
     const uint64_t block = (uint64_t)nn__silicon__block() * NVIDIA_CUDA12__ZZPRIVATE_ROT_WARPS
                          + (uint32_t)nn__silicon__lane() / NVIDIA_CUDA12__ZZPACKAGE_WARP;
     if (block >= blocks) return;                     /* the whole warp, so its shuffles have every lane */
-    nvidia_cuda12__zzprivate_rotation_at(out, in, block * E * NVIDIA_CUDA12__ZZPACKAGE_WARP, sign, inverse, over, E);
+    nvidia_cuda12__zzpackage_rotation_at(out, in, block * E * NVIDIA_CUDA12__ZZPACKAGE_WARP, sign, inverse, over, E);
 }
 
 static __global__ NVIDIA_CUDA12__ZZPRIVATE_ROT_BOUNDS void nvidia_cuda12__zzprivate_rotation_128(uint16_t* out, const uint16_t* in, const uint16_t* sign,
@@ -142,11 +142,11 @@ static __global__ NVIDIA_CUDA12__ZZPRIVATE_ROT_BOUNDS void nvidia_cuda12__zzpriv
          u < rows * units; u += (uint64_t)nn__silicon__blocks() * NVIDIA_CUDA12__ZZPRIVATE_ROT_WARPS) {
         const uint64_t row = u / units, j = u - row * units, at = row * cols;
         if (j < whole)
-            nvidia_cuda12__zzprivate_rotation_at(out, in, at + j * 512u, sign, 0u, over, 16u);
+            nvidia_cuda12__zzpackage_rotation_at(out, in, at + j * 512u, sign, 0u, over, 16u);
         else if (rest >= 256u && j == whole)
-            nvidia_cuda12__zzprivate_rotation_at(out, in, at + whole * 512u, sign, 0u, over, 8u);
+            nvidia_cuda12__zzpackage_rotation_at(out, in, at + whole * 512u, sign, 0u, over, 8u);
         else
-            nvidia_cuda12__zzprivate_rotation_at(out, in, at + whole * 512u + (rest >= 256u ? 256u : 0u), sign, 0u, over, 4u);
+            nvidia_cuda12__zzpackage_rotation_at(out, in, at + whole * 512u + (rest >= 256u ? 256u : 0u), sign, 0u, over, 4u);
     }
 }
 static void nvidia_cuda12__override_hadamard_ladder_rows(uint16_t* out, const uint16_t* in, const uint16_t* sign, uint64_t cols,

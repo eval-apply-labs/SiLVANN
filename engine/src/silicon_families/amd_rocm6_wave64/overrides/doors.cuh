@@ -37,6 +37,7 @@ static inline void amd_rocm6_wave64__override_doors(nn__doors* doors) {
     doors->turboquant_gemv_groups_n   = amd_rocm6_wave64__override_gemv_groups_n;
     doors->turboquant_gemv_groups_sum = amd_rocm6_wave64__override_gemv_groups_sum;
     doors->expert_rows          = amd_rocm6_wave64__override_expert_rows;
+    doors->expert_multiply_fp16 = amd_rocm6_wave64__override_expert_multiply_fp16;
     doors->expert_rows_sum      = amd_rocm6_wave64__override_expert_rows_sum;
     doors->expert_groups        = amd_rocm6_wave64__override_expert_groups;
     doors->rmsnorm              = amd_rocm6_wave64__override_rmsnorm;

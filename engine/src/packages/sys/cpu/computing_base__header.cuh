@@ -162,8 +162,8 @@
  *   than freeing — see `WHERE IT LIVES` above for why that is a fact about its home and not its shape.
  *   It does not WAIT UNBOUNDED, and it waits in one place, which is not a question: `begin` backs off for
  *   `SYS__COMPUTING_BASE__POLL_CYCLES` when its swap loses, so an idle block polls instead of hammering.
- *   The lisp's `sys__wait` waits on an answer, not on a base, up to `SYS__COMPUTING_BASE__RESULT_TRIES`
- *   tries with that same back-off between them. Every question — `status`, `fault`, an answer's state — is a read,
+ *   The lisp's `sys__wait` waits on an answer, not on a base: parked on it where the computation may move,
+ *   else up to `SYS__COMPUTING_BASE__WAIT_NS` by the clock with that same back-off between its looks. Every question — `status`, `fault`, an answer's state — is a read,
  *   and a refused `claim` answers at once.
  *   It does not COPY in `init`: bindings and program are references handed over and held, not duplicated.
  *   ⛔ `begin` DOES, and it is the one verb here that allocates — it thaws the picture into a list of its
@@ -198,6 +198,11 @@ static __device__ inline bool        sys__computing_base__init  (sys__heap_node*
                                                                  uint64_t program_picture);
 static __device__ inline sys__heap_node* sys__computing_base__begin (sys__heap_node* computing_base,
                                                                  uint32_t block_id);
+/* Whether the program the next `init` on this runner hands its base is a copy already under way — a computation that
+ * moved here (▶ `sys__scheduler__continue_on`) — which `begin` then runs as it stands instead of thawing a picture.
+ * Said by the scheduler as it takes the request, and taken back by `begin`, or by the request's put-away when it never
+ * began. */
+static __device__ inline void        sys__computing_base__zzpackage_under_way(bool under_way);
 /* ⭐ FINISHING TAKES THE ANSWER, BECAUSE PUTTING IT DOWN AND SAYING SO ARE ONE ACT. Whoever is watching
  * this base is watching the status word and nothing else, so a status that lands before the answer is an
  * invitation to collect one that is not there — and two separate verbs would leave that ordering to

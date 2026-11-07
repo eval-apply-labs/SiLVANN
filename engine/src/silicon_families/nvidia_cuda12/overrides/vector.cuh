@@ -2,7 +2,7 @@
 #define SILVANN__SILICON_FAMILIES_NVIDIA_CUDA12_OVERRIDES_VECTOR_CUH
 /* ══ vector's DOOR, RUN FASTER — nvidia_cuda12 ════════════════════════════════════════════════════════════════════════
  * nn's vector doors (`nn/cpu/opcodes/vector__abi.cuh`), where this family covers them: a sampler's top k over a vocabulary, a
- * scored router's, and the sum of a tensor-parallel group's parts. */
+ * router's few, a scored router's, and the sum of a tensor-parallel group's parts. */
 
 /* What this file needs, named where a reader — and an editor — can follow it. */
 #include <stdint.h>
@@ -24,7 +24,7 @@
  *   ⛳ MORE THAN `HELD` WORDS AT THE BAR — fewer than `k` lanes holding any valid value, and many valid values among
  *   them — and the block runs nn's own rounds instead, so the answer never depends on the input, only the time.
  *   ⛳ ONE BLOCK, WAITING FOR ITSELF: the lanes' words, the bar, the held words, the picks' values. No other block. */
-#define NVIDIA_CUDA12__ZZPRIVATE_TOP_K_SHORT  1024u    /* up to this many values, nn's rounds: a router's few */
+#define NVIDIA_CUDA12__ZZPRIVATE_TOP_K_SHORT  1024u    /* up to this many values, one warp's: a router's few */
 #define NVIDIA_CUDA12__ZZPRIVATE_TOP_K_HELD   1024u    /* words the block holds at or above the bar */
 #define NVIDIA_CUDA12__ZZPRIVATE_TOP_K_DEPTH  16u      /* reads of sixteen bytes a lane has in flight */
 #define NVIDIA_CUDA12__ZZPRIVATE_TOP_K_BOUNDS __launch_bounds__(256)
@@ -226,6 +226,69 @@ static __global__ NVIDIA_CUDA12__ZZPRIVATE_SCORED_BOUNDS void nvidia_cuda12__zzp
     nvidia_cuda12__zzprivate_top_k_scored_warp<32u>(values, stride, weights, x, bias, n, k, scale, score);
 }
 
+/* ⭐ THE `k` LARGEST OF A ROUTER'S FEW IN ONE WARP — nn's `top_k` over up to `TOP_K_SHORT` values (a router's logits,
+ *   the 35B's 256 a layer at every position) is `k` rounds of a block's two folds. Here one warp holds them all, `HELD` a
+ *   lane in registers, each as one word that orders the way nn's rounds pick, as amd_rocm6_wave64's wave does: its high
+ *   half the value's order — the two zeros one — and its low half 0xFFFF less its index, so of equal values the first is
+ *   the larger word; a NaN is 0, which no round takes. A round is one integer max over the lane's words and five shuffles,
+ *   and it picks what nn's round picks: the first index of the largest value left. Each pick's weight is nn's expression,
+ *   on the lane numbered by its round, over a sum added in the rounds' order, as nn's is; a pick's value is read back from
+ *   its word, so a zero comes back +0, which the weights read only as a difference `v - v0` — so the indices and the
+ *   weights are nn's to the bit. Up to 32 picks, one a lane (▶ the door). No barrier: one warp. */
+template <uint32_t HELD>
+static __device__ inline void nvidia_cuda12__zzprivate_top_k_warp(uint64_t* values, uint64_t stride, uint16_t* weights,
+                                                                   const uint16_t* x, uint64_t n, uint64_t k) {
+    const uint32_t W = NVIDIA_CUDA12__ZZPACKAGE_WARP, lane = (uint32_t)nn__silicon__lane();
+    uint32_t key[HELD];
+#pragma unroll
+    for (uint32_t j = 0u; j < HELD; ++j) {
+        const uint32_t i = lane + j * W;
+        const uint32_t h = i < n ? (uint32_t)x[i] : 0x7E00u;              /* past `n`, as a NaN */
+        const uint32_t z = (h & 0x7FFFu) == 0u ? 0u : h;                  /* -0 as +0 */
+        const uint32_t order = (z & 0x8000u) != 0u ? (~z & 0xFFFFu) : (z | 0x8000u);
+        key[j] = (h & 0x7FFFu) > 0x7C00u ? 0u : (order << 16) | (0xFFFFu - i);
+    }
+    float mine_v = -NN__KERNELS__INFINITY, v0 = -NN__KERNELS__INFINITY;  /* lane `r` keeps round `r`'s pick */
+    uint64_t mine_i = n;
+    for (uint32_t r = 0u; r < (uint32_t)k; ++r) {
+        uint32_t best = 0u;
+#pragma unroll
+        for (uint32_t j = 0u; j < HELD; ++j) best = key[j] > best ? key[j] : best;
+#pragma unroll
+        for (uint32_t off = 1u; off < W; off <<= 1) {
+            const uint32_t other = __shfl_xor_sync(0xFFFFFFFFu, best, (int)off);
+            best = other > best ? other : best;
+        }
+#pragma unroll
+        for (uint32_t j = 0u; j < HELD; ++j) key[j] = key[j] == best ? 0u : key[j];    /* taken: a word names one item */
+        const uint32_t order = best >> 16;
+        const uint32_t h = (order & 0x8000u) != 0u ? (order & 0x7FFFu) : (~order & 0xFFFFu);
+        const float v = best != 0u ? nn__silicon__half_to_float((uint16_t)h) : -NN__KERNELS__INFINITY;
+        if (r == 0u) v0 = v;
+        if (lane == r) { mine_v = v; mine_i = best != 0u ? (uint64_t)(0xFFFFu - (best & 0xFFFFu)) : n; }
+    }
+    const float e = nn__silicon__expf(mine_v - v0);
+    float sum = 0.0f;
+    for (uint32_t r = 0u; r < (uint32_t)k; ++r) sum += __shfl_sync(0xFFFFFFFFu, e, (int)r);
+    if (lane < k) {
+        values[lane * stride] = mine_i;
+        unsigned int unreported = 0u;                                    /* nn's top_k raises no overflow either */
+        weights[lane] = nn__kernels__zzabi_to_half(e / sum, &unreported);
+    }
+}
+static __global__ NVIDIA_CUDA12__ZZPRIVATE_SCORED_BOUNDS void nvidia_cuda12__zzprivate_top_k_8(uint64_t* values, uint64_t stride,
+    uint16_t* weights, const uint16_t* x, uint64_t n, uint64_t k) {
+    nvidia_cuda12__zzprivate_top_k_warp<8u>(values, stride, weights, x, n, k);
+}
+static __global__ NVIDIA_CUDA12__ZZPRIVATE_SCORED_BOUNDS void nvidia_cuda12__zzprivate_top_k_16(uint64_t* values, uint64_t stride,
+    uint16_t* weights, const uint16_t* x, uint64_t n, uint64_t k) {
+    nvidia_cuda12__zzprivate_top_k_warp<16u>(values, stride, weights, x, n, k);
+}
+static __global__ NVIDIA_CUDA12__ZZPRIVATE_SCORED_BOUNDS void nvidia_cuda12__zzprivate_top_k_32(uint64_t* values, uint64_t stride,
+    uint16_t* weights, const uint16_t* x, uint64_t n, uint64_t k) {
+    nvidia_cuda12__zzprivate_top_k_warp<32u>(values, stride, weights, x, n, k);
+}
+
 /* ⭐ A TENSOR-PARALLEL GROUP'S PARTS ADDED — nn's `vector_sum`: `count` vectors of halves, an address possibly another
  *   device's memory, added in the order given in float and rounded once. nn's body reads a half of each part at a time, a
  *   read across the bus waited on before the next. Here a lane takes eight halves, sixteen bytes a read, every part's read
@@ -261,10 +324,19 @@ static __global__ NVIDIA_CUDA12__ZZPRIVATE_SUM_BOUNDS void nvidia_cuda12__zzpriv
     }
 }
 
-/* More than `TOP_K_SHORT` values with `x` on sixteen bytes; one to `NN__VECTOR__TOP_K_MAX` picks, each its own word
- * (`stride` not 0); anything else is nn's. */
+/* Up to `TOP_K_SHORT` values and one to 32 picks in one warp; more values with `x` on sixteen bytes and one to
+ * `NN__VECTOR__TOP_K_MAX` picks in one block; each pick its own word (`stride` not 0); anything else is nn's. */
 static void nvidia_cuda12__override_vector_top_k(uint64_t* values, uint64_t stride, uint16_t* weights, const uint16_t* x, uint64_t n,
                                                  uint64_t k) {
+    const uint64_t W = NVIDIA_CUDA12__ZZPACKAGE_WARP;
+    if (n != 0u && n <= NVIDIA_CUDA12__ZZPRIVATE_TOP_K_SHORT && k != 0u && k <= W && stride != 0u) {
+        const void* kernel = n <= 8u * W ? (const void*)nvidia_cuda12__zzprivate_top_k_8
+                           : n <= 16u * W ? (const void*)nvidia_cuda12__zzprivate_top_k_16 : (const void*)nvidia_cuda12__zzprivate_top_k_32;
+        void* args[] = { &values, &stride, &weights, &x, &n, &k };
+        const size_t sizes[] = { sizeof values, sizeof stride, sizeof weights, sizeof x, sizeof n, sizeof k };
+        nn__silicon__launch(kernel, "nvidia_cuda12__zzprivate_top_k", 1u, NVIDIA_CUDA12__ZZPACKAGE_WARP, args, sizes, 6u);
+        return;
+    }
     if (n <= NVIDIA_CUDA12__ZZPRIVATE_TOP_K_SHORT || n > NN__KERNELS__INDEX_EXACT || k == 0u || k > NN__VECTOR__TOP_K_MAX
      || stride == 0u || ((uint64_t)(uintptr_t)x) % 16u != 0u) {
         nn__vector__zzabi_launch_top_k(values, stride, weights, x, n, k);
@@ -305,6 +377,42 @@ static void nvidia_cuda12__override_vector_sum(uint16_t* out, nn__vector__parts 
     void* args[] = { &out, &parts, &n, &over };
     const size_t sizes[] = { sizeof out, sizeof parts, sizeof n, sizeof over };
     nn__silicon__launch((const void*)nvidia_cuda12__zzprivate_sum, "nvidia_cuda12__zzprivate_sum", blocks, NN__SILICON__LANES_MAX, args, sizes, 4u);
+}
+
+/* ⭐ THE REPETITION PENALTY WITH ITS IDS IN SHARED MEMORY — amd_rocm6_wave64's: nn's body asks each id whether an earlier
+ *   lane holds it by reading the earlier ids again, and where they are the program's nodes, registered with the card, each
+ *   of those reads crosses the bus. Here the block reads each id once, into shared memory, waits, and asks there. The same
+ *   ids are penalised, once each, as nn's are. Up to `PENALIZE_HELD` ids, one block; more are nn's.
+ * ⛳ THE BARRIER: the one wait after the ids are staged, every lane of the block reaching it — the category of the row
+ *   kernels' staging (`penalize`, `scripts/claim_rules/no_rendezvous.py`). */
+#define NVIDIA_CUDA12__ZZPRIVATE_PENALIZE_HELD 2048u
+#define NVIDIA_CUDA12__ZZPRIVATE_PENALIZE_BOUNDS __launch_bounds__(NN__SILICON__LANES_MAX)
+static __global__ NVIDIA_CUDA12__ZZPRIVATE_PENALIZE_BOUNDS void nvidia_cuda12__zzprivate_penalize(uint16_t* x, uint64_t n, const uint64_t* ids,
+                                                                                                     uint64_t stride, uint64_t count, float penalty,
+                                                                                                     unsigned int* over) {
+    __shared__ uint64_t held[NVIDIA_CUDA12__ZZPRIVATE_PENALIZE_HELD];
+    const uint32_t t = (uint32_t)nn__silicon__lane(), lanes = (uint32_t)nn__silicon__lanes();
+    for (uint32_t j = t; j < (uint32_t)count; j += lanes) held[j] = ids[j * stride];
+    __syncthreads();
+    for (uint32_t j = t; j < (uint32_t)count; j += lanes) {
+        const uint64_t id = held[j];
+        bool again = id >= n;
+        for (uint32_t q = 0u; q < j; ++q) again |= held[q] == id;        /* no early exit: the reads are independent */
+        if (again) continue;
+        const float v = nn__silicon__half_to_float(x[id]);
+        x[id] = nn__kernels__zzabi_to_half(v > 0.0f ? v / penalty : v * penalty, over);
+    }
+}
+static void nvidia_cuda12__override_vector_penalize(uint16_t* x, uint64_t n, const uint64_t* ids, uint64_t stride, uint64_t count,
+                                                    float penalty, unsigned int* over) {
+    if (count == 0u || count > NVIDIA_CUDA12__ZZPRIVATE_PENALIZE_HELD) {
+        nn__vector__zzabi_launch_penalize(x, n, ids, stride, count, penalty, over);
+        return;
+    }
+    void* args[] = { &x, &n, &ids, &stride, &count, &penalty, &over };
+    const size_t sizes[] = { sizeof x, sizeof n, sizeof ids, sizeof stride, sizeof count, sizeof penalty, sizeof over };
+    nn__silicon__launch((const void*)nvidia_cuda12__zzprivate_penalize, "nvidia_cuda12__zzprivate_penalize", 1u,
+                        NN__SILICON__LANES_MAX, args, sizes, 7u);
 }
 
 #endif /* SILVANN__SILICON_FAMILIES_NVIDIA_CUDA12_OVERRIDES_VECTOR_CUH */

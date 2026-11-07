@@ -2,13 +2,15 @@
 call, each the next one's input, ending early after an end token; only the tokens come back.
 
 A family whose program has `(position tok pos)` and a head answers with it by taking `Generates`: its boot calls
-`_answer_buffers`, binds STOPS (0) and SEEN with its shape, loads lisp/generate.lisp, and runs a program with `_run`.
+`_answer_buffers`, binds STOPS (`STOPS_MOST`) and SEEN with its shape, loads lisp/generate.lisp, and runs a program with
+`_run`.
 """
 from . import sampling
 from .model_folder import Refused
 
 GENERATE_MOST = 64                # the most tokens one `generate` makes — OUT's length
-STOPS_MOST = 8                    # the most end tokens it watches for
+STOPS_MOST = 8                    # the most end tokens it watches for — STOP's length, and STOPS
+NO_TOKEN = 1 << 30                # a STOP slot no end token fills: past every vocabulary, no token is it
 
 
 class Generates:
@@ -45,12 +47,16 @@ class Generates:
         return [self.m.must("(nth OUT %d)" % j, "a token made") for j in range(made)]
 
     def _watch(self, stop):
-        """The end tokens `generate` watches for, into STOP — when they are not the ones there already."""
+        """The end tokens `generate` watches for, into STOP — when they are not the ones there already. Every slot is
+        written, the ones past the end tokens `NO_TOKEN`, and STOPS stays as bound: a view (▶ `Machine.view`) holds its
+        bindings as they stood when it was made, and a `set!` after it does not reach it, while STOP is one array that
+        every view shares."""
         stop = tuple(sorted(stop))[:STOPS_MOST]
         if stop == self._stops:
             return
-        self.m.must("(begin %s (set! STOPS %d) 0)" % (" ".join("(sys__node_array__set STOP %d %d)" % (j, t)
-                                                              for j, t in enumerate(stop)), len(stop)), "the end tokens")
+        slots = stop + (NO_TOKEN,) * (STOPS_MOST - len(stop))
+        self.m.must("(begin %s 0)" % " ".join("(sys__node_array__set STOP %d %d)" % (j, t) for j, t in enumerate(slots)),
+                    "the end tokens")
         self._stops = stop
 
     def _run(self, text, what):

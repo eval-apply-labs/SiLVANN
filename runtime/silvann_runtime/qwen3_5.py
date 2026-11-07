@@ -30,7 +30,7 @@ import numpy as np
 from . import experts_file, expert_tier, sampling
 from .autotune import card_memory
 from .vision import video_ram
-from .generate import GENERATE_MOST, Generates
+from .generate import GENERATE_MOST, STOPS_MOST, Generates
 from .machine import EngineError
 from .model_folder import NL, Refused
 
@@ -1669,7 +1669,7 @@ class Qwen35(Generates):
         plane = lambda at, size: "(nn__expert__plane 0 %d 0 %d %d)" % (self.T_HEAD, at, size)
         values = dict(HIDDEN=H, HIDDEN_BYTES=2 * H, VOCAB=self.VOCAB, EPS=self.EPS, THETA=self.THETA, ROTARY=self.ROT,
                       RUN=len(run) - (1 if self.MTP is not None else 0), EMB_HALVES=row // 2, EMB_SCALES=self.EMB_DATA_BYTES // 2, EMB_BITS=self.EMB_BITS,
-                      HEAD_BITS=self.HEAD_BITS, STOPS=0, SEEN=sampling.SEEN,
+                      HEAD_BITS=self.HEAD_BITS, STOPS=STOPS_MOST, SEEN=sampling.SEEN,
                       HEAD_CODES=plane(self.HPLAN.at_up_data, self.HPLAN.up_data),
                       HEAD_SCALES=plane(self.HPLAN.at_down_lut, self.HPLAN.down_lut),
                       LAG=0, ROWPOS=False, MROPE=self.MROPE,
@@ -2112,9 +2112,12 @@ class Qwen35(Generates):
     def _run(self, text, what):
         """A program's answer. ⛳ With a CPU worker (the experts, or the embedding) it runs with every block standing — it
         hands them work (`sys__scheduler__add`) — and a program that does not would find the CPU's block never started.
-        With seats, on the card's block in the view of the seat `on_seat` chose (▶ `_seat_views`)."""
+        With seats, on the card's block in the view of the seat `on_seat` chose (▶ `_seat_views`) — inline (NN-159): a
+        seat's program keeps the card's scratch between its verbs, so no slice gives its block to the other seat's step
+        in the middle of it, nor does a wait park it there (▶ sys's `sys__scheduler__compute_inline`)."""
         if self.SEATS > 1:
-            kind, value = self.m.run_in(self.place(self.SEAT)[0], text, view=self.view_of(self.SEAT))
+            kind, value = self.m.run_in(self.place(self.SEAT)[0], "(sys__scheduler__compute_inline '%s)" % text,
+                                        view=self.view_of(self.SEAT))
             if kind == self.m.K["sys__error"]:
                 raise EngineError("%s did not run on seat %d: %s" % (what, self.SEAT, value))
             return value

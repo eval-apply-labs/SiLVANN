@@ -31,6 +31,10 @@ from .composer import Composer, read_all, to_text
 _SET_MEMPOLICY = {"x86_64": 238, "aarch64": 237}      # the system call's number on each processor
 _MPOL_LOCAL = 4
 
+# ⭐ THE SLICE EVERY MACHINE BOOTS WITH (⚖ 2026-11-07 *"set the slice to 0.05s by default"*): a computation that has run
+#   50 ms gives its block up to what waits there, at the end of a verb — preemptive, not protected (▶ `boot`)
+SLICE_US = 50000
+
 
 def _memory_policy_local():
     number = _SET_MEMPOLICY.get(platform.machine())
@@ -192,11 +196,18 @@ class Machine:
         self.booted = False
         self._abi_write = None
 
-    def boot(self, device_params, alloc_mb=256, workers=None, worker_params=None, bindings=512):
+    def boot(self, device_params, alloc_mb=256, workers=None, worker_params=None, bindings=512, slice_us=SLICE_US,
+             slice_cycles=0):
         """Boot with one worker (or the list given), each with the device parameters given, or its own section from
-        `worker_params` — {worker: text}. `bindings`: how many names the program's environment holds."""
+        `worker_params` — {worker: text}. `bindings`: how many names the program's environment holds. `slice_us`:
+        preemption — a computation that has run that many microseconds gives its block up to what waits there, at the
+        end of a verb (▶ sys's `scheduler__impl.cuh`, "THE SLICE"); SLICE_US by default, 0 for none. `slice_cycles`, if
+        given, the slice in the processor's clock's cycles instead. A model's steps that share a worker's buffers
+        between verbs run inside `compute_inline`, which no slice gives up."""
         e = self.e
-        text = "boot_commands{\nsys__alloc_size_mb:%d\n}\ndevice_params{\n%s}\n" % (alloc_mb, device_params)
+        slice_line = ("sys__scheduler__slice_cycles:%d\n" % slice_cycles if slice_cycles else
+                      "sys__scheduler__slice_us:%d\n" % slice_us if slice_us else "")
+        text = "boot_commands{\nsys__alloc_size_mb:%d\n%s}\ndevice_params{\n%s}\n" % (alloc_mb, slice_line, device_params)
         for w, params in sorted((worker_params or {}).items()):
             text += "worker%d_params{\n%s}\n" % (w, params)
         if workers:
@@ -322,9 +333,12 @@ class Machine:
         `nn__partials__join`), the worker left at the last card's. A model split over cards needs each pair of them to
         read the other's memory directly (⚖ "tensor parallelism requires DMA"); a card that cannot is refused, saying so
         and what to run instead. A runtime joins once at the start of its load, before a weight is read, so the refusal
-        costs no load — `MEASURED` 2026-11-06 debian01 (two MI50s, one on each socket): GLM's two cards were refused
-        with the fault's number after its 142 GB of experts had loaded — and again where its group is used: rank 0's
-        join starts the group afresh."""
+        costs no load — `MEASURED` 2026-11-06 debian01 (two MI50s): GLM's two cards were refused with the fault's number
+        after its 142 GB of experts had loaded — and again where its group is used: rank 0's join starts the group afresh.
+        ⛳ WHAT REFUSES IS THE DRIVER, NOT WHERE THE CARDS SIT: node03 has a card on each socket as debian01 has, and its
+        cards reach each other — ROCm's amdgpu-dkms links them (KFD's p2p_links between the two) — where debian01's
+        kernel's own amdgpu (Debian 13's 6.12, built without CONFIG_PCI_P2PDMA, so without CONFIG_HSA_AMD_P2P) links a
+        card to the CPUs alone (`MEASURED` 2026-11-06, both machines' /sys/class/kfd/kfd/topology and /boot/config)."""
         fan = fan or min(4, ranks)
         for k in range(ranks):
             self.act_as(k)
@@ -335,12 +349,15 @@ class Machine:
                 if (getattr(ex, "fault", None) or {}).get("op") != NO_DMA:
                     raise
                 from .model_folder import Refused
+                fix = (" — on Linux, ROCm's amdgpu-dkms gives AMD's cards the path; a kernel's own amdgpu gives it only "
+                       "built with CONFIG_HSA_AMD_P2P, which Debian's is not" if getattr(self, "silicon", None) == "amd_rocm6_wave64"
+                       else "")
                 raise Refused("card %d cannot read the memory of card%s %s directly, nor they its, and a model split "
                               "over %d cards (tensor_parallel %d: the server's num_cards %d with multi_user \"no\") "
-                              "needs each pair of its cards to — a machine whose cards hang off different processors, "
-                              "a card on each socket, has no such path between them. Run the model on one card "
-                              "(num_cards 1), or a conversation on each card (multi_user \"yes\") where the model has it"
-                              % (k, "" if k == 1 else "s", ", ".join(map(str, range(k))), ranks, ranks, ranks)) from None
+                              "needs each pair of its cards to: this machine's driver gives them no such path%s. Run the "
+                              "model on one card (num_cards 1), or a conversation on each card (multi_user \"yes\") "
+                              "where the model has it"
+                              % (k, "" if k == 1 else "s", ", ".join(map(str, range(k))), ranks, ranks, ranks, fix)) from None
 
     def grid(self, text):
         """A program run with every block standing, so it can hand work to the others (`sys__scheduler__add`) and collect it

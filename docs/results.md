@@ -20,8 +20,8 @@ with every model measured on that kind of machine, and the model's own page.
 | [16 GB](results.md#a-16-gb-card) | 14 GB | 4 cores | NVMe, 5.7 GB/s | [GLM 5.3 Flash](models.md#glm-53-flash) `D8E4` | the experts from the disk | 9.1 positions/s | 2.21 tokens/s after 100k | 110,000 | — |
 | [16 GB](results.md#a-16-gb-card) | 16 GB | 4 cores | — | [Qwen 3.8 27B](models.md#qwen-38-27b) `D4` | on the card | 221.3 positions/s | 14.32 tokens/s after 35k | 35,840 | — |
 | [2× 16 GB](results.md#two-cards-or-more) | 125 GB | 28 cores | — | [Qwen 3.6 35B-A3B](models.md#qwen-36-35b-a3b) `D8E4` | every layer over both cards, a tier on each | 85.9 positions/s | 32.22 tokens/s after 100k | 262,144 | the 35B on one card, faster after a short prompt |
-| [32 GB](results.md#a-24-or-32-gb-card) | 160 GB | 28 cores | — | [GLM 5.3 Flash](models.md#glm-53-flash) `D8E4` | every expert in RAM, a tier on the card | 72.1 positions/s | 9.86 tokens/s after 100k | 1,048,576 | DeepSeek-V4.1-Flash over two cards |
-| [2× 32 GB](results.md#two-cards-or-more) | 251 GB | 28 cores | — | [DeepSeek-V4.1-Flash](models.md#deepseek-v41-flash) `D8E4` | every expert in RAM, exclusive tiers | 31.3 positions/s | 9.72 tokens/s after 100k | 1,048,576 | GLM 5.3 Flash on one card |
+| [32 GB](results.md#a-24-or-32-gb-card) | 160 GB | 28 cores | — | [GLM 5.3 Flash](models.md#glm-53-flash) `D8E4` | every expert in RAM, a tier on the card | 72.1 positions/s | 9.86 tokens/s after 100k | 1,048,576 | DeepSeek-V4.1-Flash, given RAM for its experts |
+| [32 GB](results.md#a-24-or-32-gb-card) | 1.5 TB (PMem 100) | 48 cores | — | [DeepSeek-V4.1-Flash](models.md#deepseek-v41-flash) `D8E4` | every expert in RAM, a CPU worker a socket | 27.6-29.5 positions/s | 10.9-11.6 tokens/s after 2k | 2,320 as run | every layer over two 32 GB cards |
 <!-- /rates -->
 
 - **The low end** — a mini PC, an old desktop, no card: the 4B on the CPU, or on an integrated GPU through OpenCL 1.2,
@@ -33,7 +33,8 @@ with every model measured on that kind of machine, and the model's own page.
 - **Two 16 GB cards**: Qwen 3.6 35B-A3B, every layer over both and a tier of its experts on each — faster than one of
   the cards at a long context (after 100k, 30.5 tokens a second against 25.9), slower by about a tenth after a short
   prompt.
-- **The top end** — RAM for every expert: GLM 5.3 Flash on one 32 GB card, DeepSeek-V4.1-Flash over two.
+- **The top end** — RAM for every expert: GLM 5.3 Flash on one 32 GB card; DeepSeek-V4.1-Flash on one too, beside
+  two processors, its experts on a worker on each — or over two cards.
 
 ## By machine
 
@@ -152,6 +153,7 @@ The CPU alone: the model in RAM, or its experts read from the disk.
 | [GLM 5.3 Flash](models.md#glm-53-flash) `D8E4` | 32 GB · MI50 | 1.5 TB (PMem 100) | 2× Xeon Gold 6252 (48 cores) | — | every expert in RAM, a 9.75 GB tier | 33.4-34.3 positions/s | 11.6-11.8 tokens/s after 2k | 110,000 | v0.24.0 |
 | [GLM 5.3 Flash](models.md#glm-53-flash) `D8E4` | 32 GB · MI50 | 150 GB | 2× Xeon E5-2680 v4 (28 cores) | — | every expert in RAM, a 17.75 GB tier | 54 positions/s | 10.8 tokens/s after 1k | 300,000 | v0.20.0 |
 | [GLM 5.3 Flash](models.md#glm-53-flash) `D8E4` | 32 GB · MI50 | 128 GB | 2× Xeon E5-2680 v4 (28 cores) | NVMe, 5 GB/s | the experts from the disk | 13.2 positions/s | 5.7 tokens/s after 1k | — | v0.3 |
+| [DeepSeek-V4.1-Flash](models.md#deepseek-v41-flash) `D8E4` | 32 GB · MI50 | 1.5 TB (PMem 100) | 2× Xeon Gold 6252 (48 cores) | — | every expert in RAM, a CPU worker a socket | 27.6-29.5 positions/s | 10.9-11.6 tokens/s after 2k | 2,320 as run | v0.25.0 |
 | [DeepSeek-V4.1-Flash](models.md#deepseek-v41-flash) `D8E4` | 32 GB · MI50 | 251 GB | 2× Xeon E5-2680 v4 (28 cores) | NVMe array, 6.6 GB/s | the experts from the disk, every byte of RAM the cache | 14.3-14.5 positions/s | 4.7-5.0 tokens/s after 1k | — | v0.21.2 |
 <!-- /rates -->
 
@@ -189,6 +191,27 @@ Through OpenCL: 2.0 for a card without its vendor's own family, 1.2 for an older
 | [Qwen 3.6 35B-A3B](models.md#qwen-36-35b-a3b) `D8E4` | 16 GB · RTX 5060 Ti, OpenCL 1.2 | 62 GB | Xeon W-2123 (4 cores) | — | the experts in RAM, no tier | 37.1 positions/s | 23.0 tokens/s after 2k | — | v0.20.0 |
 | [Qwen 3.5 122B-A10B](models.md#qwen-35-122b-a10b) `D8E4` | 32 GB · MI50, OpenCL 2.0 | 251 GB | 2× Xeon E5-2680 v4 (28 cores) | — | the experts in RAM, an 18 GB tier | 49-51 positions/s | 13.5 tokens/s after 2k | — | v0.20.0 |
 <!-- /rates -->
+
+## Several conversations at once
+
+With `multi_user` "yes" a Qwen MoE model, GLM 5.3 Flash and DeepSeek-V4.1-Flash answer two conversations at once — on
+one card, the card on one conversation's layers while the CPU computes the other's experts, or one on each card — each
+answering what it would answer alone, every expert in RAM ([`config.md`](config.md), `multi_user`). The two together,
+against one conversation's tokens a second:
+
+| Model | GPU | CPU | How | The two together | Version |
+|---|---|---|---|---|---|
+| [Qwen 3.6 35B-A3B](models.md#qwen-36-35b-a3b) `D8E4` | 16 GB · MI50 | 2× Xeon E5-2680 v4 (28 cores) | two on one card | 1.65-1.77× — 32 tokens/s each through the server | v0.24.0 |
+| [Qwen 3.6 35B-A3B](models.md#qwen-36-35b-a3b) `D8E4` | 2× 16 GB · MI50 | 2× Xeon E5-2680 v4 (28 cores) | one on each card | 1.71× | v0.24.0 |
+| [Qwen 3.5 122B-A10B](models.md#qwen-35-122b-a10b) `D8E4` | 16 GB · MI50 | 2× Xeon E5-2680 v4 (28 cores) | two on one card | 1.31× | v0.24.0 |
+| [GLM 5.3 Flash](models.md#glm-53-flash) `D8E4` | 32 GB · MI50 | 2× Xeon Gold 6252 (48 cores) | two on one card | ~1.77× | v0.24.0 |
+| [DeepSeek-V4.1-Flash](models.md#deepseek-v41-flash) `D8E4` | 32 GB · MI50 | 2× Xeon Gold 6252 (48 cores) | two on one card, a CPU worker a socket | 1.53× — 21.0 tokens/s together against 13.7 | v0.25.0 |
+| [DeepSeek-V4.1-Flash](models.md#deepseek-v41-flash) `D8E4` | 2× 32 GB · MI50 | 2× Xeon Gold 6252 (48 cores) | one on each card, one CPU worker | 1.23× — 11.4 tokens/s together against 9.3 | v0.25.0 |
+
+Two at once gain as far as the card's part of a token takes as long as the CPU's: where a token is mostly the CPU's
+experts — the 122B, DeepSeek with a conversation on each card, its experts then on one worker — they gain less. A
+config that reads the experts from the disk is refused with several conversations: RAM would be a cache of them that
+each conversation keeps its own way.
 
 ## The machines
 

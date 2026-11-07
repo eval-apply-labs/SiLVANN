@@ -433,19 +433,30 @@ static __device__ inline sys__heap_node eng__eval(uint64_t bindings, uint64_t pr
     /* ⛔ A PANICKED MACHINE STARTS NOTHING (▶ "A STOP IS A PANIC", above): a computation handed to a runner
      * after another runner stopped answers nothing, and the door that asked refuses after it. */
     if (eng__eval__panicked() != 0u) return sys__heap_node__nothing();
-    places = sys__stack__create();
+    /* ⭐ A COMPUTATION THAT MOVED HERE GOES ON WHERE IT STOOD (▶ `sys__scheduler__continue_on`): its places, the path
+     *   from the program to the form it stopped at, and that form — whose verb has answered, so the loop arrives
+     *   coming back to it, as it would have where it was. The places' hold is this loop's, as a new stack's is. */
+    uint64_t moved_places = 0ull, moved_current = 0ull;
+    const bool resumed = sys__scheduler__zzengine_resumed(&moved_places, &moved_current);
+    places = resumed ? sys__heap_object__reference_to(moved_places) : sys__stack__create();
     if (places.dtype != SYS__KIND__OBJECT_REFERENCE) return sys__heap_node__nothing();
+    bool moved = false;       /* handed on to another block: what it holds is the next step's, and not let go of */
 
     /* Where the scan of `current` stands, when a return put it back there: a walk stood up from the place,
      * so the next scan starts at the cell just written rather than finding it again. */
     sys__list_walk scan;
     bool           standing = false;
 
-    current  = program;
+    current  = resumed ? moved_current : program;
     answer   = sys__heap_node__nothing();
-    entering = true;                 /* nothing has run this yet */
+    entering = !resumed;             /* nothing has run this yet — or its last verb has answered */
     resume   = 0ull;                 /* and nothing of it has been scanned */
-    (void)sys__heap_object__retain(current);
+    (void)sys__scheduler__zzengine_handed();   /* a hand-off is this evaluation's to see, none before it */
+    (void)sys__heap_object__retain(program);
+    /* ⭐ THE SLICE STARTS HERE, WITH THE EVALUATION (▶ "THE SLICE", sys's `scheduler__impl.cuh`): a new computation's
+     *   and a moved one's alike, so each has a whole one. 0, the shipping default: no clock is read. */
+    const uint64_t slice = sys__scheduler__zzengine_slice();
+    uint64_t slice_began = slice != 0ull ? sys__scheduler__zzengine_clock() : 0ull;
 
     for (;;) {
 
@@ -618,8 +629,33 @@ static __device__ inline sys__heap_node eng__eval(uint64_t bindings, uint64_t pr
 
         entering = false;                                   /* whatever it left, we wrote it */
         resume   = 0ull;            /* and a verb may have rewritten the whole form */
+        /* ⛔⛔ BUT A COMPUTATION MOVED STOPS HERE (▶ `sys__scheduler__continue_on`): the verb named a block, its form holds
+         *   its answer now, and the program, these places and the environment are handed to that block, which goes on
+         *   from this form. Nothing of it may run here after. One word read a verb. Where it could not be handed on —
+         *   no room, said by the fault raised — it goes on here. */
+        const uint64_t to = sys__scheduler__zzengine_handed();
+        if (to != 0ull && sys__scheduler__zzengine_move(computing_base, (uint32_t)(to - 1ull), program, places.args[0], current)) {
+            moved = true;
+            answer = sys__heap_node__nothing();
+            break;
+        }
+        /* ⛔ A MOVE REFUSED BECAUSE ITS PROCESS WAS KILLED ENDS THE STEP (▶ "THE PROCESSES", sys's scheduler): its answer
+         *   SCKL already, the program let go as any step's end lets it go */
+        if (to != 0ull && sys__scheduler__zzengine_killed(computing_base)) { answer = sys__heap_node__nothing(); break; }
+        /* ⛔ AND ONE WHOSE SLICE IS SPENT GOES TO THE BACK OF ITS OWN BLOCK'S QUEUE, as if it had moved there itself — when
+         *   something waits there and it may move; else it has a slice more here. A step of a process killed ends here. */
+        if (slice != 0ull && sys__scheduler__zzengine_clock() - slice_began >= slice) {
+            if (sys__scheduler__zzengine_killed(computing_base)) { answer = sys__heap_node__nothing(); break; }
+            if (sys__scheduler__zzengine_should_yield(computing_base)
+             && sys__scheduler__zzengine_move(computing_base, (uint32_t)sys__silicon__block_id(), program, places.args[0], current)) {
+                moved = true;
+                answer = sys__heap_node__nothing();
+                break;
+            }
+            slice_began = sys__scheduler__zzengine_clock();
+        }
 
-        /* ⭐ AND NOTHING STOPS HERE. A program's answer is what it reduces to, and the loop ends when the
+        /* ⭐ AND NOTHING ELSE STOPS HERE. A program's answer is what it reduces to, and the loop ends when the
          * outermost form is one value — so a verb that rewrote itself into a bigger form is simply scanned
          * again and costs nothing, and whatever finishes last is the answer. */
     }
@@ -632,7 +668,8 @@ static __device__ inline sys__heap_node eng__eval(uint64_t bindings, uint64_t pr
     (void)sys__heap_object__release(program);
     /* ⛳ THE STACK IS DRAINED AND NOTHING IS RELEASED OUT OF IT, because it never held anything: every
      * entry was borrowed from the chain, and releasing the program above lets that chain go from the top. */
-    while (!sys__stack__empty(&places)) (void)sys__stack__zzengine_compute_stack_pop(&places);
+    /* ⛔ AND A COMPUTATION MOVED KEEPS ITS PLACES: they are where it stands, and the next step's. */
+    while (!moved && !sys__stack__empty(&places)) (void)sys__stack__zzengine_compute_stack_pop(&places);
 #if SILVANN_LIST_POOL
     /* ⛔ NOT TIDINESS. The pool is one per runner and is emptied on every call, so a list still in a slot is
      * held by nothing and leaked. Every exit from the loop above reaches here. */

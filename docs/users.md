@@ -306,7 +306,36 @@ Intel from Haswell, 2013, AMD from Excavator, 2015; an older processor has no fa
 `silvann_tq_D8E4_qwen3.6_35b_a3b`, the one for a card too: on the test machine's two Xeons it answers at 14-16 tokens a
 second after a 1,000-position prompt, and at 11.9 held to 12 GB of RAM with its experts read from the disk (v0.18.1). On a processor with AVX-512 (F, BW, VL and DQ) the family's matrix products use it: on a four-core Xeon
 W-2123 with two DDR4-2400 sticks the 35B D8E4 alone ran at 9.0 tokens a second against 1.7 with AVX2, and with its
-experts on the CPU beside a card at 27-29 against 15-17. `SILVANN_CPU_AVX512=0` keeps the AVX2 code.
+experts on the CPU beside a card at 27-29 against 15-17. `SILVANN_CPU_AVX512=0` keeps the AVX2 code. With VNNI as well (Intel from
+Cascade Lake and Ice Lake, AMD from Zen 4) its int8 products use it, the same answers: on two Xeon Gold 6252 GLM 5.3
+Flash read a 2,000-position prompt with its experts on the CPU at 41.2 positions a second against 39.6, its decode the
+same within the noise. `SILVANN_CPU_VNNI=0` keeps AVX-512's.
+
+### Several people on one server: a user each
+
+`silvann users add <name>` makes a user: a folder of their own, `users/<name>/` in the data folder, and a password
+(asked twice, without echoing it). From then on every server on that data folder asks for a sign-in — the UI before
+anything else, `silvann_cli --sign-in <name>` in a terminal (the password asked, or `SILVANN_PASSWORD`), and any other
+client with `POST /users/sign_in` `{"name", "password"}` and the token it answers in `Authorization: Bearer <token>`. A
+sign-in lasts while it is used: twelve hours unused, a new password or the server's restart ends it. With no user, a
+server asks no one.
+
+A user sees and opens only the conversations in their folder; another's answers as one that is not there. The
+conversations made before the first user are nobody's until `silvann users adopt <name>` moves them into a folder.
+A user's model has a REPL of its own, and it sees the machine as from a chroot, with no root asked for: it writes in the
+user's workspace (`users/<name>/workspace/`) alone, and reads, besides, the system's programs (`/usr`, `/etc` and the
+like), the folders of the tools the user has switched on, and the runtime it runs from. The rest is closed in every
+mode — of the data folder every other user's folder, the user's own password, settings and conversations, the
+conversations made before the users, the Hugging Face token, a file made there later; of the machine its other disks,
+`/home`, `/tmp`. A user's `(bash …)` is held to the same by Linux's Landlock (where the machine has none, the command is
+refused); a link at the workspace's top is not followed for a user, as the model could make one itself; `add_tool` is
+off, since what it adds every conversation would run.
+
+`users/<name>/tools.json` is the user's own settings over the machine's tools file: their search —
+`{"search": {"config": {"brave_key": "…", "searxng": "…"}}}` — `fetch`'s `contact`, the agent registry's `registry` and
+`key`, a setting a skill's entry leaves `null`, and a tool switched off (`"enabled": "no"`). What else it asks stays the
+machine's, and the UI's list of the tools says which. `silvann users` lists the users and their conversations;
+`silvann users passwd <name>`, `silvann users remove <name> [--with-conversations]`.
 
 ### The model's tool
 

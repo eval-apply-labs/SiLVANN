@@ -2,7 +2,8 @@
 #define SILVANN__SILICON_FAMILIES_NVIDIA_CUDA12_OVERRIDES_TURBOQUANT_CUH
 /* ══ turboquant's DOORS, ON THE TENSOR CORES — nvidia_cuda12 ══════════════════════════════════════════════════════════
  * nn's turboquant doors (`nn/cpu/opcodes/turboquant__abi.cuh`), where this family covers them: the gemv — one matrix,
- * several over one `x`, or several, each over its own `x`, weighted into a sum onto a residual. */
+ * several over one `x` or over several inputs, or several, each over its own `x`, weighted into a sum onto a residual —
+ * the int8 gemv at 4 bits, and a router's matrix of halves. */
 
 /* What this file needs, named where a reader — and an editor — can follow it. */
 #include <stdint.h>
@@ -281,9 +282,62 @@ static inline bool nvidia_cuda12__zzprivate_gemvs(nvidia_cuda12__gemv_job* j) {
     return true;
 }
 
+/* ⭐ THE GEMV OF HALVES — `d` 16, a router's matrix (the 35B's 256 × 2048 a layer at every position), no scales:
+ *   `out[r] = half(Σ_c W[r][c] · x[c])`. nn's body reads a half of a row at a time. Here a warp takes a row, each lane
+ *   eight halves a read (sixteen bytes) and four reads in flight before the first product, into four partial sums, one a
+ *   read; the warp's butterfly adds each partial across the lanes, and the four are added in pairs, as
+ *   amd_rocm6_wave64's halves kernel does. The products are nn's; the order they are summed in is this kernel's own, the
+ *   same every call. Rows of whole groups of eight, the matrix and `x` on sixteen bytes (▶ the door). */
+#define NVIDIA_CUDA12__ZZPRIVATE_ROUTER_BOUNDS __launch_bounds__(256)
+static __global__ NVIDIA_CUDA12__ZZPRIVATE_ROUTER_BOUNDS void nvidia_cuda12__zzprivate_router_gemv(uint16_t* out, const uint8_t* weights,
+                                                                                              const uint16_t* x, uint64_t rows,
+                                                                                              uint64_t cols, unsigned int* over) {
+    const uint32_t W = NVIDIA_CUDA12__ZZPACKAGE_WARP, lane = (uint32_t)nn__silicon__lane() % W;
+    const uint64_t warps = nn__silicon__lanes() / W, runs = cols / 8u;
+    const uint4* xr = (const uint4*)(const void*)x;
+    for (uint64_t r = (uint64_t)nn__silicon__block() * warps + nn__silicon__lane() / W; r < rows;
+         r += (uint64_t)nn__silicon__blocks() * warps) {
+        const uint4* row = (const uint4*)(const void*)(weights + r * cols * 2u);
+        float q[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+        for (uint64_t j0 = lane; j0 < runs; j0 += 4u * W) {
+            uint4 c[4], xv[4];
+#pragma unroll
+            for (uint32_t u = 0u; u < 4u; ++u) {
+                const uint64_t j = j0 + (uint64_t)u * W;
+                c[u] = row[j < runs ? j : j0];
+                xv[u] = xr[j < runs ? j : j0];
+            }
+#pragma unroll
+            for (uint32_t u = 0u; u < 4u; ++u) {
+                if (j0 + (uint64_t)u * W >= runs) continue;
+                const uint32_t cw[4] = { c[u].x, c[u].y, c[u].z, c[u].w }, xw[4] = { xv[u].x, xv[u].y, xv[u].z, xv[u].w };
+#pragma unroll
+                for (uint32_t e = 0u; e < 4u; ++e) {
+                    q[u] += nn__silicon__half_to_float((uint16_t)(cw[e] & 0xFFFFu)) * nn__silicon__half_to_float((uint16_t)(xw[e] & 0xFFFFu));
+                    q[u] += nn__silicon__half_to_float((uint16_t)(cw[e] >> 16)) * nn__silicon__half_to_float((uint16_t)(xw[e] >> 16));
+                }
+            }
+        }
+#pragma unroll
+        for (uint32_t s = 0u; s < 4u; ++s)
+#pragma unroll
+            for (uint32_t off = 1u; off < W; off <<= 1) q[s] += __shfl_xor_sync(0xFFFFFFFFu, q[s], (int)off);
+        if (lane == 0u) out[r] = nn__kernels__zzabi_to_half((q[0] + q[1]) + (q[2] + q[3]), over);
+    }
+}
+
 static void nvidia_cuda12__override_turboquant_gemv(uint16_t* out, const uint8_t* weights, uint64_t w_room, const uint8_t* luts,
                                                     uint64_t l_room, const uint16_t* x, uint64_t d, uint64_t rows, uint64_t cols,
                                                     unsigned int* over) {
+    if (d == 16u && rows != 0u && cols != 0u && cols % 8u == 0u && rows <= w_room / (cols * 2u)
+     && ((uint64_t)(uintptr_t)weights) % 16u == 0u && ((uint64_t)(uintptr_t)x) % 16u == 0u) {
+        const uint64_t want = (rows + 7u) / 8u;
+        const uint32_t blocks = want < NN__KERNELS__BLOCKS_MAX ? (uint32_t)want : NN__KERNELS__BLOCKS_MAX;
+        void* args[] = { &out, &weights, &x, &rows, &cols, &over };
+        const size_t sizes[] = { sizeof out, sizeof weights, sizeof x, sizeof rows, sizeof cols, sizeof over };
+        nn__silicon__launch((const void*)nvidia_cuda12__zzprivate_router_gemv, "nvidia_cuda12__zzprivate_router_gemv", blocks, 256u, args, sizes, 6u);
+        return;
+    }
     const uint64_t row_bytes = cols * d / 8u;
     if (row_bytes != 0u && rows <= w_room / row_bytes && rows <= l_room / 2u) {
         nvidia_cuda12__gemv_job j = {};
@@ -314,6 +368,121 @@ static void nvidia_cuda12__override_turboquant_gemv_groups_sum(uint16_t* out, nn
     j.count = g.count; j.cols = cols; j.sum = 1u; j.out = out; j.x = x; j.w = w; j.residual = residual; j.over = over;
     if (nvidia_cuda12__zzprivate_gemvs(&j)) return;
     nn__turboquant__zzabi_launch_gemv_groups_sum(out, g, x, w, residual, rows, cols, over);
+}
+
+/* ⭐ THE GROUPS OVER `n` INPUTS — `x`'s rows `cols` apart, their answers `out_stride` apart, or with `out_stride` 0 each
+ *   group's answers one input after another (the rows verbs' layout) — a draft's check: several positions through every
+ *   matrix of a step at once. Here an input at a time through the one-input door above, so each answer is that door's to
+ *   the bit, on the tensor cores where nn's body is its generic gemv. amd_rocm6_wave64 reads the codes once for two
+ *   inputs; the tensor cores' product has eight columns, and the one-input door fills all eight with the same `x`, so the
+ *   same tile could take eight inputs at once — not written yet (`REASONED`: each column of the product is summed alone,
+ *   so an input's answer would stay the one-input door's). */
+static void nvidia_cuda12__override_turboquant_gemv_groups_n(uint16_t* out, nn__turboquant__groups g, const uint16_t* x, uint64_t cols,
+                                                             uint64_t n, uint64_t out_stride, unsigned int* over) {
+    for (uint64_t k = 0u; k < n; ++k) {
+        uint16_t* o = out;
+        const nn__turboquant__groups gk = nn__turboquant__groups_input(&g, &o, k, out_stride);
+        nvidia_cuda12__override_turboquant_gemv_groups(o, gk, x + k * cols, cols, over);
+    }
+}
+
+/* ══ ⭐ THE int8 GEMV AT 4 BITS — a warp a row ═════════════════════════════════════════════════════════════════════════
+ * nn's definition (`nn/gpu/kernels/kernels.cuh`, `rows_i8`): `x` quantised in blocks of 32 columns (nn's
+ * `zzabi_quantise`), each block's int8 products with the int8 levels summed in int32 — exact — then the block's float scale,
+ * and the row's scale / 127 once the parts are summed. nn's body gives a row a block of 256 lanes, a lane a block of 32
+ * columns at a time, each code decoded alone. Here, as amd_rocm6_wave64's `int8_rows4`: a warp a row, eight rows a block,
+ * a lane's blocks `l, l + 32, …` of `x` quantised once a kernel and held in registers, and four codes a step decoded into
+ * four int8 levels by two `__byte_perm`s over the sixteen levels held in four registers — AMD's `v_perm_b32`, whose CUDA
+ * form takes its selectors as nibbles, so a row's 16 bits of codes are the selector as they stand — and multiplied by
+ * `__dp4a`. The products are exact; the parts are added in the lane's blocks' order and then by the warp's butterfly, so
+ * the sum's last bits are this kernel's own, as AMD's are. Whole blocks of 32 columns up to 32 · 32 · `INT8_HELD`, codes
+ * on eight bytes, the rows and scales the rooms hold; anything else is nn's. */
+#define NVIDIA_CUDA12__ZZPRIVATE_INT8_HELD  8u         /* blocks of x a lane holds: up to 32 · 8 · 32 = 8192 columns */
+#define NVIDIA_CUDA12__ZZPRIVATE_INT8_WARPS 8u
+/* The int8 levels of four codes — 16 bits of a row, low nibble first — packed as four bytes. */
+static __device__ __forceinline__ uint32_t nvidia_cuda12__zzprivate_levels4_i8(const uint32_t* lev, uint32_t codes) {
+    const uint32_t sel = codes & 0x7777u, t = (codes >> 3) & 0x1111u;
+    const uint32_t top = ((t & 0x1u) | ((t & 0x10u) << 4) | ((t & 0x100u) << 8) | ((t & 0x1000u) << 12)) * 0xFFu;
+    const uint32_t low = __byte_perm(lev[0], lev[1], sel), high = __byte_perm(lev[2], lev[3], sel);
+    return (low & ~top) | (high & top);
+}
+#define NVIDIA_CUDA12__ZZPRIVATE_INT8_BOUNDS __launch_bounds__(256)
+static __global__ NVIDIA_CUDA12__ZZPRIVATE_INT8_BOUNDS void nvidia_cuda12__zzprivate_int8_4(uint16_t* out, const uint8_t* weights, const uint8_t* luts,
+                                                                               const uint16_t* x, uint64_t rows, uint64_t cols,
+                                                                               unsigned int* over) {
+    const int8_t* table = nn__turboquant__zzabi_levels_i8(4u);
+    uint32_t lev[4];
+#pragma unroll
+    for (uint32_t w = 0u; w < 4u; ++w)
+        lev[w] = (uint32_t)(uint8_t)table[4u * w] | ((uint32_t)(uint8_t)table[4u * w + 1u] << 8)
+               | ((uint32_t)(uint8_t)table[4u * w + 2u] << 16) | ((uint32_t)(uint8_t)table[4u * w + 3u] << 24);
+    const uint32_t lane = (uint32_t)nn__silicon__lane() % NVIDIA_CUDA12__ZZPACKAGE_WARP;
+    const uint32_t warp = (uint32_t)nn__silicon__lane() / NVIDIA_CUDA12__ZZPACKAGE_WARP;
+    const uint64_t blocks = cols / 32u, row_bytes = cols / 2u;
+    uint32_t q[NVIDIA_CUDA12__ZZPRIVATE_INT8_HELD][8];
+    float s[NVIDIA_CUDA12__ZZPRIVATE_INT8_HELD];
+#pragma unroll
+    for (uint32_t k = 0u; k < NVIDIA_CUDA12__ZZPRIVATE_INT8_HELD; ++k) {
+        const uint64_t b = lane + (uint64_t)k * NVIDIA_CUDA12__ZZPACKAGE_WARP;
+        s[k] = b < blocks ? nn__turboquant__zzabi_quantise(x, b * 32u, q[k]) : 0.0f;
+    }
+    for (uint64_t r = (uint64_t)nn__silicon__block() * NVIDIA_CUDA12__ZZPRIVATE_INT8_WARPS + warp; r < rows;
+         r += (uint64_t)nn__silicon__blocks() * NVIDIA_CUDA12__ZZPRIVATE_INT8_WARPS) {
+        const uint8_t* row = weights + r * row_bytes;
+        float part = 0.0f;
+#pragma unroll
+        for (uint32_t k = 0u; k < NVIDIA_CUDA12__ZZPRIVATE_INT8_HELD; ++k) {
+            const uint64_t b = lane + (uint64_t)k * NVIDIA_CUDA12__ZZPACKAGE_WARP;
+            if (b < blocks) {
+                const uint64_t* codes = (const uint64_t*)(const void*)(row + b * 16u);    /* 32 columns: 16 bytes */
+                int acc = 0;
+#pragma unroll
+                for (uint32_t e = 0u; e < 2u; ++e) {
+                    const uint64_t c = codes[e];
+#pragma unroll
+                    for (uint32_t f = 0u; f < 4u; ++f)
+                        acc = __dp4a((int)nvidia_cuda12__zzprivate_levels4_i8(lev, (uint32_t)(c >> (16u * f)) & 0xFFFFu),
+                                     (int)q[k][4u * e + f], acc);
+                }
+                part += (float)acc * s[k];
+            }
+        }
+        part = nvidia_cuda12__zzpackage_warp_sum(part);
+        if (lane == 0u) {
+            const float scale = nn__silicon__half_to_float((uint16_t)((uint32_t)luts[r * 2ull] | ((uint32_t)luts[r * 2ull + 1ull] << 8)));
+            out[r] = nvidia_cuda12__zzpackage_to_half(part * scale / 127.0f, over);
+        }
+    }
+}
+/* The blocks the card holds at once, asked once a card: a block quantises its lanes' `x` once, so a grid larger than the
+ * card holds would quantise it again for every block that waits. 0 where they cannot be asked. */
+static inline uint64_t nvidia_cuda12__zzprivate_int8_resident(void) {
+    static int sms[64], blocks[64];
+    int d = 0;
+    if (cudaGetDevice(&d) != cudaSuccess || d < 0 || d >= 64) return 0u;
+    if (sms[d] == 0 && cudaDeviceGetAttribute(&sms[d], cudaDevAttrMultiProcessorCount, d) != cudaSuccess) sms[d] = 0;
+    if (blocks[d] == 0 && cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blocks[d], nvidia_cuda12__zzprivate_int8_4,
+                              NVIDIA_CUDA12__ZZPRIVATE_INT8_WARPS * NVIDIA_CUDA12__ZZPACKAGE_WARP, 0) != cudaSuccess) blocks[d] = 0;
+    return sms[d] > 0 && blocks[d] > 0 ? (uint64_t)sms[d] * (uint64_t)blocks[d] : 0u;
+}
+static void nvidia_cuda12__override_turboquant_gemv_int8(uint16_t* out, const uint8_t* weights, uint64_t w_room, const uint8_t* luts,
+                                                         uint64_t l_room, const uint16_t* x, uint64_t d, uint64_t rows, uint64_t cols,
+                                                         unsigned int* over) {
+    const uint64_t row_bytes = cols * d / 8u;
+    if (d != 4u || cols == 0u || cols % 32u != 0u || cols > 32u * NVIDIA_CUDA12__ZZPACKAGE_WARP * NVIDIA_CUDA12__ZZPRIVATE_INT8_HELD
+     || ((uint64_t)(uintptr_t)weights) % 8u != 0u || rows > w_room / row_bytes || rows > l_room / 2u) {
+        nn__turboquant__zzabi_launch_gemv_int8(out, weights, w_room, luts, l_room, x, d, rows, cols, over);
+        return;
+    }
+    if (rows == 0u) return;
+    const uint64_t want = (rows + NVIDIA_CUDA12__ZZPRIVATE_INT8_WARPS - 1u) / NVIDIA_CUDA12__ZZPRIVATE_INT8_WARPS;
+    const uint64_t most = nvidia_cuda12__zzprivate_int8_resident();
+    const uint64_t cap = most != 0u && most < NN__KERNELS__BLOCKS_MAX ? most : NN__KERNELS__BLOCKS_MAX;
+    const uint32_t blocks = (uint32_t)(want < cap ? want : cap);
+    void* args[] = { &out, &weights, &luts, &x, &rows, &cols, &over };
+    const size_t sizes[] = { sizeof out, sizeof weights, sizeof luts, sizeof x, sizeof rows, sizeof cols, sizeof over };
+    nn__silicon__launch((const void*)nvidia_cuda12__zzprivate_int8_4, "nvidia_cuda12__zzprivate_int8_4", blocks,
+                        NVIDIA_CUDA12__ZZPRIVATE_INT8_WARPS * NVIDIA_CUDA12__ZZPACKAGE_WARP, args, sizes, 7u);
 }
 
 #endif /* SILVANN__SILICON_FAMILIES_NVIDIA_CUDA12_OVERRIDES_TURBOQUANT_CUH */

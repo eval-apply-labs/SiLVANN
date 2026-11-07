@@ -10,12 +10,21 @@
     python3 silvann_core.py hf-token                  whether a Hugging Face token is saved, and whose it is
     python3 silvann_core.py hf-token --set            save one, asked for without echoing it (or: hf-token <token>)
     python3 silvann_core.py hf-token --forget         remove it
+    python3 silvann_core.py users                     the users, each with how many conversations they hold
+    python3 silvann_core.py users add <name>          a user: a folder of their own and a password (asked twice,
+                                                      without echoing it; read from stdin when that is no terminal) —
+                                                      the first turns sign-in on for every server on this data folder
+    python3 silvann_core.py users passwd <name>       a new password: their sign-ins end
+    python3 silvann_core.py users remove <name> [--with-conversations]
+    python3 silvann_core.py users adopt <name>        the conversations made before there were users moved into
+                                                      <name>'s folder, every model's
 
 A token makes Hugging Face's downloads faster than a client that is not signed in gets, and reaches a repository whose
 terms its account accepted. It is saved in `.huggingface_token` beside `models/` (only its owner may read it), which the
 UI's Options save too; `HF_TOKEN` in the environment comes before it.
 
-`models/` and `user_sessions/` are beside this file, or in the folder `SILVANN_DATA` names (the Docker image's volume).
+`models/` and `user_sessions/` are beside this file, or in the folder `SILVANN_DATA` names (the Docker image's volume);
+a user's folder is `users/<name>/` there (▶ silvann_runtime/users.py).
 
 A model is fetched only when it is asked for, so the release carries no weights; the server refuses a model that is not
 here and names this command. A fetched folder gets `configs/default.json` — the runtime settings the server boots with
@@ -33,6 +42,7 @@ sys.path.insert(0, os.environ.get("SILVANN_RUNTIME", str(_HERE)))
 from silvann_runtime.fetch import KNOWN, differences, ensure_model, present, said, state, update_program  # noqa: E402
 from silvann_runtime.fetch import size as fetch_size                                # noqa: E402
 from silvann_runtime.model_folder import Refused                   # noqa: E402
+from silvann_runtime import users as _users                         # noqa: E402
 
 # what a user's machine keeps — the models and the conversations: beside the release, or where SILVANN_DATA says
 DATA = Path(os.environ.get("SILVANN_DATA") or ROOT)
@@ -144,9 +154,65 @@ def hf_token(args):
     return 0
 
 
+def _password(name):
+    """A password for `name`: asked twice without echoing it at a terminal, or the first line of stdin."""
+    if not sys.stdin.isatty():
+        return sys.stdin.readline().rstrip("\n")
+    import getpass
+    first = getpass.getpass("%s's password: " % name)
+    if getpass.getpass("again: ") != first:
+        raise SystemExit("the two passwords differ: nothing changed")
+    return first
+
+
+def users_command(argv):
+    """`users …` (▶ the module's note): the data folder's users, made, given a new password, removed, given the
+    conversations made before there were users."""
+    u = _users.Users(DATA)
+    what, rest = (argv[0] if argv else "list"), argv[1:]
+    try:
+        if what == "list":
+            names = u.names()
+            for name in names:
+                n = u.conversations(name)
+                print("%-32s %d conversation%s" % (name, n, "" if n == 1 else "s"))
+            if not names:
+                print("no users: a server on this data folder asks no one to sign in. `silvann users add <name>` makes one")
+            return 0
+        if not rest:
+            raise SystemExit("users %s <name>" % what)
+        name = rest[0].strip().lower()
+        if what == "add":
+            first = not u.on()
+            u.add(name, _password(name))
+            print("%s added, their folder %s" % (name, u.folder(name)))
+            if first:
+                print("sign-in is on for every server on this data folder, from its next request. The conversations made "
+                      "before are nobody's until `silvann users adopt <name>` gives them to someone")
+            return 0
+        if what == "passwd":
+            u.passwd(name, _password(name))
+            print("%s's password changed; their sign-ins on a running server end" % name)
+            return 0
+        if what == "remove":
+            u.remove(name, with_conversations="--with-conversations" in rest[1:])
+            print("%s removed, their folder with them" % name)
+            return 0
+        if what == "adopt":
+            moved = u.adopt(name, str(DATA / "user_sessions"))
+            print("%d conversation%s moved into %s's folder%s" % (len(moved), "" if len(moved) == 1 else "s", name,
+                  "" if not moved else ": " + ", ".join("%s/%s" % m for m in moved)))
+            return 0
+    except _users.Refused as ex:
+        raise SystemExit(str(ex))
+    raise SystemExit("users: list, add, passwd, remove or adopt — not %r" % what)
+
+
 def main(argv):
     if argv[:1] == ["hf-token"]:
         return hf_token(argv[1:])
+    if argv[:1] == ["users"]:
+        return users_command(argv[1:])
     if len(argv) >= 2 and argv[0] == "download-model":
         if not os.environ.get("HF_TOKEN") and saved_token():
             os.environ["HF_TOKEN"] = saved_token()          # huggingface_hub reads it at each request

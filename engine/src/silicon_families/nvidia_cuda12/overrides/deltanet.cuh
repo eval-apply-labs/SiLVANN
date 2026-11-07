@@ -2,7 +2,7 @@
 #define SILVANN__SILICON_FAMILIES_NVIDIA_CUDA12_OVERRIDES_DELTANET_CUH
 /* ══ deltanet's DOORS, RUN FASTER — nvidia_cuda12 ═════════════════════════════════════════════════════════════════════
  * nn's deltanet doors (`nn/cpu/opcodes/deltanet__abi.cuh`), where this family covers them: the step over a prompt's rows
- * at a head of 128. */
+ * at a head of 128, with Qwen 3.5's output gate or the one a call names, and the gates over rows. */
 
 /* What this file needs, named where a reader — and an editor — can follow it. */
 #include <stdint.h>
@@ -18,10 +18,11 @@
  *     layer is on the card at once */
 #define NVIDIA_CUDA12__ZZPRIVATE_DN_D 128u
 #define NVIDIA_CUDA12__ZZPRIVATE_DN_BOUNDS __launch_bounds__(128)
-static __global__ NVIDIA_CUDA12__ZZPRIVATE_DN_BOUNDS void nvidia_cuda12__zzprivate_deltanet_steps128(float* S, const uint16_t* conved, const uint16_t* z,
+static __device__ __forceinline__ void nvidia_cuda12__zzprivate_deltanet_steps128_body(float* S, const uint16_t* conved, const uint16_t* z,
                                                                                          const uint16_t* beta, const uint16_t* g,
                                                                                          const uint16_t* w, uint16_t* out, uint64_t k_heads,
-                                                                                         uint64_t v_heads, uint64_t rows, unsigned int* over) {
+                                                                                         uint64_t v_heads, uint64_t rows, unsigned int gate,
+                                                                                         unsigned int* over) {
     const uint32_t D = NVIDIA_CUDA12__ZZPRIVATE_DN_D;
     const uint64_t lane = nn__silicon__lane(), lanes = nn__silicon__lanes(), j = lane;
     const uint64_t rep = v_heads / k_heads, ch = (2ull * k_heads + v_heads) * D, vd = v_heads * D;
@@ -65,12 +66,30 @@ static __global__ NVIDIA_CUDA12__ZZPRIVATE_DN_BOUNDS void nvidia_cuda12__zzpriva
             const float scale = 1.0f / nn__silicon__sqrtf(nn__silicon__lanes_sum(oo) / (float)D + 1e-6f);
             const float zr = nn__silicon__half_to_float(zh[j]);
             const float zc = (zr < -88.0f) ? -88.0f : ((zr > 88.0f) ? 88.0f : zr);
-            oh[j] = nn__kernels__zzabi_to_half(nn__silicon__half_to_float(oh[j]) * scale * nn__silicon__half_to_float(w[j])
-                                                   * (zc / (1.0f + nn__silicon__expf(-zc))), over);
+            const float gz = gate == NN__DELTANET__GATE_SIGMOID ? 1.0f / (1.0f + nn__silicon__expf(-zc))
+                                                                : zc / (1.0f + nn__silicon__expf(-zc));
+            oh[j] = nn__kernels__zzabi_to_half(nn__silicon__half_to_float(oh[j]) * scale * nn__silicon__half_to_float(w[j]) * gz, over);
         }
 #pragma unroll
         for (uint32_t i = 0u; i < D; ++i) Sh[i * D + j] = col[i];
     }
+}
+static __global__ NVIDIA_CUDA12__ZZPRIVATE_DN_BOUNDS void nvidia_cuda12__zzprivate_deltanet_steps128(float* S, const uint16_t* conved, const uint16_t* z,
+                                                                                         const uint16_t* beta, const uint16_t* g,
+                                                                                         const uint16_t* w, uint16_t* out, uint64_t k_heads,
+                                                                                         uint64_t v_heads, uint64_t rows, unsigned int* over) {
+    nvidia_cuda12__zzprivate_deltanet_steps128_body(S, conved, z, beta, g, w, out, k_heads, v_heads, rows, NN__DELTANET__GATE_SILU, over);
+}
+/* ⭐ …AND WITH THE OUTPUT GATE NAMED — nn's `deltanet_steps_gate`: σ(z), Flash-Next's, where silu(z) is Qwen 3.5's; the rest
+ *   of the step the kernel above's, so a gated prompt's rows and its positions agree to the bit as Qwen's do. Every
+ *   Flash-Next DeltaNet layer ran nn's body without it (`MEASURED` on amd_rocm6_wave64, 2026-11-01: 36 a token, 109 µs each;
+ *   this family's own cost unmeasured). */
+static __global__ NVIDIA_CUDA12__ZZPRIVATE_DN_BOUNDS void nvidia_cuda12__zzprivate_deltanet_steps128_gate(float* S, const uint16_t* conved,
+                                                                                         const uint16_t* z, const uint16_t* beta,
+                                                                                         const uint16_t* g, const uint16_t* w, uint16_t* out,
+                                                                                         uint64_t k_heads, uint64_t v_heads, uint64_t rows,
+                                                                                         unsigned int gate, unsigned int* over) {
+    nvidia_cuda12__zzprivate_deltanet_steps128_body(S, conved, z, beta, g, w, out, k_heads, v_heads, rows, gate, over);
 }
 /* A head of 128 and whole key groups; anything else is nn's. */
 static void nvidia_cuda12__override_deltanet_steps(float* S, const uint16_t* conved, const uint16_t* z, const uint16_t* beta,
@@ -98,6 +117,59 @@ static void nvidia_cuda12__override_deltanet_step(float* S, const uint16_t* conv
         return;
     }
     nvidia_cuda12__override_deltanet_steps(S, conved, z, beta, g, w, out, k_heads, v_heads, head_dim, 1u, over);
+}
+
+/* A head of 128, whole key groups and a gate nn names; anything else is nn's. */
+static void nvidia_cuda12__override_deltanet_steps_gate(float* S, const uint16_t* conved, const uint16_t* z, const uint16_t* beta,
+                                                        const uint16_t* g, const uint16_t* w, uint16_t* out, uint64_t k_heads,
+                                                        uint64_t v_heads, uint64_t head_dim, uint64_t rows, unsigned int gate,
+                                                        unsigned int* over) {
+    if (head_dim != NVIDIA_CUDA12__ZZPRIVATE_DN_D || k_heads == 0u || v_heads % k_heads != 0u
+     || (gate != NN__DELTANET__GATE_SILU && gate != NN__DELTANET__GATE_SIGMOID)) {
+        nn__deltanet__zzabi_launch_steps_gate(S, conved, z, beta, g, w, out, k_heads, v_heads, head_dim, rows, gate, over);
+        return;
+    }
+    const uint32_t blocks = v_heads < NN__KERNELS__BLOCKS_MAX ? (uint32_t)v_heads : NN__KERNELS__BLOCKS_MAX;
+    void* args[] = { &S, &conved, &z, &beta, &g, &w, &out, &k_heads, &v_heads, &rows, &gate, &over };
+    const size_t sizes[] = { sizeof S, sizeof conved, sizeof z, sizeof beta, sizeof g, sizeof w, sizeof out, sizeof k_heads,
+                             sizeof v_heads, sizeof rows, sizeof gate, sizeof over };
+    nn__silicon__launch((const void*)nvidia_cuda12__zzprivate_deltanet_steps128_gate, "nvidia_cuda12__zzprivate_deltanet_steps128_gate",
+                        blocks, NVIDIA_CUDA12__ZZPRIVATE_DN_D, args, sizes, 12u);
+}
+
+/* ⭐ THE GATES OVER ROWS — nn's `deltanet_gates_rows`, β = σ(b) and g = −exp(A_log)·softplus(a + dt_bias), a lane an element
+ *   as nn's body, nn's arithmetic in its order, its six roundings through the family's `to_half` (nn's conversion's bits
+ *   and fault word, ▶ kernels.cuh) where nn's body takes its branches. */
+#define NVIDIA_CUDA12__ZZPRIVATE_GATES_BOUNDS __launch_bounds__(256)
+static __global__ NVIDIA_CUDA12__ZZPRIVATE_GATES_BOUNDS void nvidia_cuda12__zzprivate_deltanet_gates_rows(uint16_t* beta, uint16_t* g, const uint16_t* a,
+                                                                                         const uint16_t* b, const uint16_t* a_log,
+                                                                                         const uint16_t* dt_bias, uint64_t heads,
+                                                                                         uint64_t rows, unsigned int* over) {
+    const uint64_t n = heads * rows, stride = (uint64_t)nn__silicon__blocks() * nn__silicon__lanes();
+    for (uint64_t i = (uint64_t)nn__silicon__block() * nn__silicon__lanes() + nn__silicon__lane(); i < n; i += stride) {
+        const uint64_t h = i % heads;
+        beta[i] = nvidia_cuda12__zzpackage_to_half(1.0f / (1.0f + nn__silicon__expf(-nn__silicon__half_to_float(b[i]))), over);
+        const float sum = nn__silicon__half_to_float(nvidia_cuda12__zzpackage_to_half(
+                              nn__silicon__half_to_float(a[i]) + nn__silicon__half_to_float(dt_bias[h]), over));
+        const float mag = (sum < 0.0f) ? -sum : sum, top = (sum > 0.0f) ? sum : 0.0f;
+        const float sp = nn__silicon__half_to_float(nvidia_cuda12__zzpackage_to_half(
+                             top + nn__silicon__logf(1.0f + nn__silicon__expf(-mag)), over));
+        const float ea = nn__silicon__half_to_float(nvidia_cuda12__zzpackage_to_half(
+                             nn__silicon__expf(nn__silicon__half_to_float(a_log[h])), over));
+        const float prod = nn__silicon__half_to_float(nvidia_cuda12__zzpackage_to_half(sp * ea, over));
+        g[i] = nvidia_cuda12__zzpackage_to_half(prod * -1.0f, over);
+    }
+}
+/* nn's launch's lanes and the same arguments: every call is this family's. */
+static void nvidia_cuda12__override_deltanet_gates_rows(uint16_t* beta, uint16_t* g, const uint16_t* a, const uint16_t* b,
+                                                        const uint16_t* a_log, const uint16_t* dt_bias, uint64_t heads, uint64_t rows,
+                                                        unsigned int* over) {
+    const uint64_t want = (heads * rows + 255u) / 256u;
+    const uint32_t blocks = want == 0u ? 1u : want < NN__KERNELS__BLOCKS_MAX ? (uint32_t)want : NN__KERNELS__BLOCKS_MAX;
+    void* args[] = { &beta, &g, &a, &b, &a_log, &dt_bias, &heads, &rows, &over };
+    const size_t sizes[] = { sizeof beta, sizeof g, sizeof a, sizeof b, sizeof a_log, sizeof dt_bias, sizeof heads, sizeof rows, sizeof over };
+    nn__silicon__launch((const void*)nvidia_cuda12__zzprivate_deltanet_gates_rows, "nvidia_cuda12__zzprivate_deltanet_gates_rows",
+                        blocks, 256u, args, sizes, 9u);
 }
 
 #endif /* SILVANN__SILICON_FAMILIES_NVIDIA_CUDA12_OVERRIDES_DELTANET_CUH */
