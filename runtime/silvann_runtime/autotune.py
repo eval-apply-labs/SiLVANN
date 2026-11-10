@@ -17,16 +17,17 @@ picks them by trying them on the card and measuring the RAM:
   ② else on the CPU: from RAM, the largest tier the card boots with beside the context, in steps of STEP_GB; from the disk, no tier (a tier copies its experts from RAM), and GLM's prompt DISK_CHUNK positions at a
      time — `MEASURED` 2026-10-14, held to 28 GB on the RTX 5060 Ti: 10.6 positions/s against 8.3 at 256, the answer
      the same
-  ③ the context halved, down to MIN_CONTEXT, while nothing boots
+  ③ the context as long as the card holds beside the model, up to the number asked (or the model's length, "max"),
+     down to MIN_CONTEXT — the tier only once the context is whole (⚖ 2026-11-09)
   every trial with the config's `vram_margin_mb` (VRAM_MARGIN_MB by default) of each card held beside it (`_held`), so
   what is chosen leaves that much free for whatever else draws on the card
   and GLM's tier exclusive (each expert on the card or in RAM) where it is a quarter of the experts or more and the card
   copies both ways at once — else inclusive (⚖ 2026-10-14)
 
 The context comes first: the conversation's cache for the whole context is the card's before any tier (a tier a little
-smaller costs a little speed; a cache too small refuses a conversation). A config's `max_context` of `"max"` takes that
-further (⚖ 2026-10-14): the context grows to what the card holds beside the model, up to the model's own length
-(`model_length`), and a tier only once the context is whole. The experts stay on the card at the longest context it
+smaller costs a little speed; a cache too small refuses a conversation). The context grows to what the card holds
+beside the model, up to the number the config's `max_context` names — or, `"max"` (⚖ 2026-10-14), up to the model's own
+length (`model_length`) — and a tier only once the context is whole (⚖ 2026-11-09, for a number too). The experts stay on the card at the longest context it
 holds beside them where that is CARD_CONTEXT or more (⚖ 2026-10-17, NN-93) — else they go to the CPU for the whole
 length, and the tier is lent the cache's rows a conversation has not reached (▶ qwen3_5's and glm5's `_lend`), so
 the context costs the tier only what a conversation uses of it. Where the whole length does not fit beside the model,
@@ -42,8 +43,8 @@ and the next boot on the same takes it without trying; a boot the card refuses a
 A config's options win: what it names of the placement (`experts_on`, `experts_from`, `card_experts_gb`) is kept and the
 rest chosen around it — `"auto"` names nothing, so `{"experts_on": "cpu", "experts_from": "auto"}` chooses where from and
 the tier — and its other options are kept in every candidate; a placement it names in full is booted as it is. A machine with no card is not tried — its "card" is the CPU's memory — nor an
-integrated GPU (`khronos_opencl1_igpu`), whose memory is the PC's RAM — where pictures are read on the CPU unless the config's
-`picture_pixels` gives them room.
+integrated GPU before Gen9 (`intel_opencl1_igpu`), whose memory is the PC's RAM — where pictures are read on the CPU unless the
+config's `picture_pixels` gives them room.
 """
 import collections
 import datetime
@@ -57,7 +58,7 @@ import shutil
 import subprocess
 
 from . import experts_file
-from .machine import Machine, own_memory
+from .machine import CPU_FAMILIES, Machine, own_memory
 from .model_folder import ModelFolder, Refused
 from .system import LIBRARY_SUFFIX, memory
 from .vision import video_ram
@@ -73,9 +74,9 @@ POOL = re.compile(r"nn__expert_cache_l1__size_mb:(\d+)")
 CTX_STEP = 1024          # the context's step, where it takes what the card holds (`"max"`)
 MIN_CONTEXT = 4096
 NO_CARD_CONTEXT = 32768  # `"max"` on a machine with no card of its own, and a model that names no length
-NOT_A_CARD = ("x86_avx2", "host", "khronos_opencl1_igpu")   # silicon whose pool is the PC's RAM: never tried — but an
-                         # OpenCL 1.2 card whose memory is its own (an NVIDIA card below compute 7.5, NN-96) is a card
-                         # (`machine.own_memory`), and is tried as one
+NOT_A_CARD = CPU_FAMILIES + ("host", "intel_opencl1_igpu")   # silicon whose pool is the PC's RAM: never tried — but a
+                         # device of it whose memory is its own is a card (`machine.own_memory`), and is tried as one;
+                         # an NVIDIA card through OpenCL 1.2 (`nvidia_opencl1`, NN-96) is a card
 TIER_MAX_GB = 128        # the binary search's ceiling, past any card's memory
 DISK_CHUNK = 1024        # GLM's prompt rows a step with its experts on the disk (Qwen's chunk is at most 256)
 FREED_GB = 1             # a card this much emptier than when a kept choice was made chooses again (`_freed`)
@@ -307,9 +308,9 @@ def _remember(folder, key, options, max_context, why, used):
 
 def choose(path, max_context, options=None, silicon=None, fresh=False, log=print, video_tokens=None, margin_mb=None):
     """(options, max_context, why): the config's `options`, completed for this machine, the context the card holds, and
-    one line saying what was chosen and why. `max_context` a number of positions, or `"max"`: as many as the card holds
-    beside the model, up to the model's own length — and a tier of experts only once the context is that whole length
-    (⚖ 2026-10-14). `video_tokens`: the config's `max_tokens_per_video`, which the server's RAM holds while a video is
+    one line saying what was chosen and why. `max_context` `"max"`: as many positions as the card holds beside the model,
+    up to the model's own length — and a tier of experts only once the context is that whole length (⚖ 2026-10-14); or a
+    number of positions, the same up to it. `video_tokens`: the config's `max_tokens_per_video`, which the server's RAM holds while a video is
     read (▶ `vision.video_ram`). `fresh` tries again what the folder remembers. `margin_mb`: the config's `vram_margin_mb`,
     what each card keeps free (VRAM_MARGIN_MB where it says nothing)."""
     margin_mb = VRAM_MARGIN_MB if margin_mb is None else int(margin_mb)
@@ -349,7 +350,7 @@ def choose(path, max_context, options=None, silicon=None, fresh=False, log=print
         # an integrated GPU's pool is refused the pictures' room the model sets aside by default (`MEASURED` 2026-10-14
         #   on the precision: the 27B through OpenCL 1.2 boots with picture_pixels 0, and not with its 4 MP — since
         #   v0.7.0): pictures there are read on the CPU unless the config gives them room
-        if where == "khronos_opencl1_igpu" and "picture_pixels" in takes and "picture_pixels" not in options:
+        if where == "intel_opencl1_igpu" and "picture_pixels" in takes and "picture_pixels" not in options:
             options = dict(options, picture_pixels=0)
             why += ", pictures read on the CPU (picture_pixels in the config's options gives them room in the pool)"
         return options, ctx, why
@@ -364,29 +365,20 @@ def choose(path, max_context, options=None, silicon=None, fresh=False, log=print
         return got["options"], got["max_context"], "%s — as chosen %s, kept in autotune.json" % (got["why"], got["chosen"])
     p = _Prober(folder, arch, silicon, log, margin_mb)
     p.video_tokens = video_tokens
-    if most:
-        found = _setup(p, top, options, takes, grow=True)
-        if found is None:
-            raise Refused("%s does not fit this card even at a %d-token context: a larger card, or a smaller pack"
-                          % (folder.path, MIN_CONTEXT))
-        chosen, ctx, why = found
-        why += "; the context %d, %s" % (ctx, "the model's whole length" if ctx == top else
-                                         "as much as the card holds beside the model")
-    else:
-        ctx = top
-        while True:
-            found = _setup(p, ctx, options, takes)
-            if found is not None:
-                chosen, _, why = found
-                if ctx < top:
-                    why += "; the context %d, the largest of %d halved that boots" % (ctx, top)
-                break
-            if ctx <= MIN_CONTEXT:
-                moe = bool(getattr(p.model(ctx, options), "MOE", False)) or "experts_on" not in takes and "card_experts_gb" in takes
-                how = " with its experts on the CPU" if moe else ""
-                raise Refused("%s does not fit this card even at a %d-token context%s: a larger card, or a smaller pack"
-                              % (folder.path, ctx, how))
-            ctx = max(MIN_CONTEXT, ctx // 2)
+    # ⭐ A NUMBER IS "max" UP TO IT (⚖ 2026-11-09 *"i thought auto would give you all of the context possible by
+    #   shrinking the temporary expert block"*): the context as much as the card holds beside the model up to the number,
+    #   and a tier only once the context is the whole number — or, lent the cache's rows a conversation has not reached,
+    #   the least the model takes (▶ `_setup`). `MEASURED` the precision 2026-11-09 (RTX 5060 Ti 16 GB, Flash-Next from
+    #   the disk at 62 GB, measurements/2026-11-08_owed_rows_precision.md ②d): 100,384 asked was halved to 50,192 and a
+    #   4.5 GB tier, where 90,973 boots with none.
+    found = _setup(p, top, options, takes, grow=True)
+    if found is None:
+        moe = bool(getattr(p.model(MIN_CONTEXT, options), "MOE", False)) or "experts_on" not in takes and "card_experts_gb" in takes
+        raise Refused("%s does not fit this card even at a %d-token context%s: a larger card, or a smaller pack"
+                      % (folder.path, MIN_CONTEXT, " with its experts on the CPU" if moe else ""))
+    chosen, ctx, why = found
+    why += "; the context %d, %s" % (ctx, ("the model's whole length" if most else "as asked") if ctx == top else
+                                     "as much as the card holds beside the model" + ("" if most else ", of %d asked" % top))
     why = "%s; %d MB of the card kept free (%d setups tested)" % (why, margin_mb, p.tried)
     _remember(folder, key, chosen, ctx, why, used)
     return chosen, ctx, why
@@ -429,6 +421,17 @@ def _least(p, ctx, options):
     return -(-model.TIER_LEAST // int(STEP_GB * 2**30)) * STEP_GB
 
 
+def _tier_from_disk(p, options):
+    """Whether the model takes a card's tier fed from the disk's cache beside these options (NN-164): Flash-Next, a Qwen
+    MoE, GLM on one socket — not GLM's experts over two, each expert whole in one socket's cache being what a promotion
+    copies."""
+    try:
+        p.model(MIN_CONTEXT, dict(options, card_experts_gb=STEP_GB))
+        return True
+    except Refused:
+        return False
+
+
 def _takes_card(p, options):
     """Whether the model takes its experts on the card beside these options — GLM's tensor-parallel group does not, its
     cards a tier of the experts on the CPU."""
@@ -457,23 +460,31 @@ def _setup(p, ctx, options, takes, grow=False):
     #   "mapped" with the same 80 GB and answered 7.0 times as fast; on one MI50 with 251 GB, against 34 layers in RAM and
     #   6 mapped, the prompt 17% faster and the answer 12% slower by its 300th token, the boot 20 s against 6 minutes.
     #   A card's share of the experts (a tier, a fixed share) is copied from RAM, so it keeps "mapped" as before.
-    if "experts_in_ram" in takes and "experts_from" not in options:
+    #   ⭐ Every layer in RAM and the card's share not named, the card's tier is sized below as any family's — inclusive
+    #   over two sockets (NN-167; ⚖ 2026-11-09 *"let's size it with the autotune"*), a conversation a card's alike.
+    said = "experts_from" in options
+    if "experts_in_ram" in takes and not said:
         whole = p.model(MIN_CONTEXT, dict(options, experts_from="ram"))
         layers, held = len(whole.run_layers), experts_file.limit()
         a_layer = whole.cpu_arena // layers
-        room = held * (1 - FILES_SHARE) - experts_file.OWN - experts_file.SPARE - video_ram(p.folder.config, p.video_tokens)
+        room = (held * (1 - FILES_SHARE) - max(experts_file.OWN, getattr(p.arch, "HOST_OWN", 0) or 0) - experts_file.SPARE
+                - video_ram(p.folder.config, p.video_tokens))
         n = int(max(0, min(layers, room // a_layer)))
         carded = float(options.get("card_experts_gb") or 0) or int(options.get("card_experts") or 0)
-        placed = (dict(options, experts_from="ram") if n == layers else
-                  dict(options, experts_from="mapped", experts_in_ram=n) if carded else
-                  dict(options, experts_from="disk"))
-        why = ("the experts on the CPU, in RAM" if n == layers else
-               "the experts on the CPU, %d of %d layers' in RAM and the rest mapped from the pack (or their files)" % (n, layers)
-               if carded else
-               "the experts on the CPU, read from the disk into a cache in RAM (%d of %d layers' would fit in it)" % (n, layers))
-        got = sized(placed)
-        return None if got is None else (placed, got, why + " (%.1f GB a layer, %.0f GB this process may hold)"
-                                         % (a_layer / 2**30, held / 2**30))
+        if n == layers and "card_experts_gb" in takes and "card_experts_gb" not in options and "card_experts" not in options:
+            options = dict(options, experts_from="ram")
+        else:
+            placed = (dict(options, experts_from="ram") if n == layers else
+                      dict(options, experts_from="mapped", experts_in_ram=n) if carded else
+                      dict(options, experts_from="disk"))
+            why = ("the experts on the CPU, in RAM" if n == layers else
+                   "the experts on the CPU, %d of %d layers' in RAM and the rest mapped from the pack (or their files)"
+                   % (n, layers) if carded else
+                   "the experts on the CPU, read from the disk into a cache in RAM (%d of %d layers' would fit in it)"
+                   % (n, layers))
+            got = sized(placed)
+            return None if got is None else (placed, got, why + " (%.1f GB a layer, %.0f GB this process may hold)"
+                                             % (a_layer / 2**30, held / 2**30))
     # a model that refuses its experts on the card beside these options — a Qwen MoE over a group of cards (`num_cards`),
     #   whose experts are the card's by default — is tried with them on the CPU, its cards a tier of them
     if "experts_on" in takes and "experts_on" not in options and int(options.get("tensor_parallel") or 1) > 1 \
@@ -502,12 +513,24 @@ def _setup(p, ctx, options, takes, grow=False):
     held = experts_file.limit()
     gb = "%.0f GB of experts, %.0f GB this process may hold" % (need / 2**30, held / 2**30)
     if "experts_from" in options:
-        source, gb = options["experts_from"], gb + "; where from, as the config says"
+        source, gb = options["experts_from"], gb + ("; where from, as the config says" if said else "")
     else:
         # where the experts live: RAM when they fit in what this process may hold, beside its own memory and the spare
-        source = "ram" if experts_file.in_ram(need, held, video_ram(p.folder.config, p.video_tokens)) else "disk"
+        source = "ram" if experts_file.in_ram(need, held, video_ram(p.folder.config, p.video_tokens),
+                                              getattr(p.arch, "HOST_OWN", None)) else "disk"
     cpu["experts_from"] = source
-    if source != "ram" or "card_experts_gb" not in takes or "card_experts_gb" in options:
+    # ⭐ FROM THE DISK, A TIER TOO (NN-164; ⚖ 2026-11-08 "yes"): where the family takes a card's tier fed from the disk's
+    #   cache — each promotion copied from the slot that cache holds its expert in, a layer's most picked — the tier is
+    #   sized as from RAM; a family that refuses one beside these options (GLM's experts over two sockets) has none.
+    #   `MEASURED` the precision (measurements/2026-11-08_middle_row_tier_from_disk_precision.md), at 32 GB against the
+    #   disk alone: a token 1.19× (Flash-Next, 9.5 GB) and 1.20× (the 122B, 6 GB), 1.43× and 1.36× over 700 tokens; the
+    #   122B's prompt 1.55×. `MEASURED` node03, 28 cores, auto's 8.5 GB tier on a 16 GB card at 32 GB
+    #   (measurements/2026-11-08_disk_tier_auto_node03.md): over 700 tokens 1.39× (Flash-Next) and 1.18× (the 122B), the
+    #   122B's prompt 2.0×; over the first 128 tokens after a 2k prompt Flash-Next's tier, still filling, 0.96×
+    from_disk = (source == "disk" and "card_experts_gb" in takes and "card_experts_gb" not in options
+                 and _tier_from_disk(p, cpu))
+    where = "RAM" if source == "ram" else "the disk"
+    if (source != "ram" and not from_disk) or "card_experts_gb" not in takes or "card_experts_gb" in options:
         why = "the experts on the CPU, from the %s (%s)" % ("RAM" if source == "ram" else "disk", gb)
         if "card_experts_gb" in options:
             why += (", %s GB of the card a tier of them, as the config says" % options["card_experts_gb"]
@@ -519,6 +542,10 @@ def _setup(p, ctx, options, takes, grow=False):
                 return dict(cpu, chunk=DISK_CHUNK), got, why + ", the prompt %d positions a step" % DISK_CHUNK
         got = sized(cpu)
         return None if got is None else (cpu, got, why)
+    chunked = ""
+    if from_disk and "experts_on" not in takes and "chunk" in takes and "chunk" not in options \
+            and sized(dict(cpu, chunk=DISK_CHUNK)) is not None:
+        cpu["chunk"], chunked = DISK_CHUNK, ", the prompt %d positions a step" % DISK_CHUNK
     got = sized(cpu)
     if got is None:
         return None
@@ -529,10 +556,10 @@ def _setup(p, ctx, options, takes, grow=False):
         least = _least(p, ctx, cpu)
         most = _most(p, dict(cpu, card_experts_gb=least), ctx) if least else None
         if most is not None:
-            return (dict(cpu, card_experts_gb=least), most, "the experts on the CPU from RAM (%s), a tier of %g GB of its "
-                    "own lent the cache's rows a conversation has not reached" % (gb, least))
-        return cpu, got, "the experts on the CPU from RAM (%s), no tier: the context has the card" % gb
-    # from RAM, the context whole: the largest tier the card boots with beside it, the margin held, in steps of STEP_GB
+            return (dict(cpu, card_experts_gb=least), most, "the experts on the CPU from %s (%s), a tier of %g GB of its "
+                    "own lent the cache's rows a conversation has not reached%s" % (where, gb, least, chunked))
+        return cpu, got, "the experts on the CPU from %s (%s), no tier: the context has the card%s" % (where, gb, chunked)
+    # the context whole: the largest tier the card boots with beside it, the margin held, in steps of STEP_GB
     lo, hi = 0, int(TIER_MAX_GB / STEP_GB)
     while hi - lo > 1:
         mid = (lo + hi) // 2
@@ -542,18 +569,22 @@ def _setup(p, ctx, options, takes, grow=False):
             hi = mid
     tier = lo * STEP_GB
     if not tier:
-        return cpu, ctx, "the experts on the CPU from RAM (%s), no room on the card for a tier" % gb
+        return cpu, ctx, "the experts on the CPU from %s (%s), no room on the card for a tier%s" % (where, gb, chunked)
     cpu["card_experts_gb"] = tier
-    why = "the experts on the CPU from RAM (%s), %g GB of the card a tier of them" % (gb, tier)
+    why = "the experts on the CPU from %s (%s), %g GB of the card a tier of them%s" % (
+        where, gb, tier, ", fed from the disk's cache in RAM" if from_disk else "") + chunked
     # ⚖ 2026-10-14 *"if the l1 is less than 1/4 of the l2 it stays inclusive, and if the full duplex test fails it also
     #   stays inclusive"*: an exclusive tier (each expert on the card or in RAM, never both — GLM's) gives back the tier's
     #   RAM for a swap each promotion, worth it only where the tier is a large share and the card copies both ways at once
-    if "card_exclusive" in takes and "card_exclusive" not in options:
+    if source == "ram" and "card_exclusive" in takes and "card_exclusive" not in options:   # exclusive: RAM's alone
         if tier * 2**30 < need / 4:
             why += "; inclusive, the tier under a quarter of the experts"
         else:
             line = int(options.get("card_duplex_line", inspect.signature(p.arch.__init__).parameters["card_duplex_line"].default))
-            ratio = p.duplex(ctx, dict(cpu, card_exclusive=True))
+            try:
+                ratio = p.duplex(ctx, dict(cpu, card_exclusive=True))
+            except Refused:                                # a family that keeps its tier inclusive here (DeepSeek's
+                ratio = None                               #   over two sockets) refuses the exclusive one
             if ratio is not None and ratio < line:
                 cpu["card_exclusive"] = True
                 why += "; exclusive, the card's copies both ways at once (%.2f)" % (ratio / 1000)

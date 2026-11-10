@@ -38,9 +38,15 @@ performance upgrades"*. A family may split itself in two, as `x86_avx2/` does:
 An override computes what the generic body computes, and a package publishes what an override may reuse
 of its definitions as `zzabi_` functions (nn's: `nn__turboquant__zzabi_levels`, `_levels_i8`, `_quantise`,
 `nn__kernels__zzabi_to_half`), so an override never restates a definition or reaches into a private name.
-`amd_rocm6_wave64/` has an `overrides/` (the TurboQuant gemvs at 4 bits through `v_dot4_i32_i8` and
-`v_dot2_f32_f16`, the exact one at 8 bits too, and the rotation as a butterfly through wave shuffles) while its
-primitives still sit at the family's root.
+`amd_rocm_base/` has an `overrides/` (the TurboQuant gemvs at 4 bits through `v_dot4_i32_i8` and
+`v_dot2_f32_f16`, the exact one at 8 bits too, the rotation as a butterfly through wave shuffles, and the prompt's
+GEMM tiles on the matrix cores where the card has them) while its primitives sit at its root.
+
+⭐ TWO FAMILIES FROM ONE SOURCE — `amd_rocm6_wave64` (the MI50, ROCm 6) and `amd_rocm10` (the MI100 on, ROCm 7 and
+later) are each a card list (`includes.cuh`) and a `unit.cuh` that builds `amd_rocm_base`: it defines
+`SYS__SILICON_FAMILY__THIS amd_rocm_base` (the names its doors carry) and `SYS__SILICON_FAMILY__IS` the family (its
+number and name), `AMD_ROCM_BASE__TAKES(card)` its own `includes` and `AMD_ROCM_BASE__NAME` its name. The base is no
+roster row; the seam rule holds a family built from it to what the base defines (`silicon_seam_conformance._source`).
 
 Where nn gives a door a one-row and a many-row form that agree to the bit (`test/src_abi_verbs_on_device.cpp`, in the
 development repository, names them), a family that overrides one form with its own arithmetic overrides the other with
@@ -66,7 +72,8 @@ folder's name, the prefix of every function the family defines, the name of its 
 a boot asks for it by.
 
 Its number places it in the roster, `SILICON_FAMILIES__LIST` in `roster.cuh`: the host is 0, `x86_avx2` 50,
-`khronos_opencl1_igpu` 75, `khronos_opencl2` 100, `amd_rocm6_wave64` 200, `nvidia_cuda12` 300. Numbers leave gaps on purpose, so a family can be placed
+`nvidia_opencl1` 75, `intel_opencl1_igpu` 80, `khronos_opencl2` 100, `intel_opencl2` 150, `amd_rocm6_wave64` 200,
+`amd_rocm10` 250, `nvidia_cuda12` 300. Numbers leave gaps on purpose, so a family can be placed
 between two others; they must rise down the list, and the build refuses one that does not, or one past
 `SYS__SILICON_FAMILY__SLOTS`. Numbers never move and are never reused, because a machine records the
 number of the silicon it stood up on.
@@ -84,7 +91,7 @@ list fewer cards in it; renumbering is not an option.
 static inline bool amd_rocm7_wave64__includes(const char* card) { … }
 ```
 
-Copy `amd_rocm6_wave64/includes.cuh` and change the row. The row is the one list of what the family
+Copy `amd_rocm10/includes.cuh` and change the row. The row is the one list of what the family
 is: the build script reads its targets from it, so a family cannot take a card its binary has no
 code for. List only cards the vendor's support matrix says the runtime supports — AMD's ROCm
 compatibility matrix, NVIDIA's CUDA release notes. A card not named here is not taken, even a newer
@@ -93,7 +100,7 @@ one of the same line. The OpenCL families, whose kernels the driver compiles, al
 ### 3. `sys.cuh` — sys's doors
 
 Every door in `packages/sys/contracts/abi/gpu.cuh`, each a plain host function named
-`<family>__<door>`, taking the door's parameters. `amd_rocm6_wave64/sys.cuh` is the model: each is one
+`<family>__<door>`, taking the door's parameters. `amd_rocm_base/sys.cuh` is the model: each is one
 or two calls into the vendor's runtime.
 
 Three of them are the devices, and they count **only the cards this family includes**, in the
@@ -133,9 +140,9 @@ static __device__ inline nn__gemm__tile nn__silicon__gemm_tile(void);  /* the ti
 `nn__silicon__launch` starts a kernel on `blocks` of `threads`, with `args` pointing at each of its
 `count` arguments and `sizes` giving each one's width. A runtime that launches by pointer —
 `hipLaunchKernel`, `cudaLaunchKernel` — takes `kernel` and ignores the rest. One that finds kernels by
-name in a program it compiled takes `name`, `sizes` and `count`: `khronos_opencl2` is that case, and
-defines `SYS__SILICON_FAMILY__KERNELS_BY_NAME` so nn compiles no kernel for it, and its kernels come
-from `scripts/opencl_kernel_source.py` instead. `khronos_opencl1_igpu` is the same for OpenCL 1.2, from
+name in a program it compiled takes `name`, `sizes` and `count`: the OpenCL 2.0 families (`khronos_opencl2_base`) are
+that case, and define `SYS__SILICON_FAMILY__KERNELS_BY_NAME` so nn compiles no kernel for them, and their kernels come
+from `scripts/opencl_kernel_source.py` instead. The OpenCL 1.2 families (`khronos_opencl1_base`) are the same, from
 `scripts/opencl1_kernel_source.py`, which works out every pointer's address space from the kernels down,
 so nn's bodies name none; it also adds after a kernel's own arguments the buffers its addresses are in. nn's doors (`packages/nn/gpu/doors.cuh`) are written
 once against it, for every family.
@@ -162,10 +169,10 @@ business (`packages/<pkg>/manifest__gpu.cuh`), so a family names no package head
 ### 6. The roster
 
 In `roster.cuh`, include the family's `includes.cuh` beside the others and add its row where its number falls —
-here between `amd_rocm6_wave64`'s and `nvidia_cuda12`'s:
+here between `amd_rocm10`'s and `nvidia_cuda12`'s:
 
 ```c
-X(250u, AMD_ROCM7_WAVE64, amd_rocm7_wave64, amd)
+X(275u, AMD_ROCM11_WAVE64, amd_rocm11_wave64, amd)
 ```
 
 The last column is the vendor. **Two families of one vendor are never opened in one process.** A

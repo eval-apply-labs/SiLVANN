@@ -337,8 +337,8 @@ typedef struct nn__expert__gather { nn__expert__run run[NN__EXPERT__GATHER_RUNS]
  *   SOURCES     a node array on the model's layers, each a node array of `experts · parts` addresses (part p of expert
  *               x at x · parts + p), or 0 where nothing feeds that layer, which then stays what boot made it
  *   a slot's plan, a part's plan: the gate rows then the up rows, their scales likewise, then the down codes and the
- *               down scales. A part holds `inter / parts` of the gate and up rows and its columns of every down row;
- *               the down scales are whole in each part.
+ *               down scales. A part holds `inter / parts` of the gate and up rows (or its own width, ▶ PART_SHAPES)
+ *               and its columns of every down row; the down scales are whole in each part.
  *   GATE_ROW, DOWN_ROW   the bytes of one gate (or up) row, and of one whole down row
  *   LANDING     the most promotions one visit of a layer may start */
 #define NN__EXPERT_TIER__SOURCES     0u
@@ -364,7 +364,10 @@ typedef struct nn__expert__gather { nn__expert__run run[NN__EXPERT__GATHER_RUNS]
  * and at its commit (a layer's visit or a chunk's note, the CPUs idle: the promoted expert's layer's next, or the
  * COMMIT_VISITS-th since, its copies waited for if late) it leaves the card, its slot back to FREE, and takes the RAM
  * slots the promoted expert gave up; the channel is written into them, and a CPU reaching it first waits.
- *   EXCLUSIVE     1, or absent / 0 for an inclusive tier
+ *   EXCLUSIVE     1, or absent / 0 for an inclusive tier — or 2, an inclusive tier with no SOURCES: a promotion copies
+ *                 its expert from the slot PART_WORKER's PART_TYPE collection holds it in when it is made (NN-164: a disk
+ *                 tier's RAM cache, whose slots move as it reads; the experts a tier promotes are its layer's most picked,
+ *                 the top of that cache's ladder, so held there — one where none holds it is not promoted). One part.
  *   PART_WORKER   the worker that holds part 0 of every expert; part p is that worker plus p
  *   PART_TYPE     the CPUs' collection of expert parts */
 #define NN__EXPERT_TIER__EXCLUSIVE   16u
@@ -423,6 +426,21 @@ typedef struct nn__expert__gather { nn__expert__run run[NN__EXPERT__GATHER_RUNS]
 #define NN__EXPERT_TIER__STREAM        23u
 #define NN__EXPERT_TIER__STREAM_BATCH  24u
 #define NN__EXPERT_TIER__LENGTH_STREAM 25u
+/* ⭐ A DISK TIER'S FILE, FOR A STREAMED PROMPT (NN-165): with EXCLUSIVE 2, a node array on the model's layers, each that
+ *   layer's backing on PART_WORKER (▶ `nn__expert__backing`, as a program holds it) or 0. A streamed chunk picks far more
+ *   of a layer's experts than the cache holds, and each layer keeps only its share of the cache's slots — so an expert
+ *   the cache does not hold is read into it from the file, as PART_WORKER, a batch ahead of its copy to the ring
+ *   (▶ routed__impl's `stream_one`). Absent or 0: a streamed chunk finds only what the cache holds, and faults where it
+ *   does not hold an expert. */
+#define NN__EXPERT_TIER__BACKINGS        25u
+#define NN__EXPERT_TIER__LENGTH_BACKINGS 26u
+/* ⭐ PARTS OF UNEQUAL WIDTHS (NN-167): a node array of 4 · PARTS integers — part p's inner width, and its slot's up-scales,
+ *   down and down-scales offsets (as P_UP_LUT, P_DOWN, P_DOWN_LUT) — where an expert's inner width is not split evenly:
+ *   DeepSeek's 2,304 over two sockets in whole 512-wide rotation blocks, 1,024 and 1,280. The widths sum to INTER, each
+ *   cuts a down row on a byte, and the parts' slots each their own plan. Absent or 0: `INTER / PARTS` each, the slots one
+ *   plan (P_UP_LUT …). An inclusive tier's alone: an exclusive tier's swap writes its parts back by the even split. */
+#define NN__EXPERT_TIER__PART_SHAPES        26u
+#define NN__EXPERT_TIER__LENGTH_PART_SHAPES 27u
 /* ...and a note's line with this bit: streamed as with 0, the experts picked `line` times or more promoted into the tier
  *   all the same — so the tier is as warm after a streamed prompt as after one read a chunk at a time, each expert across
  *   once either way. */
@@ -442,6 +460,8 @@ typedef struct nn__expert_tier {
     uint64_t ranks;                                               /* the cards of its group, 1 alone (▶ RANKS) */
     uint64_t shared;                                              /* a layer's experts on every card (▶ SHARED) */
     uint64_t stream, stream_batch;                                /* a streamed prompt's ring and batch (▶ STREAM) */
+    uint64_t backings;                                            /* a disk tier's files on the layers, 0 none (▶ BACKINGS) */
+    uint64_t part_shapes;                                         /* parts of unequal widths, 0 even (▶ PART_SHAPES) */
 } nn__expert_tier;
 #define NN__EXPERT_TIER__CHANNELS  64u   /* evacuation channels over every card, each a chunk of its card's pad's down way */
 #define NN__EXPERT_TIER__OUTGOING  64u   /* swaps in flight, over every layer */

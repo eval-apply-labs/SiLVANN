@@ -11,7 +11,11 @@ file is what it caches.
                             last, so a file cut short is written again
 ```
 A run over a subset of the layers (a test's) gets files of its own, named by the layers, so it never overwrites the
-model's.
+model's. ⭐ A SOCKET'S FILE ON ITS OWN MOUNT (NN-148 ③): `directory` a list, one a part — each socket's share on that
+socket's own memory (a DL380's PMem in App Direct, a mount a socket), read as the disk is; `plan` a list too where the
+parts are not one shape (DeepSeek's 1,024 and 1,280 of 2,304). `experts_split` writes them ahead of a boot. ⭐ THE FOLDER
+SPLIT IN PLACE: over two sockets the folder's own `experts/part1of2.bin` and `part2of2.bin` are the model's experts, freed
+from its layers' files (▶ `experts_split.settle`) — `shares` hands the loaders below where each layer lies in them.
 """
 import hashlib
 import json
@@ -81,7 +85,7 @@ OWN = 2 << 30            # MEASURED on node03 (measurements/2026-10-14_v080rc1_o
 SPARE = 500 << 20        # what is left to the system — ⚖ 2026-10-14, "a flat 500mb of spare ram"
 
 
-def in_ram(need, held=None, video=0):
+def in_ram(need, held=None, video=0, own_bytes=None):
     """Whether `need` bytes of experts go in RAM: they, the server's own memory beside them (`OWN`, and `video`, what
     reading a video holds — `vision.video_ram`) and the system's spare fit in what this process may hold (`held`, by
     default `limit`: a container's or a capped scope's cgroup limit, else what the system has available).
@@ -92,10 +96,12 @@ def in_ram(need, held=None, video=0):
     `MEASURED` 2026-11-06 on the precision, 62 GB (measurements/2026-11-06_home_rows_precision.md ③): the 122B's
     54.141 GiB of experts + OWN 2 + the spare 0.488 against 56.521 GiB available, the process already holding 4.254 —
     `OWN` taken twice, RAM missed by 0.108 GiB, and its experts read from the disk at 10.11 tokens/s where in RAM with a
-    tier they answer 16.43."""
+    tier they answer 16.43. `own_bytes`: a family's own measure of what its process holds beside its experts, where it
+    holds more than `OWN` (its `HOST_OWN`)."""
     held = limit() if held is None else held
+    total = OWN if own_bytes is None else max(OWN, int(own_bytes))
     mine = resident()
-    own = max(0, OWN - mine) if held >= available() else max(OWN, mine)
+    own = max(0, total - mine) if held >= available() else max(total, mine)
     return need + own + video + SPARE <= held
 
 
@@ -122,17 +128,27 @@ def choose(experts_from, need, video=0):
     return experts_from
 
 
+def of_part(value, part):
+    """A part's own of a `directory` or a `plan` given one a part (a list), else the one value every part shares."""
+    return value[part] if isinstance(value, (list, tuple)) else value
+
+
 def map_experts(m, bundle, workers, plan, layers, experts, directory, pieces, all_layers, expert_type=0,
-                progress=None):
+                progress=None, shares=None):
     """Every layer's experts on each CPU worker, from its file, mapped over its slots.
 
     workers      [(worker, part, parts)] — each maps its own file
-    plan         the slot's shape (an `NL.SlotPlan`)
+    plan         the slot's shape (an `NL.SlotPlan`), or one a part
     layers       the routed layers this run holds; `all_layers` the model's, which name the file when they are the same
+    directory    where the files are, or one a part (▶ `of_part`)
     pieces       pieces(view, layer, expert, part) -> [(offset in the slot, a uint8 array)], `view` the layer's blob
+    shares       the folder split in place (▶ `experts_split.Shares`): each part's share mapped where each layer lies
     """
-    paths = ensure(bundle, workers, plan, layers, experts, directory, pieces, all_layers, progress)
+    paths = ({part: shares.paths[part] for _, part, _ in workers} if shares is not None else
+             ensure(bundle, workers, plan, layers, experts, directory, pieces, all_layers, progress))
+    whole = plan
     for w, part, parts in workers:
+        plan = of_part(whole, part)
         m.act_as(w)
         loader, at = m.loader(), {}
         for l in layers:
@@ -145,7 +161,11 @@ def map_experts(m, bundle, workers, plan, layers, experts, directory, pieces, al
         lo = min(at.values())
         if any(at[(l, x)] - lo != off for l, x, off in layout(layers, experts, plan.slot_bytes)):
             raise Refused("the slots were not handed out one after another, as the file is laid out")
-        m.map_file(lo, plan.slot_bytes * experts * len(layers), paths[part], 0)
+        if shares is not None:
+            for l in layers:
+                m.map_file(at[(l, 0)], plan.slot_bytes * experts, paths[part], shares.at(part, l))
+        else:
+            m.map_file(lo, plan.slot_bytes * experts * len(layers), paths[part], 0)
 
 
 def layout(layers, experts, slot_bytes):
@@ -157,14 +177,15 @@ def ensure(bundle, workers, plan, layers, experts, directory, pieces, all_layers
     """Each worker's file, written if it is missing or was written for something else: {part: path}."""
     tag = "" if list(layers) == list(all_layers) else ".layers-" + hashlib.sha256(
         json.dumps(list(layers)).encode()).hexdigest()[:10]
-    size = plan.slot_bytes * experts * len(layers)
-    places = [[l, x, off] for l, x, off in layout(layers, experts, plan.slot_bytes)]
     todo, paths = [], {}
     for _, part, parts in workers:
+        p = of_part(plan, part)
+        size = p.slot_bytes * experts * len(layers)
+        places = [[l, x, off] for l, x, off in layout(layers, experts, p.slot_bytes)]
         ident = hashlib.sha256(json.dumps(dict(pack=bundle.manifest, parts=parts, part=part, size=size,
-                                               slot=[plan.up_data, plan.up_lut, plan.down_data, plan.down_lut],
+                                               slot=[p.up_data, p.up_lut, p.down_data, p.down_lut],
                                                layout=places), sort_keys=True, default=str).encode()).hexdigest()
-        path = paths[part] = os.path.join(directory, "part%dof%d%s.bin" % (part + 1, parts, tag))
+        path = paths[part] = os.path.join(of_part(directory, part), "part%dof%d%s.bin" % (part + 1, parts, tag))
         try:
             fresh = json.load(open(path + ".json"))["ident"] == ident and os.path.getsize(path) == size
         except (OSError, ValueError, KeyError):
@@ -172,21 +193,34 @@ def ensure(bundle, workers, plan, layers, experts, directory, pieces, all_layers
         if not fresh:
             todo.append((path, ident, size, part, parts, {(l, x): off for l, x, off in places}))
     if todo:
+        from . import experts_split
+        rec = experts_split.state_of(bundle.path) or {"moved": {}}
+        split = sorted({v["layer"] for v in rec["moved"].values()} & set(layers))
+        if split:                           # the folder split in place: its freed bytes are no expert's to copy
+            raise Refused("%s is split in place over two sockets (layer %d …), so the experts' files in %s cannot be "
+                          "written from it: boot it once over two sockets with no experts_dir (it reads its own shares), "
+                          "or put it back first (silvann stitch %s)" % (bundle.path, split[0], of_part(directory, todo[0][3]),
+                                                                       os.path.basename(bundle.path.rstrip(os.sep))))
         _write(bundle, todo, plan, layers, experts, directory, pieces, progress)
     return paths
 
 
 def cache_experts(m, bundle, workers, plan, layers, experts, directory, pieces, all_layers, expert_type=0,
-                  progress=None):
+                  progress=None, shares=None):
     """Every layer's experts on each CPU worker as a CACHE in its own memory, read as they are wanted (nn's loader,
     straight from the drive) — from the pack itself where its experts lie as the slots take them (`_in_place`, NN-97:
     nothing written beside it), else from the worker's file, written first if it is not there. Answers each worker's
-    backing tables, {(worker, layer): name}, for the experts tables to name. ▶ nn's `nn__expert__backing`."""
-    lie = _in_place(bundle, workers, layers, experts, pieces, plan.slot_bytes)
-    paths = None if lie is not None else ensure(bundle, workers, plan, layers, experts, directory, pieces, all_layers,
-                                                progress)
-    names = {}
+    backing tables, {(worker, layer): name}, for the experts tables to name. ▶ nn's `nn__expert__backing`. `shares`:
+    the folder split in place (▶ `experts_split.Shares`), each worker's share read where each layer lies."""
+    if shares is not None:
+        lie, paths = None, {part: shares.paths[part] for _, part, _ in workers}
+    else:
+        lie = _in_place(bundle, workers, layers, experts, pieces, [of_part(plan, part).slot_bytes for _, part, _ in workers])
+        paths = None if lie is not None else ensure(bundle, workers, plan, layers, experts, directory, pieces, all_layers,
+                                                    progress)
+    names, whole = {}, plan
     for w, part, parts in workers:
+        plan = of_part(whole, part)
         m.act_as(w)
         loader = m.loader()
         for l in layers:
@@ -201,7 +235,8 @@ def cache_experts(m, bundle, workers, plan, layers, experts, directory, pieces, 
             else:
                 if part not in handles:
                     handles[part] = _open(m, paths[part], "the experts' file")
-                row = [handles[part], i * experts * plan.slot_bytes, plan.slot_bytes, 0, plan.slot_bytes]
+                at = shares.at(part, l) if shares is not None else i * experts * plan.slot_bytes
+                row = [handles[part], at, plan.slot_bytes, 0, plan.slot_bytes]
             names[(w, l)] = "bk%d_%d" % (l, w)
             m.table(names[(w, l)], row + [0] * (CELLS - len(row)))
     return names
@@ -215,15 +250,15 @@ _UNSPELLED = set(" \t\r\n()'\"")    # what ends a name in a program: a path hold
 
 
 def _in_place(bundle, workers, layers, experts, pieces, slot_bytes):
-    """Where a worker's experts lie in the pack itself — {part: {layer: (its file, [(expert 0's slice there, its bytes,
+    """`slot_bytes` a worker's slot, or one a worker in `workers`' order. Where a worker's experts lie in the pack itself — {part: {layer: (its file, [(expert 0's slice there, its bytes,
     its place in the slot, the step to the next expert's), ...])}} — when every piece `pieces` cuts, of every expert, is
     a run of its layer's mapped file and each slice steps by one stride; else None, and the file is written (NN-97).
     A Qwen layer's four slices, its experts stacked by tensor, and GLM's six on one socket lie so; a socket's share of
     GLM's down rows (a column cut of each) and a LoRA's experts (another file) do not. The slices are read as few runs
     as they lie in (`_runs`): a pack with one record an expert, in the slot's order, is one run an expert."""
     found = {}
-    for _, part, _parts in workers:
-        found[part] = {}
+    for i, (_, part, _parts) in enumerate(workers):
+        found[part], size = {}, slot_bytes[i] if isinstance(slot_bytes, (list, tuple)) else slot_bytes
         for l in layers:
             view = np.frombuffer(bundle.blob(l), dtype=np.uint8)
             base, end = view.ctypes.data, view.ctypes.data + view.nbytes
@@ -249,7 +284,7 @@ def _in_place(bundle, workers, layers, experts, pieces, slot_bytes):
                         g != (f[0] + x * s, f[1], f[2]) for g, f, s in zip(got, first, step)):
                     return None
             path = os.path.join(bundle.layer_dir(l), bundle.manifest["layout"]["weights_bin"])
-            found[part][l] = (path, _runs([(f[0], f[1], f[2], s) for f, s in zip(first, step)], slot_bytes,
+            found[part][l] = (path, _runs([(f[0], f[1], f[2], s) for f, s in zip(first, step)], size,
                                           os.path.getsize(path), experts))
     return found
 
@@ -311,18 +346,19 @@ def _open(m, path, what):
 
 def _write(bundle, todo, plan, layers, experts, directory, pieces, progress):
     """Each file: every expert's part in its slot's layout, at its slot's offset — a layer's blob read once for all."""
-    os.makedirs(directory, exist_ok=True)
     fds = []
     for path, ident, size, part, parts, off in todo:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
         if os.path.exists(path + ".json"):
             os.remove(path + ".json")
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | BINARY, 0o644)
         os.ftruncate(fd, size)
         fds.append(fd)
-    slot = np.zeros(plan.slot_bytes, np.uint8)
+    slots = {part: np.zeros(of_part(plan, part).slot_bytes, np.uint8) for _, _, _, part, _, _ in todo}
     for i, l in enumerate(layers):
         view = np.frombuffer(bundle.blob(l), dtype=np.uint8)
         for fd, (_, _, _, part, _, off) in zip(fds, todo):
+            slot = slots[part]
             for x in range(experts):
                 for into, piece in pieces(view, l, x, part):
                     slot[into:into + piece.nbytes] = piece

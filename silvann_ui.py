@@ -500,7 +500,7 @@ HELP_DOCS = [
     ("Developing", "Package ai_qwen_image", ENGINE_SRC / "packages" / "ai_qwen_image" / "README.md"),
     ("Developing", "Package ai_deepseek_4", ENGINE_SRC / "packages" / "ai_deepseek_4" / "README.md"),
     ("Developing", "Adding a silicon family", ENGINE_SRC / "silicon_families" / "add_a_family.md"),
-    ("Developing", "OpenCL 1.2 for integrated GPUs", ENGINE_SRC / "silicon_families" / "khronos_opencl1_igpu" / "README.md"),
+    ("Developing", "OpenCL 1.2: old NVIDIA cards and integrated GPUs", ENGINE_SRC / "silicon_families" / "khronos_opencl1_base" / "README.md"),
     ("Developing", "Contributing", LICENCE_DIR / "CONTRIBUTING.md"),
     ("Licences", "The licence", LICENCE_DIR / "LICENSE"),
     ("Licences", "Attribution", LICENCE_DIR / "ATTRIBUTION.md"),

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""opencl1_kernel_source.py — every package's kernels as one OpenCL C 1.2 program, for `khronos_opencl1_igpu`.
+"""opencl1_kernel_source.py — every package's kernels as one OpenCL C 1.2 program, for the OpenCL 1.2 families
+(`khronos_opencl1_base`: `nvidia_opencl1`, `intel_opencl1_igpu`).
 
     python3 scripts/opencl1_kernel_source.py <out.c>
 
@@ -17,11 +18,17 @@ OpenCL C 2.0 takes them as generic ones. So this writes the 1.2 program from the
      (an initialiser, an assignment, an argument, a return). Two spaces meeting in one pointer stop the
      build with the function's name: one function would need a copy for each.
   3. AN ADDRESS IS AN ARENA AND AN OFFSET. A 1.2 card has no shared virtual memory, so the family hands
-     out addresses inside a few large buffers (`khronos_opencl1_igpu/sys.cuh`) and every kernel is given those
+     out addresses inside a few large buffers (`khronos_opencl1_base/sys.cuh`) and every kernel is given those
      buffers. Wherever the program turns a number into a pointer — a kernel's argument, an address a table
      carries — it becomes the buffer's pointer plus the offset.
   4. THE FOLDS through the block's shared memory: `nn__silicon__lanes_sum` and its kin take a `__local`
      scratch the kernel declares, handed down to every function that reaches one.
+  4b. THE READ-ONLY ARENAS: a kernel the family names in its `READ_ONLY_ROWS` reads through its pointers to `const`
+     only memory no lane writes while it runs, so each address it turns into such a pointer is taken from the arenas
+     handed to it a second time, `const restrict`, chosen by a switch — on a card built with `<FAMILY>__READ_ONLY`
+     (▶ the family's `nn.cuh`). A compiler then knows each read for what it is: NVIDIA's reads it through the lanes'
+     read-only cache, the one a Pascal card keeps a read of its memory in. Without the macro the second set is the
+     first, and the read is the arena's.
   5. WRITE the program, and check it with an OpenCL C 1.2 compiler when one is on the machine (ROCm's clang, as the
      2.0 generator does).
 
@@ -35,10 +42,12 @@ sys.path.insert(0, HERE)
 from pycparser import c_ast, c_generator, c_parser   # noqa: E402
 import opencl_kernel_source as two                      # noqa: E402  the 2.0 generator: the flatten and the door rows
 
-FAMILY = 'khronos_opencl1_igpu'
-ARENAS = 32            # buffers a kernel is handed; the family's `KHRONOS_OPENCL1_IGPU__ARENAS`
+FAMILY = 'khronos_opencl1_base'   # the source the 1.2 families are built from: the program's names
+ARENAS = 32            # buffers a kernel is handed; the family's `KHRONOS_OPENCL1_BASE__ARENAS`
 LANES_MAX = 256        # nn's `NN__SILICON__LANES_MAX`: the fold's scratch, one float a lane
 AT = FAMILY + '__zzprivate_at'
+RO_AT = FAMILY + '__zzprivate_ro_at'
+READ_ONLY = FAMILY.upper() + '__READ_ONLY'   # the macro a card's build defines to hand its kernels the read-only arenas
 # the family's own kernels, read after nn's card side: the doors it runs faster than nn's generic body launch them by name
 OVERRIDES = os.path.join(HERE, '..', 'src', 'silicon_families', FAMILY, 'overrides', 'kernels.cuh')
 G, C, P = '__global', '__constant', '__private'
@@ -65,13 +74,13 @@ SILICON = {
     'nn__silicon__lanes_sum':  'float nn__silicon__lanes_sum(float part);',
     'nn__silicon__lanes_max':  'float nn__silicon__lanes_max(float part);',
     'nn__silicon__lanes_sums': 'void nn__silicon__lanes_sums(float* parts, uint n);',
-    'khronos_opencl1_igpu__zzpackage_lanes_sum_each': 'float khronos_opencl1_igpu__zzpackage_lanes_sum_each(float part, uint width);',
-    'khronos_opencl1_igpu__zzpackage_lanes_hadamard': 'float khronos_opencl1_igpu__zzpackage_lanes_hadamard(float v, uint width);',
+    'khronos_opencl1_base__zzpackage_lanes_sum_each': 'float khronos_opencl1_base__zzpackage_lanes_sum_each(float part, uint width);',
+    'khronos_opencl1_base__zzpackage_lanes_hadamard': 'float khronos_opencl1_base__zzpackage_lanes_hadamard(float v, uint width);',
     'nn__silicon__half_to_float': 'float nn__silicon__half_to_float(ushort h);',
     'nn__silicon__dot2': 'float nn__silicon__dot2(uint a, uint b, float c);',
 }
-FOLDS = ('nn__silicon__lanes_sum', 'nn__silicon__lanes_max', 'nn__silicon__lanes_sums', 'khronos_opencl1_igpu__zzpackage_lanes_sum_each',
-         'khronos_opencl1_igpu__zzpackage_lanes_hadamard')
+FOLDS = ('nn__silicon__lanes_sum', 'nn__silicon__lanes_max', 'nn__silicon__lanes_sums', 'khronos_opencl1_base__zzpackage_lanes_sum_each',
+         'khronos_opencl1_base__zzpackage_lanes_hadamard')
 # ⛳ THE FOLDS WAIT FOR THE WHOLE BLOCK, as `work_group_reduce_add` does in the 2.0 family: every lane of the block reaches
 #   each one, which nn's bodies already promise. The order of the sum is a tree over the lanes, the same every run.
 DEFINITIONS = r'''
@@ -129,7 +138,7 @@ static inline void nn__silicon__lanes_sums(float* parts, uint n, __local float* 
 }
 /* The sum over each run of `width` lanes (a power of two dividing the block), every lane of a run its run's: a fold of
  * its own a run, all of them at once — the family's overrides' many outputs a block (nn's bodies never call it). */
-static inline float khronos_opencl1_igpu__zzpackage_lanes_sum_each(float part, uint width, __local float* zz_lanes) {
+static inline float khronos_opencl1_base__zzpackage_lanes_sum_each(float part, uint width, __local float* zz_lanes) {
     const uint i = (uint)get_local_id(0), first = i & ~(width - 1u), j = i - first;
     zz_lanes[i] = part;
     barrier(CLK_LOCAL_MEM_FENCE);
@@ -144,7 +153,7 @@ static inline float khronos_opencl1_igpu__zzpackage_lanes_sum_each(float part, u
 /* The Walsh-Hadamard transform over each run of `width` lanes (a power of two dividing the block, at most the fold's
  * scratch): lane `j` of a run gets `Σ_i (−1)^popcount(i & j) · v_i` over the run's lanes `i`, unscaled — the butterfly,
  * a stage a bit of the lane, through the fold's scratch. */
-static inline float khronos_opencl1_igpu__zzpackage_lanes_hadamard(float v, uint width, __local float* zz_lanes) {
+static inline float khronos_opencl1_base__zzpackage_lanes_hadamard(float v, uint width, __local float* zz_lanes) {
     const uint i = (uint)get_local_id(0);
     for (uint span = 1u; span < width; span <<= 1) {
         zz_lanes[i] = v;
@@ -161,10 +170,25 @@ static inline float nn__silicon__dot2(uint a, uint b, float c) {
          + nn__silicon__half_to_float((ushort)(a >> 16)) * nn__silicon__half_to_float((ushort)(b >> 16));
 }
 '''
-# an address the family handed out: its arena in the bits above the offset, as `khronos_opencl1_igpu/sys.cuh` writes it
+# an address the family handed out: its arena in the bits above the offset, as `khronos_opencl1_base/sys.cuh` writes it
 AT_DEFINITION = ('static inline __global uchar* %s(__global uchar* const* zz_arena, ulong a) {\n'
                  '    return a == 0ul ? (__global uchar*)0 : zz_arena[(a >> 40) & %dul] + (a & 0xFFFFFFFFFFul);\n}\n'
                  % (AT, ARENAS - 1))
+# ⭐ AND THE SAME FROM THE READ-ONLY ARENAS: chosen by a switch, each case one of the kernel's own arguments, so a compiler
+#   follows the pointer to the `const restrict` argument it came from — an index into the array would hide it
+RO_AT_DEFINITION = ('#ifdef %s\n'
+                    'static inline const __global uchar* %s(const __global uchar* const* zz_ro, ulong a) {\n'
+                    '    if (a == 0ul) return (const __global uchar*)0;\n'
+                    '    const ulong off = a & 0xFFFFFFFFFFul;\n'
+                    '    switch ((uint)((a >> 40) & %dul)) {\n%s    }\n}\n'
+                    '#else\n'
+                    'static inline const __global uchar* %s(const __global uchar* const* zz_ro, ulong a) {\n'
+                    '    return a == 0ul ? (const __global uchar*)0 : zz_ro[(a >> 40) & %dul] + (a & 0xFFFFFFFFFFul);\n}\n'
+                    '#endif\n'
+                    % (READ_ONLY, RO_AT, ARENAS - 1,
+                       ''.join('    %s: return zz_ro[%d] + off;\n' % ('default' if k == ARENAS - 1 else 'case %du' % k, k)
+                               for k in range(ARENAS)),
+                       RO_AT, ARENAS - 1))
 
 
 def preprocess(text, tmp, dial):
@@ -204,6 +228,19 @@ def override_rows():
     block = text[text.index('#define %s__OVERRIDE_ROWS(X)' % FAMILY.upper()):]
     return [(body, params, ('NN__GPU__ZZPRIVATE_WIDE', body, [re.findall(r'(\w+)\s*$', x.strip())[0] for x in params.split(',')]))
             for body, params in re.findall(r'X\((\w+),\s*\(([^)]*)\)\)', block)]
+
+
+def read_only_rows():
+    """The family's kernels that read through the read-only arenas (`overrides/kernels.cuh`'s `READ_ONLY_ROWS`), by kernel."""
+    text = open(OVERRIDES, encoding='utf-8').read()
+    at = text.find('#define %s__READ_ONLY_ROWS(X)' % FAMILY.upper())
+    return set() if at < 0 else {b + '__kernel' for b in re.findall(r'X\((\w+)\)', text[at:].split('\n\n', 1)[0])}
+
+
+def to_const(cast):
+    """Whether a cast makes a pointer to `const`."""
+    t = cast.to_type.type
+    return isinstance(t, c_ast.PtrDecl) and 'const' in getattr(t.type, 'quals', [])
 
 
 def kernel(fn, params, run):
@@ -579,6 +616,26 @@ class Program:
                 if n not in self.needs_lanes and cs & self.needs_lanes:
                     self.needs_lanes.add(n); grew = True
 
+    def read_only(self, ro_roots, roots):
+        """The read-only kernels' addresses turned into pointers to `const` (▶ 4b), and the functions that hand the
+        read-only arenas down to them. ⛳ A FUNCTION BOTH KINDS OF KERNEL REACH WOULD NEED A COPY FOR EACH, so it stops the
+        build: another kernel would read through arenas it was never promised."""
+        mine = self.reach(ro_roots)
+        others = self.reach([r for r in roots if r not in ro_roots])
+        self.ro_casts = {n: {id(c) for c in self.casts.get(n, []) if to_const(c)} for n in mine}
+        self.ro_casts = {n: ids for n, ids in self.ro_casts.items() if ids}
+        self.needs_ro = set(self.ro_casts)
+        grew = True
+        while grew:
+            grew = False
+            for n in mine:
+                if n not in self.needs_ro and self.calls.get(n, set()) & self.needs_ro:
+                    self.needs_ro.add(n); grew = True
+        both = sorted(self.needs_ro & others)
+        if both:
+            sys.exit('⛔ %s: reached by a read-only kernel and by another, and it reads through the read-only arenas — '
+                     'it would need a copy for each' % ', '.join(both))
+
     def callees(self, n):
         out = set()
 
@@ -625,6 +682,8 @@ def rewrite(prog, roots):
     lanes_param.type.type.quals.append('__local')
     arena_param = hidden_param('uchar* const* zz_arena')
     arena_param.type.type.type.quals.append(G)
+    ro_param = hidden_param('const uchar* const* zz_ro')
+    ro_param.type.type.type.quals.append(G)
     # the spaces, onto every declaration and cast in reach
     for n in prog.reached:
         f = prog.funcs[n]
@@ -647,6 +706,8 @@ def rewrite(prog, roots):
                 extra = []
                 if name in prog.needs_arena:
                     extra.append(c_ast.ID('zz_arena'))
+                if name in prog.needs_ro:
+                    extra.append(c_ast.ID('zz_ro'))
                 if name in prog.needs_lanes or name in FOLDS:
                     extra.append(c_ast.ID('zz_lanes'))
                 if extra:
@@ -657,15 +718,20 @@ def rewrite(prog, roots):
         for p in prog.param_decls(f):
             if id(p) in prog.chain:
                 qualify(p.type, prog.chain[id(p)])
-        # ⭐ A NUMBER INTO A POINTER: the arena's pointer plus the offset
+        # ⭐ A NUMBER INTO A POINTER: the arena's pointer plus the offset — a read-only kernel's pointer to `const`, the
+        #   read-only arena's (▶ 4b)
+        ro = prog.ro_casts.get(n, set())
         for cast in prog.casts.get(n, []):
-            cast.expr = c_ast.FuncCall(c_ast.ID(AT), c_ast.ExprList([c_ast.ID('zz_arena'), cast.expr]))
+            at, arena = (RO_AT, 'zz_ro') if id(cast) in ro else (AT, 'zz_arena')
+            cast.expr = c_ast.FuncCall(c_ast.ID(at), c_ast.ExprList([c_ast.ID(arena), cast.expr]))
         if n not in roots:
             args = f.decl.type.args
             if args is None or (len(args.params) == 1 and isinstance(args.params[0], c_ast.Typename)):
                 f.decl.type.args = args = c_ast.ParamList([])
             if n in prog.needs_arena:
                 args.params.append(arena_param)
+            if n in prog.needs_ro:
+                args.params.append(ro_param)
             if n in prog.needs_lanes:
                 args.params.append(lanes_param)
 
@@ -692,7 +758,7 @@ def write(prog, roots, ext_skip, raw_typedefs, definitions):
                 if e.name not in written:
                     written.add(e.name)
                     if e.name == 'nn__silicon__expf':
-                        out.append(definitions + AT_DEFINITION)
+                        out.append(definitions + AT_DEFINITION + RO_AT_DEFINITION)
                     if e.name == 'nn__silicon__gemm_tile':
                         out.append('static inline nn__gemm__tile nn__silicon__gemm_tile(void) { nn__gemm__tile t = {1u, 4u}; return t; }\n')
                 continue
@@ -711,11 +777,20 @@ def write(prog, roots, ext_skip, raw_typedefs, definitions):
             text = gen.visit(e)
             if n in roots:
                 params = ', '.join('__global uchar* zz_a%d' % k for k in range(ARENAS))
+                ro_params, ro_set = '', ''
+                if n in prog.needs_ro:
+                    # ⭐ THE ARENAS A SECOND TIME, `const restrict`, after the first: the launch hands every argument
+                    #   past the door's its arena (▶ the family's `nn.cuh`)
+                    ro_params = '\n#ifdef %s\n, %s\n#endif\n' % (
+                        READ_ONLY, ', '.join('const __global uchar* restrict zz_r%d' % k for k in range(ARENAS)))
+                    ro_set = '#ifdef %s\n  const __global uchar* zz_ro[%d] = {%s};\n#else\n  const __global uchar* zz_ro[%d] = {%s};\n#endif\n' % (
+                        READ_ONLY, ARENAS, ', '.join('zz_r%d' % k for k in range(ARENAS)),
+                        ARENAS, ', '.join('zz_a%d' % k for k in range(ARENAS)))
                 text = re.sub(r'^void %s\((.*?)\)\n\{' % re.escape(n),
-                              lambda m: '__kernel void %s(%s%s)\n{\n%s%s' % (
-                                  n, m.group(1) + ', ' if m.group(1) not in ('', 'void') else '', params,
+                              lambda m: '__kernel void %s(%s%s%s)\n{\n%s%s%s' % (
+                                  n, m.group(1) + ', ' if m.group(1) not in ('', 'void') else '', params, ro_params,
                                   '  __global uchar* zz_arena[%d] = {%s};\n' % (ARENAS, ', '.join('zz_a%d' % k for k in range(ARENAS)))
-                                  if n in prog.needs_arena else '',
+                                  if n in prog.needs_arena else '', ro_set,
                                   '  __local float zz_lanes[%d];\n' % LANES_MAX if n in prog.needs_lanes else ''),
                               text, count=1, flags=re.S)
             out.append(text)
@@ -751,6 +826,9 @@ def main():
     for fn, params, run in own:
         source += kernel(fn, params, run)
         roots.append(fn + '__kernel')
+    ro_roots = read_only_rows()
+    if ro_roots - set(roots):
+        sys.exit('⛔ READ_ONLY_ROWS names a kernel the program does not have: %s' % ', '.join(sorted(ro_roots - set(roots))))
     # ⛳ A TYPE WITH AN ALIGNMENT IS WRITTEN AS IT WAS: the parser takes no attributes, so it reads one without and the
     #   writer puts back the original
     raw = {}
@@ -785,15 +863,17 @@ def main():
         prog.infer(roots)
     except Clash as clash:
         sys.exit('⛔ %s — this function would need a copy for each space' % clash)
+    prog.read_only(ro_roots, roots)
     rewrite(prog, set(roots))
     definitions = preprocess('#include "%s"\n%s' % (os.path.join(two.PK, 'nn', 'contracts', 'defaults.cuh'), DEFINITIONS), tmp, dial)
     text = write(prog, set(roots), skip, raw, definitions)
     if os.path.exists(two.CLANG):
         cl = os.path.join(tmp, 'k.cl'); open(cl, 'w').write(text)
-        c = subprocess.run([two.CLANG, '-x', 'cl', '-cl-std=CL1.2', '-target', 'amdgcn-amd-amdhsa', '-mcpu=gfx906',
-                            '-fsyntax-only', '-w', cl], capture_output=True, text=True)
-        if c.returncode != 0:
-            sys.exit('⛔ the kernels are not valid OpenCL C 1.2:\n' + c.stderr[:3000])
+        for macro in ([], ['-D' + READ_ONLY]):   # the program both ways a card builds it
+            c = subprocess.run([two.CLANG, '-x', 'cl', '-cl-std=CL1.2', '-target', 'amdgcn-amd-amdhsa', '-mcpu=gfx906',
+                                '-fsyntax-only', '-w'] + macro + [cl], capture_output=True, text=True)
+            if c.returncode != 0:
+                sys.exit('⛔ the kernels are not valid OpenCL C 1.2%s:\n' % (' with ' + macro[0] if macro else '') + c.stderr[:3000])
     lit = ''.join('    "%s\\n"\n' % l.replace('\\', '\\\\').replace('"', '\\"') for l in text.split('\n'))
     with open(sys.argv[1], 'w') as f:
         f.write('/* GENERATED by scripts/opencl1_kernel_source.py — do not edit, and do not check in. */\n'
@@ -802,9 +882,10 @@ def main():
                 '/* how many kernels it holds: the family sizes its table of made kernels from this */\n'
                 'extern "C" const unsigned %s__kernel_count;\n'
                 'extern "C" const unsigned %s__kernel_count = %du;\n' % (FAMILY, FAMILY, lit, FAMILY, FAMILY, len(roots)))
-    print('✅ %d kernels from %s and %d of the family\'s own, %d functions in reach, %d lines of OpenCL C 1.2; %d into an arena, %d through the folds%s' % (
-        len(roots) - len(own), ', '.join(with_doors), len(own), len(prog.reached), text.count('\n'), len(prog.needs_arena), len(prog.needs_lanes),
-        ', checked for gfx906' if os.path.exists(two.CLANG) else ''))
+    print('✅ %d kernels from %s and %d of the family\'s own, %d functions in reach, %d lines of OpenCL C 1.2; %d into an arena, %d through the folds, '
+          '%d kernels and %d functions through the read-only arenas%s' % (
+              len(roots) - len(own), ', '.join(with_doors), len(own), len(prog.reached), text.count('\n'), len(prog.needs_arena), len(prog.needs_lanes),
+              len(prog.needs_ro & ro_roots), len(prog.needs_ro - ro_roots), ', checked for gfx906 both ways' if os.path.exists(two.CLANG) else ''))
     if os.environ.get('OPENCL1_PROGRAM'):
         open(os.environ['OPENCL1_PROGRAM'], 'w').write(text)
 

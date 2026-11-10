@@ -5,9 +5,14 @@
 #include "../packages/sys/contracts/abi/silicon_family.cuh"   /* what a family is, and the bound on its number */
 #include "host/includes.cuh"                                  /* each family's `includes`, in roster order */
 #include "x86_avx2/includes.cuh"
-#include "khronos_opencl1_igpu/includes.cuh"
+#include "arm_neon/includes.cuh"
+#include "arm_gb10/includes.cuh"
+#include "nvidia_opencl1/includes.cuh"
+#include "intel_opencl1_igpu/includes.cuh"
 #include "khronos_opencl2/includes.cuh"
+#include "intel_opencl2/includes.cuh"
 #include "amd_rocm6_wave64/includes.cuh"
+#include "amd_rocm10/includes.cuh"
 #include "nvidia_cuda12/includes.cuh"
 #include "choose.cuh"                                         /* how a card is given to them */
 
@@ -34,13 +39,30 @@
  *   reorder when one is added. ⛔ SO A NEW ROW MUST NEVER BE A WORSE CHOICE than an older row that takes
  *   the same cards; if one ever is, the answer is another row, never a renumbering. ▶ `choose.cuh`.
  * ⛳ THE VENDOR IS THERE FOR ONE RULE: two families of one vendor are never opened in one process. ▶ the
- *   same file for why. */
+ *   same file for why. The OpenCL families that may take the same card are one vendor, `khronos` — Intel's two and the
+ *   2.0 family that takes any GPU: one of them in a process. `nvidia_opencl1` takes NVIDIA's cards alone, which no other
+ *   OpenCL family takes, so it is a vendor of its own, `nvidia_opencl`, and opens beside one of them — a GTX 1060
+ *   through it and the HD 630 beside it through `intel_opencl2` (⚗ `SILVANN_IGPU_CPU`, NN-142). Every OpenCL family
+ *   reaches its devices through the one loader (`libOpenCL.so.1`, `OpenCL.dll`), made to hold every vendor's at once
+ *   (`REASONED` from the ICD loader's design; two of them in one process `MEASURED` on node03's stand-in, NN-142).
+ * ⛳ THE OPENCL FAMILIES ARE TWO SOURCES, FOUR ROWS (⚖ 2026-11-09 *"old_nvidia does its own thing and does not stomp
+ *   against the intel old igpu"*): 75 NVIDIA's cards through the 1.2 source, the number every machine that stood up on
+ *   it recorded (an NVIDIA card, each); 80 Intel's before Gen9 through the same; 100 any GPU through the 2.0 source; 150
+ *   Intel's from Gen9 through it, offered before 100.
+ * ⛳ THE PROCESSORS ARE A FAMILY A KIND: 50 x86's (`x86_avx2`), 55 and 60 Arm's, one source (`arm_base`, ⚖ 2026-11-09 *"make
+ *   the arm_base silicon platform and then add the overrides for that specific dgx sparx platform"*) — 55 any Armv8.2 with
+ *   half precision and the dot product, 60 the DGX Spark's GB10, offered before 55. */
 #define SILICON_FAMILIES__LIST(X)                                                                          \
     X(0u,   HOST,                 host,                 host)                                            \
     X(50u,  X86_AVX2,             x86_avx2,             x86)                                             \
-    X(75u,  KHRONOS_OPENCL1_IGPU, khronos_opencl1_igpu, khronos)                                         \
+    X(55u,  ARM_NEON,             arm_neon,             arm)                                             \
+    X(60u,  ARM_GB10,             arm_gb10,             arm)                                             \
+    X(75u,  NVIDIA_OPENCL1,       nvidia_opencl1,       nvidia_opencl)                                   \
+    X(80u,  INTEL_OPENCL1_IGPU,   intel_opencl1_igpu,   khronos)                                         \
     X(100u, KHRONOS_OPENCL2,      khronos_opencl2,      khronos)                                         \
+    X(150u, INTEL_OPENCL2,        intel_opencl2,        khronos)                                         \
     X(200u, AMD_ROCM6_WAVE64,     amd_rocm6_wave64,     amd)                                             \
+    X(250u, AMD_ROCM10,           amd_rocm10,           amd)                                             \
     X(300u, NVIDIA_CUDA12,        nvidia_cuda12,        nvidia)
 
 #define SILICON_FAMILIES__ZZPRIVATE_ROW(ID, NAME, FOLDER, VENDOR)    SILICON_FAMILIES__##NAME = (ID),

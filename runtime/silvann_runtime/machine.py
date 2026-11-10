@@ -101,7 +101,13 @@ def _unindent(text):
 _ENTRY = re.compile(r"^;; (defun|picture|view)(?: (\S+))?, as worker (-?\d+)$")
 
 
-OPENCL_FAMILIES = ("khronos_opencl2", "khronos_opencl1_igpu")
+OPENCL_FAMILIES = ("intel_opencl2", "khronos_opencl2", "nvidia_opencl1", "intel_opencl1_igpu")
+# the OpenCL 1.2 families (`khronos_opencl1_base`): mapped RAM is two copies there, the card's and the program's, unless
+#   the device's memory is the host's
+OPENCL1_FAMILIES = ("nvidia_opencl1", "intel_opencl1_igpu")
+# the processors' own families, the one present the CPU worker's (`Machine.cpu`): x86-64's, and Arm's (`arm_base`) — the
+#   DGX Spark's GB10 before any Armv8.2
+CPU_FAMILIES = ("x86_avx2", "arm_gb10", "arm_neon")
 
 
 def opencl_own_memory():
@@ -152,10 +158,18 @@ def own_memory(machine):
     if machine.silicon not in OPENCL_FAMILIES:
         return False
     names = [c["card"] for c in machine.e.cards() if c.get("silicon_family") == machine.silicon]
-    take = os.environ.get("SILVANN_OPENCL1_TAKE") if machine.silicon == "khronos_opencl1_igpu" else None
+    take = os.environ.get("SILVANN_OPENCL1_TAKE") if machine.silicon in OPENCL1_FAMILIES else None
     devices = opencl_own_memory()
     mine = [own for name, own in devices.items() if any(name.startswith(n) for n in names) or (take and name.startswith(take))]
     return bool(mine) and all(mine)
+
+
+def _family_integrated(e, family, own):
+    """Whether every device OpenCL `family` drives is an integrated GPU — its memory the host's — by `own`
+    (`opencl_own_memory`) and the names the roster gave its cards; False where OpenCL cannot say."""
+    names = [c["card"] for c in e.cards() if c.get("silicon_family") == family]
+    mine = [o for seen, o in own.items() if any(seen.startswith(n) for n in names)]
+    return bool(mine) and not any(mine)
 
 
 class Machine:
@@ -184,16 +198,29 @@ class Machine:
         #   starts; a value the user set stays.
         os.environ.setdefault("HIP_FORCE_DEV_KERNARG", "1")
         self.e = importlib.import_module("silvann_engine_" + engine)
-        # a card if any family drives one — its vendor's own first, then OpenCL 2.0, then 1.2 — else the CPU's own
-        # cores. x86_avx2 counts no devices on a CPU without AVX2; the host family then runs the language but answers
-        # none of nn's doors, so a model's first verb refuses with "NPND"
-        for family in ("amd_rocm6_wave64", "nvidia_cuda12", "khronos_opencl2", "khronos_opencl1_igpu", "x86_avx2"):
+        # a card if any family drives one — its vendor's own first (AMD's: ROCm 7's family for the MI100 on, then ROCm 6's
+        #   for the MI50), then OpenCL 2.0 (Intel's own first), then 1.2 — else the CPU's own
+        # cores. x86_avx2 counts no devices on a CPU without AVX2 (nor an Arm family on one without its features); the
+        # host family then runs the language but answers none of nn's doors, so a model's first verb refuses with "NPND"
+        present = [f for f in ("amd_rocm10", "amd_rocm6_wave64", "nvidia_cuda12", "intel_opencl2", "khronos_opencl2",
+                               "nvidia_opencl1", "intel_opencl1_igpu") if self.e.devices(f) > 0]
+        # ⛳ AN INTEGRATED GPU IS THE CARD ONLY WHERE NO CARD OF ITS OWN MEMORY IS PRESENT (NN-142): two OpenCL families open
+        #   at once — a GTX 1060 through OpenCL 1.2 and the HD 630 beside it through Intel's 2.0, the laptop
+        #   `SILVANN_IGPU_CPU` asks for — and the card is the 1060, the integrated GPU a worker beside it (`integrated`)
+        if len(present) > 1 and any(f in OPENCL_FAMILIES for f in present):
+            own = opencl_own_memory()
+            present.sort(key=lambda f: f in OPENCL_FAMILIES and _family_integrated(self.e, f, own))
+        for family in present + list(CPU_FAMILIES):
             if silicon is None and self.e.devices(family) > 0:
                 silicon = family
         if silicon is not None:
             self.e.choose_silicon(silicon)
         self.silicon = silicon or "host"
+        # the processors' family — the CPU worker's beside a card, its devices the machine and each NUMA node; x86_avx2
+        #   where none is present, as before there was another
+        self.cpu = next((f for f in CPU_FAMILIES if self.e.devices(f) > 0), "x86_avx2")
         self.booted = False
+        self.held_files = []                 # descriptors held as long as the machine runs (▶ `shutdown`)
         self._abi_write = None
 
     def boot(self, device_params, alloc_mb=256, workers=None, worker_params=None, bindings=512, slice_us=SLICE_US,
@@ -350,7 +377,7 @@ class Machine:
                     raise
                 from .model_folder import Refused
                 fix = (" — on Linux, ROCm's amdgpu-dkms gives AMD's cards the path; a kernel's own amdgpu gives it only "
-                       "built with CONFIG_HSA_AMD_P2P, which Debian's is not" if getattr(self, "silicon", None) == "amd_rocm6_wave64"
+                       "built with CONFIG_HSA_AMD_P2P, which Debian's is not" if getattr(self, "silicon", None) in ("amd_rocm6_wave64", "amd_rocm10")
                        else "")
                 raise Refused("card %d cannot read the memory of card%s %s directly, nor they its, and a model split "
                               "over %d cards (tensor_parallel %d: the server's num_cards %d with multi_user \"no\") "
@@ -405,6 +432,31 @@ class Machine:
         pic = self.e.freeze(cell)
         self.e.release(cell[2])
         self.bind(name, pic)
+
+    # ── a process for the host's work (NN-160, ▶ sys's "A PROCESS FOR THE HOST") ──────────────────────────────────────────
+    def new_process(self):
+        """A new process: a number from the counter every process is made from, so no two are one."""
+        return int(self.e.process_new())
+
+    @contextlib.contextmanager
+    def as_process(self, pid):
+        """What this thread asks of the machine inside — every program it runs, and what they ask and go on as — made as
+        process `pid`: `kill` tears it down, `stop` asks it to end at the token it is on. The thread's own after."""
+        was = self.e.process_as(int(pid))
+        try:
+            yield pid
+        finally:
+            self.e.process_as(was)
+
+    def kill(self, pid):
+        """Process `pid` killed: its requests off every queue and its steps ended at their next move or slice, their
+        answers SCKL; nothing it did undone. Answers how many requests it took off."""
+        return int(self.e.process_kill(int(pid)))
+
+    def stop(self, pid):
+        """Process `pid` asked to stop at the token it is on: its program reads `(sys__scheduler__stopped)` once a token
+        (▶ lisp/generate.lisp) and ends there."""
+        return bool(self.e.process_stop(int(pid)))
 
     def view(self, name):
         """A read-only snapshot of the bindings as they stand, bound by name — the names a computed block sees."""
@@ -600,6 +652,38 @@ class Machine:
     def write(self, at, data):
         self.e.nn.write(at, data)
 
+    def integrated(self):
+        """The integrated GPU beside this machine's cards, as a worker — (its OpenCL family, its device) — where an OpenCL
+        family drives a GPU whose memory is the host's (`opencl_own_memory`: `CL_DEVICE_HOST_UNIFIED_MEMORY`) and the cards
+        are another family's — ROCm's, CUDA's, or another OpenCL family's (a GTX 1060 through `nvidia_opencl1`); None where
+        there is none (NN-142)."""
+        if self.silicon == "host" or self.silicon in CPU_FAMILIES:
+            return None
+        own = opencl_own_memory()
+        for family in OPENCL_FAMILIES:
+            if family == self.silicon:
+                continue
+            names = [c["card"] for c in self.e.cards() if c.get("silicon_family") == family]
+            for device, name in enumerate(names):
+                if any(seen.startswith(name) and not mine for seen, mine in own.items()):
+                    return (family, device)
+        return None
+
+    _ZEROS = None                           # one host buffer of zeros, shared, that `zero` writes again and again
+
+    def zero(self, at, nbytes, piece=64 << 20):
+        """`nbytes` of zeros at `at`, a `piece` at a time from one buffer of zeros kept for it — so clearing a
+        conversation's state never holds the state's size in host memory (Flash-Next's n-gram values 3.75 GiB at 196,608
+        positions: `MEASURED` node03 2026-11-09, the load's peak 63.59 GiB of anonymous memory against its plan's 59.1)."""
+        if Machine._ZEROS is None or len(Machine._ZEROS) < piece:
+            import numpy as np
+            Machine._ZEROS = np.zeros(piece, dtype=np.uint8)
+        done = 0
+        while done < nbytes:
+            n = min(piece, nbytes - done)
+            self.write_from(at + done, Machine._ZEROS.ctypes.data, n)
+            done += n
+
     def write_from(self, at, pointer, nbytes):
         """Bytes already in host memory — a mapped file's pages, say — copied to the card through nn's C door, with no
         Python copy on the way: `MEASURED` 13.8 GB/s for a 44 MB matrix from a mapped bundle, against 1.26 through
@@ -626,3 +710,5 @@ class Machine:
         if self.booted:
             self.e.shutdown()
             self.booted = False
+        while self.held_files:               # a model folder held while it was read (▶ `experts_split.hold`)
+            os.close(self.held_files.pop())

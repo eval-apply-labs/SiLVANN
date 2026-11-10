@@ -295,6 +295,25 @@
           (nn__buffer__copy c_routed CPU routed HIDDEN_BYTES)
           (ai_qwen_3__post_expert h1 hand routed (nth POST i) x)
           (if (< (+ i 1) RUN) (chain_ask (+ i 1)) (ends (nth HERE 2)))))
+      ;; with a card's tier (CARD_TIER — a conversation a card keeps one, NN-166): the tier's visit before the CPU is asked,
+      ;; the card's own picks beside it, its share added at the close (▶ ⑤, and qwen4_exp.lisp's tiered chain)
+      (if CARD_TIER
+          (begin
+            (defun (chain_ask i)
+              (begin (mixer i (nth HERE 1) h1)
+                     (route i)
+                     (ai_qwen_3__experts hand picks (nth EXPERTS_TIER i) routed_k nn__expert_tier 1)
+                     (sys__node_array__set HERE 0 i)
+                     (let ((r (sys__scheduler__add CPU names xq_ready)))
+                       (ai_qwen_3__experts hand picks (nth EXPERTS_TIER i) routed_k nn__expert_tier)
+                       (sys__scheduler__continue CARD 0 c_close '(r)))))
+            (defun (chain_close)
+              (let ((i (nth HERE 0)))
+                (nn__buffer__copy c_routed CPU routed HIDDEN_BYTES)
+                (nn__vector__add routed routed_k routed HIDDEN)
+                (ai_qwen_3__post_expert h1 hand routed (nth POST i) x)
+                (if (< (+ i 1) RUN) (chain_ask (+ i 1)) (ends (nth HERE 2))))))
+          (< 0 1))
       ;; the position's first step: its token in, its angles at its rotary position, the first layer's experts asked
       (defun (chain_position tok pos rpos ending)
         (begin (sys__node_array__set HERE 1 pos)

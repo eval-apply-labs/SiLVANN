@@ -600,6 +600,19 @@ PYBIND11_MODULE(SILVANN_MODULE_NAME, m) {
        "where it was not queued: no engine, no such block, an operand missing, or the queue's refusal. The queue takes "
        "holds of its own; yours stay yours.");
 
+    /* A process for the host's work (NN-160): a new one, this thread's requests made as one, one killed, one asked to stop
+     * at the token it is on (▶ `engine/abi/residency.cuh`). */
+    m.def("process_new", []() { return eng_abi_process_new(); }, "A new process: its number, the counter's next.");
+    m.def("process_as", [](unsigned long long pid) { return eng_abi_process_as(pid); }, py::arg("pid"),
+          "This thread's requests made as process `pid` from here on (0: each its own). Answers the one they were made as.");
+    m.def("process_kill", [](unsigned long long pid) {
+        unsigned long long taken = 0ull;
+        { py::gil_scoped_release step_aside; taken = eng_abi_process_kill(pid); }
+        return taken;
+    }, py::arg("pid"), "Process `pid` killed: its requests off every queue, their answers SCKL. Answers how many it took off.");
+    m.def("process_stop", [](unsigned long long pid) { return eng_abi_process_stop(pid) != 0; }, py::arg("pid"),
+          "Process `pid` asked to stop at the token it is on: its program reads `(sys__scheduler__stopped)`.");
+
     m.def("poll", [](unsigned long long answer) {
         int ok = 0, ready = 0;
         { py::gil_scoped_release step_aside; ok = eng_abi_poll(answer, &ready); }

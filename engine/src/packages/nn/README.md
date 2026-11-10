@@ -302,7 +302,7 @@ The matvec got there with `x` held in registers, 960 blocks striding the rows (`
 swept to a plateau at 960–1920), eight halves a load, and `nn__silicon__half_to_float` — without that last
 step the software conversion held it at 188 GB/s. OpenCL runs `multiply_fp16` at 615–628 GB/s, with one
 context per card: a context over several cards puts a coarse-grained allocation in host RAM, and every
-weight is then read at PCIe speed. ▶ `silicon_families/khronos_opencl2/sys.cuh`.
+weight is then read at PCIe speed. ▶ `silicon_families/khronos_opencl2_base/sys.cuh`.
 Re-derive from the commits: `git log --oneline -8 -- ':(top)src/packages/nn'`, then read the
 messages.
 

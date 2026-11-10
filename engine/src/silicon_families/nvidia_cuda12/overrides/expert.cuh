@@ -62,16 +62,19 @@ static __device__ __forceinline__ void nvidia_cuda12__zzprivate_codes(const uint
 }
 
 /* Those codes as the A operands of step `s`: four registers, each two fp16 levels in column order — rows `g` and `g + 8`
- * at the step's first two columns, then at its last two. At 4 bits a byte is two codes, and `pair4` holds every byte's
- * two levels as one register; at 8 bits a code is a byte, and `lev8` its level. */
+ * at the step's first two columns, then at its last two. At 4 bits a byte is two codes, their two levels one register
+ * by byte permutes over nn's levels in registers (▶ kernels.cuh's `levels4_pairs`, a word's four bytes at once — the two
+ * steps of one word decode it alike, and the compiler keeps one); at 8 bits a code is a byte, and `lev8` its level. */
 static __device__ __forceinline__ void nvidia_cuda12__zzprivate_operand(const uint32_t D, const uint32_t raw[2][4], uint32_t s,
-                                                                         const uint32_t* pair4, const uint16_t* lev8, uint32_t a[4]) {
+                                                                         const uint32_t tl[4], const uint32_t th[4],
+                                                                         const uint16_t* lev8, uint32_t a[4]) {
 #pragma unroll
     for (uint32_t r = 0u; r < 2u; ++r) {
         if (D == 4u) {
-            const uint32_t word = raw[r][s / 2u], at = 16u * (s % 2u);
-            a[r]      = pair4[(word >> at) & 0xFFu];
-            a[2u + r] = pair4[(word >> (at + 8u)) & 0xFFu];
+            uint32_t h[4];
+            nvidia_cuda12__zzpackage_levels4_pairs(raw[r][s / 2u], tl, th, h);
+            a[r]      = h[2u * (s % 2u)];
+            a[2u + r] = h[2u * (s % 2u) + 1u];
         } else {
             const uint32_t word = raw[r][s];
             a[r]      = (uint32_t)lev8[word & 0xFFu] | ((uint32_t)lev8[(word >> 8) & 0xFFu] << 16);
@@ -103,15 +106,12 @@ static __device__ __forceinline__ void nvidia_cuda12__zzprivate_stage(const nvid
  * if written for them. A launch's matrices all have its kernel's `D`. */
 static __device__ __forceinline__ void nvidia_cuda12__zzprivate_tile(const nvidia_cuda12__tile_job* j, const uint32_t NT, const uint32_t D,
                                                                       const uint32_t AHEAD) {
-    __shared__ uint32_t pair4[256];
     __shared__ uint16_t lev8[256];
     __shared__ __align__(16) uint16_t xs[2][NVIDIA_CUDA12__ZZPRIVATE_NT_MAX * 8u][NVIDIA_CUDA12__ZZPRIVATE_XS];
     const uint32_t lane = (uint32_t)nn__silicon__lane(), lanes = (uint32_t)nn__silicon__lanes();
-    for (uint32_t e = lane; e < 256u; e += lanes) {
-        const uint16_t* lev4 = nn__turboquant__zzabi_levels(4u);
-        pair4[e] = (uint32_t)lev4[e & 15u] | ((uint32_t)lev4[e >> 4] << 16);
-        lev8[e] = nn__turboquant__zzabi_levels(8u)[e];
-    }
+    uint32_t tl[4], th[4];                                 /* the 4-bit levels, in registers (▶ kernels.cuh) */
+    nvidia_cuda12__zzpackage_levels4(tl, th);
+    for (uint32_t e = lane; e < 256u; e += lanes) lev8[e] = nn__turboquant__zzabi_levels(8u)[e];
     __syncthreads();
     const uint32_t warp = lane / NVIDIA_CUDA12__ZZPACKAGE_WARP, l = lane % NVIDIA_CUDA12__ZZPACKAGE_WARP, g = l / 4u, t = l % 4u;
     const uint32_t TP = 8u * NT, KT = NVIDIA_CUDA12__ZZPRIVATE_KT;
@@ -154,8 +154,8 @@ static __device__ __forceinline__ void nvidia_cuda12__zzprivate_tile(const nvidi
 #pragma unroll
             for (uint32_t s2 = 0u; s2 < 2u; ++s2) {
                 uint32_t a0[4], a1[4];
-                nvidia_cuda12__zzprivate_operand(D, now, 2u * s2, pair4, lev8, a0);
-                nvidia_cuda12__zzprivate_operand(D, now, 2u * s2 + 1u, pair4, lev8, a1);
+                nvidia_cuda12__zzprivate_operand(D, now, 2u * s2, tl, th, lev8, a0);
+                nvidia_cuda12__zzprivate_operand(D, now, 2u * s2 + 1u, tl, th, lev8, a1);
 #pragma unroll
                 for (uint32_t n = 0u; n < NT; ++n) {
                     const uint4 q = *(const uint4*)(const void*)&xs[buf][8u * n + g][16u * t + 8u * s2];

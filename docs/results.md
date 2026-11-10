@@ -16,7 +16,7 @@ with every model measured on that kind of machine, and the model's own page.
 |---|---|---|---|---|---|---|---|---|---|
 | [none](results.md#no-graphics-card) | 16 GB | 4 cores | — | [Qwen 3.5 4B](models.md#qwen-35-4b) `D4` | the CPU alone | 18.9 positions/s | 7.95 tokens/s after 8k | 8,320 | — |
 | [8 GB](results.md#an-8-gb-card) | 32 GB | 4 cores | — | [Qwen 3.6 35B-A3B](models.md#qwen-36-35b-a3b) `D8E4` | the experts in RAM, a tier on the card | 94.9 positions/s | 14.34 tokens/s after 100k | 262,144 | the 4B on the card |
-| [16 GB](results.md#a-16-gb-card) | 32 GB | 4 cores | NVMe, 5.7 GB/s | [Qwen 3.5 122B-A10B](models.md#qwen-35-122b-a10b) `D8E4` | the experts from the disk, ~30 GB of them in RAM | 17.6 positions/s | 5.65 tokens/s after 100k | 110,000 | GLM 5.3 Flash from the disk |
+| [16 GB](results.md#a-16-gb-card) | 32 GB | 4 cores | NVMe, 5.7 GB/s | [Qwen 3.8 Flash-Next](models.md#qwen-38-flash-next) `D8E4` | the experts from the disk | 29.2-29.4 positions/s | 10.61-10.64 tokens/s after 2k | — | the 122B from the disk |
 | [16 GB](results.md#a-16-gb-card) | 14 GB | 4 cores | NVMe, 5.7 GB/s | [GLM 5.3 Flash](models.md#glm-53-flash) `D8E4` | the experts from the disk | 9.1 positions/s | 2.21 tokens/s after 100k | 110,000 | — |
 | [16 GB](results.md#a-16-gb-card) | 16 GB | 4 cores | — | [Qwen 3.8 27B](models.md#qwen-38-27b) `D4` | on the card | 221.3 positions/s | 14.32 tokens/s after 35k | 35,840 | — |
 | [2× 16 GB](results.md#two-cards-or-more) | 125 GB | 28 cores | — | [Qwen 3.6 35B-A3B](models.md#qwen-36-35b-a3b) `D8E4` | every layer over both cards, a tier on each | 85.9 positions/s | 32.22 tokens/s after 100k | 262,144 | the 35B on one card, faster after a short prompt |
@@ -27,8 +27,9 @@ with every model measured on that kind of machine, and the model's own page.
 - **The low end** — a mini PC, an old desktop, no card: the 4B on the CPU, or on an integrated GPU through OpenCL 1.2,
   which should be faster than its CPU and leaves the CPU's cores free — not yet measured on one.
 - **An 8 GB card**: Qwen 3.6 35B-A3B, the dense part on the card and the experts in RAM.
-- **The middle** — a gaming PC, a 16 GB card and 32 GB of RAM: Qwen 3.5 122B-A10B, its experts read from the disk into
-  about 30 GB of RAM; or GLM 5.3 Flash from the disk, slower, with as little as 14 GB.
+- **The middle** — a gaming PC, a 16 GB card, 32 GB of RAM and a fast NVMe drive: Qwen 3.8 Flash-Next, its experts read
+  from the disk into RAM — 1.30× the 122B's tokens a second there and 1.45× its prompt; or Qwen 3.5 122B-A10B the same
+  way; or GLM 5.3 Flash from the disk, slower, with as little as 14 GB.
 - **The card alone**: Qwen 3.8 27B, the whole model on a 16 GB card.
 - **Two 16 GB cards**: Qwen 3.6 35B-A3B, every layer over both and a tier of its experts on each — faster than one of
   the cards at a long context (after 100k, 30.5 tokens a second against 25.9), slower by about a tenth after a short
@@ -110,6 +111,11 @@ The CPU alone: the model in RAM, or its experts read from the disk.
 | [Qwen 3.5 122B-A10B](models.md#qwen-35-122b-a10b) `D8E4` | 16 GB · RTX 5060 Ti | 32 GB | Xeon W-2123 (4 cores) | NVMe array, 5.7 GB/s | the experts from the disk (`auto`) | 17.0 positions/s | 5.42 tokens/s after 100k | 110,000 | v0.24.0 |
 | [Qwen 3.5 122B-A10B](models.md#qwen-35-122b-a10b) `D8E4` | 16 GB · RTX 5060 Ti | 28 GB | Xeon W-2123 (4 cores) | NVMe, 5 GB/s | the experts from the disk | 18.8 positions/s | 7.5 tokens/s after 1k | — | v0.19.0 |
 | [Qwen 3.5 122B-A10B](models.md#qwen-35-122b-a10b) `D8E4` | 16 GB · RTX 5060 Ti | 61 GB | Xeon W-2123 (4 cores) | — | the experts in RAM, a 7.75 GB tier | 56.2 positions/s | 15.9 tokens/s after 2k | 32,768 | v0.21.0 |
+| [Qwen 3.8 Flash-Next](models.md#qwen-38-flash-next) `D8E4` | 16 GB · RTX 5060 Ti | 32 GB | Xeon W-2123 (4 cores) | NVMe array, 5.7 GB/s | the experts from the disk (`auto`) | 29.2-29.4 positions/s | 10.61-10.64 tokens/s after 2k | — | v0.26.0 |
+| [Qwen 3.8 Flash-Next](models.md#qwen-38-flash-next) `D8E4` | 16 GB · RTX 5060 Ti | 32 GB | Xeon W-2123 (4 cores) | NVMe array, 5.7 GB/s | the experts from the disk, a 9.5 GB tier | 28.6 positions/s | 12.66-12.73 tokens/s after 2k | — | v0.26.0 |
+| [Qwen 3.8 Flash-Next](models.md#qwen-38-flash-next) `D8E4` | 16 GB · RTX 5060 Ti | 62 GB | Xeon W-2123 (4 cores) | — | the experts in RAM, a 9.5 GB tier (`auto`) | 83.8 positions/s | 18.22-18.25 tokens/s after 2k | — | v0.26.0 |
+| [Qwen 3.8 Flash-Next](models.md#qwen-38-flash-next) `D8E4` | 16 GB · MI50 | 32 GB | 2× Xeon E5-2680 v4 (28 cores) | NVMe array | the experts from the disk (`auto`) | 37.3-38.0 positions/s | 11.82-11.84 tokens/s after 2k | — | v0.26.0 |
+| [Qwen 3.8 Flash-Next](models.md#qwen-38-flash-next) `D8E4` | 16 GB · MI50 | 62 GB | 2× Xeon E5-2680 v4 (28 cores) | — | the experts in RAM, a 10 GB tier (`auto`) | 81.0-82.2 positions/s | 21.37-21.55 tokens/s after 2k | — | v0.26.0 |
 | [GLM 5.3 Flash](models.md#glm-53-flash) `D8E4` | 16 GB · RTX 5060 Ti | 14 GB | Xeon W-2123 (4 cores) | NVMe array, 5.7 GB/s | the experts from the disk, the next layer's read ahead | 9.1 positions/s | 2.21 tokens/s after 100k | 110,000 | v0.22.0 |
 | [GLM 5.3 Flash](models.md#glm-53-flash) `D8E4` | 16 GB · RTX 5060 Ti | 16 GB | Xeon W-2123 (4 cores) | NVMe array (4 drives) | the experts from the disk, a 12 GiB cache, the next layer's read ahead | — | 2.31 tokens/s after 256 | 32,768 | v0.22.0 |
 | [GLM 5.3 Flash](models.md#glm-53-flash) `D8E4` | 16 GB · RTX 5060 Ti | 62 GB | Xeon W-2123 (4 cores) | NVMe array, 5.7 GB/s | the experts from the disk (`auto`) | 8.6-8.7 positions/s | 3.65-3.68 tokens/s after 2k | 110,000 | v0.24.0 |
@@ -179,8 +185,8 @@ A model's every layer split over the cards of one machine (`num_cards`), or its 
 
 ### An older card or an integrated GPU
 
-Through OpenCL: 2.0 for a card without its vendor's own family, 1.2 for an older card or an integrated GPU
-(`khronos_opencl1_igpu`).
+Through OpenCL: 2.0 for a card without its vendor's own family, 1.2 for an older NVIDIA card (`nvidia_opencl1`) or an
+older integrated GPU (`intel_opencl1_igpu`).
 
 <!-- rates:machine opencl -->
 | Model | GPU | RAM | CPU | Disk | Setup | Prefill | Decode | Max context | Version |
@@ -194,22 +200,32 @@ Through OpenCL: 2.0 for a card without its vendor's own family, 1.2 for an older
 
 ## Several conversations at once
 
-With `multi_user` "yes" a Qwen MoE model, GLM 5.3 Flash and DeepSeek-V4.1-Flash answer two conversations at once — on
+With `multi_user` "yes" a Qwen MoE model, Qwen 3.8 Flash-Next, GLM 5.3 Flash and DeepSeek-V4.1-Flash answer two
+conversations at once — on
 one card, the card on one conversation's layers while the CPU computes the other's experts, or one on each card — each
-answering what it would answer alone, every expert in RAM ([`config.md`](config.md), `multi_user`). The two together,
-against one conversation's tokens a second:
+answering what it would answer alone, every expert in RAM ([`config.md`](config.md), `multi_user`). One on each card,
+each card keeps a tier of its own for its conversation (DeepSeek's none yet). The two together, against one
+conversation's tokens a second:
 
 | Model | GPU | CPU | How | The two together | Version |
 |---|---|---|---|---|---|
 | [Qwen 3.6 35B-A3B](models.md#qwen-36-35b-a3b) `D8E4` | 16 GB · MI50 | 2× Xeon E5-2680 v4 (28 cores) | two on one card | 1.65-1.77× — 32 tokens/s each through the server | v0.24.0 |
 | [Qwen 3.6 35B-A3B](models.md#qwen-36-35b-a3b) `D8E4` | 2× 16 GB · MI50 | 2× Xeon E5-2680 v4 (28 cores) | one on each card | 1.71× | v0.24.0 |
 | [Qwen 3.5 122B-A10B](models.md#qwen-35-122b-a10b) `D8E4` | 16 GB · MI50 | 2× Xeon E5-2680 v4 (28 cores) | two on one card | 1.31× | v0.24.0 |
+| [Qwen 3.8 Flash-Next](models.md#qwen-38-flash-next) `D8E4` | 16 GB · MI50 | 2× Xeon E5-2680 v4 (28 cores) | two on one card | 1.57× — 27.9 tokens/s together against 17.7 | v0.24.0 |
+| [Qwen 3.8 Flash-Next](models.md#qwen-38-flash-next) `D8E4` | 2× 16 GB · MI50 | 2× Xeon E5-2680 v4 (28 cores) | one on each card, a 10 GB tier on each | 2.02× — 47.8 tokens/s together against 23.6 | v0.24.0 |
+| [Qwen 3.8 Flash-Next](models.md#qwen-38-flash-next) `D8E4` | 4× 32 GB · MI50 | 2× Xeon E5-2680 v4 (28 cores) | one on each of four cards, each tier warmed on its conversation | 2.01× — 52.8 tokens/s together against 26.2 | v0.24.0 |
 | [GLM 5.3 Flash](models.md#glm-53-flash) `D8E4` | 32 GB · MI50 | 2× Xeon Gold 6252 (48 cores) | two on one card | ~1.77× | v0.24.0 |
 | [DeepSeek-V4.1-Flash](models.md#deepseek-v41-flash) `D8E4` | 32 GB · MI50 | 2× Xeon Gold 6252 (48 cores) | two on one card, a CPU worker a socket | 1.53× — 21.0 tokens/s together against 13.7 | v0.25.0 |
-| [DeepSeek-V4.1-Flash](models.md#deepseek-v41-flash) `D8E4` | 2× 32 GB · MI50 | 2× Xeon Gold 6252 (48 cores) | one on each card, one CPU worker | 1.23× — 11.4 tokens/s together against 9.3 | v0.25.0 |
+| [GLM 5.3 Flash](models.md#glm-53-flash) `D8E4` | 2× 32 GB · MI50 | 2× Xeon Gold 6252 (48 cores) | one on each card | 1.63× — 23.0 tokens/s together against 14.1 | v0.26.0 |
+| [DeepSeek-V4.1-Flash](models.md#deepseek-v41-flash) `D8E4` | 2× 32 GB · MI50 | 2× Xeon Gold 6252 (48 cores) | one on each card, a CPU worker a socket | 1.66× — 24.0 tokens/s together against 14.5 | v0.26.0 |
+| [Qwen 3.6 35B-A3B](models.md#qwen-36-35b-a3b) `D8E4` | 2× 16 GB · MI50 | 2× Xeon E5-2680 v4 (28 cores) | one on each card, a 10.25 GB tier on each — the boot's setup at 262,144 positions, after a 2k prompt | 2.07-2.12× — 99.8-100.0 tokens/s together against 47.2-48.2; with no tier 62.2-62.9 against 33.5-34.1 | v0.26.0 |
+| [GLM 5.3 Flash](models.md#glm-53-flash) `D8E4` | 2× 32 GB · MI50 | 2× Xeon Gold 6252 (48 cores) | one on each card, a 10.75 GB tier on each — the boot's setup at 1,048,576 positions, after a 2k prompt | 1.66× — 27.3 tokens/s together against 16.5; with no tier 23.2 against 13.2 | v0.26.0 |
 
 Two at once gain as far as the card's part of a token takes as long as the CPU's: where a token is mostly the CPU's
-experts — the 122B, DeepSeek with a conversation on each card, its experts then on one worker — they gain less. A
+experts — the 122B — they gain less. A card each gains most with its tier: every card computes its own conversation's
+most picked experts and the CPU only the rest — the 35B 99.8 tokens/s together with a tier on each card against 62.9
+without, GLM 27.3 against 23.2, from the same setup with `card_experts_gb` 0. A
 config that reads the experts from the disk is refused with several conversations: RAM would be a cache of them that
 each conversation keeps its own way.
 
@@ -237,7 +253,7 @@ its card kernels, and where a card does part of the work they are a floor.
 penalty, temperature, top k and top p — on the card, and the draw costs a token next to nothing: the server answers at
 the rates below. Up to v0.11.0 that held on AMD cards through ROCm alone. Elsewhere the draw's top k ran nn's
 generic body, which reads the whole vocabulary once for each of the `k` picks, and on one CPU lane also asks every value
-whether an earlier pick took it. Every family now has its own top k but `khronos_opencl1_igpu`, the same picks and
+whether an earlier pick took it. Every family now has its own top k but the OpenCL 1.2 one, the same picks and
 weights to the bit (v0.11.1):
 
 | Qwen 3.6 35B-A3B (248,320 logits, a top 20) | a draw's top k, before → after | the answer drawn as the server draws it, before → after |

@@ -20,6 +20,12 @@
 #ifndef SYS__SILICON_FAMILY__THIS
 #error "a family says which it is: define SYS__SILICON_FAMILY__THIS (its folder's name) before this file"
 #endif
+/* ⭐ A FAMILY BUILT FROM ANOTHER'S SOURCE — `amd_rocm6_wave64` and `amd_rocm10` from `amd_rocm_base` — keeps the source's
+ *   names for its doors (`SYS__SILICON_FAMILY__THIS`, the source's folder) and says which family it IS, its number and
+ *   name the program sees, by `SYS__SILICON_FAMILY__IS`; a family that is its own source leaves it out. */
+#ifndef SYS__SILICON_FAMILY__IS
+#define SYS__SILICON_FAMILY__IS SYS__SILICON_FAMILY__THIS
+#endif
 
 /* ⭐ EACH PACKAGE'S DOOR TABLE, FILLED FROM ITS OWN LIST — gathered over the package roster, so a package
  * gets a table by being listed and no line here names one. A door named in a list and not defined by the
@@ -49,9 +55,9 @@ static inline const void* sys__silicon__own_doors(uint64_t package) {
 static const sys__silicon_family silicon_families__zzprivate_this = {
     SYS__SILICON_FAMILY__ABI_VERSION,
     (uint32_t)sizeof(sys__silicon_family),
-    SYS__SILICON_FAMILY__OF_THIS(family_id),
+    SYS__SILICON_FAMILY__ZZPRIVATE_NAME(SYS__SILICON_FAMILY__IS, family_id),
     (uint32_t)package_count,
-    SILICON_FAMILIES__ZZPRIVATE_TEXT(SYS__SILICON_FAMILY__THIS),
+    SILICON_FAMILIES__ZZPRIVATE_TEXT(SYS__SILICON_FAMILY__IS),
     silicon_families__zzprivate_package_doors,
 };
 #undef SILICON_FAMILIES__ZZPRIVATE_TEXT

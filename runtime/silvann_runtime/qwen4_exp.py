@@ -9,9 +9,11 @@ them once, expert-major (ai_qwen_3's `experts_rows`). This class makes what the 
 the buffers, the tables, the names (`_bindings`) — and the host's part of a position or a chunk: the n-gram rows
 (`ngram_qwen4.NGram`, from the pack's `ngram/`) written into `ngr` (a chunk's into `ngrR`) before it runs.
 
-A conversation's STATE is the DeltaNet layers' fp32 state and conv window, the attention layers' keys and values, and the
-n-gram layer's normed values, a position each. ⛔ QSA's indexer is not in this program: up to 2,051 positions it chooses
-every block (`min(512, blocks)`), so the context is held below that.
+A conversation's STATE is the DeltaNet layers' fp32 state and conv window, the attention layers' keys and values and
+their indexer's keys (a position's, and a block's of RATIO positions), and the n-gram layer's normed values, a position
+each. Qwen Sparse Attention's indexer is ai_qwen_4's verbs': up to 2,051 positions a query chooses every block, past
+that its best 512 blocks and its unfinished block's positions (▶ ai_qwen_4's contracts/objects/layer.cuh); the program's
+words (`verbs` false) hold the context below 2,048.
 """
 import contextlib
 import os
@@ -49,7 +51,9 @@ DELTANET = ("linear_attn.in_proj_qkv.weight", "linear_attn.in_proj_z.weight", "l
             "linear_attn.in_proj_b.weight", "linear_attn.conv1d.weight", "linear_attn.A_log", "linear_attn.dt_bias",
             "linear_attn.norm.weight", "linear_attn.out_proj.weight")
 ATTENTION = ("self_attn.q_proj.weight", "self_attn.k_proj.weight", "self_attn.v_proj.weight", "self_attn.o_proj.weight",
-             "self_attn.q_norm.weight", "self_attn.k_norm.weight")
+             "self_attn.q_norm.weight", "self_attn.k_norm.weight",
+             "self_attn.indexer.index_qk_proj.weight", "self_attn.indexer.q_layernorm.weight",
+             "self_attn.indexer.k_layernorm.weight")
 NGRAM = ("ple.key_proj.weight", "ple.value_proj.weight", "ple.norm_conv.weight")
 MOE = ("mlp.gate.weight", "mlp.shared_expert.gate_proj.weight", "mlp.shared_expert.up_proj.weight",
        "mlp.shared_expert.down_proj.weight", "mlp.shared_expert_gate.weight")
@@ -67,7 +71,8 @@ CELLS = [("AN", SITES[0] + ".hc_norm.weight", ONE), ("AD", SITES[0] + ".input_mi
          ("QN", ATTENTION[4], ONE), ("KN", ATTENTION[5], ONE),
          ("KEY", NGRAM[0], MATRIX), ("VAL", NGRAM[1], MATRIX), ("NC", NGRAM[2], ONE), ("WENG", None, ONE), ("TAP", None, 4),
          ("GATE", MOE[0], MATRIX), ("SG", MOE[1], MATRIX), ("SU", MOE[2], MATRIX), ("SD", MOE[3], MATRIX),
-         ("SEG", MOE[4], MATRIX)]
+         ("SEG", MOE[4], MATRIX),
+         ("IX", ATTENTION[6], MATRIX), ("IQN", ATTENTION[7], ONE), ("IKN", ATTENTION[8], ONE)]
 AT = {}
 _n = 0
 for _k, _name, _w in CELLS:
@@ -80,20 +85,27 @@ class Qwen4Exp(Generates):
     PROGRAM = ("qwen4_exp", "qwen4_exp_cpu", "generate")   # the pack's lisp/ files (▶ `ModelFolder.program`)
     BINDINGS = 1024
     CARDS_ARE_SEATS = True                     # several cards a conversation each, the boot's multi_user (▶ with_cards)
+    # what its process holds beside its experts in RAM, for the autotune's RAM rule (▶ `experts_file.in_ram`): `MEASURED`
+    #   node03 2026-11-09 (one MI50, the experts in RAM, the boot's peak of anonymous memory less the experts' 56.53 GiB),
+    #   3.62 GiB at 4,096 positions and 3.57 at 196,608 — its CPU worker's pool, the embedding in RAM, the load's own —
+    #   against `OWN`'s 2; 4 GiB, a CUDA card's host memory beside it (the precision's 62 GB boot was OOM-killed at 2)
+    HOST_OWN = 4 << 30
 
     @staticmethod
     def longest_context(config):
-        """The longest conversation this program holds (▶ autotune's `model_length`): where QSA still chooses every block."""
-        return QSA_ALL
+        """The longest conversation this program holds (▶ autotune's `model_length`): the model's own — QSA's indexer is
+        ai_qwen_4's verbs' (`verbs`, the default)."""
+        c = config.get("text_config", config)
+        return int(c.get("max_position_embeddings", QSA_ALL))
 
     def __init__(self, folder, machine, max_context=2048, experts_from="auto", experts_dir=None, experts_ram_gb=None,
                  experts_ahead="auto", chunk=512, experts_int8=False, sockets=1, verbs=True, rows_from=8, seats=1,
-                 cards=None, prompt_on="auto", card_from=CARD_FROM, card_experts_gb=0, card_landing=1):
+                 cards=None, prompt_on="auto", card_from=CARD_FROM, card_experts_gb=0, card_landing=1, layers=None):
         if folder.architecture not in ARCHITECTURES:
             raise Refused("%s is a %r model, not one of %s" % (folder.path, folder.architecture, ARCHITECTURES))
-        if max_context > QSA_ALL:
-            raise Refused("max_context %d: past %d positions Qwen Sparse Attention chooses which blocks to attend, and "
-                          "this program has no indexer yet" % (max_context, QSA_ALL))
+        if max_context > QSA_ALL and not verbs:
+            raise Refused("max_context %d: past %d positions Qwen Sparse Attention chooses which blocks to attend, and its "
+                          "indexer is ai_qwen_4's verbs' — verbs true" % (max_context, QSA_ALL))
         c, b = folder.config, folder.bundle
         self.folder, self.m, self.b, self.max_context = folder, machine, b, max_context
         self.H, self.LAYERS, self.HC = c["hidden_size"], c["num_hidden_layers"], c["hc_count"]
@@ -104,6 +116,12 @@ class Qwen4Exp(Generates):
         self.QH, self.KVH, self.AD = c["num_attention_heads"], c["num_key_value_heads"], c["head_dim"]
         rope = c.get("rope_parameters") or {}
         self.ROT, self.THETA = int(self.AD * rope.get("partial_rotary_factor", 1.0)), int(rope["rope_theta"])
+        # QSA's indexer: its query heads and their width, a block's positions, and how many positions it chooses (▶ the
+        #   attention verbs: past BUDGET / RATIO finished blocks, the best BUDGET / RATIO of them and the unfinished one's)
+        self.IH, self.ID = c["indexer_n_heads"], c["indexer_head_dim"]
+        self.RATIO, self.BUDGET = c["indexer_compress_ratio"], c["indexer_budget"]
+        self.PICK = (self.BUDGET // self.RATIO) * self.RATIO + self.RATIO - 1
+        self.ATTENDED = min(self.max_context, self.PICK)          # the most positions a query attends
         self.EXPERTS, self.TOPK, self.INTER = c["num_experts"], c["num_experts_per_tok"], c["moe_intermediate_size"]
         if c.get("shared_expert_intermediate_size", self.INTER) != self.INTER:
             raise Refused("the shared expert is another width than the routed ones")
@@ -111,7 +129,12 @@ class Qwen4Exp(Generates):
         self.kinds = {l: ("f" if c["layer_types"][l] != "linear_attention" else "d") for l in range(self.LAYERS)}
         self.PLE = [i - 1 for i in c.get("ple_layer_ids") or []]
         self.CONV_K, self.DIL = c["ple_conv_kernel_size"], c["ngram_size"]
-        self.run_layers = list(range(self.LAYERS))
+        # `layers`: the layers this boot runs, from the first, the head after the last — a check on a part of the model
+        #   (▶ test/src_qwen4_exp_qsa.py); every layer by default
+        self.run_layers = list(range(self.LAYERS)) if layers is None else sorted(set(int(l) for l in layers))
+        if not self.run_layers or self.run_layers[0] != 0 or self.run_layers[-1] >= self.LAYERS:
+            raise Refused("layers %r: from layer 0, below %d" % (layers, self.LAYERS))
+        self.PLE = [l for l in self.PLE if l in self.run_layers]
         rec = b.record(0, SITES[0] + ".input_mix_weight_up.weight")
         self.R = rec.cols
         if NC.blocks_for(self.R) != ((256, 128), 0):
@@ -183,18 +206,24 @@ class Qwen4Exp(Generates):
         #   into the tier: the ring is its staging, and the tier the positions' to fill; without `card_experts_gb` the
         #   tier is a slot a layer. "card": a chunk of `card_from` positions or more read so, a shorter one by the CPU's
         #   `experts_rows`, which copies nothing to the card; "cpu": every chunk by the CPU's; "auto" (the default):
-        #   "card" where the boot allows it — a seat a card, one CPU worker, the verbs, the experts in RAM — else "cpu".
+        #   "card" where the boot allows it — a seat a card, one CPU worker, the verbs, the experts in RAM or read from the
+        #   disk (a chunk's experts the disk's cache misses read from the pack into the ring, NN-165) — else "cpu".
         #   `MEASURED` node03 2026-11-02, Flash-Next, a 10 GB tier
         #   (measurements/2026-11-02_prompt_card_crossover_node03.md): the card reads a chunk faster than the CPU from 64
         #   positions on the conversation's topic once an answer has warmed the tier, from ~80 on other prose and ~180 on
         #   code; with the tier cold, from ~150 on prose and ~240 on code. From 128 (CARD_FROM) the card is ahead or within
         #   6 % in all of these but a cold tier's code (1.23×); at 8-32 positions it is behind in every one, 1.1-1.7×.
+        #   From the disk (⚖ 2026-11-09, the precision's finding): `MEASURED` the RTX 5060 Ti, a 2,035-position prompt —
+        #   at 32 GB 86.8 · 87.4 positions/s on the card against 29.6 on the CPU (2.9×), the token 5% faster after it; at
+        #   62 GB 96.5 · 97.1 against 29.9 · 30.1 (3.2×), the token the same over 128
+        #   (measurements/2026-11-08_owed_rows_precision.md ③, ②c); node03's MI50 1.4×, its token 3-5% slower after
+        #   (measurements/2026-11-08_disk_stream_node03.md).
         if prompt_on not in ("auto", "cpu", "card"):
             raise Refused("prompt_on is \"auto\", \"cpu\" or \"card\", not %r" % (prompt_on,))
         if not isinstance(card_from, int) or isinstance(card_from, bool) or card_from < 1:
             raise Refused("card_from is the chunk's length from which its experts are the card's, 1 or more, not %r"
                           % (card_from,))
-        allowed = seats == 1 and sockets == 1 and verbs is True and self.EXPERTS_FROM == "ram"
+        allowed = seats == 1 and sockets == 1 and verbs is True and self.EXPERTS_FROM in ("ram", "disk")
         self.PROMPT_CARD = prompt_on == "card" or prompt_on == "auto" and allowed
         if self.PROMPT_CARD and (seats > 1 or sockets > 1 or not verbs):
             raise Refused("a prompt's experts on the card take a seat a card, one CPU worker and the verbs")
@@ -214,8 +243,16 @@ class Qwen4Exp(Generates):
         if self.CARD_GB and (seats > 1 or sockets > 1 or not verbs):
             raise Refused("a card's tier of experts is its one seat's: a seat a card, one CPU worker and the verbs")
         self._plan()
-        if (self.PROMPT_CARD or self.CARD_GB) and self.EXPERTS_FROM != "ram":
-            raise Refused("a card's experts come from the CPU's memory: experts_from 'ram', not %r" % self.EXPERTS_FROM)
+        # a card's experts come from the CPU's memory: a prompt's streamed from their places in RAM, or from the disk tier's
+        #   cache, an expert it does not hold read into it first (NN-165, nn's BACKINGS); the tier's promoted from their
+        #   places in RAM, or from that cache — the slot the CPU worker holds the expert in when it is made (NN-164, nn's
+        #   EXCLUSIVE 2: the tier promotes a layer's most picked, the top of that cache). "auto" keeps the disk's on the CPU
+        if self.PROMPT_CARD and self.EXPERTS_FROM not in ("ram", "disk"):
+            raise Refused("a prompt's experts on the card come from their places in RAM or the disk's cache there: "
+                          "experts_from 'ram' or 'disk', not %r" % self.EXPERTS_FROM)
+        if self.CARD_GB and self.EXPERTS_FROM not in ("ram", "disk"):
+            raise Refused("a card's tier of experts comes from the experts in RAM or their cache there: experts_from 'ram' or "
+                          "'disk', not %r" % self.EXPERTS_FROM)
         # ⭐ THE ROUTED EXPERTS OVER THE SOCKETS (`sockets` 2): a CPU worker a NUMA node (x86_avx2's devices 1 and 2), each
         #   holding in its own node's memory its part of every expert — I/2 of its gate and up rows and H/2 of its down's
         #   rows (▶ nn_load_bundle.expert_part_plan). A layer's experts are then two steps on both sockets at once,
@@ -232,9 +269,9 @@ class Qwen4Exp(Generates):
                               "not %r" % self.EXPERTS_FROM)
             if experts_int8:
                 raise Refused("the experts split over the sockets are exact: experts_up and experts_down have no integer form")
-            if machine is not None and machine.e.devices("x86_avx2") < 3:
+            if machine is not None and machine.e.devices(machine.cpu) < 3:
                 raise Refused("sockets 2 needs two NUMA nodes, a CPU worker each — this machine's x86 family has %d device(s)"
-                              % machine.e.devices("x86_avx2"))
+                              % machine.e.devices(machine.cpu))
             self.PPLAN = NL.expert_part_plan(b, 0, self.EXPERTS, sockets)
         self.SOCKETS = sockets
         if (self.CARD_SEATS > 1 or self.CARDS > 1) and sockets > 1:
@@ -253,6 +290,10 @@ class Qwen4Exp(Generates):
                              // self.EPLAN.slot_bytes)
             if self.SLOTS < 4 * self.TOPK:
                 raise Refused("%d experts is too few for a cache of them" % self.SLOTS)
+        # the CPU's experts' memory — every expert in RAM, or the cache of them — as the boot's setup reads it before a load
+        #   (▶ autotune's `_setup`: where the experts live, from what this process may hold); the load sets it again by its
+        #   sockets' plan
+        self.cpu_arena = (self.SLOTS if self.SLOTS is not None else self.EXPERTS * self.LAYERS) * self.EPLAN.slot_bytes
         # ⭐ THE NEXT LAYER'S EXPERTS READ AHEAD (NN-138), as qwen3_5.py's: from the disk, each layer's router also runs the
         #   next layer's on its input — its `GUESS` likeliest picks, the likeliest first — and the CPU worker reads the first
         #   of them it does not hold while the layer computes. `experts_ahead`: "auto" as many as the disk starts in that
@@ -331,7 +372,7 @@ class Qwen4Exp(Generates):
             conved=self.CONV_CH * 2,
             core=self.VAL * 2, crot=self.VAL * 2, y=H * 2, y2=H * 2,
             qg=self.QH * 2 * self.AD * 2, qb=self.QH * self.AD * 2, gsig=self.QH * self.AD * 2, kk=self.KVH * self.AD * 2,
-            vv=self.KVH * self.AD * 2, scores=self.QH * self.max_context * 4, ao=self.QH * self.AD * 2,
+            vv=self.KVH * self.AD * 2, scores=self.QH * self.ATTENDED * 4, ao=self.QH * self.AD * 2,
             aog=self.QH * self.AD * 2, aogr=self.QH * self.AD * 2,
             lg=self.EXPERTS * 2, wts=64, lgn=self.EXPERTS * 2, gwts=64, hand=2 * (H + 16 + I), routed=H * 2, routed1=H * 2, sgo=I * 2, suo=I * 2, sact=I * 2,
             sactr=I * 2, sdo=H * 2, segv=16, segs=16, sdow=H * 2, mh=H * 2, mhr=H * 2, logits_h=self.VOCAB * 2)
@@ -342,8 +383,11 @@ class Qwen4Exp(Generates):
         # ai_qwen_4's scratch: the largest any verb carves of it, every piece on a 256-byte boundary (▶ its layer__abi)
         carve = lambda *halves: sum((2 * n + 255) // 256 * 256 for n in halves)
         QW, KVW, VH, VAL, M, R = self.QH * self.AD, self.KVH * self.AD, self.VH, self.VAL, self.HC, self.R
+        IW, IQ, PICK, BLOCKS = self.IH * self.ID + self.ID, self.IH * self.ID, self.PICK, self.max_context // self.RATIO
         self.BUFS["q4s"] = max(carve(S, S, R, R, R, S, M),
-                               carve(H, 2 * QW, KVW, KVW, QW, QW, QW, QW, QW, 2 * QW),
+                               carve(H, 2 * QW, KVW, KVW, QW, QW, QW, QW, QW, 2 * QW,
+                                     IW, IQ, self.ID, self.RATIO * self.ID, 2 * self.ROT, 2 * BLOCKS, 2 * PICK, 2,
+                                     PICK * KVW, PICK * KVW),
                                carve(H, self.CONV_CH, VAL, VH, VH, VH, VH, self.CONV_CH, VAL, VAL),
                                carve(I, I, I, I, H, 1, 1))
         # …and a chunk's, its rows at once (the rows verbs, ▶ ai_qwen_4's layer__abi): their scratch, the chunk's attention
@@ -352,10 +396,13 @@ class Qwen4Exp(Generates):
                                      C * H, C * M, C * M, C * M),
                                carve(4 * C, C * H, C * self.CONV_CH, C * VAL, C * VH, C * VH, C * VH, C * VH, C * self.CONV_CH,
                                      C * VAL, C * VAL),
-                               carve(4 * C, 4 * C, C * H, C * 2 * QW, C * KVW, C * QW, C * QW, C * QW, C * QW),
+                               carve(4 * C, 4 * C, C * H, C * 2 * QW, C * KVW, C * QW, C * QW, C * QW, C * QW,
+                                     C * IW, C * IQ, C * IQ, (C // self.RATIO + 1) * self.RATIO * self.ID,
+                                     (C // self.RATIO + 1) * self.ID, (C // self.RATIO + 1) * 2 * self.ROT, 2 * BLOCKS,
+                                     2 * PICK, 2, PICK * KVW, PICK * KVW),
                                carve(4 * C, C * I, C * I, C * I, C * I, C * H, C, C))
         self.MIX_ROW = 2 * M + M * M
-        self.BUFS.update(scoresR=C * self.QH * self.max_context * 4, mixR=C * self.MIX_ROW * 4, mR=C * H * 2, yR=C * H * 2,
+        self.BUFS.update(scoresR=C * self.QH * self.ATTENDED * 4, mixR=C * self.MIX_ROW * 4, mR=C * H * 2, yR=C * H * 2,
                          injR=C * 16)
         if self.PROMPT_CARD:                       # the card's `experts_rows` over a chunk: its scratch, as the CPU's
             P = C * self.TOPK
@@ -373,6 +420,8 @@ class Qwen4Exp(Generates):
                 self.STATE["s32_%d" % l], self.STATE["cwin%d" % l] = self.S_BYTES, self.W_BYTES
             else:
                 self.STATE["kc%d" % l], self.STATE["vc%d" % l] = self.KV_BYTES, self.KV_BYTES
+                self.STATE["ik%d" % l] = self.max_context * self.ID * 2                    # the indexer's keys, a position's
+                self.STATE["ip%d" % l] = (self.max_context // self.RATIO) * self.ID * 2    # …and a block's
         self.STATE["prev2"] = 8                    # the two tokens before the next position: the n-gram hash reads them
         for l in self.PLE:
             self.STATE["gvn%d" % l] = self.GVN_BYTES
@@ -390,24 +439,52 @@ class Qwen4Exp(Generates):
     POOLS = ("partials", "resid", "attn_out", "main", "logits")
 
     @staticmethod
-    def _classes(asks):
-        """Five buffer classes' sizes for `asks` (bytes), from the asks themselves: their median, upper quartile and
-        ninetieth percentile, and the two largest."""
-        asks = sorted(asks)
-        cut = [asks[int(len(asks) * q)] for q in (0.5, 0.75, 0.9)] + [asks[-2], asks[-1]]
-        sizes = sorted({max(64, (s + 255) // 256 * 256) for s in cut})
-        while len(sizes) < 5:
+    def _room(n):
+        """An ask's room in a class: on a 256-byte boundary, 64 bytes at least."""
+        return max(64, (n + 255) // 256 * 256)
+
+    @classmethod
+    def _classes(cls, asks, spare, reach):
+        """Five buffer classes' sizes for `asks` (bytes): the five of the asks' own sizes that hold them, and `spare` more
+        of each class up to the one `reach` (the largest working buffer) falls in, in the fewest bytes — a class above it
+        holds the conversation's state alone, made once, and keeps no spare (▶ `_pools`). ⚖ 2026-11-09 *"let's fix the
+        card pool"*: cut at the asks' median, upper quartile, ninetieth percentile and two largest, Flash-Next's 47.8 KB
+        of state a position took 119 KB of the card — the n-gram layer's values the largest class and its two spares, the
+        indexer's keys rounded into K's class — and past ~200k positions an empty class twice the largest
+        (measurements/2026-11-09_auto_context_node03.md ③)."""
+        rooms = sorted(set(cls._room(n) for n in asks))
+        count = {r: 0 for r in rooms}
+        for n in asks:
+            count[cls._room(n)] += 1
+        top = next((r for r in rooms if r >= cls._room(reach)), rooms[-1])
+        m = len(rooms)
+
+        def cost(i, j):                 # a class of rooms[j] holding the asks of rooms (i, j], and its spares
+            return rooms[j] * (sum(count[rooms[t]] for t in range(i + 1, j + 1)) + (spare if rooms[j] <= top else 0))
+        best = {(1, j): (cost(-1, j), None) for j in range(m)}
+        for k in range(2, min(5, m) + 1):
+            for j in range(k - 1, m):
+                best[(k, j)] = min((best[(k - 1, i)][0] + cost(i, j), i) for i in range(k - 2, j))
+        k = min(range(1, min(5, m) + 1), key=lambda k: best[(k, m - 1)][0])   # fewer classes where a spare costs more
+        j, sizes = m - 1, []
+        while j is not None:
+            sizes.append(rooms[j])
+            j = best[(k, j)][1]
+            k -= 1
+        sizes = sorted(sizes)
+        while len(sizes) < 5:           # fewer sizes than classes: the rest past the largest, holding nothing
             sizes.append(sizes[-1] * 2)
         return sizes
 
     @classmethod
-    def _pools(cls, sizes, asks, spare):
+    def _pools(cls, sizes, asks, spare, reach):
         """The classes `sizes` holding `asks`, each in the smallest class that fits (▶ nn's `zzprivate_take`), and
-        `spare` more of each."""
+        `spare` more of each class up to the one `reach` falls in — none above it, where only the state is."""
         qty = dict.fromkeys(cls.POOLS, 0)
         for n in asks:
             qty[cls.POOLS[next(i for i, s in enumerate(sizes) if s >= n)]] += 1
-        return "".join("nn__buffer_%s__size_bytes:%d\nnn__buffer_%s__qty:%d\n" % (nm, s, nm, qty[nm] + spare)
+        top = next(s for s in sizes if s >= cls._room(reach))
+        return "".join("nn__buffer_%s__size_bytes:%d\nnn__buffer_%s__qty:%d\n" % (nm, s, nm, qty[nm] + (spare if s <= top else 0))
                        for nm, s in zip(cls.POOLS, sizes))
 
     def device_params(self):
@@ -445,8 +522,8 @@ class Qwen4Exp(Generates):
         #   "resid" 1 MiB read against the CPU's 2 MB (measurements/2026-10-31_nn141_flash_next_node03.md). The CPU's
         #   largest class alone is raised, to its rows' scratch; nothing of that class crosses.
         card_asks = list(self.BUFS.values()) + list(self.STATE.values())
-        self.CLASSES = self._classes(card_asks)
-        card = (self._pools(self.CLASSES, card_asks, 2)
+        self.CLASSES = self._classes(card_asks, 2, max(self.BUFS.values()))
+        card = (self._pools(self.CLASSES, card_asks, 2, max(self.BUFS.values()))
                 + "nn__expert_cache_l1__size_mb:%d\n" % ((self.arena + tier_bytes + (256 << 20)) >> 20) + common
                 + "nn__expert__types:%d\n%s" % (n_types, types)
                 + "nn__ram_buffer_result__size_bytes:64\nnn__ram_buffer_result__qty:1\n"
@@ -467,7 +544,7 @@ class Qwen4Exp(Generates):
         cpu_asks += [2 * (H + 16), H * 2] * (self.CARD_SEATS - 1)     # a seat's own hand and routed sum past the first
         cpu_asks += [2 * (H + 16), H * 2, self.CHUNK * self.HAND_ROW, self.CHUNK * H * 2] * (self.CARDS - 1)   # a card's own
         cpu_classes = self.CLASSES[:-1] + [max(self.CLASSES[-1], (max(cpu_asks) + 255) // 256 * 256)]
-        cpu = (self._pools(cpu_classes, cpu_asks, 6)
+        cpu = (self._pools(cpu_classes, cpu_asks, 6, max(cpu_asks))
                + "nn__expert_cache_l1__size_mb:%d\n" % ((self.cpu_arena + (256 << 20)) >> 20) + common
                + "nn__expert__types:1\nnn__expert__type0__up_bytes:%d\nnn__expert__type0__down_bytes:%d\n"
                  "nn__expert__type0__slots:%d\n" % (p.up_bytes, p.down_bytes, slots))
@@ -480,7 +557,7 @@ class Qwen4Exp(Generates):
 
     def workers(self):
         """The cards, then the CPU: the whole machine's pool, or with `sockets` 2 a worker a NUMA node."""
-        cpus = [("x86_avx2", 0)] if self.SOCKETS == 1 else [("x86_avx2", 1 + s) for s in range(self.SOCKETS)]
+        cpus = [(self.m.cpu, 0)] if self.SOCKETS == 1 else [(self.m.cpu, 1 + s) for s in range(self.SOCKETS)]
         return [(self.m.silicon, c) for c in self.CARD_IDS] + cpus
 
     # ── the load ────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -592,8 +669,14 @@ class Qwen4Exp(Generates):
             m.array("EXPERTS_CARD_ROWS", ["exkr%d" % l for l in self.run_layers])
         if self.CARD_GB:
             m.array("EXPERTS_TIER", ["exk%d" % l for l in self.run_layers])
+        disk = self.EXPERTS_FROM == "disk"
         expert_tier.tier(m, "tier_card", self.T_CEXP, self.EXPERTS, self.TOPK, self.H, self.INTER, e, self.LAYERS,
-                         {l: "src%d" % l for l in self.run_layers}, landing=self.CARD_LANDING, stream=self.T_STREAM)
+                         None if disk else {l: "src%d" % l for l in self.run_layers}, landing=self.CARD_LANDING,
+                         stream=self.T_STREAM, slots=dict(worker=self.CPU, type=0) if disk else None,
+                         # ⭐ A PROMPT ON THE CARD FROM THE DISK (NN-165): an expert a chunk picks that the cache does not
+                         #   hold read into it from the layer's file, a batch ahead of its copy to the ring
+                         backings={l: self._backing[(self.CPU, l)] for l in self.run_layers}
+                         if disk and self.T_STREAM is not None else None)
         expert_tier.bind(m, {k: "tier_card"}, len(self.workers()))
         # past any chunk's picks of one expert: a prompt's experts through the ring, none promoted by it — the tier is the
         #   positions' to fill
@@ -616,7 +699,10 @@ class Qwen4Exp(Generates):
         for name, n in self.STATE.items():
             if name.startswith(("weng", "wtap")):
                 continue
-            self.AT[name] = m.buffer(n, name, self.EOS2 if name.split("_s")[0] == "prev2" else bytes(n))
+            prev2 = name.split("_s")[0] == "prev2"
+            self.AT[name] = m.buffer(n, name, self.EOS2 if prev2 else None)
+            if not prev2:
+                m.zero(self.AT[name], n)
         for l in self.PLE:                         # the n-gram gate's two norms folded as DeepSeek's runtime folds its q and k
             dec = lambda n: NU.decode_record(*self._layer_record(l, n)).astype(np.float64)
             self.AT["weng%d" % l] = m.buffer(S * 2, "weng%d" % l,
@@ -671,18 +757,20 @@ class Qwen4Exp(Generates):
         # the shape ai_qwen_4's verbs read (▶ its contracts/objects/layer.cuh): the buffers, the integers, the epsilon
         shape = [self.H, self.HC, self.R, self.KH, self.VH, self.LD, self.QH, self.KVH, self.AD, self.ROT, self.INTER,
                  self.EXPERTS, self.HAND_ROW]
-        m.table("Q4", ["signs", "ones", "q4s", "cs", "scores", "mix"] + shape + [1, repr(float(self.EPS))])
-        m.table("Q4R", ["signs", "ones", "q4r", "csR", "scoresR", "mixR"] + shape + [self.CHUNK, repr(float(self.EPS))])
+        qsa = [self.THETA, self.IH, self.ID, self.RATIO, self.BUDGET]
+        m.table("Q4", ["signs", "ones", "q4s", "cs", "scores", "mix"] + shape + [1] + qsa + [repr(float(self.EPS))])
+        m.table("Q4R", ["signs", "ones", "q4r", "csR", "scoresR", "mixR"] + shape + [self.CHUNK] + qsa + [repr(float(self.EPS))])
         for seat in range(1, self.CARD_SEATS):           # a seat's own position shape: its angles
             m.table(self.seat_name("Q4", seat), ["signs", "ones", "q4s", self.seat_name("cs", seat), "scores", "mix"] + shape
-                    + [1, repr(float(self.EPS))])
+                    + [1] + qsa + [repr(float(self.EPS))])
         m.array("LT", ["lt%d" % l for l in self.run_layers])
         m.array("ATTN", [self.kinds[l] == "f" for l in self.run_layers])
         m.array("NGRAM_AT", [l in self.PLE for l in self.run_layers])
         # the next layer's place in RUN, where its experts are read ahead (`experts_ahead`); 0 where none — the last
         m.array("AHEAD_NEXT", [i + 1 if self.AHEAD is not None and i + 1 < len(self.run_layers) else 0
                                for i in range(len(self.run_layers))])
-        for arr, fmt, kind in (("S32S", "s32_%d", "d"), ("CWINS", "cwin%d", "d"), ("KCS", "kc%d", "f"), ("VCS", "vc%d", "f")):
+        for arr, fmt, kind in (("S32S", "s32_%d", "d"), ("CWINS", "cwin%d", "d"), ("KCS", "kc%d", "f"), ("VCS", "vc%d", "f"),
+                               ("IKS", "ik%d", "f"), ("IPS", "ip%d", "f")):
             for seat in range(self.CARD_SEATS):
                 m.array(self.seat_name(arr, seat),
                         [self.seat_name(fmt % l, seat) if self.kinds[l] == kind else 0 for l in self.run_layers])
@@ -707,10 +795,11 @@ class Qwen4Exp(Generates):
         layers = self.run_layers
         if self.SOCKETS > 1:
             return self._socket_experts(progress)
-        backing = {}
+        backing = self._backing = {}
         if self.EXPERTS_FROM == "disk":
-            backing = experts_file.cache_experts(m, self.b, [(CPU, 0, 1)], e, layers, self.EXPERTS, self.experts_dir,
-                                                 self._expert_pieces, layers, progress=progress)
+            backing = self._backing = experts_file.cache_experts(m, self.b, [(CPU, 0, 1)], e, layers, self.EXPERTS,
+                                                                 self.experts_dir, self._expert_pieces, layers,
+                                                                 progress=progress)
         elif self.EXPERTS_FROM == "mapped":
             experts_file.map_experts(m, self.b, [(CPU, 0, 1)], e, layers, self.EXPERTS, self.experts_dir,
                                      self._expert_pieces, layers, progress=progress)
@@ -741,7 +830,7 @@ class Qwen4Exp(Generates):
             m.table("exrc%d" % l, rows + [0] * (19 - len(rows)) + [1 if self.EXPERTS_INT8 else 0])
         m.array("EXPERTS_CPU", ["exc%d" % l for l in layers])
         m.array("EXPERTS_CPU_ROWS", ["exrc%d" % l for l in layers])
-        if self.TIER_ON:
+        if self.TIER_ON and self.EXPERTS_FROM != "disk":     # from the disk the tier reads the cache's slots (NN-164)
             for l in layers:
                 m.array("src%d" % l, self.SRC[l])
         m.act_as(CARD)
@@ -838,15 +927,19 @@ class Qwen4Exp(Generates):
 
     def state_regions(self, length, where=None):
         """(address, bytes) of everything a conversation of `length` positions has written: each DeltaNet layer's state
-        and window whole, each attention layer's key and value rows `0..length`, the n-gram layer's normalised gated
+        and window whole, each attention layer's key and value rows `0..length` and its indexer's — a position's key `0..length`,
+        a block's for the blocks finished in them — the n-gram layer's normalised gated
         values `0..length` (its convolution reads back over them), and the two tokens the hash reads next. `where`: each
         buffer's address — card 0's by default; a table of zeros answers the sizes before the boot."""
         at = self.AT if where is None else where
-        rows = dict(kc=self.KVH * self.AD * 2, vc=self.KVH * self.AD * 2, gvn=self.S * 2)
+        rows = dict(kc=self.KVH * self.AD * 2, vc=self.KVH * self.AD * 2, ik=self.ID * 2, gvn=self.S * 2)
         out = []
         for name, n in self._own_state():
             key = next((k for k in rows if name.startswith(k)), None)
-            out.append((at[name], length * rows[key] if key else n))
+            if name.startswith("ip"):                # the indexer's block keys: the blocks `length` positions finished
+                out.append((at[name], (length // self.RATIO) * self.ID * 2))
+            else:
+                out.append((at[name], length * rows[key] if key else n))
         return out
 
     def _own_state(self):
@@ -880,6 +973,7 @@ class Qwen4Exp(Generates):
     # what a seat's view binds (▶ `load`): the names its programs read a conversation by, what its steps carry, the
     #   logits its head leaves, and its hand and routed sum on the CPU
     SEAT_NAMES = ("sf", "hand", "picks", "m2", "mr2", "inj2", "sdow", "ngr", "prev2", "cs", "Q4", "S32S", "CWINS", "KCS", "VCS",
+                  "IKS", "IPS",
                   "GVNS", "HERE", "logits_h", "c_hand", "c_routed")
     SEAT_BUFS = ("sf", "hand", "m2", "mr2", "inj2", "sdow", "ngr", "cs", "logits_h")
 
@@ -926,7 +1020,7 @@ class Qwen4Exp(Generates):
         """A new conversation on the seat `on_seat` chose: every state buffer zeroed, the tokens before position 0 the
         hash's end of text."""
         for name, n in self._own_state():
-            self.m.write(self._at(name), bytes(n))
+            self.m.zero(self._at(name), n)
         self.m.write(self._at("prev2"), self.EOS2)
 
     @staticmethod

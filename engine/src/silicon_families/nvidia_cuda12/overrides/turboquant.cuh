@@ -15,11 +15,12 @@
  * at `x + i · cols`. A gemv reads every code once and multiplies it once, so it is the codes' bytes that set its speed,
  * and what a lane spends on each code decides whether it keeps up with them. Here the multiply is `mma.sync`'s:
  *   · a WARP takes 16 rows of a matrix; each lane loads its two rows' codes straight into registers — 32 bytes a row a
- *     slice, four lanes a row's 128 bytes — and decodes them into A operands as `expert.cuh` does: a register, two
- *     levels, from one lookup in nn's level table staged in shared memory. `x` is the B operand, the same in all eight of
- *     its columns, read by every warp of the card from the cache it shares
- *   · so a code costs half a lookup and its shifts; the products and their sum are the tensor cores' — where a lane's own
- *     multiply-adds would also convert every level and every `x` to a float
+ *     slice, four lanes a row's 128 bytes — and decodes them into A operands as `expert.cuh` does: at 4 bits a register,
+ *     two levels, by byte permutes over nn's levels held in registers (▶ kernels.cuh's `levels4_pairs`), at 8 bits from
+ *     nn's level table staged in shared memory. `x` is the B operand, the same in all eight of its columns, read by every
+ *     warp of the card from the cache it shares
+ *   · so eight 4-bit codes cost sixteen byte permutes; the products and their sum are the tensor cores' — where a lane's
+ *     own multiply-adds would also convert every level and every `x` to a float
  *   · the columns in `expert.cuh`'s order, widened: a slice is 256 columns at 4 bits and 128 at 8, and lane `t` of four
  *     takes its quarter of them in one run, four columns a step, both operands alike
  *   · a tile's codes loaded two slices ahead of its products; the sum in fp32, rounded once, as nn's
@@ -78,8 +79,8 @@ static __device__ __forceinline__ void nvidia_cuda12__zzprivate_advance(const nv
 }
 /* One slice's products into `acc`, at width `D`: each step's A operands decoded from the codes, `x`'s 16U columns the B. */
 static __device__ __forceinline__ void nvidia_cuda12__zzprivate_slice_mma(const uint32_t D, const uint32_t c[2][8], const uint16_t* x,
-                                                                           uint32_t t, const uint32_t* pair4, const uint16_t* lev8,
-                                                                           float acc[4]) {
+                                                                           uint32_t t, const uint32_t tl[4], const uint32_t th[4],
+                                                                           const uint16_t* lev8, float acc[4]) {
     const uint32_t U = D == 4u ? 4u : 2u, W = 8u * U;
     uint32_t xw[32];
     const uint4* xs = (const uint4*)(const void*)(x + 16u * U * t);
@@ -88,20 +89,25 @@ static __device__ __forceinline__ void nvidia_cuda12__zzprivate_slice_mma(const 
         const uint4 v = xs[q];
         xw[4u * q] = v.x; xw[4u * q + 1u] = v.y; xw[4u * q + 2u] = v.z; xw[4u * q + 3u] = v.w;
     }
+    if (D == 4u) {                       /* a word's eight codes, two steps: bytes 0 and 1, then 2 and 3 */
+#pragma unroll
+        for (uint32_t s = 0u; s < 4u * U; s += 2u) {
+            uint32_t h0[4], h1[4];
+            nvidia_cuda12__zzpackage_levels4_pairs(c[0][s / 2u], tl, th, h0);
+            nvidia_cuda12__zzpackage_levels4_pairs(c[1][s / 2u], tl, th, h1);
+            nvidia_cuda12__zzpackage_mma(acc, h0[0], h1[0], h0[1], h1[1], xw[2u * s], xw[2u * s + 1u]);
+            nvidia_cuda12__zzpackage_mma(acc, h0[2], h1[2], h0[3], h1[3], xw[2u * s + 2u], xw[2u * s + 3u]);
+        }
+        return;
+    }
 #pragma unroll
     for (uint32_t s = 0u; s < 4u * U; ++s) {
         uint32_t a[4];
 #pragma unroll
         for (uint32_t r = 0u; r < 2u; ++r) {
-            if (D == 4u) {
-                const uint32_t word = c[r][s / 2u], sh = 16u * (s % 2u);
-                a[r]      = pair4[(word >> sh) & 0xFFu];
-                a[2u + r] = pair4[(word >> (sh + 8u)) & 0xFFu];
-            } else {
-                const uint32_t word = c[r][s];
-                a[r]      = (uint32_t)lev8[word & 0xFFu] | ((uint32_t)lev8[(word >> 8) & 0xFFu] << 16);
-                a[2u + r] = (uint32_t)lev8[(word >> 16) & 0xFFu] | ((uint32_t)lev8[word >> 24] << 16);
-            }
+            const uint32_t word = c[r][s];
+            a[r]      = (uint32_t)lev8[word & 0xFFu] | ((uint32_t)lev8[(word >> 8) & 0xFFu] << 16);
+            a[2u + r] = (uint32_t)lev8[(word >> 16) & 0xFFu] | ((uint32_t)lev8[word >> 24] << 16);
         }
         nvidia_cuda12__zzpackage_mma(acc, a[0], a[1], a[2], a[3], xw[2u * s], xw[2u * s + 1u]);
     }
@@ -113,7 +119,6 @@ static __device__ __forceinline__ void nvidia_cuda12__zzprivate_slice_mma(const 
  * sum of short matrices keeps as many bytes in flight as one long matrix. A block's first codes are asked for before nn's
  * levels are staged, so the staging waits under their load. */
 static __device__ __forceinline__ void nvidia_cuda12__zzprivate_groups_rows(const nvidia_cuda12__gemv_job* j) {
-    __shared__ uint32_t pair4[256];
     __shared__ uint16_t lev8[256];
     __shared__ float parts[NVIDIA_CUDA12__ZZPRIVATE_GEMV_WARPS][16];
     const uint32_t lane = (uint32_t)nn__silicon__lane(), lanes = (uint32_t)nn__silicon__lanes();
@@ -121,6 +126,8 @@ static __device__ __forceinline__ void nvidia_cuda12__zzprivate_groups_rows(cons
     const uint32_t warp = lane / NVIDIA_CUDA12__ZZPACKAGE_WARP, S = (uint32_t)j->split, per = warps / S, p = warp % S;
     const uint64_t tiles = j->first[j->count];
     bool staged = false;
+    uint32_t tl[4], th[4];                                 /* the 4-bit levels, in registers (▶ kernels.cuh) */
+    nvidia_cuda12__zzpackage_levels4(tl, th);
     for (uint64_t base = (uint64_t)nn__silicon__block() * per; base < tiles; base += (uint64_t)nn__silicon__blocks() * per) {
         const uint64_t it = base + warp / S;
         const bool live = it < tiles;
@@ -145,11 +152,7 @@ static __device__ __forceinline__ void nvidia_cuda12__zzprivate_groups_rows(cons
         nvidia_cuda12__zzprivate_fetch(j, ahead, stop, r0, g, t, c1);
         if (nvidia_cuda12__zzprivate_before(ahead, stop)) nvidia_cuda12__zzprivate_advance(j, &ahead);
         if (!staged) {
-            for (uint32_t e = lane; e < 256u; e += lanes) {
-                const uint16_t* lev4 = nn__turboquant__zzabi_levels(4u);
-                pair4[e] = (uint32_t)lev4[e & 15u] | ((uint32_t)lev4[e >> 4] << 16);
-                lev8[e] = nn__turboquant__zzabi_levels(8u)[e];
-            }
+            for (uint32_t e = lane; e < 256u; e += lanes) lev8[e] = nn__turboquant__zzabi_levels(8u)[e];
             __syncthreads();
             staged = true;
         }
@@ -158,8 +161,8 @@ static __device__ __forceinline__ void nvidia_cuda12__zzprivate_groups_rows(cons
             if (nvidia_cuda12__zzprivate_before(ahead, stop)) nvidia_cuda12__zzprivate_advance(j, &ahead);
             const uint64_t m = now.m;
             const uint16_t* xm = (j->sum ? j->x + m * j->cols : j->x) + now.k;
-            if (j->d[m] == 4u) nvidia_cuda12__zzprivate_slice_mma(4u, c0, xm, t, pair4, lev8, acc);
-            else               nvidia_cuda12__zzprivate_slice_mma(8u, c0, xm, t, pair4, lev8, acc);
+            if (j->d[m] == 4u) nvidia_cuda12__zzprivate_slice_mma(4u, c0, xm, t, tl, th, lev8, acc);
+            else               nvidia_cuda12__zzprivate_slice_mma(8u, c0, xm, t, tl, th, lev8, acc);
             nvidia_cuda12__zzprivate_advance(j, &now);
             if (j->sum && now.m != m) {                        /* a matrix of the sum is done: its share */
                 const uint8_t* lut = (const uint8_t*)(uintptr_t)j->luts[m];

@@ -179,11 +179,56 @@ static inline void sys__os__cpu_ticks(unsigned long long* busy, unsigned long lo
 }
 static inline long sys__os__cpu_l2_bytes(void) { return sysconf(_SC_LEVEL2_CACHE_SIZE); }
 
+/* Always inline, as the file's calls are: `MEASURED`, left to GCC the engine module's pybind setup compiled differently.
+ * Spelled through a name, so a definition below reads as one. */
+#define SYS__OS__ZZPRIVATE_ALWAYS __attribute__((always_inline))
+
+/* ⛳ OPENCL'S LOADER, ASKED FOR ONE VENDOR'S GPUS (`pci_vendor`): each named by its OpenCL device name, as Windows'
+ *   `cards` names every GPU's — an AMD card's is its `gfx`, Intel's its product — up to `most`, in the order the loader
+ *   lists them. Loaded by name and left loaded for the family that opens next. The calls' types are OpenCL's, spelled
+ *   here without its headers. */
+static inline SYS__OS__ZZPRIVATE_ALWAYS uint32_t sys__os__zzprivate_opencl_gpus(char* names, uint32_t name_bytes, uint32_t most,
+                                                                                uint32_t pci_vendor) {
+    if (most == 0u) return 0u;
+    typedef int32_t (*platforms_fn)(uint32_t, void**, uint32_t*);
+    typedef int32_t (*devices_fn)(void*, uint64_t, uint32_t, void**, uint32_t*);
+    typedef int32_t (*info_fn)(void*, uint32_t, size_t, void*, size_t*);
+    void* cl = dlopen("libOpenCL.so.1", RTLD_NOW | RTLD_LOCAL);
+    if (cl == 0) return 0u;
+    const platforms_fn platforms = (platforms_fn)dlsym(cl, "clGetPlatformIDs");
+    const devices_fn   devices   = (devices_fn)dlsym(cl, "clGetDeviceIDs");
+    const info_fn      info      = (info_fn)dlsym(cl, "clGetDeviceInfo");
+    void* platform[16];
+    uint32_t platform_count = 0u, n = 0u;
+    if (platforms == 0 || devices == 0 || info == 0 || platforms(16u, platform, &platform_count) != 0) return 0u;
+    for (uint32_t p = 0u; p < platform_count && p < 16u && n < most; ++p) {
+        void* device[16];
+        uint32_t device_count = 0u;
+        /* (1 << 2) is CL_DEVICE_TYPE_GPU */
+        if (devices(platform[p], 1ull << 2, 16u, device, &device_count) != 0) continue;
+        for (uint32_t d = 0u; d < device_count && d < 16u && n < most; ++d) {
+            uint32_t vendor = 0u;
+            char name[256];
+            /* 0x1001 is CL_DEVICE_VENDOR_ID, 0x102B CL_DEVICE_NAME */
+            if (info(device[d], 0x1001u, sizeof vendor, &vendor, 0) != 0 || vendor != pci_vendor) continue;
+            memset(name, 0, sizeof name);
+            if (info(device[d], 0x102Bu, sizeof name - 1u, name, 0) != 0 || name[0] == 0) continue;
+            char* to = names + (size_t)(n++) * name_bytes;
+            strncpy(to, name, name_bytes - 1u);
+            to[name_bytes - 1u] = 0;
+        }
+    }
+    return n;
+}
+
 /* ⛳ THE KERNEL DRIVER'S TOPOLOGY, `/sys/class/kfd/kfd/topology/nodes/<n>/properties`: every GPU node carries
  *   `gfx_target_version` as a number, major·10000 + minor·100 + stepping, and its name is `gfx` then the major in decimal
  *   and the other two in hex — 90006 is `gfx906`, 90010 `gfx90a`, 110000 `gfx1100`. A CPU node carries 0 and is
- *   skipped. The nodes are read in numeric order, so the answer is the same on every read. Always inline, as the
- *   file calls are: `MEASURED`, left to GCC the engine module's pybind setup compiled differently. */
+ *   skipped. The nodes are read in numeric order, so the answer is the same on every read.
+ * ⛳ WSL2 HAS NO KFD: its GPUs are `/dev/dxg`, behind Windows' driver, and the topology names none. There an AMD card is
+ *   named as Windows names it, by OpenCL's loader (PCI vendor 0x1002) — ROCm's OpenCL inside WSL2, from the ROCm the AMD
+ *   family then opens (`MEASURED` an RX 9070 XT on SaladCloud, ROCm 7.2: `gfx1201`,
+ *   measurements/2026-11-10_amd_radeon_wave64.md). NVIDIA's cards are its driver's to name, there as here. */
 static inline __attribute__((always_inline)) uint32_t sys__os__cards(char* names, uint32_t name_bytes, uint32_t most) {
     uint32_t n = 0u;
     for (uint32_t node = 0u; node < 256u && n < most; ++node) {
@@ -200,7 +245,24 @@ static inline __attribute__((always_inline)) uint32_t sys__os__cards(char* names
         snprintf(names + (size_t)(n++) * name_bytes, name_bytes, "gfx%llu%llx%llx",
                  version / 10000ull, (version / 100ull) % 100ull, version % 100ull);
     }
+    if (n == 0u && access("/dev/dxg", F_OK) == 0) n = sys__os__zzprivate_opencl_gpus(names, name_bytes, most, 0x1002u);
     return n;
+}
+/* ⛳ LINUX'S INTEL GPUS, BY OPENCL'S LOADER — the kernel's topology above is AMD's driver's alone. Asked only where the
+ *   system shows a display device of Intel's (PCI vendor 0x8086, `/sys/class/drm/card<n>/device/vendor`), read before any
+ *   library is loaded; then OpenCL's loader names Intel's devices (above). */
+static inline __attribute__((always_inline)) uint32_t sys__os__intel_gpus(char* names, uint32_t name_bytes, uint32_t most) {
+    bool intel = false;
+    for (int card = 0; card < 16 && !intel; ++card) {
+        char path[64];
+        snprintf(path, sizeof path, "/sys/class/drm/card%d/device/vendor", card);
+        FILE* f = fopen(path, "r");
+        if (f == 0) continue;
+        unsigned int vendor = 0u;
+        if (fscanf(f, "%x", &vendor) == 1 && vendor == 0x8086u) intel = true;
+        fclose(f);
+    }
+    return intel ? sys__os__zzprivate_opencl_gpus(names, name_bytes, most, 0x8086u) : 0u;
 }
 
 #endif /* SILVANN__OPERATING_SYSTEMS_LINUX_OS_CUH */

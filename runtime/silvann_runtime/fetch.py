@@ -26,6 +26,8 @@ from .version import RELEASE, parse
 KNOWN = {
     "silvann_tq_D8E4_qwen3.6_35b_a3b": ("eval-apply/silvann_tq_D8E4_qwen3.6_35b_a3b", "20 GB", "Qwen/Qwen3.6-35B-A3B"),
     "silvann_tq_D8E4_qwen3.5_122b_a10b": ("eval-apply/silvann_tq_D8E4_qwen3.5_122b_a10b", "67 GB", "Qwen/Qwen3.5-122B-A10B"),
+    "silvann_tq_D8E4_qwen3.8_flash_next": ("eval-apply/silvann_tq_D8E4_qwen3.8_flash_next", "111 GB",
+                                           "Qwen/Qwen3.8-Flash-Next-FP8"),
     "silvann_tq_D4_qwen3.5_4b": ("eval-apply/silvann_tq_D4_qwen3.5_4b", "3.5 GB", "Qwen/Qwen3.5-4B"),
     "silvann_tq_D8_qwen3.5_4b": ("eval-apply/silvann_tq_D8_qwen3.5_4b", "5.3 GB", "Qwen/Qwen3.5-4B"),
     "silvann_tq_D4_qwen3.8_27b": ("eval-apply/silvann_tq_D4_qwen3.8_27b", "16 GB", "Qwen/Qwen3.8-27B"),
@@ -224,13 +226,20 @@ def differences(path, repo, programs_only=False, release=None):
         tree = list(api.list_repo_tree(repo, recursive=True, revision=commit))
     tree = [f for f in tree if isinstance(f, RepoFile)]
     keep, later = programs_of([f.path for f in tree], release)
+    from . import experts_split
+    moved = (experts_split.state_of(path) or {}).get("moved", {})
     files, linked, hashed = [], [], []
     for f in tree:
         if f.path not in keep:
             continue
         local = os.path.join(path, *f.path.split("/"))
+        rel = os.path.join(*f.path.split("/"))
         if _linked(path, f.path):
             linked.append(f.path)
+        elif rel in moved:                  # a layer split in place over two sockets: the pack's by the sha256 recorded
+            if f.lfs is None or moved[rel].get("sha256") != f.lfs.sha256 or not os.path.isfile(local) \
+                    or os.path.getsize(local) != f.size:
+                files.append((f.path, f.size))
         elif not os.path.isfile(local) or os.path.getsize(local) != f.size:
             files.append((f.path, f.size))
         elif f.lfs is None:
@@ -257,7 +266,9 @@ def update(path, repo, files, quiet=False):
     if not files:
         return path
     from huggingface_hub import snapshot_download
+    from . import experts_split
     rest = [f for f in files if f != VERSION_FILE]
+    experts_split.forget(path, [os.path.join(*f.split("/")) for f in rest])   # a moved layer replaced: the pack's whole
     if rest:
         snapshot_download(repo_id=repo, local_dir=os.path.abspath(path), allow_patterns=[glob.escape(f) for f in rest],
                           force_download=True, **({"tqdm_class": _quiet()} if quiet else

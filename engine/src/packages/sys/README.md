@@ -42,7 +42,13 @@ process it is of — the asker's, inherited by what it asks and what it goes on 
 `(sys__scheduler__pid)` says which, and `(sys__scheduler__kill pid)` takes its requests off every queue, their answers
 filled with `SCKL`; a block refuses one taken later and drops its parked steps; a step of it still running ends at its
 next move or slice, and an answer it fills at its end is `SCKL`. Nothing it did is undone (measurements/
-2026-11-06_kill_node03.md). `MEASURED` on node03: a short computation
+2026-11-06_kill_node03.md). ⭐ **A process can be asked to stop** — the milder of the two levels (NN-160):
+`(sys__scheduler__stop pid)` remembers it, and its program reads `(sys__scheduler__stopped)` once a token (`generate`'s
+loop does) and ends at the token it is on, everything whole; a killed process reads as stopped too. The host makes a
+process of its own from the counter every process is made from (`process_new`), makes its requests as it
+(`process_as`: its thread's, inherited as a program's), and kills it or asks it to stop through doors of its own
+(`process_kill`, `process_stop`) — so a server's stop ends an answer at its token, and its kill tears a conversation's
+work down (measurements/2026-11-08_processes_node03.md). `MEASURED` on node03: a short computation
 queued behind a loop that never yields answered in 1.2 ms at a 1 ms slice, against 806 ms without; two such loops
 interleave and take what the two take one after the other; the clock costs a loop 1-2%
 (measurements/2026-11-06_slice_node03.md).
@@ -113,7 +119,7 @@ objects      create type clone
 node arrays  node_array__get node_array__set
 lists        list__shared_append list__shared_take list__shared_length
 computation  compute result wait worker scheduler__continue scheduler__continue_on scheduler__gate scheduler__pid
-             scheduler__kill scheduler__compute_inline scheduler__preemptive
+             scheduler__kill scheduler__compute_inline scheduler__preemptive scheduler__stop scheduler__stopped
 the machine  system_register__get system_register__set package__init
 dictionary   dictionary__put dictionary__get dictionary__remove
 files        file__open file__close

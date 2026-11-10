@@ -882,6 +882,29 @@ static __device__ sys__heap_node sys__opcodes__zzabi_scheduler_preemptive(const 
 }
 SYS__ENGINE__ABI__BRIDGE(sys__opcodes__zzabi_adapter_scheduler_preemptive, sys__opcodes__zzabi_scheduler_preemptive)
 
+/* `(sys__scheduler__stop pid)` -> `#t`: the process asked to stop at the token it is on — remembered, and read by its
+ * program once a token (`sys__scheduler__stopped`), which ends there, everything it did whole; its requests run on (a kill
+ * is the other level, ▶ `sys__scheduler__kill`). ⛔ A process is a positive integer: anything else is refused, OPCT. */
+static __device__ sys__heap_node sys__opcodes__zzabi_scheduler_stop(const sys__heap_node* argv, unsigned argc,
+                                                                    sys__engine__ctx* ctx) {
+    (void)ctx;
+    if (argc != 1u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
+    if (argv[0].dtype != SYS__KIND__VALUE_INT || argv[0].args[0] == 0ull || argv[0].args[0] > 0xFFFFFFFFull)
+        return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
+    return sys__opcodes__truth(sys__scheduler__stop(argv[0].args[0]));
+}
+SYS__ENGINE__ABI__BRIDGE(sys__opcodes__zzabi_adapter_scheduler_stop, sys__opcodes__zzabi_scheduler_stop)
+
+/* `(sys__scheduler__stopped)` -> `#t` once this computation's process has been asked to stop, or killed; `#f` else — what a
+ * program that makes many of something reads once each, to end at the one it is on (▶ lisp/generate.lisp). */
+static __device__ sys__heap_node sys__opcodes__zzabi_scheduler_stopped(const sys__heap_node* argv, unsigned argc,
+                                                                       sys__engine__ctx* ctx) {
+    (void)argv; (void)ctx;
+    if (argc != 0u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
+    return sys__opcodes__truth(sys__scheduler__stopped());
+}
+SYS__ENGINE__ABI__BRIDGE(sys__opcodes__zzabi_adapter_scheduler_stopped, sys__opcodes__zzabi_scheduler_stopped)
+
 /* ── ⭐ A CARD'S LANDING PAD (NN-115, ▶ `silicon/pad.cuh`) ─────────────────────────────────────────────────────────────
  * `(sys__pad__open up down chunk_bytes)` -> the chunks: the calling worker's card's pad, pinned now — `up` chunks up,
  *   `down` down. */

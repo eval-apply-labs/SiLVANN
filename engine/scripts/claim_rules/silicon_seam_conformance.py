@@ -64,7 +64,7 @@ def _params(raw):
 
 
 def _sig_for(family):
-    """The signature pattern, widened to a silicon family's own prefix — `amd_rocm6_wave64__…` — which is how
+    """The signature pattern, widened to a silicon family's own prefix — `amd_rocm_base__…` — which is how
     a family names the doors it defines. Its helpers — private to a file, or shared by the family's own files
     (`zzpackage`, which the C-subset gate keeps inside the family's folder) — and its `includes` are not doors."""
     return re.compile(_SIG.pattern.replace(r'((?:sys__silicon|sys__gpu|nn__silicon)__\w+)',
@@ -123,16 +123,31 @@ def _answers(parts):
     return None
 
 
+# ⭐ A FAMILY BUILT FROM ANOTHER'S SOURCE (⚖ 2026-10-29 *"amd_rocm_base package that hosts the shared code, and is then
+#   "inherited" by the specific rocm6 and rocm10 engines"*): its `unit.cuh` names the source's folder as
+#   `SYS__SILICON_FAMILY__THIS` — the names its doors carry — and the family it is as `SYS__SILICON_FAMILY__IS`. It answers
+#   what that folder defines, under that folder's prefix; the source is held to the seam as a backend of its own.
+_BUILT_FROM = re.compile(r'^\s*#define\s+SYS__SILICON_FAMILY__THIS\s+(\w+)', re.M)
+
+
+def _source(files, family):
+    """The folder whose answers `family` is built from: its own, or the one its `unit.cuh` names."""
+    m = _BUILT_FROM.search(files.get('silicon_families/%s/unit.cuh' % family, ''))
+    return m.group(1) if m else family
+
+
 def unanswered(files, family):
     """The requests `family` does not define, sorted — empty when it answers every package. The build asks
-    this before compiling a family, and skips one that has gaps rather than failing on them."""
+    this before compiling a family, and skips one that has gaps rather than failing on them. A family built from
+    another's source answers what that source defines (▶ `_source`)."""
     declared, nn = _requests(files)
+    source = _source(files, family)
     seen = set()
     for path, text in files.items():
         parts = path.replace('\\', '/').split('/')
-        if _answers(parts) == family and path.endswith('.cuh'):
-            seen.update(n for n, _ in _harvest(text, '{', family))
-    return sorted(set(_owed(family, declared, nn)) - seen)
+        if _answers(parts) == source and path.endswith('.cuh'):
+            seen.update(n for n, _ in _harvest(text, '{', source))
+    return sorted(set(_owed(source, declared, nn)) - seen)
 
 
 def check(files):
@@ -163,6 +178,13 @@ def check(files):
             backends.setdefault(_answers(parts), []).extend(_harvest(text, '{', _answers(parts)))
         elif parts[:4] == ['packages', 'sys', 'cpu', 'silicon'] and parts[-1] in HOST_PRIMITIVES:
             backends.setdefault(_EVALUATOR, []).extend(_harvest(text, '{'))
+    # a family built from another's source is that source's answers, which are held to the seam as their own backend
+    #   (▶ `_source`): its folder holds its cards and its unit, not answers of its own
+    built_from = {b: _source(files, b) for b in backends if b != _EVALUATOR and _source(files, b) != b}
+    for b, src in built_from.items():
+        if src not in backends:
+            return False, '%s is built from %s, and silicon_families/%s/ defines nothing' % (b, src, src)
+        del backends[b]
     if not [b for b in backends if b != _EVALUATOR]:
         return False, ('examined NOTHING: no family folder found under silicon_families/ '
                        '(%d verbs declared, 0 implementations to compare them against)' % len(declared))
@@ -276,7 +298,7 @@ def check(files):
 def falsify(files):
     """Parameter-type drift in one backend: exactly the kind the header MEASURED as uncaught."""
     files = dict(files)
-    path = 'silicon_families/amd_rocm6_wave64/nn.cuh'
+    path = 'silicon_families/amd_rocm_base/nn.cuh'
     text = files[path]
     broken = re.sub(r'(nn__silicon__sqrtf\s*\()\s*float\b', r'\1double', text, count=1)
     assert broken != text, 'falsify() did not bite — sqrtf has moved'

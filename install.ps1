@@ -110,25 +110,32 @@ function Stop-If-Missing($missing) {
 function Find-Cards {
     # the OpenCL families always, as install.sh builds them: they need nothing installed to be built (the headers carried,
     # OpenCL.dll's import library made from them), and at run time they take only the cards no other family does - an
-    # NVIDIA card older than CUDA's (OpenCL 1.2), an AMD or Intel GPU (OpenCL 2.0) - so a PC whose card CUDA runs is unchanged
-    $script:Families = "x86_avx2 khronos_opencl2 khronos_opencl1_igpu"
+    # NVIDIA card older than CUDA's (OpenCL 1.2, nvidia_opencl1), an Intel GPU (intel_opencl2 from Gen9, intel_opencl1_igpu
+    # before), an AMD GPU (khronos_opencl2) - so a PC whose card CUDA runs is unchanged
+    $script:Families = "x86_avx2 khronos_opencl2 intel_opencl2 nvidia_opencl1 intel_opencl1_igpu"
     $openclCard = $false
     $cpu = (Get-CimInstance Win32_Processor | Select-Object -First 1).Name
     Note "the CPU: $cpu"
     $smi = Get-Command nvidia-smi -ErrorAction SilentlyContinue
     if ($smi) {
         $cards = (& nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>$null) -join "; "
-        $caps = @(& nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>$null | ForEach-Object { "$_".Trim().Replace(".", "") } |
-                  Where-Object { $_ -match "^[0-9]+$" } | Sort-Object -Unique)
+        # a Turing card without tensor cores, by its name - the list src/silicon_families/nvidia_tensor_cores.cuh keeps
+        $bare = "GTX 1630|GTX 1650|GTX 1660|MX450|MX550|Quadro T1000|Quadro T2000| T400| T500| T550| T600| T1000| T1200"
+        $rows = @(& nvidia-smi --query-gpu=name,compute_cap --format=csv,noheader 2>$null | ForEach-Object {
+                      $f = "$_".Split(","); if ($f.Count -ge 2) { [pscustomobject]@{ Name = $f[0].Trim(); Cap = $f[1].Trim().Replace(".", "") } } } |
+                  Where-Object { $_.Cap -match "^[0-9]+$" })
         if ($cards) {
             Note "NVIDIA: $cards"
-            # CUDA's family takes compute 7.5 and newer (its targets, sm_75 ...): an older card - Pascal's GTX 10x0, compute
-            # 6.1 - is not built for (CUDA 13 builds no sm_61, and 12.9 stops at its tensor cores), and runs through OpenCL 1.2
-            $new = @($caps | Where-Object { [int]$_ -ge 75 })
-            $old = @($caps | Where-Object { [int]$_ -lt 75 })
+            # CUDA's family takes compute 7.5 and newer (its targets, sm_75 ...) but a Turing card without tensor cores: an older
+            # card - Pascal's GTX 10x0, compute 6.1 - is not built for (CUDA 13 builds no sm_61, and 12.9 stops at its tensor
+            # cores), and a GTX 16xx - compute 7.5, no tensor cores - runs CUDA's tensor-core kernels slower than OpenCL 1.2's:
+            # both run through OpenCL 1.2
+            $isOld = { param($r) [int]$r.Cap -lt 75 -or ($r.Cap -eq "75" -and $r.Name -match $bare) }
+            $new = @($rows | Where-Object { -not (& $isOld $_) } | ForEach-Object { $_.Cap } | Sort-Object -Unique)
+            $old = @($rows | Where-Object { & $isOld $_ })
             if ($old.Count -gt 0) {
-                $said = ($old | ForEach-Object { $_.Substring(0, $_.Length - 1) + "." + $_.Substring($_.Length - 1) }) -join ", "
-                Note "   compute capability $said is older than CUDA's family takes (7.5 and newer): that card runs through OpenCL 1.2"
+                $said = ($old | ForEach-Object { "$($_.Name) ($($_.Cap.Substring(0, $_.Cap.Length - 1)).$($_.Cap.Substring($_.Cap.Length - 1)))" }) -join ", "
+                Note "   $said - not CUDA's family (compute 7.5 and newer, with tensor cores): runs through OpenCL 1.2"
                 $openclCard = $true
             }
             if ($new.Count -gt 0 -or $old.Count -eq 0) {     # a card CUDA's family takes, or none whose compute was read

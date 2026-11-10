@@ -118,6 +118,14 @@ podman run -d --name silvann --userns=keep-id --device nvidia.com/gpu=all \
 No card: either command without its `--device` and `--group-add` flags. To update: `podman pull` the image,
 `podman rm silvann`, and the same `podman run`.
 
+⚗ **An integrated GPU beside the card — experimental.** On a laptop whose Intel GPU sits beside its NVIDIA card, the Intel
+GPU can do what the processors would — a larger model's experts in RAM, an older card's embedding — and leave them free:
+add `--device /dev/dri --group-add keep-groups -e SILVANN_IGPU_CPU=1` to the NVIDIA command (Docker: `--device /dev/dri
+-e SILVANN_IGPU_CPU=1`). The image holds Intel's OpenCL for it; `igpu_cpu` in [config.md](../docs/config.md) says what
+goes there and when. It has never run on an Intel GPU: what the server's log says as the model starts is the report it
+needs. A Linux machine's — Docker Desktop on Windows reaches a GPU through WSL 2's `/dev/dxg`, which the image's Intel
+OpenCL is not built for (`ASSUMED`); there the native install sees the integrated GPU itself (the same variable).
+
 - `--userns=keep-id` runs SiLVANN as you, so the files in `~/SiLVANN` stay yours.
 - `--group-add keep-groups` keeps your `video` and `render` groups, which own the AMD card.
 - `-p 127.0.0.1:8080:8080` keeps the chat to this machine: it has no login.

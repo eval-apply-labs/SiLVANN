@@ -4,7 +4,8 @@ clang-cl, and one library a silicon family — x86_avx2 with clang-cl, nvidia_cu
 where its toolchain is installed and skipped where it is not.
 
   SILVANN_SILICON_FAMILIES  which families to build, e.g. "x86_avx2 nvidia_cuda12"   default those two; the OpenCL
-                            ones, khronos_opencl2 and khronos_opencl1_igpu, when named; "none" for the evaluator alone
+                            ones, khronos_opencl2, intel_opencl2, nvidia_opencl1 and intel_opencl1_igpu, when named;
+                            "none" for the evaluator alone
   SILVANN_CUDA_ARCHES       the NVIDIA cards to build for, e.g. 120                   default every one the family lists
   SILVANN_NVCC              CUDA's compiler            default %CUDA_PATH%\\bin\\nvcc.exe, else nvcc on the PATH
   SILVANN_CLANG_CL          clang-cl                   default Visual Studio's "C++ Clang tools", else on the PATH
@@ -266,10 +267,10 @@ def main():
             done = run([nvcc] + gencode + ["-O2", "-std=c++17", "-cudart", "static", "-allow-unsupported-compiler",
                                            "-Xcompiler", "/MD,/EHsc,/Zc:preprocessor,/bigobj,/W0",
                                            "-D_CRT_SECURE_NO_WARNINGS", "-shared", "-I", SRC, tu, "-o", out], env, log)
-        elif family in ("khronos_opencl2", "khronos_opencl1_igpu"):
+        elif family in ("khronos_opencl2", "intel_opencl2", "nvidia_opencl1", "intel_opencl1_igpu"):
             # ⛳ NO CARD COMPILER, as on Linux: the kernels are OpenCL C, generated from nn's rows and compiled by the
             #   driver for the card it finds. The host side is built against the carried headers and OpenCL.dll.
-            generator = "opencl_kernel_source.py" if family == "khronos_opencl2" else "opencl1_kernel_source.py"
+            generator = "opencl_kernel_source.py" if family in ("khronos_opencl2", "intel_opencl2") else "opencl1_kernel_source.py"
             kernels = os.path.join(WORK, family + "_kernels.cpp")
             tu = os.path.join(WORK, family + ".cpp")
             if not DRY:

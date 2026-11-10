@@ -122,7 +122,8 @@ NOTE_STREAM = 1 << 62                   # a note's line with this bit streams, i
 
 
 def tier(m, name, type_, experts, top_k, hidden, inter, plan, layers, sources=None, parts=1, part_plan=None, gate_row=0,
-         down_row=0, landing=0, exclusive=None, landing_line=3, ranks=1, shared=0, stream=None, stream_batch=STREAM_BATCH):
+         down_row=0, landing=0, exclusive=None, landing_line=3, ranks=1, shared=0, stream=None, stream_batch=STREAM_BATCH,
+         slots=None, backings=None, part_shapes=None):
     """A card's tier of routed experts as nn reads it (▶ NN__EXPERT_TIER__), bound by `name`: the card's collection, the
     card slot's `plan`, and — where the CPUs keep every expert — `sources`, {layer: the name of a node array of that layer's
     addresses, part p of expert x at x · parts + p}, with a part slot's `part_plan` and the row bytes the stitch splices
@@ -134,6 +135,13 @@ def tier(m, name, type_, experts, top_k, hidden, inter, plan, layers, sources=No
     `ranks` > 1: a tier on each of a tensor-parallel group's cards, a position's picks shared out among them (NN-99,
     ▶ nn's RANKS), `shared` of a layer's experts kept on every one of them (▶ nn's SHARED). `stream`: the ring's
     collection a chunk's experts are streamed through when its note's line is 0, `stream_batch` experts a batch.
+    `slots`, {worker, type}, in place of `sources`: the experts a disk tier keeps in RAM, a cache whose slots move as it
+    reads — a promotion copies its expert from the slot that worker's `type` collection holds it in when it is made (nn's
+    EXCLUSIVE 2, NN-164: the experts a tier promotes are its layer's most picked, the top of that cache). One part.
+    `backings`, with `slots`: {layer: the name of that layer's backing on the slots' worker} — a streamed chunk's experts
+    the cache does not hold read into it from the file before their copy to the ring (nn's BACKINGS, NN-165).
+    `part_shapes`, [(inner width, part plan)] a part: parts of unequal widths, each slot its own plan (nn's PART_SHAPES,
+    NN-167 — DeepSeek's 2,304 over two sockets, 1,024 and 1,280); an inclusive tier's alone.
     Made as the card's worker, it opens that card's landing pad, which every promotion is moved through (▶ `pad_bytes`)."""
     m.must("(sys__add_bindings %d '%s %d)" % (m.env, LANDING_LINE, int(landing_line)), "the binding " + LANDING_LINE,
            "sys__value_true")
@@ -143,11 +151,21 @@ def tier(m, name, type_, experts, top_k, hidden, inter, plan, layers, sources=No
     pp = part_plan if part_plan is not None else plan
     if sources:
         m.table(name + "_sources", [sources.get(l, 0) for l in range(layers)])
+    if backings:
+        m.table(name + "_backings", [backings.get(l, 0) for l in range(layers)])
+    if part_shapes:
+        if exclusive or slots or len(part_shapes) != parts or sum(w for w, _ in part_shapes) != inter:
+            raise ValueError("parts of unequal widths are an inclusive tier's, one a part, summing to the inner width")
+        m.table(name + "_parts", [c for w, q in part_shapes for c in [int(w)] + off(q)])
     m.table(name, [name + "_sources" if sources else 0, type_, experts, top_k, hidden, inter] + off(plan) + [parts] + off(pp)
             + [gate_row, down_row, landing]
-            + ([1, exclusive["part_worker"], exclusive["part_type"], "(if %s 1 0)" % DUPLEX] if exclusive else [0, 0, 0, 0])
-            + [LANDING_LINE] + ([int(ranks), int(shared)] if ranks > 1 or stream is not None else [])
-            + ([int(stream) + 1, int(stream_batch)] if stream is not None else []))
+            + ([1, exclusive["part_worker"], exclusive["part_type"], "(if %s 1 0)" % DUPLEX] if exclusive else
+               [2, slots["worker"], slots["type"], 0] if slots else [0, 0, 0, 0])
+            + [LANDING_LINE] + ([int(ranks), int(shared)] if ranks > 1 or stream is not None or backings or part_shapes else [])
+            + ([int(stream) + 1 if stream is not None else 0, int(stream_batch)] if stream is not None or backings or part_shapes
+               else [])
+            + ([name + "_backings" if backings else 0] if backings or part_shapes else [])
+            + ([name + "_parts"] if part_shapes else []))
 
 
 # ⭐ THE SHARED SLICE FROM THE MACHINE'S OWN SPEEDS (NN-99) — ⚖ 2026-10-21 *"it is likely better to have zero shared if we
@@ -218,6 +236,21 @@ def part_pieces(view, gate, up, down, plan, s, parts, inter):
     gate, up and down records: its `inter` gate rows and up rows as one matrix, their scales, its columns of every down
     row, every down row's scale — the layout nn's tier stitches whole again (▶ `nn__expert_tier__stitch`)."""
     return part_pieces_at(view, gate, up, down, plan, s * inter, inter, parts * inter)
+
+
+def part_places_at(gate, up, down, plan, first, inter, whole):
+    """Where `part_pieces_at`'s pieces come from in the layer's blob, as [(offset in the slot, offset in the blob, bytes a
+    run, runs, the blob's step between two runs)] — what puts a slot back where the pack keeps it (▶
+    `experts_split`'s stitch)."""
+    if (first * down.row_bytes) % whole or (inter * down.row_bytes) % whole:
+        raise ValueError("a part from %d of %d inner rows of %d does not cut a down row on a byte" % (first, inter, whole))
+    c0, rb, (d_at, _) = first * down.row_bytes // whole, inter * down.row_bytes // whole, down.data_span()
+    return [(plan.at_up_data, gate.data_span()[0] + first * gate.row_bytes, inter * gate.row_bytes, 1, 0),
+            (plan.at_up_data + inter * gate.row_bytes, up.data_span()[0] + first * up.row_bytes, inter * up.row_bytes, 1, 0),
+            (plan.at_up_lut, gate.lut_span()[0] + first * 2, inter * 2, 1, 0),
+            (plan.at_up_lut + inter * 2, up.lut_span()[0] + first * 2, inter * 2, 1, 0),
+            (plan.at_down_data, d_at + c0, rb, down.rows, down.row_bytes),
+            (plan.at_down_lut, down.lut_span()[0], down.lut_span()[1], 1, 0)]
 
 
 def part_pieces_at(view, gate, up, down, plan, first, inter, whole):

@@ -18,7 +18,8 @@
 ;;   a layer each    arrays indexed by the layer: LT (its table: a matrix three cells — codes, scales, bits — at C_*, a norm
 ;;                   or a vector one), ATTN (true for an attention layer), NGRAM_AT (true for the n-gram layer), AHEAD_NEXT
 ;;                   (the next layer, where its experts are read ahead; 0 where none), S32S CWINS
-;;                   (a DeltaNet layer's state and conv window), KCS VCS (an attention layer's keys and values), GVNS (the
+;;                   (a DeltaNet layer's state and conv window), KCS VCS (an attention layer's keys and values), IKS IPS
+;;                   (its indexer's keys, a position's and a block's: the verbs' QSA, ▶ ai_qwen_4), GVNS (the
 ;;                   n-gram layer's normed values, a position each)
 ;;   the buffers     sf (the streams, fp32) mix mix1 mixd sf2 gvf ngr (a position's n-gram rows, ▶ `position`) prev2 (the
 ;;                   two tokens before it) NGT (the n-gram table, ▶ nn's `nn__ngram__rows`) hand
@@ -105,8 +106,9 @@
 
 
 ;; ── the attention: per-head q and k norms, rope on each head's first ROT, the cache, the sigmoid gate ────────────────
-;; ⛳ QSA's indexer is not here: up to 2,051 positions it chooses every block, and the boot holds the context below that
-(defun (attention t kc vc pos)
+;; ⛳ QSA's indexer is ai_qwen_4's verbs' (`ik`, `ip` theirs): up to 2,051 positions it chooses every block, and the boot
+;;   holds these words' context below that (`verbs` false)
+(defun (attention t kc vc ik ip pos)
   (begin
     (nn__hadamard__rotate m signs mr HIDDEN)
     (mv t C_Q m mr qg (* 2 QW) HIDDEN)
@@ -251,7 +253,7 @@
 
 (defun (front_attention t i pos)
   (begin (gated_pre t C_AN C_AD C_AU C_AI m inj)
-         (attention t (nth KCS i) (nth VCS i) pos)
+         (attention t (nth KCS i) (nth VCS i) (nth IKS i) (nth IPS i) pos)
          (inject y inj)
          (route t i)))
 
@@ -276,7 +278,7 @@
         (begin (ai_qwen_4__gated_pre sf t C_MN m2 inj2 Q4)
                (ai_qwen_4__route m2 mr2 t lg picks hand TOPK Q4)))
       (defun (deltanet t s32 cwin) (ai_qwen_4__deltanet m t s32 cwin y Q4))
-      (defun (attention t kc vc pos) (ai_qwen_4__attention m t kc vc pos y Q4))
+      (defun (attention t kc vc ik ip pos) (ai_qwen_4__attention m t kc vc ik ip pos y Q4))
       (defun (shared t x xr out) (ai_qwen_4__shared x xr t out Q4))
       (defun (front_deltanet t i pos)
         (begin (ai_qwen_4__gated_pre sf t C_AN m inj Q4)
@@ -286,7 +288,7 @@
                (ai_qwen_4__route m2 mr2 t lg picks hand TOPK Q4)))
       (defun (front_attention t i pos)
         (begin (ai_qwen_4__gated_pre sf t C_AN m inj Q4)
-               (ai_qwen_4__attention m t (nth KCS i) (nth VCS i) pos y Q4)
+               (ai_qwen_4__attention m t (nth KCS i) (nth VCS i) (nth IKS i) (nth IPS i) pos y Q4)
                (ai_qwen_4__inject_rows sf y inj 1 Q4)
                (ai_qwen_4__gated_pre sf t C_MN m2 inj2 Q4)
                (ai_qwen_4__route m2 mr2 t lg picks hand TOPK Q4))))
@@ -338,7 +340,7 @@
                   (begin (nn__vector__copy (in_row ngrR r HIDDEN) ngr HIDDEN) (ngram t (nth GVNS i) pos))
                   (type sf))
               (gated_pre t C_AN C_AD C_AU C_AI m inj)
-              (if (nth ATTN i) (attention t (nth KCS i) (nth VCS i) pos) (deltanet t (nth S32S i) (nth CWINS i)))
+              (if (nth ATTN i) (attention t (nth KCS i) (nth VCS i) (nth IKS i) (nth IPS i) pos) (deltanet t (nth S32S i) (nth CWINS i)))
               (inject y inj)
               (gated_pre t C_MN C_MD C_MU C_MI m2 inj2)
               (nn__hadamard__rotate m2 signs mr2 HIDDEN)
@@ -403,7 +405,7 @@
             (type sf))
         (ai_qwen_4__gated_pre_rows sfR t C_AN mR injR n Q4R)
         (if (nth ATTN i)
-            (ai_qwen_4__attention_rows mR t (nth KCS i) (nth VCS i) first n yR Q4R)
+            (ai_qwen_4__attention_rows mR t (nth KCS i) (nth VCS i) (nth IKS i) (nth IPS i) first n yR Q4R)
             (ai_qwen_4__deltanet_rows mR t (nth S32S i) (nth CWINS i) yR n Q4R))
         (ai_qwen_4__inject_rows sfR yR injR n Q4R)
         (ai_qwen_4__gated_pre_rows sfR t C_MN m2R inj2R n Q4R)
@@ -438,7 +440,7 @@
             (type sf))
         (ai_qwen_4__gated_pre_rows sfR t C_AN mR injR n Q4R)
         (if (nth ATTN i)
-            (ai_qwen_4__attention_rows mR t (nth KCS i) (nth VCS i) first n yR Q4R)
+            (ai_qwen_4__attention_rows mR t (nth KCS i) (nth VCS i) (nth IKS i) (nth IPS i) first n yR Q4R)
             (ai_qwen_4__deltanet_rows mR t (nth S32S i) (nth CWINS i) yR n Q4R))
         (ai_qwen_4__inject_rows sfR yR injR n Q4R)
         (ai_qwen_4__gated_pre_rows sfR t C_MN m2R inj2R n Q4R)

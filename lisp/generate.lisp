@@ -7,7 +7,8 @@
 ;; What the boot binds before this file is read (▶ silvann_runtime/generate.py `buffers`):
 ;;   OUT STOP STOPS — what `generate` made, the end tokens and how many of them · seen SEEN — the sampler's recent tokens
 
-;; From `tok` at `pos`, up to `n` tokens into OUT, ending early after one of STOP's first STOPS. `draw` true draws each
+;; From `tok` at `pos`, up to `n` tokens into OUT, ending early after one of STOP's first STOPS, or once its process is
+;; asked to stop (`sys__scheduler__stopped`, read a token at a time: it ends at the token it is on). `draw` true draws each
 ;; with the card's sampler (▶ sampling.lisp: `penalty inv_t k top_p seed`), false takes the greedy one. Where the
 ;; penalty reads them (`reads` 1) each token goes into `seen` first, at `slot`, `count` of them there. Answers how many
 ;; it made.
@@ -29,5 +30,6 @@
               (set! tok (if draw (head_sample count penalty inv_t k top_p seed pos) (head)))
               (sys__node_array__set OUT i tok)
               (set! i (+ i 1)) (set! pos (+ pos 1))
-              (if (stop? tok) (set! n i) 0)))
+              (if (stop? tok) (set! n i) 0)
+              (if (sys__scheduler__stopped) (set! n i) 0)))
     i))

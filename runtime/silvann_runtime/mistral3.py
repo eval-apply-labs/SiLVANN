@@ -28,6 +28,7 @@ import pickle
 import numpy as np
 
 from . import sampling
+from .machine import OPENCL1_FAMILIES
 from .generate import STOPS_MOST, Generates
 from .model_folder import NL, Refused
 
@@ -101,13 +102,13 @@ class Ministral3(Generates):
         self.SCORES_ROWS = max(self.QH * self.max_context * 4, 32 << 20)
         self.MOE = False
         # ⭐ THE EMBEDDING ON THE CPU, as Qwen's (▶ qwen3_5.py `embed_on`): a token's row decoded by the CPU worker from its
-        #   own RAM and copied across, HIDDEN halves, so the table never reaches the card. Through khronos_opencl1_igpu the
+        #   own RAM and copied across, HIDDEN halves, so the table never reaches the card. Through an OpenCL 1.2 family the
         #   card's reading its row in place keeps the table twice and crosses it whole each token, both ways — the 14B's
         #   is 8-bit, 671 MB. `"auto"`: the CPU there alone.
         if embed_on not in ("auto", "card", "cpu"):
             raise Refused("embed_on is 'auto', 'card' or 'cpu', not %r" % (embed_on,))
         #   A folder whose lisp/ predates mistral3_cpu.lisp keeps the table where it was under "auto".
-        self.EMBED_CPU = embed_on == "cpu" or (embed_on == "auto" and machine.silicon == "khronos_opencl1_igpu"
+        self.EMBED_CPU = embed_on == "cpu" or (embed_on == "auto" and machine.silicon in OPENCL1_FAMILIES
                                                and folder.has_program("mistral3_cpu"))
         self.run_layers = list(range(self.LAYERS)) if layers is None else sorted(layers)
         g = pickle.load(open(os.path.join(folder.path, "global.pkl"), "rb"))
@@ -206,7 +207,7 @@ class Ministral3(Generates):
         return {CARD: card, CPU: cpu}
 
     def workers(self):
-        return [(self.m.silicon, 0)] + ([("x86_avx2", 0)] if self.EMBED_CPU else [])
+        return [(self.m.silicon, 0)] + ([(self.m.cpu, 0)] if self.EMBED_CPU else [])
 
     # ── ② the load ───────────────────────────────────────────────────────────────────────────────────────────
     def load(self, progress=None):

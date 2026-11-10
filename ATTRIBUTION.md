@@ -29,7 +29,7 @@ the published images, which §6 lists.
 
 | component | version | licence | its notice | used by |
 |---|---|---|---|---|
-| pycparser (Eli Bendersky) | 2.22 | BSD-3-Clause | `engine/scripts/third_party/pycparser/LICENSE` | `engine/scripts/opencl1_kernel_source.py`, which writes nn's kernels as OpenCL C 1.2 for the `khronos_opencl1_igpu` family |
+| pycparser (Eli Bendersky) | 2.22 | BSD-3-Clause | `engine/scripts/third_party/pycparser/LICENSE` | `engine/scripts/opencl1_kernel_source.py`, which writes nn's kernels as OpenCL C 1.2 for the OpenCL 1.2 families (`nvidia_opencl1`, `intel_opencl1_igpu`) |
 | PLY (David M. Beazley), the copy pycparser carries | 3.9 | BSD-3-Clause | the header of each file in `engine/scripts/third_party/pycparser/ply/` | pycparser |
 | OpenCL-Headers (The Khronos Group): `cl.h`, `cl_platform.h`, `cl_version.h` | v2022.01.04 | Apache-2.0 | `engine/scripts/third_party/OpenCL-Headers/LICENSE`, and the header of each file | `build.py`, which compiles the OpenCL families against them on Windows |
 
@@ -40,9 +40,9 @@ Headers and libraries the builder installs themselves:
 | component | licence | used by |
 |---|---|---|
 | pybind11 3.0 | BSD-3-Clause | the evaluator's Python module (`engine/src/pybind.cuh`) |
-| AMD ROCm / HIP runtime | MIT (HIP headers and runtime) | the `amd_rocm6_wave64` family |
+| AMD ROCm / HIP runtime | MIT (HIP headers and runtime) | the AMD families (`amd_rocm6_wave64`, `amd_rocm10`) |
 | NVIDIA CUDA toolkit | NVIDIA CUDA EULA | the `nvidia_cuda12` family, built only where `nvcc` is installed; it links the CUDA runtime statically, so a binary of it may be redistributed only under that EULA's terms |
-| Khronos OpenCL headers | Apache-2.0 | the `khronos_opencl2` and `khronos_opencl1_igpu` families |
+| Khronos OpenCL headers | Apache-2.0 | the OpenCL families: `khronos_opencl2`, `intel_opencl2`, `nvidia_opencl1`, `intel_opencl1_igpu` |
 
 Python packages the runtime imports (`scripts/requirements.txt`), installed by the user:
 

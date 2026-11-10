@@ -13,9 +13,14 @@
  *   fp32 streams — each stream normed by its slice of the gain, the mix's two maps, the weighted mean into `into` (H
  *   halves) and, where `inj` is a buffer, the four injection weights into it (2·σ(¼·W·n)); `inj` 0 for none (the last
  *   mixer's). `site` is the table cell of the site's norm: its down, up and injection matrices follow it (▶ LT).
- * `(ai_qwen_4__attention m table kc vc pos y shape)` -> `y`: Qwen Sparse Attention's layer while it chooses every block —
- *   q (with its gate), k and v of `m`, each head's q and k normed and roped on its first ROT, k and v into the cache at
- *   `pos`, the attention over 0 … pos, gated by σ(gate), the output projection.
+ * `(ai_qwen_4__attention m table kc vc ik ip pos y shape)` -> `y`: Qwen Sparse Attention's layer — q (with its gate), k
+ *   and v of `m`, each head's q and k normed and roped on its first ROT, k and v into the cache at `pos`; the indexer's
+ *   map of `m`, its key into `ik`'s row `pos` (ID halves a position) and, where `pos` ends a block of RATIO positions,
+ *   the block's key into `ip`'s row `pos / RATIO`: the mean of its keys, normed, roped at the block's first position.
+ *   While every block is chosen — `(pos + 1) / RATIO ≤ BUDGET / RATIO` — the attention over 0 … pos; past that, over the
+ *   positions of the BUDGET / RATIO blocks whose keys score best against the indexer's normed and roped query heads
+ *   (Σ_h relu(q_h · k)/√ID, ties to the lower block, the chosen in position order) and the unfinished block's —
+ *   nn's `index_scores`, `index_select`, `index_gather`. Gated by σ(gate), the output projection.
  * `(ai_qwen_4__deltanet m table s32 cwin y shape)` -> `y`: the Gated DeltaNet's layer at one position — its projections,
  *   β = σ(b) and g = −exp(A_log)·softplus(a + dt_bias), the short conv, every head's step in one launch with its output
  *   gated by σ(z), the output projection.
@@ -35,9 +40,10 @@
  * `(ai_qwen_4__inject_rows streams y inj n shape)` -> `streams`: row r's streams += inj_r · y_r, a row of `inj` STREAMS
  *   halves; the shape's MIX a 24-float mix a row, its comb the identity (▶ the program's `inject`).
  * `(ai_qwen_4__deltanet_rows m table s32 cwin y n shape)` -> `y`: `n` positions after the state's.
- * `(ai_qwen_4__attention_rows m table kc vc first n y shape)` -> `y`: positions `first .. first + n`, every row's key and
- *   value into the cache before any row's query reads it, row r attending 0 … first + r; the angles the shape's, a row
- *   ROT floats.
+ * `(ai_qwen_4__attention_rows m table kc vc ik ip first n y shape)` -> `y`: positions `first .. first + n`, every row's
+ *   key and value into the cache, its indexer key into `ik` and every block the chunk ends into `ip`, before any row's
+ *   query reads them; row r attending 0 … first + r while every block is chosen, past that its own choice, as the
+ *   position's verb; the angles the shape's, a row ROT floats.
  * `(ai_qwen_4__shared_rows x xr table out n shape)` -> `out`.
  * `(ai_qwen_4__route_rows m mr table logits hands n shape)` -> `logits`: `m` rotated into `mr`, the router over every
  *   row into `logits` (`n` rows of the experts' count), and each row's `mr` into its hand row (HAND_ROW bytes a row) — the
@@ -70,7 +76,10 @@
 #define AI_QWEN_4__LT__SU      71u
 #define AI_QWEN_4__LT__SD      74u
 #define AI_QWEN_4__LT__SEG     77u
-#define AI_QWEN_4__LT__TABLE   80u
+#define AI_QWEN_4__LT__IX      80u    /* QSA's indexer: its query heads' and key's map, then their norms          */
+#define AI_QWEN_4__LT__IQN     83u
+#define AI_QWEN_4__LT__IKN     84u
+#define AI_QWEN_4__LT__TABLE   85u
 
 /* ── the shape table — one a position's, one a prompt's chunk's, the same layout: its buffers first, then its integers,
  *    then its epsilon ─────────────────────────────────────────────────────────────────────────────────────────────── */
@@ -94,8 +103,13 @@
 #define AI_QWEN_4__SH__EXPERTS 17u    /* the router's experts                                                      */
 #define AI_QWEN_4__SH__HAND    18u    /* a hand row's bytes (ai_qwen_3's AI_QWEN_3__HAND__ROW)                    */
 #define AI_QWEN_4__SH__ROWS    19u    /* the most rows its scratch, angles, scores and mixes hold (1: a position's) */
-#define AI_QWEN_4__SH__EPS     20u    /* a float: the norms' epsilon                                               */
-#define AI_QWEN_4__SH__TABLE   21u
+#define AI_QWEN_4__SH__THETA   20u    /* the rope's theta (an integer), for the angles at a block's first position */
+#define AI_QWEN_4__SH__IH      21u    /* QSA's indexer: its query heads, their width, the positions a block, and   */
+#define AI_QWEN_4__SH__ID      22u    /*   the positions it attends besides the unfinished block's (its budget)    */
+#define AI_QWEN_4__SH__RATIO   23u
+#define AI_QWEN_4__SH__BUDGET  24u
+#define AI_QWEN_4__SH__EPS     25u    /* a float: the norms' epsilon                                               */
+#define AI_QWEN_4__SH__TABLE   26u
 
 #define AI_QWEN_4__RANK_FIRST  256u   /* the rank's rotation: a block of 256, then one of 128 (▶ the program's rotate_rank) */
 #define AI_QWEN_4__RANK_LAST   128u

@@ -179,7 +179,9 @@ an NVIDIA card or the CPU alone: `wsl --install` in PowerShell as administrator;
 driver inside WSL) and CUDA's toolkit from NVIDIA's WSL-Ubuntu page; the installer, run in WSL's own files (`~`, not
 `/mnt/c`, which is many times slower to read models from); `.wslconfig`'s `memory=` raised past the default half of the
 machine's RAM for a model with its experts in RAM; the UI at `http://localhost:8090` in a Windows browser. Nobody has
-tried it yet: tell us in Discussions if you do. ROCm inside WSL supports recent Radeon cards only, not the MI50.
+tried it yet: tell us in Discussions if you do. ROCm inside WSL supports recent Radeon cards only, not the MI50: an RX
+9070 XT has run SiLVANN inside WSL2 (a rented container, ROCm 7.2), the card found with nothing set — AMD's Windows
+driver and its ROCm for WSL, 7.2 or later, for a Radeon of RDNA4; an RDNA3 card (an RX 7900) runs OpenCL 2.0.
 
 ## 2. Get a model
 

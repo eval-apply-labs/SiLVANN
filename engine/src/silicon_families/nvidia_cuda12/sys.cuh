@@ -85,13 +85,14 @@ static inline bool nvidia_cuda12__memory_allocate_host_ram_mapped(void** at, voi
  * because a family loaded where it has nothing to drive is an ordinary machine, and zero is how its
  * workers learn there is nothing to take over. */
 
-/* Whether the card the vendor's runtime numbers `ordinal` is this family's, asked by its compute capability, as `sm_86`. */
+/* Whether the card the vendor's runtime numbers `ordinal` is this family's, asked by its compute capability, as `sm_86`
+ * — and by its name, as the program names it, so a Turing card without tensor cores is not (▶ `includes.cuh`). */
 static inline bool nvidia_cuda12__zzprivate_takes(int ordinal) {
-    int major = 0, minor = 0;
-    char card[16];
-    if (cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, ordinal) != cudaSuccess ||
-        cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, ordinal) != cudaSuccess) return false;
-    snprintf(card, sizeof card, "sm_%d%d", major, minor);
+    cudaDeviceProp p;
+    char card[24];
+    if (cudaGetDeviceProperties(&p, ordinal) != cudaSuccess) return false;
+    snprintf(card, sizeof card, silicon_families__no_tensor_cores(p.major, p.minor, p.name) ? "sm_%d%d:tc-" : "sm_%d%d",
+             p.major, p.minor);
     return nvidia_cuda12__includes(card);
 }
 

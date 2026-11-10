@@ -115,6 +115,25 @@ int eng_abi_take(unsigned long long answer, unsigned int* dtype, unsigned long l
     return 1;
 }
 
+/* ── A PROCESS FOR THE HOST'S WORK (NN-160, ▶ sys's "A PROCESS FOR THE HOST") ────────────────────────────────────────
+ * `process_new` a new process, from the counter every process is made from; `process_as` this thread's requests made as
+ * process `pid` from here on — `place`'s and every door's that queues — inherited by what they ask and go on as (0: each
+ * its own, as before), answering the one they were made as; `process_kill` it killed as `(sys__scheduler__kill pid)`
+ * kills it, answering how many of its requests it took off the queues; `process_stop` it asked to stop at the token it is
+ * on, which its program reads. */
+unsigned long long eng_abi_process_new(void) { return sys__scheduler__process_new(); }
+
+unsigned long long eng_abi_process_as(unsigned long long pid) { return sys__scheduler__process_as(pid); }
+
+unsigned long long eng_abi_process_kill(unsigned long long pid) {
+    if (!eng__abi__zzpackage_live()) return 0ull;
+    uint64_t taken = 0ull;
+    ENG__ABI__AS_THE_HOST(taken = sys__scheduler__kill(pid));
+    return taken;
+}
+
+int eng_abi_process_stop(unsigned long long pid) { return sys__scheduler__stop(pid) ? 1 : 0; }
+
 }  /* extern "C" */
 
 #endif /* SILVANN__ENGINE_ABI_RESIDENCY_CUH */

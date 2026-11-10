@@ -1,8 +1,8 @@
 # SiLVANN
 
-> **Developer preview, v0.25.0.** It runs the models below well on the hardware it was tested on, and it is shared
-> for people who can find their way around a build and a stack trace. NVIDIA cards are tested on two, a GeForce
-> RTX 5060 Ti and an RTX 5070 Ti; Windows natively on one PC; macOS is not supported.
+> **Developer preview, v0.26.0.** It runs the models below well on the hardware it was tested on, and it is shared
+> for people who can find their way around a build and a stack trace. NVIDIA cards are tested on four, a GeForce
+> RTX 5060 Ti and an RTX 5070 Ti, an H100 and a B200; Windows natively on one PC; macOS is not supported.
 
 **Silicon Linked Virtualized Architecture for Neural Networks** — a from-scratch inference engine for large language
 models, and the three things it is made of:
@@ -41,7 +41,7 @@ measured on, how fast it reads a prompt and answers after one:
 |---|---|---|---|---|---|---|---|---|
 | [none](docs/results.md#no-graphics-card) | 16 GB | 4 cores | — | [Qwen 3.5 4B](docs/models.md#qwen-35-4b) `D4` | the CPU alone | 18.9 positions/s | 7.95 tokens/s after 8k | 8,320 |
 | [8 GB](docs/results.md#an-8-gb-card) | 32 GB | 4 cores | — | [Qwen 3.6 35B-A3B](docs/models.md#qwen-36-35b-a3b) `D8E4` | the experts in RAM, a tier on the card | 94.9 positions/s | 14.34 tokens/s after 100k | 262,144 |
-| [16 GB](docs/results.md#a-16-gb-card) | 32 GB | 4 cores | NVMe, 5.7 GB/s | [Qwen 3.5 122B-A10B](docs/models.md#qwen-35-122b-a10b) `D8E4` | the experts from the disk, ~30 GB of them in RAM | 17.6 positions/s | 5.65 tokens/s after 100k | 110,000 |
+| [16 GB](docs/results.md#a-16-gb-card) | 32 GB | 4 cores | NVMe, 5.7 GB/s | [Qwen 3.8 Flash-Next](docs/models.md#qwen-38-flash-next) `D8E4` | the experts from the disk | 29.2-29.4 positions/s | 10.61-10.64 tokens/s after 2k | — |
 | [16 GB](docs/results.md#a-16-gb-card) | 14 GB | 4 cores | NVMe, 5.7 GB/s | [GLM 5.3 Flash](docs/models.md#glm-53-flash) `D8E4` | the experts from the disk | 9.1 positions/s | 2.21 tokens/s after 100k | 110,000 |
 | [16 GB](docs/results.md#a-16-gb-card) | 16 GB | 4 cores | — | [Qwen 3.8 27B](docs/models.md#qwen-38-27b) `D4` | on the card | 221.3 positions/s | 14.32 tokens/s after 35k | 35,840 |
 | [2× 16 GB](docs/results.md#two-cards-or-more) | 125 GB | 28 cores | — | [Qwen 3.6 35B-A3B](docs/models.md#qwen-36-35b-a3b) `D8E4` | every layer over both cards, a tier on each | 85.9 positions/s | 32.22 tokens/s after 100k | 262,144 |
@@ -49,23 +49,27 @@ measured on, how fast it reads a prompt and answers after one:
 | [32 GB](docs/results.md#a-24-or-32-gb-card) | 1.5 TB (PMem 100) | 48 cores | — | [DeepSeek-V4.1-Flash](docs/models.md#deepseek-v41-flash) `D8E4` | every expert in RAM, a CPU worker a socket | 27.6-29.5 positions/s | 10.9-11.6 tokens/s after 2k | 2,320 as run |
 <!-- /rates -->
 
-Several conversations at once are served too (`multi_user` "yes") by the Qwen MoE models, GLM 5.3 Flash and
-DeepSeek-V4.1-Flash, usually at around 1.6-1.8× one conversation's tokens a second together — each model's, and on which
-machine, in [`docs/results.md`](docs/results.md#several-conversations-at-once).
+Several conversations at once are served too (`multi_user` "yes") by the Qwen MoE models, Qwen 3.8 Flash-Next, GLM 5.3
+Flash and DeepSeek-V4.1-Flash, usually at around 1.6-1.8× one conversation's tokens a second together, and about 2× for the
+35B and Flash-Next on two cards, each card a tier of its own — each model's, and on which machine, in
+[`docs/results.md`](docs/results.md#several-conversations-at-once).
 
 Every model measured on each kind of machine, and how: [`docs/results.md`](docs/results.md#which-model-for-your-machine);
 every machine one model was measured on, its packs and its notes: [`docs/models.md`](docs/models.md). A model whose config
 names no setup chooses its own when the server starts, by trying it on the card: where its experts go, how much of the
 card holds the ones used most, the context the card has room for ([`docs/config.md`](docs/config.md)).
 
-**New in v0.25.0**, and in every release before it: [`docs/release_logs/v0.md`](docs/release_logs/v0.md).
+**New in v0.26.0**, and in every release before it: [`docs/release_logs/v0.md`](docs/release_logs/v0.md).
 
 ## Platforms
 
-- **Runs on:** Linux with an AMD card (ROCm 6), an NVIDIA card (CUDA 12) or OpenCL, or the CPU alone (AVX2 or
+- **Runs on:** Linux with an AMD card (ROCm 6 for the MI50, ROCm 7 or later from the MI100 on and for the Radeons of
+  RDNA4), an NVIDIA card (CUDA 12)
+  or OpenCL, or the CPU alone (AVX2 or
   AVX-512); Windows with an NVIDIA card. Each machine it was measured on is in the table above.
-- **Not yet tested:** other AMD generations than the MI50, NVIDIA cards older than the RTX 50 series, integrated GPUs,
-  and Windows' prebuilt libraries.
+- **Not yet tested:** other AMD generations than the MI50 and the RX 9070 XT, NVIDIA cards before Hopper (the RTX 20
+  series, the A100; of the 30 and 40 series, two laptops' GPUs under WSL2),
+  integrated GPUs, and Windows' prebuilt libraries.
 - **Not supported:** macOS.
 
 In full — what was checked on each, and what is not yet: [`docs/platforms.md`](docs/platforms.md).

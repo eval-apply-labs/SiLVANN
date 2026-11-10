@@ -68,6 +68,7 @@ from silvann_runtime import autotune, experts_file, registry, skills, tools, too
 from silvann_runtime import users                                         # noqa: E402
 from silvann_runtime.chat import Chat, ToolMarkup                         # noqa: E402
 from silvann_runtime.fetch import ensure_model                            # noqa: E402
+from silvann_runtime.machine import CPU_FAMILIES                         # noqa: E402
 from silvann_runtime.session import Busy, Cartridge, Runtime, SeatedRuntime, _state_read, sampler, state_bytes     # noqa: E402
 from silvann_runtime import image_session                                 # noqa: E402
 from silvann_runtime.qwen_image import Stopped, image_pack                 # noqa: E402
@@ -887,7 +888,7 @@ def _whoami(cid):
     session = S.tool_sessions.get(cid)
     cards = _cards(m)
     lines = ["you are %s (%s), LoRA %s" % (S.model_id, m.folder.architecture, getattr(m, "active_lora", None) or "none"),
-             "you run on %s: %s" % ("%d cards" % cards if cards > 1 else "one card" if m.m.silicon not in ("host", "x86_avx2")
+             "you run on %s: %s" % ("%d cards" % cards if cards > 1 else "one card" if m.m.silicon not in ("host",) + CPU_FAMILIES
                                     else "the CPU", m.m.silicon),
              "your context: %d positions; this conversation has used %d" % (m.max_context, c.length if c else 0),
              "your tool: %s%s" % (session.classifier.mode if session else "?",
@@ -1562,9 +1563,28 @@ async def stop_cartridge(cid: str, x_cart_password: Optional[str] = Header(defau
     _check_password(cid, x_cart_password)
     t = S.turns.get(cid)
     if t is not None and not t.done.is_set():
-        t.cancelled = True
+        if hasattr(t, "cancel"):                     # the stop (NN-160): the answer ends at the token it is on
+            t.cancel()
+        else:
+            t.cancelled = True
         return {"ok": True, "stopped": True}
     return {"ok": True, "stopped": False, "reason": "no generation in flight"}
+
+
+@app.post("/cartridges/{cid}/kill")
+async def kill_cartridge(cid: str, x_cart_password: Optional[str] = Header(default=None)):
+    """⭐ THE PKILL (NN-160): whatever of the conversation's turn is in flight torn down — its queued work off every queue,
+    its running step ended at its next move or slice — where `/stop` lets it end at the token it is on. Its answer so far
+    is kept, and its state is read again from its tokens at its next message."""
+    _check_password(cid, x_cart_password)
+    t = S.turns.get(cid)
+    if t is not None and not t.done.is_set():
+        if hasattr(t, "kill"):
+            t.kill()
+        else:
+            t.cancelled = True
+        return {"ok": True, "killed": True}
+    return {"ok": True, "killed": False, "reason": "no generation in flight"}
 
 
 @app.post("/cartridges/{cid}/images")

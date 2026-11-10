@@ -38,7 +38,7 @@ import numpy as np
 
 from . import experts_file, expert_tier, sampling
 from .generate import STOPS_MOST, Generates
-from .machine import EngineError, own_memory
+from .machine import CPU_FAMILIES, EngineError, OPENCL1_FAMILIES, own_memory
 from .model_folder import NL, Refused
 
 ARCHITECTURES = ("deepseek_v41_text",)
@@ -159,7 +159,8 @@ class DeepSeek4(Generates):
         #   `cards`: each card the whole dense model and its own seat, a card a worker, the CPU worker after the cards the
         #   routed experts of every card's. Card k's program is card 0's, its buffers and tables bound under the program's
         #   own names and frozen in its seat's views, each card's over the one after's and card 0's last (▶
-        #   `_load_seat_cards`). A group (`cards`) is one conversation over its cards; this is one a card.
+        #   `_load_seat_cards`). A group (`cards`) is one conversation over its cards; this is one a card. With
+        #   `card_experts_gb` each card keeps a tier of its own, inclusive, promoted by its one conversation's picks (NN-167).
         self.NC = 1
         if seat_cards is not None:
             sc = list(seat_cards)
@@ -192,12 +193,12 @@ class DeepSeek4(Generates):
         self.CPUS = [dict(w=self.CPU, dev=0 if socket is None else 1 + int(socket), part=0)]
         # ⭐ THE EMBEDDING ON THE CPU (as Qwen's, ▶ qwen3_5.py): the CPU worker keeps the table in its RAM and decodes a
         #   token's row, which the card copies across and un-rotates — where the card's family keeps mapped RAM as a copy
-        #   on the card (khronos_opencl1_igpu), so the table neither takes the card's room nor crosses whole each token.
+        #   on the card (an OpenCL 1.2 family's), so the table neither takes the card's room nor crosses whole each token.
         if embed_on not in ("auto", "card", "cpu"):
             raise Refused("embed_on is 'auto', 'card' or 'cpu', not %r" % (embed_on,))
         if embed_on == "cpu" and self.P > 1:
             raise Refused("embed_on 'cpu' is one card's: a group's card 0 reads the table in place")
-        self.EMBED_CPU = embed_on == "cpu" or (embed_on == "auto" and self.P == 1 and machine.silicon == "khronos_opencl1_igpu")
+        self.EMBED_CPU = embed_on == "cpu" or (embed_on == "auto" and self.P == 1 and machine.silicon in OPENCL1_FAMILIES)
         # ⭐ THE ROUTED EXPERTS IN RAM, MAPPED FROM THE PACK, OR A CACHE READ FROM THE DISK (▶ `experts_file`) — the 40 layers'
         #   are 272 GB and node-01 has 251 GB of RAM. `"mapped"`: the first `experts_in_ram` layers this machine runs copied
         #   into RAM as `"ram"` copies them all, the rest mapped from the pack over their slots — the page cache holds the
@@ -212,7 +213,11 @@ class DeepSeek4(Generates):
                           "are a cache, experts_ram_gb its size")
         self.EXPERTS_FROM, self.EXPERTS_IN_RAM = experts_from, int(experts_in_ram)
         self.EXPERTS_RAM_GB = experts_ram_gb
-        self.experts_dir = experts_dir or os.path.join(folder.path, "experts")
+        self.experts_dir = experts_dir or os.path.join(folder.path, "experts")    # a list: a directory a socket (▶ `sockets`)
+        # the experts' files named elsewhere: copies there, the folder kept as it is (▶ `experts_split.settle`)
+        self.EXPERTS_ELSEWHERE = experts_dir is not None and (isinstance(experts_dir, (list, tuple)) or os.path.abspath(
+            experts_dir) != os.path.abspath(os.path.join(folder.path, "experts")))
+        self.SHARES = None                   # the folder's shares where it is split in place (▶ `_settle`)
         self.EXPERTS_LOCK, self.LOCKED_GB = bool(experts_lock), 0.0      # ▶ `_plan`
         self.EXPERTS_REGISTER, self.REGISTERED_GB = experts_register, 0.0  # ▶ `_plan`
         self.REGISTER_REQUIRED = experts_register is True
@@ -269,7 +274,8 @@ class DeepSeek4(Generates):
         if self.SEATS > 1:
             why = [w for w, on in (("one card (no cards group)", self.P > 1),
                                    ("every routed expert on the CPU (card_experts 0)", bool(self.NK)),
-                                   ("no card tier (card_experts_gb 0)", bool(self.CARD_GB)),
+                                   ("no card tier (card_experts_gb 0)", self.NC == 1 and bool(self.CARD_GB)),
+                                   ("an inclusive tier (card_exclusive false)", self.NC > 1 and self.CARD_EXCLUSIVE),
                                    ("the embedding on the card (embed_on 'card')", self.EMBED_CPU),
                                    ("no rank-1 mask", b.mask is not None)) if on]
             if why:
@@ -282,23 +288,44 @@ class DeepSeek4(Generates):
         # ⭐ THE ROUTED EXPERTS ON EVERY SOCKET, EACH ITS PART OF EVERY EXPERT IN ITS OWN MEMORY (NN-163, as GLM's): a CPU
         #   worker a NUMA node — x86_avx2's devices 1 and 2, each its threads and its memory on its node — holding its part
         #   of each expert's inner width in whole rotation blocks (of 2304, 1024 and 1280, as the cards' parts of the shared
-        #   expert), all six picks run at that width on each, and the parts' sums added on the card. `MEASURED` (node03,
+        #   expert), all six picks run at that width on each, and the parts' sums added on the card. ⭐ A card's tier over them
+        #   (NN-167): an inclusive one, each promotion stitched from both sockets' parts — 1,024 and 1,280 inner rows, each
+        #   its slot's own plan (nn's PART_SHAPES) — the picks it holds marked for both sockets, which compute the rest.
+        #   `MEASURED` (node03,
         #   layers 0-4, measurements/2026-11-07_deepseek_sockets_node03.md): a layer's experts ~1.67 ms on the whole
         #   machine, ~1.05 and ~1.23 ms on the two sockets at once, a token 1.20x sooner. `sockets` None: two where the
-        #   machine has two and the placement is theirs — every routed expert in RAM on the CPU, one card, no card tier, no
-        #   pipeline `socket` — else one.
-        held = [w for w, on in (("every routed expert in RAM (experts_from 'ram')", experts_from != "ram"),
-                                ("one card (no cards group, no conversation a card)", self.P > 1 or self.NC > 1),
+        #   machine has two and the placement is theirs — every routed expert in RAM on the CPU, no cards group, a card's
+        #   tier inclusive if any, no pipeline `socket` — else one. A conversation a card (`seat_cards`) is theirs: each card hands its
+        #   seat's picks to both sockets, as one card's seats do (▶ `_load_seat_cards`).
+        #   ⭐ READ FROM THE DISK TOO (NN-148 ③; ⚖ 2026-11-09 *"autotune should take care of it"*): each socket's cache of
+        #   its part of every expert, from a file of its own — the folder's `experts/`, the folder split in place (▶
+        #   `experts_split.settle`), or `experts_dir` a directory a socket, its own memory's mount. `sockets` 1 in a
+        #   config keeps one on a two-socket machine.
+        #   ⭐ OR MAPPED (⚖ 2026-11-09 *"yes, add the mapped path for deepseek and test it"*): each socket's share file mapped
+        #   over its slots, every layer — on PMem in App Direct the CPU reads an expert where it lies, no copy — where the
+        #   disk path's reads from it ran at a read's pace (`MEASURED` the DL380, 3.8 ms a part's read from PMem against 4.3
+        #   from the NVMe, measurements/2026-11-09_nn148_pmem_dl380.md); no card tier over it (a tier copies from RAM).
+        held = [w for w, on in (("every routed expert in RAM, read from the disk or mapped (experts_from 'ram', 'disk' or "
+                                 "'mapped')", experts_from not in ("ram", "disk", "mapped")),
+                                ("every layer mapped (experts_in_ram 0)", experts_from == "mapped" and bool(experts_in_ram)),
+                                ("no card tier over mapped layers (card_experts_gb 0)", experts_from == "mapped"
+                                 and bool(self.CARD_GB)),
+                                ("no cards group (tensor_parallel)", self.P > 1),
                                 ("every routed expert on the CPU (card_experts 0)", bool(self.NK)),
-                                ("no card tier (card_experts_gb 0)", bool(self.CARD_GB)),
+                                ("an inclusive tier (card_exclusive false)", bool(self.CARD_GB) and self.CARD_EXCLUSIVE),
                                 ("no pipeline stage a socket (socket None)", socket is not None)) if on]
         if sockets is None:
-            sockets = 2 if not held and machine is not None and machine.e.devices("x86_avx2") >= 3 else 1
+            sockets = 2 if not held and machine is not None and machine.e.devices(machine.cpu) >= 3 else 1
         if not isinstance(sockets, int) or isinstance(sockets, bool) or not 1 <= sockets <= 2:
             raise Refused("sockets is 1 or 2, not %r" % (sockets,))
         if sockets > 1 and held:
             raise Refused("two sockets take %s" % ", ".join(held))
         self.SOCKETS = sockets
+        if isinstance(self.experts_dir, (list, tuple)) and (len(self.experts_dir) != sockets
+                                                            or experts_from not in ("disk", "mapped")):
+            raise Refused("experts_dir names a directory a socket — %d of them — for the experts from the disk or mapped "
+                          "over as many sockets; this boot reads them from %r over %d" % (len(self.experts_dir), experts_from,
+                                                                                         sockets))
         each = 512 * ((self.MINTER // 512) // sockets)
         if not each:
             raise Refused("an expert's inner width %d has no whole rotation block for each of %d sockets" % (self.MINTER, sockets))
@@ -504,8 +531,8 @@ class DeepSeek4(Generates):
             #   gigabytes for its buffers and the pictures' room come out of what the cache may take: `MEASURED` on node03 held to 60 GB, the CPU
             #   alone with the cache at the process's limit less 8 GB was killed for memory in its prompt (62.8 GB
             #   resident, measurements/2026-10-27_nn133_deepseek_disk_node03.md)
-            if self.EXPERTS_RAM_GB is None and (self.m.silicon in ("x86_avx2", "host") or (
-                    self.m.silicon == "khronos_opencl1_igpu" and not own_memory(self.m))):
+            if self.EXPERTS_RAM_GB is None and (self.m.silicon in CPU_FAMILIES + ("host",) or (
+                    self.m.silicon in OPENCL1_FAMILIES and not own_memory(self.m))):
                 budget -= sum(self.ARENAS) + (2 << 30)
             self.SLOTS = self.cpu_slots = min(self.cpu_slots, max(0, budget) // self.EPLAN.slot_bytes)
             if self.SLOTS < 3 * 16 + self.TOPK:
@@ -576,7 +603,7 @@ class DeepSeek4(Generates):
                 % (resids, mains, many, big, bigs, (arena + (256 << 20)) >> 20, len(kinds), kinds, len(types), typed))
 
     def workers(self):
-        return [(self.m.silicon, d) for d in self.CARD_DEVS] + [("x86_avx2", c["dev"]) for c in self.CPUS]
+        return [(self.m.silicon, d) for d in self.CARD_DEVS] + [(self.m.cpu, c["dev"]) for c in self.CPUS]
 
     def device_params(self):
         """The card's section and the CPU worker's: {worker: text}."""
@@ -633,7 +660,17 @@ class DeepSeek4(Generates):
         return out
 
     # ── ② the load ───────────────────────────────────────────────────────────────────────────────────────────
+    def _settle(self):
+        """The folder as this boot reads its experts (▶ `experts_split.settle`): split over two sockets, or whole for one —
+        moved a layer at a time where it is not — and held for as long as the machine runs."""
+        from . import experts_split
+        self.SHARES, fd = experts_split.settle(self.folder, self.SOCKETS, list(self.run_layers),
+                                               elsewhere=self.EXPERTS_ELSEWHERE)
+        if fd is not None:
+            self.m.held_files.append(fd)
+
     def load(self, progress=None):
+        self._settle()
         if self.NC > 1:
             return self._load_seat_cards(progress)
         m, b = self.m, self.b
@@ -746,6 +783,11 @@ class DeepSeek4(Generates):
         self.ring_at, self.cache_at, self.ang_at, self.CB, self.MASK_CELLS = {}, {}, {}, {}, {}
         self.ring_seats, self.cache_seats = {s: {} for s in range(self.SEATS)}, {s: {} for s in range(self.SEATS)}
         self.SEAT_AT, self.ERWS_OF = {}, {}
+        # ⭐ A TIER A CARD (NN-167, as GLM's NN-166): each card's tier copies from the experts in RAM — its sources their
+        #   slots — so with one they are loaded first, and each card's tier made with its tables, bound to that card alone
+        #   and frozen in its views
+        if self.CARD_GB:
+            self._load_experts(progress)
         for card in reversed(range(self.NC)):
             m.act_as(card)
             self._seat_base = seat = card * self.CARD_SEATS
@@ -769,6 +811,9 @@ class DeepSeek4(Generates):
                     loader.layer_width(l, ct, 1)
                     self.cache_seats[seat][(0, l)] = at = loader.reserve(ct)
                     loader.assign(l, ct, 0, at)
+            if self.CARD_GB:                        # the card's tier: its band of every layer
+                for l in self.run_layers:
+                    loader.layer_width(l, self.T_CEXP, self.EXPERTS)
             l0 = self.run_layers[0]
             loader.layer_width(l0, self.T_ANG, 1)
             self.ang_at[0] = loader.reserve(self.T_ANG)
@@ -779,19 +824,30 @@ class DeepSeek4(Generates):
                 raise Refused("card %d: %d slots were reserved and never published" % (card, loader.handed()))
             self._card_buffers(0)                   # under the program's names: card 0's, as each card is a whole model
             self.ERWS_OF[card] = {(card, l): at for (_, l), at in self.ERWS.items()}
+            for c in self.CPUS:                     # the card's hand-off on the CPU: on each socket its part's
+                m.act_as(c["w"])
+                self._cpu_buffers(c["part"])
             m.act_as(self.CPU)
-            self._cpu_buffers(0)                    # the card's hand-off on the CPU
             m.bind_values(dict(VOCAB=self.VOCAB, STOPS=STOPS_MOST, SEEN=sampling.SEEN, GROUP=self.GROUP, SEAT_CARD=card))
             m.act_as(card)
+            self._seat_card = card
             self._tables(0)                         # its sites over its own planes and buffers, and its CPU tables
             m.act_as(card)
+            if self.CARD_GB:                        # its tier bound to it alone
+                expert_tier.bind(m, {card: "tier_card"}, len(self.workers()))
             if card == self.NC - 1:
                 m.define_programs(self._procedures)
+                m.act_as(card)
+            if self.CARD_GB and self.CARD_LANDING is None:
+                # a visit's landings timed once — on the first card loaded, its head the card's reading, so after the
+                #   programs — and taken by the rest; its tier made again with them before its views are frozen
+                self._from_speeds()
                 m.act_as(card)
             self._seat_views(card)
         self.ring_at, self.cache_at = dict(self.ring_seats[0]), dict(self.cache_seats[0])
         self.head_data = self.head_lut = self.emb_data = self.emb_lut = None
-        self._load_experts(progress)
+        if not self.CARD_GB:
+            self._load_experts(progress)
         self._seat_base = 0
         m.act_as(CARD)
         self.global_ = None
@@ -856,30 +912,37 @@ class DeepSeek4(Generates):
             m.act_as(c["w"])
             loaders[c["w"]] = m.loader()
         held = {c["w"]: [] for c in self.CPUS}
+        src = {}                            # (layer, socket) -> its part of every expert, where a tier copies it from
+        # the folder split in place: each socket's slot as its share holds it (▶ `experts_split.Shares`)
+        sh = self.SHARES
+        moved = sh.moved if sh is not None else set()
         for i, l in enumerate(self.run_layers):
-            view = np.frombuffer(b.blob(l), dtype=np.uint8)
+            pieces = (lambda view, l, x, s: [(0, sh.slot(s, l, x))]) if l in moved else self._expert_pieces
+            view = np.frombuffer(b.blob(l), dtype=np.uint8) if l not in moved else None
             for c in self.CPUS:
                 m.act_as(c["w"])
                 loader = loaders[c["w"]]
                 loader.layer_width(l, 0, self.EXPERTS)
                 for x in range(self.EXPERTS):
                     at = loader.reserve(0)
-                    for into, piece in self._expert_pieces(view, l, x, c["part"]):
+                    for into, piece in pieces(view, l, x, c["part"]):
                         m.write_from(at + into, piece.ctypes.data, piece.nbytes)
                     loader.assign(l, 0, x, at)
                     held[c["w"]].append(at)
+                    src.setdefault((l, c["part"]), []).append(at)
             view = piece = None                   # a slice left bound keeps the map open: `release` refuses it
-            b.release(l)
+            if l not in moved:
+                b.release(l)
             if progress:
                 progress(i + 1, len(self.run_layers))
         for c in self.CPUS:
             m.act_as(c["w"])
             if loaders[c["w"]].handed() != 0:
                 raise Refused("%d expert slots were reserved and never published" % loaders[c["w"]].handed())
-        self.SRC = {}
+        self.SRC = src
         self.LOCKED_GB = sum(experts_file.lock_experts(self.EXPERTS_LOCK, held[c["w"]], self.SPLANS[c["part"]].slot_bytes)
                              for c in self.CPUS)
-        self.REGISTERED_GB = sum(experts_file.register_experts(m, self.EXPERTS_REGISTER, range(self.P), held[c["w"]],
+        self.REGISTERED_GB = sum(experts_file.register_experts(m, self.EXPERTS_REGISTER, range(max(self.P, self.NC)), held[c["w"]],
                                                                self.SPLANS[c["part"]].slot_bytes, self.REGISTER_REQUIRED)
                                  for c in self.CPUS)
         m.act_as(CARD)
@@ -888,6 +951,14 @@ class DeepSeek4(Generates):
         """Every layer's routed experts into the CPU worker's slots: copied in from the mapped bundle, or — `"mapped"`, past
         the first `experts_in_ram` layers — their file mapped over them; from the disk, none, the slots a cache."""
         m, b, p = self.m, self.b, self.EPLAN
+        if self.SOCKETS > 1 and self.EXPERTS_FROM == "disk":
+            self.SRC = {}
+            self._cache_experts(progress)
+            return
+        if self.SOCKETS > 1 and self.EXPERTS_FROM == "mapped":
+            self.SRC = {}
+            self._map_socket_experts(progress)
+            return
         if self.SOCKETS > 1:
             self._load_socket_experts(progress)
             return
@@ -941,21 +1012,31 @@ class DeepSeek4(Generates):
             m.map_file(lo, p.slot_bytes * self.EXPERTS, *paths[l])
         held = [at[(l, x)] for l in ram for x in range(self.NK, self.EXPERTS) if (l, x) in at]
         self.LOCKED_GB = experts_file.lock_experts(self.EXPERTS_LOCK, held, p.slot_bytes)
-        self.REGISTERED_GB = experts_file.register_experts(m, self.EXPERTS_REGISTER, range(self.P), held, p.slot_bytes,
+        self.REGISTERED_GB = experts_file.register_experts(m, self.EXPERTS_REGISTER, range(max(self.P, self.NC)), held, p.slot_bytes,
                                                            self.REGISTER_REQUIRED)
         m.act_as(CARD)
+
+    def _map_socket_experts(self, progress):
+        """Every layer's routed experts on each socket, its share's file mapped over its slots (▶ `experts_file.map_experts`):
+        a pick reads its expert where the file lies — PMem in App Direct the CPU's loads, a drive through the page cache."""
+        experts_file.map_experts(self.m, self.b, [(c["w"], c["part"], self.SOCKETS) for c in self.CPUS], self.SPLANS,
+                                 self.run_layers, self.EXPERTS, self.experts_dir, self._expert_pieces, list(range(self.LAYERS)),
+                                 progress=progress, shares=None if self.EXPERTS_ELSEWHERE else self.SHARES)
+        self.m.act_as(CARD)
 
     def _cache_experts(self, progress):
         """Every layer's routed experts as a cache in the CPU worker's memory, read from the pack where they lie (▶
         `experts_file.cache_experts`): the backing tables the experts tables name, {(worker, layer): name}."""
-        self.BACKING = experts_file.cache_experts(self.m, self.b, [(self.CPU, 0, 1)], self.EPLAN, self.run_layers, self.EXPERTS,
-                                                  self.experts_dir, self._expert_pieces, list(range(self.LAYERS)),
-                                                  progress=progress)
+        self.BACKING = experts_file.cache_experts(self.m, self.b, [(c["w"], c["part"], self.SOCKETS) for c in self.CPUS],
+                                                  self.SPLANS, self.run_layers, self.EXPERTS, self.experts_dir,
+                                                  self._expert_pieces, list(range(self.LAYERS)), progress=progress,
+                                                  shares=None if self.EXPERTS_ELSEWHERE else self.SHARES)
         self.m.act_as(CARD)
 
-    def _backing(self, l):
-        """The CPU's experts table's last cell where the experts are a cache: its backing of layer `l`."""
-        return [self.BACKING[(self.CPU, l)]] if self.SLOTS is not None else []
+    def _backing(self, l, w=None):
+        """A CPU's experts table's last cell where the experts are a cache: worker `w`'s backing of layer `l` (the CPU's,
+        or a socket's)."""
+        return [self.BACKING[(self.CPU if w is None else w, l)]] if self.SLOTS is not None else []
 
     def _card_buffers(self, k):
         """Card `k`'s buffers, by its own names (▶ `sfx`): card 0's are the names themselves, and only card 0 has the head's,
@@ -1271,7 +1352,11 @@ class DeepSeek4(Generates):
                 # an exclusive tier over a prompt's chunk: the picks this card holds, its own scratch (▶ `_rows_procedures`)
                 if self.CARD_EXCLUSIVE and self.CHUNK:
                     m.table(n("exkr%d" % l), [n("signs"), n("zero_h"), n("krscratch")] + cells)
-                if self.SRC.get(l):
+                if self.SOCKETS > 1 and all((l, s) in self.SRC for s in range(self.SOCKETS)):
+                    if k == 0:                     # part s of expert x at x · sockets + s (▶ nn's SOURCES)
+                        self._int_array("src%d" % l, [self.SRC[(l, s)][x] for x in range(self.EXPERTS) for s in range(self.SOCKETS)])
+                    fed[l] = "src%d" % l
+                elif self.SOCKETS == 1 and self.SRC.get(l):
                     if k == 0:
                         self._int_array("src%d" % l, self.SRC[l])
                     fed[l] = "src%d" % l
@@ -1290,9 +1375,9 @@ class DeepSeek4(Generates):
             for l in self.run_layers:
                 cells = [l, 0, p.at_up_lut - p.at_up_data, p.at_down_data - p.at_up_data, p.at_down_lut - p.at_up_data, H, width,
                          self.EXPERTS, self.TOPK, self.E_D, self.NK, self.EXPERTS - self.NK, 1 if self.EXPERTS_INT8 else 0, self.LIMIT]
-                m.table("ex%d_%d" % (l, s), [c("signs"), c("zero"), c("scratch")] + cells + self._backing(l))
+                m.table("ex%d_%d" % (l, s), [c("signs"), c("zero"), c("scratch")] + cells + self._backing(l, cpu["w"]))
                 if self.CHUNK:                # a chunk's: the same experts, `experts_rows`' scratch
-                    m.table("exr%d_%d" % (l, s), [c("signs"), c("zero"), c("rscratch")] + cells + self._backing(l))
+                    m.table("exr%d_%d" % (l, s), [c("signs"), c("zero"), c("rscratch")] + cells + self._backing(l, cpu["w"]))
         m.act_as(k)
 
     def _tier(self, k):
@@ -1303,23 +1388,26 @@ class DeepSeek4(Generates):
         exclusive = dict(part_worker=self.CPU, part_type=0) if self.CARD_EXCLUSIVE else None
         if self.CARD_EXCLUSIVE:
             shared = self.CARD_SLICE
+        # over two sockets, every expert in two parts of their own widths, each its socket's plan (NN-167, nn's PART_SHAPES)
+        parts, plan0 = (self.SOCKETS, self.SPLANS[0]) if self.SOCKETS > 1 else (1, p)
+        shapes = [(w, self.SPLANS[s]) for s, (_, w) in enumerate(self.SPARTS)] if self.SOCKETS > 1 else None
         expert_tier.tier(self.m, self.sfx("tier_card", k), self.T_CEXP, self.EXPERTS, self.TOPK, self.H, self.MINTER, p, self.LAYERS,
-                         self._FED[k], 1, p, self.GATE_ROW, self.DOWN_ROW, self.CARD_LANDING or 1, exclusive, self.CARD_LANDING_LINE,
-                         ranks=self.P, shared=shared)
+                         self._FED[k], parts, plan0, self.GATE_ROW, self.DOWN_ROW, self.CARD_LANDING or 1, exclusive,
+                         self.CARD_LANDING_LINE, ranks=self.P, shared=shared, part_shapes=shapes)
 
     def _from_speeds(self):
         """`card_shared` "auto" in a group and `card_landing` "auto": a CPU pick against a card expert and an expert's
         copy, timed here (▶ `expert_tier.speeds` — the first fed layer's first experts, the head's product on card 0
         priced to a routed expert's bytes; `expert_tier.copy_seconds` over the head's codes, as it calibrates no line), the
         slice and a visit's landings from them, and every card's tier made again with them."""
-        m = self.m
+        m, card = self.m, self._seat_card if self.NC > 1 else CARD
         l = next((l for l in self.run_layers if l in self._FED[0]), self.run_layers[0])
         held = set(getattr(self, "CARD_HELD", {}).get(l, ())) if self.CARD_EXCLUSIVE else set()   # not in RAM
-        cpu_s, card_s = expert_tier.speeds(m, CARD, self.CPU, "picks", [x for x in range(self.EXPERTS) if x not in held][:self.TOPK],
+        cpu_s, card_s = expert_tier.speeds(m, card, self.CPU, "picks", [x for x in range(self.EXPERTS) if x not in held][:self.TOPK],
                                            "(ai_deepseek_4__experts c_hand picks ex%d_0 c_routed)" % l,
                                            self.EPLAN.slot_bytes / expert_tier.head_bytes(self.HPLAN))
         calibrated = (getattr(self, "CALIBRATION", None) or {}).get("copy_ms")
-        copy_s = calibrated / 1e3 if calibrated else expert_tier.copy_seconds(m, CARD, self.HEAD_AT + self.HPLAN.at_up_data,
+        copy_s = calibrated / 1e3 if calibrated else expert_tier.copy_seconds(m, card, self.HEAD_AT + self.HPLAN.at_up_data,
                                                                               min(self.EPLAN.slot_bytes, self.HPLAN.up_data))
         if self.CARD_SHARED is None:
             self.CARD_SHARED = expert_tier.slice_of(cpu_s, card_s)
@@ -1328,6 +1416,11 @@ class DeepSeek4(Generates):
         if self.CARD_LANDING is None:
             self.CARD_LANDING = expert_tier.landing_of(cpu_s, copy_s)
         self.CARD_SPEEDS["landing"] = self.CARD_LANDING
+        if self.NC > 1:                         # a conversation a card: the card loading now, its tier by the program's names
+            m.act_as(card)
+            self._tier(0)
+            expert_tier.bind(m, {card: "tier_card"}, len(self.workers()))
+            return
         for k in range(self.P):
             m.act_as(k)
             self._tier(k)
@@ -1526,18 +1619,24 @@ class DeepSeek4(Generates):
         `chain_ends`). ⛔ A PARAMETER IS A NAME LIKE ANY OTHER, bound while its procedure runs: hence `ending`, not `e`."""
         m, H, run = self.m, self.H, self.run_layers
         m.defun("(defun (chain_ends ending) (if (eq? ending 1) (head) (begin (if (eq? ending 2) (head_logits) (type streams)) 0)))")
+        # ⭐ A CARD'S TIER IN THE CHAIN (NN-167): its visit marks the picks it computes before the CPU is handed the layer,
+        #   as `lay{l}` does; the writes a promotion held back go once the CPU's answer is in, and the card's share is added
+        tier = (lambda l: "(ai_deepseek_4__experts hand picks exk%d routed_k %s) " % (l, expert_tier.BINDING)) if self.CARD_GB else (lambda l: "")
+        written = "(nn__expert_tier__written %s) " % expert_tier.BINDING if self.CARD_GB else ""
+        add = " (nn__vector__add routed routed_k routed %d)" % H if self.CARD_GB else ""
         for i, l in enumerate(run):
             engram = "(ai_deepseek_4__engram streams en%d) " % l if l in self.ENGRAM else ""
             m.defun("(defun (chain_ask%d) (begin %s(ai_deepseek_4__attention streams at%d (nth HERE 0)) "
-                    "(ai_deepseek_4__route streams mo%d hand picks) (let (%s) "
+                    "(ai_deepseek_4__route streams mo%d hand picks) %s(let (%s) "
                     "(begin (ai_deepseek_4__shared hand mo%d) (sys__scheduler__continue %s 0 chain_close%d '(%s))))))"
-                    % (l, engram, l, l, " ".join("(%s (sys__scheduler__add %d names xf%d_%d))" % (r, c["w"], l, c["part"])
-                                                 for r, c in zip(self._chain_answers(), self.CPUS)),
+                    % (l, engram, l, l, tier(l), " ".join("(%s (sys__scheduler__add %d names xf%d_%d))" % (r, c["w"], l, c["part"])
+                                                          for r, c in zip(self._chain_answers(), self.CPUS)),
                        l, self.HAND_CARD, l, " ".join(self._chain_answers())))
             after = "(chain_ask%d)" % run[i + 1] if i + 1 < len(run) else "(chain_ends (nth HERE 1))"
             # inline, as every step of a seat's (▶ `_run`): it keeps the card's scratch between its verbs (NN-159)
-            m.picture("chain_close%d" % l, "(sys__scheduler__compute_inline '(begin %s "
-                      "(ai_deepseek_4__close streams mo%d routed) %s))" % (self._socket_gather("routed", "routed", 2 * H, H), l, after))
+            m.picture("chain_close%d" % l, "(sys__scheduler__compute_inline '(begin %s%s%s "
+                      "(ai_deepseek_4__close streams mo%d routed) %s))"
+                      % (written, self._socket_gather("routed", "routed", 2 * H, H), add, l, after))
         # the position's first step: its token in, the first layer's experts asked
         m.defun("(defun (chain_position tok pos ending) (begin (sys__node_array__set HERE 0 pos) "
                 "(sys__node_array__set HERE 1 ending) (embed tok) (chain_ask%d)))" % run[0])
@@ -1669,6 +1768,7 @@ class DeepSeek4(Generates):
     SEATS_ON_A_CARD = True              # multi_user "yes" on one card seats two (▶ `with_cards`)
     # multi_user "yes" over several cards a conversation a card, by the option that says so — `cards` is a group's here
     CONVERSATION_A_CARD, CONVERSATION_A_CARD_OPTION = True, "seat_cards"
+    TIER_A_CARD = True                  # ...each card a tier of its own for its conversation, the config's or the autotune's (NN-167)
     # what a seat's view binds (▶ `_seat_views`): the names its programs read a conversation by and carry across a step's
     #   end — its streams and the two sites' mixes, the router's hand and picks, the routed sum, the logits its head
     #   leaves, what its chain carries, the CPU's copy of its hand and its routed sum — and every layer's tables over its
@@ -2176,3 +2276,27 @@ class DeepSeek4(Generates):
         if name != self.active_lora:
             raise Refused("this model runs the LoRA %r, chosen at boot, not %r" % (self.active_lora, name))
         self._lora_cache.setdefault(name, dict(ident=self.lora_identity()))
+
+
+def socket_shares(folder, sockets, layers=None):
+    """Where a boot over `sockets` sockets reads its routed experts as files, a socket's share each (▶ `experts_file`, as
+    `_cache_experts` hands it): a part's slot plan (`SPLANS`), the layers the run holds and the model's, the experts a
+    layer, a part's pieces out of a layer's blob and their places in it — for `experts_split`, which writes
+    the files ahead of a boot and puts the pack back together from them. Each socket's inner rows whole rotation blocks,
+    the last socket the rest (2,304: 1,024 and 1,280)."""
+    c, b = folder.config, folder.bundle
+    n, MINTER = c["num_hidden_layers"], c["moe_intermediate_size"]
+    run = list(range(n)) if layers is None else list(layers)
+    each = 512 * ((MINTER // 512) // sockets)
+    if not each:
+        raise Refused("an expert's inner width %d has no whole rotation block for each of %d sockets" % (MINTER, sockets))
+    parts = [(s * each, each if s < sockets - 1 else MINTER - s * each) for s in range(sockets)]
+    gr, dn = (b.record(run[0], EXPERT % (0, w)) for w in ("gate", "down"))
+    if any(dn.row_bytes * w % MINTER for _, w in parts):
+        raise Refused("a socket's part of the down rows does not end on a byte")
+    plans = ([NL.SlotPlan(2 * MINTER * gr.row_bytes, 2 * MINTER * 2, dn.rows * dn.row_bytes, dn.rows * 2)] if sockets == 1 else
+             [NL.SlotPlan(2 * w * gr.row_bytes, 2 * w * 2, dn.rows * (dn.row_bytes * w // MINTER), dn.rows * 2) for _, w in parts])
+    rec = lambda l, x: [b.record(l, EXPERT % (x, w)) for w in ("gate", "up", "down")]
+    return dict(plan=plans, layers=run, all_layers=list(range(n)), experts=c["n_routed_experts"],
+                pieces=lambda view, l, x, s: expert_tier.part_pieces_at(view, *rec(l, x), plans[s], parts[s][0], parts[s][1], MINTER),
+                places=lambda l, x, s: expert_tier.part_places_at(*rec(l, x), plans[s], parts[s][0], parts[s][1], MINTER))

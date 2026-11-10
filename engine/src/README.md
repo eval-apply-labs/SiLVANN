@@ -22,8 +22,11 @@ picture decoder) and `packages/ai_deepseek_4` (DeepSeek-V4.1-Flash's layers, a m
   shaped this way: ▶ `docs/design/evaluator.md` (`docs/` is in the development repository).
 - **Graphics cards, and the CPU's cores, are reached through *silicon families*.** A family is a runtime plus
   the traits a build is compiled for. The roster, `silicon_families/roster.cuh`, lists them lowest number first:
-  `host`, `x86_avx2` (the CPU's cores), `khronos_opencl1_igpu` (integrated GPUs whose OpenCL is 1.2),
-  `khronos_opencl2`, `amd_rocm6_wave64` (ROCm 6, the 64-wide AMD cards) and `nvidia_cuda12`. The host is
+  `host`, `x86_avx2` (the CPU's cores), `nvidia_opencl1` (NVIDIA's cards CUDA does not take, through OpenCL 1.2),
+  `intel_opencl1_igpu` (Intel's integrated GPUs before Gen9 — both built from `khronos_opencl1_base`), `khronos_opencl2`
+  (any GPU whose OpenCL is 2.0), `intel_opencl2` (Intel's GPUs from Gen9 — both built from `khronos_opencl2_base`),
+  `amd_rocm6_wave64` (ROCm 6, the MI50), `amd_rocm10` (ROCm 7 and later, the MI100 on — both built from
+  `amd_rocm_base`, one source) and `nvidia_cuda12`. The host is
   compiled into the program; each of the others is its own binary, `libsilvann_<family>.so`. The program never
   names a vendor: each package lists what it needs from a card, and each family answers it.
   ▶ `silicon_families/add_a_family.md`.

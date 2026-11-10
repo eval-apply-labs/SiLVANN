@@ -7,6 +7,13 @@
     python3 silvann_core.py update-programs           each model here gets this release's program from its pack —
                                                       what an update of SiLVANN runs once it is installed
     python3 silvann_core.py list-models [--json]      the models this release knows how to fetch, and which are here
+    python3 silvann_core.py split-experts <name>     a two-socket machine's: the model's folder split in place, each
+                                                      socket's share of its experts in its experts/, as the first boot
+                                                      over two sockets does (▶ silvann_runtime/experts_split.py)
+    python3 silvann_core.py stitch-experts <name>    the pack put back in place, as the first boot over one socket does
+    python3 silvann_core.py split-experts <name> DIR0 DIR1   each socket's share in a folder on that socket's own drive,
+                                                      which a boot with `experts_dir` [DIR0, DIR1] reads
+    python3 silvann_core.py stitch-experts DIR0 DIR1 OUT   the pack put back together from them, byte for byte
     python3 silvann_core.py hf-token                  whether a Hugging Face token is saved, and whose it is
     python3 silvann_core.py hf-token --set            save one, asked for without echoing it (or: hf-token <token>)
     python3 silvann_core.py hf-token --forget         remove it
@@ -268,6 +275,9 @@ def main(argv):
                                                        ("; " + st["why"]) if st.get("why") else
                                                        "; a newer SiLVANN is out" if st.get("newer") else ""))
         return 0
+    if argv[:1] in (["split-experts"], ["stitch-experts"]):
+        from silvann_runtime import experts_split
+        return experts_split.main([argv[0].split("-")[0]] + argv[1:], models=MODELS)
     if argv[:1] == ["list-models"]:
         if argv[1:] == ["--json"]:
             print(json.dumps([{"name": name, "repo": repo, "size": size, "base": base, "here": present(str(MODELS / name))}

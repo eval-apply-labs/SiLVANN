@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build one binary per silicon family — `libsilvann_amd_rocm6_wave64.so` and `libsilvann_nvidia_cuda12.so` —
+# Build one binary per silicon family — `libsilvann_amd_rocm6_wave64.so`, `libsilvann_amd_rocm10.so`, `libsilvann_nvidia_cuda12.so` —
 # into build/silicon_families/.
 #
 # ⚖ *"the gpu side becomes a separate binary that is loaded at the start of the cpu session"* · *"we
@@ -12,7 +12,8 @@
 #   no NVIDIA card; `SILVANN_NVCC` names it, else PATH, else the toolchain unpacked beside the repo.
 #
 #   SILVANN_SILICON_FAMILIES  which to build      default every family on the roster but the host
-#   SILVANN_HIP_ARCHES     narrows amd_rocm6_wave64's gfx targets, for a faster development build
+#   SILVANN_HIP_ARCHES     narrows the AMD families' gfx targets — each takes the ones that are its own
+#   SILVANN_ROCM6 / SILVANN_ROCM10   the ROCm each AMD family is built with (default /opt/rocm, by its HIP version)
 #   SILVANN_CUDA_ARCHES    narrows nvidia_cuda12's sm numbers; the last is also carried as PTX
 #   — each family's targets are otherwise its own `includes.cuh` row, and a narrowed binary is not one to ship
 set -u
@@ -100,17 +101,42 @@ for P in $(echo "${SILVANN_SILICON_FAMILIES:-$ALL}" | tr ',' ' '); do
     #   of the OpenCL kernels reads the same variable.
     NNDIAL=${SILVANN_NN_ARITHMETIC_FAST:+-DNN__ARITHMETIC__FAST=$SILVANN_NN_ARITHMETIC_FAST}
     case "$P" in
-    amd_rocm6_wave64)
-        tu amd_rocm6_wave64 > "$OUT/amd_rocm6_wave64.cu"
-        WANT=$(targets amd_rocm6_wave64 AMD_ROCM6_WAVE64__TARGETS | paste -sd,)
-        ARCHES=""; for a in $(echo "${SILVANN_HIP_ARCHES:-$WANT}" | tr ',' ' '); do
-            ARCHES="$ARCHES --offload-arch=$a"; done
-        rm -f "$OUT/libsilvann_amd_rocm6_wave64.so"
+    amd_rocm6_wave64|amd_rocm10)
+        # ⭐ THE TWO AMD FAMILIES, ONE SOURCE (`amd_rocm_base`), EACH ITS OWN ROCm (⚖ 2026-11-08 *"the legacy amd on rocm6
+        #   and the modern one on rocm7"*): amd_rocm6_wave64 the MI50 with ROCm 6's hipcc — SILVANN_ROCM6, else /opt/rocm —
+        #   and amd_rocm10 gfx908 on with ROCm 7's or later — SILVANN_ROCM10, else /opt/rocm where its HIP is 7 or later.
+        #   A family whose ROCm is not here is skipped and says so; so is one none of whose targets SILVANN_HIP_ARCHES names.
+        if [ "$P" = amd_rocm6_wave64 ]; then ROOT=${SILVANN_ROCM6:-/opt/rocm}; ROW=AMD_ROCM6_WAVE64__TARGETS; NEED="6"
+        else ROOT=${SILVANN_ROCM10:-/opt/rocm}; ROW=AMD_ROCM10__TARGETS; NEED="7 or later"; fi
+        HIPV=$("$ROOT/bin/hipcc" --version 2>/dev/null | grep -oE 'HIP version: [0-9]+' | grep -oE '[0-9]+$')
+        if [ -z "$HIPV" ] || { [ "$P" = amd_rocm6_wave64 ] && [ "$HIPV" != 6 ]; } || { [ "$P" = amd_rocm10 ] && [ "$HIPV" -lt 7 ]; }; then
+            HAS=${HIPV:+HIP $HIPV}; HAS=${HAS:-not there}
+            WHY="not built: it is built with HIP $NEED's hipcc, and $ROOT/bin/hipcc is $HAS"
+            echo "$WHY" > "$OUT/libsilvann_$P.skipped"; rm -f "$OUT/libsilvann_$P.so"; echo "⚠ $P skipped — $WHY"; continue
+        fi
+        WANT=$(targets "$P" "$ROW" | paste -sd,)
+        HAVE=$WANT
+        if [ -n "${SILVANN_HIP_ARCHES:-}" ]; then        # the targets named that are this family's
+            HAVE=$(echo "$SILVANN_HIP_ARCHES" | tr ',' '\n' | grep -xF -f <(echo "$WANT" | tr ',' '\n') | paste -sd,)
+        fi
+        if [ -z "$HAVE" ]; then
+            WHY="not built: none of SILVANN_HIP_ARCHES ($SILVANN_HIP_ARCHES) is its ($WANT)"
+            echo "$WHY" > "$OUT/libsilvann_$P.skipped"; rm -f "$OUT/libsilvann_$P.so"; echo "⚠ $P skipped — $WHY"; continue
+        fi
+        tu "$P" > "$OUT/$P.cu"
+        ARCHES=""; for a in $(echo "$HAVE" | tr ',' ' '); do ARCHES="$ARCHES --offload-arch=$a"; done
+        # ⛳ amd_rocm10 FINDS ITS OWN HIP: a ROCm 7 from TheRock or the SDK's wheels is not on the system's library path,
+        #   so the library names its ROCm's lib/ (an rpath); /opt/rocm's is there either way
+        RPATH=""; [ "$P" = amd_rocm10 ] && RPATH="-Wl,-rpath,$ROOT/lib"
+        # ⛳ amd_rocm10 IS BUILT IN WAVE64: amd_rocm_base's kernels are written for 64 lanes to a wavefront, which a Radeon
+        #   (RDNA4) runs only when built so — the MI cards run 64 alone (▶ amd_rocm10/includes.cuh)
+        WAVE=""; [ "$P" = amd_rocm10 ] && WAVE="-mwavefrontsize64"
+        rm -f "$OUT/libsilvann_$P.so"
         # shellcheck disable=SC2086
-        /opt/rocm/bin/hipcc ${GCC:+--gcc-install-dir=$GCC} $ARCHES $NNDIAL -O2 -std=c++17 -fPIC -shared -fvisibility=hidden -I src \
-            "$OUT/amd_rocm6_wave64.cu" -o "$OUT/libsilvann_amd_rocm6_wave64.so" > "$OUT/amd_rocm6_wave64.log" 2>&1 \
-            || { echo "⛔ amd_rocm6_wave64:"; reason "$OUT/amd_rocm6_wave64.log"; }
-        built amd_rocm6_wave64 "$OUT/libsilvann_amd_rocm6_wave64.so" ;;
+        "$ROOT/bin/hipcc" ${GCC:+--gcc-install-dir=$GCC} $ARCHES $WAVE $NNDIAL -O2 -std=c++17 -fPIC -shared -fvisibility=hidden $RPATH -I src \
+            "$OUT/$P.cu" -o "$OUT/libsilvann_$P.so" > "$OUT/$P.log" 2>&1 \
+            || { echo "⛔ $P:"; reason "$OUT/$P.log"; }
+        built "$P" "$OUT/libsilvann_$P.so" ;;
     nvidia_cuda12)
         NVCC=${SILVANN_NVCC:-$(command -v nvcc || echo "$(cd .. && pwd)/toolchains/cuda-12.9/bin/nvcc")}
         [ -x "$NVCC" ] || { echo "⛔ nvidia_cuda12: no nvcc (set SILVANN_NVCC)"; FAILED=1; continue; }
@@ -128,37 +154,45 @@ for P in $(echo "${SILVANN_SILICON_FAMILIES:-$ALL}" | tr ',' ' '); do
             "$OUT/nvidia_cuda12.cu" -o "$OUT/libsilvann_nvidia_cuda12.so" > "$OUT/nvidia_cuda12.log" 2>&1 \
             || { echo "⛔ nvidia_cuda12:"; reason "$OUT/nvidia_cuda12.log"; }
         built nvidia_cuda12 "$OUT/libsilvann_nvidia_cuda12.so" ;;
-    khronos_opencl2)
+    khronos_opencl2|intel_opencl2)
         # ⛳ NO CARD COMPILER: the kernels are OpenCL C, generated from nn's rows and compiled by the runtime
-        #   on the card it finds. What is built here is the host side, against the OpenCL loader.
-        opencl_link || { echo "⛔ khronos_opencl2: no CL/cl.h under $CLINC, or the loader's stub would not build"; FAILED=1; continue; }
-        python3 scripts/opencl_kernel_source.py "$OUT/khronos_opencl2_kernels.cpp" \
-            || { echo "⛔ khronos_opencl2: nn's kernels would not become OpenCL C"; FAILED=1; continue; }
-        tu khronos_opencl2 > "$OUT/khronos_opencl2.cpp"
-        rm -f "$OUT/libsilvann_khronos_opencl2.so"
+        #   on the card it finds. What is built here is the host side, against the OpenCL loader. ⭐ TWO FAMILIES, ONE
+        #   SOURCE (`khronos_opencl2_base`): each its own unit, the one program — `khronos_opencl2` any GPU whose OpenCL
+        #   is 2.0, `intel_opencl2` Intel's from Gen9.
+        opencl_link || { echo "⛔ $P: no CL/cl.h under $CLINC, or the loader's stub would not build"; FAILED=1; continue; }
+        python3 scripts/opencl_kernel_source.py "$OUT/${P}_kernels.cpp" \
+            || { echo "⛔ $P: nn's kernels would not become OpenCL C"; FAILED=1; continue; }
+        tu "$P" > "$OUT/$P.cpp"
+        rm -f "$OUT/libsilvann_$P.so"
         g++ -O2 -std=c++17 -fPIC -shared -fvisibility=hidden -I src -I "$CLINC" \
-            "$OUT/khronos_opencl2.cpp" "$OUT/khronos_opencl2_kernels.cpp" \
-            -L "$CLLIB" -lOpenCL -lpthread -o "$OUT/libsilvann_khronos_opencl2.so" \
-            > "$OUT/khronos_opencl2.log" 2>&1 \
-            || { echo "⛔ khronos_opencl2:"; reason "$OUT/khronos_opencl2.log"; }
-        built khronos_opencl2 "$OUT/libsilvann_khronos_opencl2.so" ;;
-    khronos_opencl1_igpu)
-        # ⛳ AS khronos_opencl2, NO CARD COMPILER — the kernels are OpenCL C 1.2, every pointer's space worked out by the
-        #   generator — against the carried headers and the loader's stub (▶ `opencl_link`).
-        opencl_link || { echo "⛔ khronos_opencl1_igpu: no CL/cl.h under $CLINC, or the loader's stub would not build"; FAILED=1; continue; }
-        python3 scripts/opencl1_kernel_source.py "$OUT/khronos_opencl1_igpu_kernels.cpp" \
-            || { echo "⛔ khronos_opencl1_igpu: nn's kernels would not become OpenCL C 1.2"; FAILED=1; continue; }
-        tu khronos_opencl1_igpu > "$OUT/khronos_opencl1_igpu.cpp"
-        rm -f "$OUT/libsilvann_khronos_opencl1_igpu.so"
+            "$OUT/$P.cpp" "$OUT/${P}_kernels.cpp" \
+            -L "$CLLIB" -lOpenCL -lpthread -o "$OUT/libsilvann_$P.so" \
+            > "$OUT/$P.log" 2>&1 \
+            || { echo "⛔ $P:"; reason "$OUT/$P.log"; }
+        built "$P" "$OUT/libsilvann_$P.so" ;;
+    nvidia_opencl1|intel_opencl1_igpu)
+        # ⛳ AS THE 2.0 FAMILIES, NO CARD COMPILER — the kernels are OpenCL C 1.2, every pointer's space worked out by
+        #   the generator — against the carried headers and the loader's stub (▶ `opencl_link`). ⭐ TWO FAMILIES, ONE
+        #   SOURCE (`khronos_opencl1_base`): `nvidia_opencl1` NVIDIA's cards, `intel_opencl1_igpu` Intel's before Gen9.
+        opencl_link || { echo "⛔ $P: no CL/cl.h under $CLINC, or the loader's stub would not build"; FAILED=1; continue; }
+        python3 scripts/opencl1_kernel_source.py "$OUT/${P}_kernels.cpp" \
+            || { echo "⛔ $P: nn's kernels would not become OpenCL C 1.2"; FAILED=1; continue; }
+        tu "$P" > "$OUT/$P.cpp"
+        rm -f "$OUT/libsilvann_$P.so"
         g++ -O2 -std=c++17 -fPIC -shared -fvisibility=hidden -I src -I "$CLINC" \
-            "$OUT/khronos_opencl1_igpu.cpp" "$OUT/khronos_opencl1_igpu_kernels.cpp" \
-            -L "$CLLIB" -lOpenCL -lpthread -o "$OUT/libsilvann_khronos_opencl1_igpu.so" \
-            > "$OUT/khronos_opencl1_igpu.log" 2>&1 \
-            || { echo "⛔ khronos_opencl1_igpu:"; reason "$OUT/khronos_opencl1_igpu.log"; }
-        built khronos_opencl1_igpu "$OUT/libsilvann_khronos_opencl1_igpu.so" ;;
+            "$OUT/$P.cpp" "$OUT/${P}_kernels.cpp" \
+            -L "$CLLIB" -lOpenCL -lpthread -o "$OUT/libsilvann_$P.so" \
+            > "$OUT/$P.log" 2>&1 \
+            || { echo "⛔ $P:"; reason "$OUT/$P.log"; }
+        built "$P" "$OUT/libsilvann_$P.so" ;;
     x86_avx2)
         # ⛳ THE CPU: g++ for the instruction set the family's name promises — the bodies and the overrides are
-        #   compiled for AVX2, FMA and F16C, and the family counts no device on a processor without them.
+        #   compiled for AVX2, FMA and F16C, and the family counts no device on a processor without them. On another
+        #   processor (aarch64: a GB10's Grace) there is nothing to build it for, and it is skipped, saying so.
+        if [ "$(uname -m)" != x86_64 ]; then
+            WHY="not built: an x86-64 processor's family, and this one is $(uname -m)"
+            echo "$WHY" > "$OUT/libsilvann_$P.skipped"; rm -f "$OUT/libsilvann_$P.so"; echo "⚠ $P skipped — $WHY"; continue
+        fi
         tu x86_avx2 > "$OUT/x86_avx2.cpp"
         rm -f "$OUT/libsilvann_x86_avx2.so"
         g++ $NNDIAL -O3 -mavx2 -mfma -mf16c -std=c++17 -fPIC -shared -fvisibility=hidden -I src \
@@ -166,6 +200,23 @@ for P in $(echo "${SILVANN_SILICON_FAMILIES:-$ALL}" | tr ',' ' '); do
             > "$OUT/x86_avx2.log" 2>&1 \
             || { echo "⛔ x86_avx2:"; reason "$OUT/x86_avx2.log"; }
         built x86_avx2 "$OUT/libsilvann_x86_avx2.so" ;;
+    arm_neon|arm_gb10)
+        # ⛳ THE ARM PROCESSORS, ONE SOURCE (`arm_base`): g++ for the instruction set each family's name promises —
+        #   arm_neon Armv8.2 with half precision and the dot product, arm_gb10 the DGX Spark's Armv9.2 with SVE2, i8mm and
+        #   bf16 — and the family counts no device on a processor without them. On another processor it is skipped.
+        if [ "$(uname -m)" != aarch64 ]; then
+            WHY="not built: an Arm processor's family, and this one is $(uname -m)"
+            echo "$WHY" > "$OUT/libsilvann_$P.skipped"; rm -f "$OUT/libsilvann_$P.so"; echo "⚠ $P skipped — $WHY"; continue
+        fi
+        if [ "$P" = arm_neon ]; then MARCH="-march=armv8.2-a+fp16+dotprod"; else MARCH="-march=armv9.2-a+sve2+i8mm+bf16+fp16+dotprod"; fi
+        tu "$P" > "$OUT/$P.cpp"
+        rm -f "$OUT/libsilvann_$P.so"
+        # shellcheck disable=SC2086
+        g++ $NNDIAL -O3 $MARCH -std=c++17 -fPIC -shared -fvisibility=hidden -I src \
+            "$OUT/$P.cpp" -lpthread -o "$OUT/libsilvann_$P.so" \
+            > "$OUT/$P.log" 2>&1 \
+            || { echo "⛔ $P:"; reason "$OUT/$P.log"; }
+        built "$P" "$OUT/libsilvann_$P.so" ;;
     *) echo "⛔ $P: this script has no recipe for it — which compiler, and how its targets are passed"; FAILED=1 ;;
     esac
 done

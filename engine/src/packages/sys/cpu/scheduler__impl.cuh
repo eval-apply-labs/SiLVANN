@@ -714,6 +714,53 @@ static __device__ inline uint64_t sys__scheduler__kill(uint64_t pid) {
     return taken;
 }
 
+/* ── A PROCESS FOR THE HOST, AND ONE ASKED TO STOP (NN-160) ─────────────────────────────────────────────────
+ * ⚖ 2026-11-07 the design agreed: *"1 and it keeps it from a shared heap object that holds the counter, so pids are
+ * unique"* · *"the process is the request of doing work, that continues itself until it produces a final result. so
+ * stopping will block whatever is in flight, return an error to that process's result as its value"* · *"a stop completes
+ * the current token and a pkill tears it down… maybe the stop is a more mild let binding checked once per token?"*.
+ * The host takes a process from the counter every process is made from, so no two are one, and makes its requests as it
+ * (`process_as`: this thread's, inherited by what they ask and go on as). Two levels: the kill above — whatever of it is
+ * in flight torn down, its answers SCKL — and a stop: the process remembered as asked to stop, which its program reads
+ * once a token (`(sys__scheduler__stopped)`, ▶ lisp/generate.lisp) and ends at the token it is on, everything it did
+ * whole. A killed process reads as stopped too. The last KILLED_KEPT stops are remembered, as the kills are. */
+static unsigned int sys__scheduler__zzprivate_stopped[SYS__SCHEDULER__KILLED_KEPT];
+static unsigned int sys__scheduler__zzprivate_stops = 0u;          /* stops made: the next one's slot, modulo KEPT */
+
+static __device__ inline uint64_t sys__scheduler__process_new(void) {
+    return (uint64_t)(sys__silicon__add_u32(&sys__scheduler__zzprivate_pids, 1u) + 1u);
+}
+
+static __device__ inline uint64_t sys__scheduler__process_as(uint64_t pid) {
+    const unsigned int was = sys__scheduler__zzprivate_pid;
+    sys__scheduler__zzprivate_pid = pid > 0xFFFFFFFFull ? 0u : (unsigned int)pid;
+    return (uint64_t)was;
+}
+
+static __device__ inline bool sys__scheduler__zzprivate_asked_to_stop(uint64_t pid) {
+    if (pid == 0ull) return false;
+    const unsigned int made = sys__silicon__read_u32(&sys__scheduler__zzprivate_stops);
+    const unsigned int n = made < SYS__SCHEDULER__KILLED_KEPT ? made : SYS__SCHEDULER__KILLED_KEPT;
+    for (unsigned int i = 0u; i < n; ++i)
+        if ((uint64_t)sys__silicon__read_u32(&sys__scheduler__zzprivate_stopped[i]) == pid) return true;
+    return false;
+}
+
+static __device__ inline bool sys__scheduler__stop(uint64_t pid) {
+    if (pid == 0ull || pid > 0xFFFFFFFFull) return false;
+    if (!sys__scheduler__zzprivate_asked_to_stop(pid)) {
+        const unsigned int at = sys__silicon__add_u32(&sys__scheduler__zzprivate_stops, 1u) % SYS__SCHEDULER__KILLED_KEPT;
+        unsigned int* slot = &sys__scheduler__zzprivate_stopped[at];
+        (void)sys__silicon__cas_u32(slot, sys__silicon__read_u32(slot), (unsigned int)pid);
+    }
+    return true;
+}
+
+static __device__ inline bool sys__scheduler__stopped(void) {
+    const uint64_t pid = (uint64_t)sys__scheduler__zzprivate_pid;
+    return sys__scheduler__zzprivate_asked_to_stop(pid) || sys__scheduler__zzpackage_killed(pid);
+}
+
 static __device__ inline bool sys__scheduler__zzengine_killed(sys__heap_node* base) {
     if (!sys__scheduler__zzpackage_killed((uint64_t)sys__scheduler__zzprivate_pid)) return false;
     const uint64_t answer = sys__computing_base__zzengine_answer(base);

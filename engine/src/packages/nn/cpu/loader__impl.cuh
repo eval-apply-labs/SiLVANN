@@ -844,9 +844,31 @@ static __device__ inline bool nn__expert_tier__of(uint64_t binding, uint64_t lay
         v[NN__EXPERT_TIER__DOWN_LUT], v[NN__EXPERT_TIER__PARTS], v[NN__EXPERT_TIER__P_UP_LUT], v[NN__EXPERT_TIER__P_DOWN],
         v[NN__EXPERT_TIER__P_DOWN_LUT], v[NN__EXPERT_TIER__GATE_ROW], v[NN__EXPERT_TIER__DOWN_ROW], v[NN__EXPERT_TIER__LANDING],
         ex[0], ex[1], ex[2], ex[3], v[NN__EXPERT_TIER__SOURCES], v[NN__EXPERT_TIER__TOP_K], 1u, 0u, 0u, 0u };
-    if (t.exclusive > 1u || t.duplex > 1u || (t.exclusive == 1u && t.layers == 0u)) return false;   /* exclusive needs its sources to move */
+    if (t.exclusive > 2u || t.duplex > 1u || (t.exclusive == 1u && t.layers == 0u)) return false;   /* exclusive needs its sources to move */
+    if (t.exclusive == 2u && (t.parts != 1u || sources != 0u || v[NN__EXPERT_TIER__SOURCES] != 0ull)) return false;   /* the slots' */
+    /* parts of unequal widths (▶ PART_SHAPES): an inclusive tier's, the widths summing to the inner width, each cutting a
+     *   down row on a byte — read before the even split's checks, which they stand in for */
+    uint64_t shapes = 0u;
+    if (sys__node_array__length(entry.args[0]) >= NN__EXPERT_TIER__LENGTH_PART_SHAPES) {
+        const sys__heap_node n = sys__node_array__borrow(entry.args[0], NN__EXPERT_TIER__PART_SHAPES);
+        if (sys__heap_node__carries_reference(n.dtype) && sys__node_array__is(n.args[0])) shapes = n.args[0];
+        else if (n.dtype != SYS__KIND__VALUE_INT || n.args[0] != 0u) return false;
+    }
+    if (shapes != 0u) {
+        if (t.exclusive != 0u || t.parts < 2u || sys__node_array__length(shapes) < 4u * t.parts || t.inter == 0u) return false;
+        uint64_t sum = 0u;
+        for (uint64_t p = 0u; p < t.parts; ++p) {
+            const sys__heap_node w = sys__node_array__borrow(shapes, 4u * p);
+            if (w.dtype != SYS__KIND__VALUE_INT || w.args[0] == 0u || (w.args[0] * t.down_row) % t.inter != 0u) return false;
+            for (uint64_t c = 1u; c < 4u; ++c)
+                if (sys__node_array__borrow(shapes, 4u * p + c).dtype != SYS__KIND__VALUE_INT) return false;
+            sum += w.args[0];
+        }
+        if (sum != t.inter) return false;
+        t.part_shapes = shapes;
+    }
     if (t.experts == 0u || t.top_k == 0u || t.top_k > t.experts || t.top_k > NN__EXPERT__TIER_K_MAX || t.parts == 0u
-     || 5u * t.parts + 1u > NN__EXPERT__GATHER_RUNS || t.inter % t.parts != 0u || t.down_row % t.parts != 0u
+     || 5u * t.parts + 1u > NN__EXPERT__GATHER_RUNS || (shapes == 0u && (t.inter % t.parts != 0u || t.down_row % t.parts != 0u))
      || (sources != 0u && sys__node_array__length(sources) < t.experts * t.parts))
         return false;
     if (sys__node_array__length(entry.args[0]) >= NN__EXPERT_TIER__LENGTH_LINE) {
@@ -874,6 +896,13 @@ static __device__ inline bool nn__expert_tier__of(uint64_t binding, uint64_t lay
          || (s.args[0] != 0u && (b.args[0] == 0u || b.args[0] > NN__ROUTED__BATCH_MAX))) return false;
         t.stream = s.args[0]; t.stream_batch = b.args[0];
     }
+    if (sys__node_array__length(entry.args[0]) >= NN__EXPERT_TIER__LENGTH_BACKINGS) {
+        const sys__heap_node n = sys__node_array__borrow(entry.args[0], NN__EXPERT_TIER__BACKINGS);
+        if (sys__heap_node__carries_reference(n.dtype) && sys__node_array__is(n.args[0])) {
+            if (t.exclusive != 2u) return false;                  /* a file only where the tier's RAM is a disk's cache */
+            t.backings = n.args[0];
+        } else if (n.dtype != SYS__KIND__VALUE_INT || n.args[0] != 0u) return false;
+    }
     *tier = t;
     return true;
 }
@@ -883,7 +912,20 @@ static __device__ inline bool nn__expert_tier__of(uint64_t binding, uint64_t lay
  * that IS a card slot (one part, the same plan) is one run. Answers false when the runs would not fit. */
 static __device__ inline bool nn__expert_tier__part_runs(const nn__expert_tier* t, uint64_t p, uint64_t src, bool scales,
                                                          nn__expert__gather* g) {
-    const uint64_t P = t->parts, H = t->hidden, I = t->inter, PI = I / P, cols = t->down_row / P;
+    const uint64_t P = t->parts, H = t->hidden, I = t->inter;
+    /* the part's inner width `PI` from inner row `O`, its columns of a down row `cols` bytes from byte `at`, and its slot's
+     *   offsets — the even split's, or the part's own (▶ PART_SHAPES: DeepSeek's sockets, 1,024 and 1,280 of 2,304) */
+    uint64_t PI = I / P, O = p * (I / P), cols = t->down_row / P, at = p * (t->down_row / P);
+    uint64_t up_lut = t->p_up_lut, down = t->p_down, down_lut = t->p_down_lut;
+    if (t->part_shapes != 0u) {
+        O = 0u;
+        for (uint64_t q = 0u; q < p; ++q) O += sys__node_array__borrow(t->part_shapes, 4u * q).args[0];
+        PI = sys__node_array__borrow(t->part_shapes, 4u * p).args[0];
+        cols = t->down_row * PI / I; at = t->down_row * O / I;
+        up_lut = sys__node_array__borrow(t->part_shapes, 4u * p + 1u).args[0];
+        down = sys__node_array__borrow(t->part_shapes, 4u * p + 2u).args[0];
+        down_lut = sys__node_array__borrow(t->part_shapes, 4u * p + 3u).args[0];
+    }
     if (P == 1u && t->p_up_lut == t->up_lut && t->p_down == t->down && t->p_down_lut == t->down_lut) {
         if (g->runs + 1u > NN__EXPERT__GATHER_RUNS) return false;
         const nn__expert__run whole = { src, 0u, 0u, 0u, t->down_lut + 2u * H, 1u };
@@ -892,22 +934,34 @@ static __device__ inline bool nn__expert_tier__part_runs(const nn__expert_tier* 
     }
     if (g->runs + 5u + (scales ? 1u : 0u) > NN__EXPERT__GATHER_RUNS) return false;
     const nn__expert__run runs[5] = {
-        { src,                           0u,   p * PI * t->gate_row,                      0u,          PI * t->gate_row, 1u },
-        { src + PI * t->gate_row,        0u,   I * t->gate_row + p * PI * t->gate_row,    0u,          PI * t->gate_row, 1u },
-        { src + t->p_up_lut,             0u,   t->up_lut + p * PI * 2u,                   0u,          PI * 2u,          1u },
-        { src + t->p_up_lut + PI * 2u,   0u,   t->up_lut + I * 2u + p * PI * 2u,          0u,          PI * 2u,          1u },
-        { src + t->p_down,               cols, t->down + p * cols,                        t->down_row, cols,             H  },
+        { src,                           0u,   O * t->gate_row,                           0u,          PI * t->gate_row, 1u },
+        { src + PI * t->gate_row,        0u,   I * t->gate_row + O * t->gate_row,         0u,          PI * t->gate_row, 1u },
+        { src + up_lut,                  0u,   t->up_lut + O * 2u,                        0u,          PI * 2u,          1u },
+        { src + up_lut + PI * 2u,        0u,   t->up_lut + I * 2u + O * 2u,               0u,          PI * 2u,          1u },
+        { src + down,                    cols, t->down + at,                              t->down_row, cols,             H  },
     };
     for (unsigned r = 0u; r < 5u; ++r) g->run[g->runs++] = runs[r];
     if (scales) {
-        const nn__expert__run sc = { src + t->p_down_lut, 0u, t->down_lut, 0u, H * 2u, 1u };
+        const nn__expert__run sc = { src + down_lut, 0u, t->down_lut, 0u, H * 2u, 1u };
         g->run[g->runs++] = sc;
     }
     return true;
 }
 
 static __device__ inline bool nn__expert_tier__stitch(const nn__expert_tier* t, uint64_t x, nn__expert__gather* g) {
-    if (t->sources == 0ull || x >= t->experts) return false;
+    if (x >= t->experts) return false;
+    if (t->exclusive == 2u) {
+        /* the slot the RAM worker's collection holds the expert in now (▶ EXCLUSIVE 2) — looked up as that worker, whose
+         *   index it is; none holding it, no promotion */
+        const int acting = sys__silicon__host_acting_as();
+        sys__silicon__host_act_as((int)t->part_worker);
+        sys__heap_node at;
+        const bool have = nn__expert__slot(t->layer, t->part_type, x, &at) && at.args[NN__EXPERT__SLOT_AT] != 0ull;
+        sys__silicon__host_act_as(acting);
+        g->runs = 0u;
+        return have && nn__expert_tier__part_runs(t, 0u, at.args[NN__EXPERT__SLOT_AT], true, g);
+    }
+    if (t->sources == 0ull) return false;
     g->runs = 0u;
     for (uint64_t p = 0u; p < t->parts; ++p) {
         const sys__heap_node at = sys__node_array__borrow(t->sources, x * t->parts + p);
@@ -1374,7 +1428,7 @@ static __device__ inline bool nn__expert_tier__visit(sys__silicon_family__id fam
                                                      bool* held) {
     const uint64_t layer = t->layer, type = t->type;
     const unsigned k = (unsigned)t->top_k;
-    const bool fed = t->sources != 0ull;
+    const bool fed = t->sources != 0ull || t->exclusive == 2u;   /* a table of its sources, or the slots' (▶ EXCLUSIVE 2) */
     /* ⭐ A PROMOTION COUNTS AT ITS LAYER'S NEXT VISIT, LANDED OR WAITED FOR: every one this worker started on the layer —
      *   at the visit before — is admitted here, so which experts a card holds at a visit is the same on every boot (⚖ one
      *   config, one answer); admitting those landed by then would make it the copies' timing. A layer's next visit is a
@@ -1910,7 +1964,7 @@ static __device__ inline bool nn__expert_tier__visit_group(sys__silicon_family__
     const uint64_t layer = t->layer, type = t->type, E = t->experts;
     const unsigned k = (unsigned)t->top_k;
     const uint32_t ranks = (uint32_t)t->ranks, me = (uint32_t)sys__silicon__worker();
-    const bool fed = t->sources != 0ull;
+    const bool fed = t->sources != 0ull || t->exclusive == 2u;   /* a table of its sources, or the slots' (▶ EXCLUSIVE 2) */
     if (fed) (void)nn__expert__settle(layer, type);           /* the visit before's promotions, as `visit` admits them */
     /* an exclusive tier's swaps that are due, before this card says what it holds (▶ commit): every card's post is then the
      *   layout this position runs on */
@@ -2052,7 +2106,7 @@ static __device__ inline bool nn__expert_tier__chunk(sys__silicon_family__id fam
                                                      uint64_t n, uint64_t threshold) {
     const uint64_t layer = t->layer, type = t->type, experts = t->experts;
     const unsigned k = (unsigned)t->top_k;
-    const bool fed = t->sources != 0ull;
+    const bool fed = t->sources != 0ull || t->exclusive == 2u;   /* a table of its sources, or the slots' (▶ EXCLUSIVE 2) */
     if (fed) (void)nn__expert__settle(layer, type);           /* the chunk before's promotions, as `visit` admits them */
     if (t->exclusive == 1u && !nn__expert_tier__commit(family, t)) return false;   /* the swaps that are due: ▶ commit */
     /* ⭐ A GROUP'S EXCLUSIVE TIERS EACH TOLD OF THE CHUNK (NN-99): each card computes the chunk's picks it holds, and the

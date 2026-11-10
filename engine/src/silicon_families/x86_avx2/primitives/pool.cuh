@@ -360,10 +360,18 @@ static inline void x86_avx2__zzprivate_launch(x86_avx2__pool* p, uint32_t blocks
      *   `MEASURED`: harmless while the doors were slow; once the layer's doors were all AVX2 and
      *   back to back, one 35B prompt in four drifted — layer 32 at 0.199 against 0.133 — because a DeltaNet
      *   step and a residual sum write in place, and running twice is a wrong answer. Counter first: a late
-     *   worker sees a generation that is not its own and leaves before it reads anything else. */
+     *   worker sees a generation that is not its own and leaves before it reads anything else.
+     * ⛔ "FIRST" IS THE FENCE'S, NOT THE STATEMENTS' ORDER. A release store orders what comes before it, not what comes
+     *   after: x86 shows every core its stores in program order, but the compiler may still move the job's stores above
+     *   the counter's, and Arm's processors may show them first — `arm_base`'s pool, this one's port, ran blocks twice
+     *   and crashed for it (`MEASURED` measurements/2026-11-10_arm_pool_order_gb10.md). The fence keeps the counter
+     *   before the job, and on x86 it is no instruction: a worker that reads the new `blocks` (an acquire load) finds
+     *   the new counter in its claim, which fails. */
     const uint32_t g = __atomic_load_n(&p->generation, __ATOMIC_RELAXED) + 1u;
     __atomic_store_n(&p->next, (uint64_t)g << 32, __ATOMIC_RELEASE);
-    p->fn = fn; p->arg = arg; p->blocks = blocks;
+    __atomic_thread_fence(__ATOMIC_RELEASE);
+    p->fn = fn; p->arg = arg;
+    __atomic_store_n(&p->blocks, blocks, __ATOMIC_RELAXED);
     __atomic_store_n(&p->done, 0u, __ATOMIC_RELAXED);
     sys__os__lock_take(&p->lock);
     __atomic_store_n(&p->generation, g, __ATOMIC_RELEASE);

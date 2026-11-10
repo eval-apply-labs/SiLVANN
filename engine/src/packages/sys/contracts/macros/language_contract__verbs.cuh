@@ -206,7 +206,10 @@
     X(PKG, 55, "sys__scheduler__kill",        sys__opcodes__zzabi_adapter_scheduler_kill,        SYS__SCHEDULER__KILL)         \
     /* a form run never given up at a slice, and whether this computation may be (▶ `cpu/scheduler__header.cuh`)       */ \
     X(PKG, 56, "sys__scheduler__compute_inline", sys__opcodes__zzpackage_apply_compute_inline,  SYS__SCHEDULER__COMPUTE_INLINE) \
-    X(PKG, 57, "sys__scheduler__preemptive",  sys__opcodes__zzabi_adapter_scheduler_preemptive,  SYS__SCHEDULER__PREEMPTIVE)
+    X(PKG, 57, "sys__scheduler__preemptive",  sys__opcodes__zzabi_adapter_scheduler_preemptive,  SYS__SCHEDULER__PREEMPTIVE) \
+    /* a process asked to stop at the token it is on, and whether the running one has been (▶ `cpu/scheduler__header.cuh`) */ \
+    X(PKG, 58, "sys__scheduler__stop",        sys__opcodes__zzabi_adapter_scheduler_stop,        SYS__SCHEDULER__STOP)        \
+    X(PKG, 59, "sys__scheduler__stopped",     sys__opcodes__zzabi_adapter_scheduler_stopped,     SYS__SCHEDULER__STOPPED)
 
 /* ── AND THE OPCODES, NAMED ──────────────────────────────────────────────────────────────────────────
  * ⚖ ARCHITECT: *"the enum addition on the opcodes."* A published verb had a number and no name, so every

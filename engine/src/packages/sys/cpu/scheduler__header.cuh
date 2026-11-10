@@ -132,6 +132,15 @@ static __device__ inline uint64_t sys__scheduler__kill(uint64_t pid);
 static __device__ inline bool     sys__scheduler__zzpackage_killed(uint64_t pid);
 static __device__ inline bool     sys__scheduler__zzengine_killed(sys__heap_node* base);
 
+/* A process for the host, and one asked to stop (NN-160, ▶ "A PROCESS FOR THE HOST" in `scheduler__impl.cuh`): a new
+ * process, from the counter every process is made from; this thread's requests made as process `pid` from here on (0:
+ * each a new one, as before), answering the one they were made as; a process asked to stop at the token it is on —
+ * remembered, its program reading it — and whether the running step's process has been, or killed. */
+static __device__ inline uint64_t sys__scheduler__process_new(void);
+static __device__ inline uint64_t sys__scheduler__process_as(uint64_t pid);
+static __device__ inline bool     sys__scheduler__stop(uint64_t pid);
+static __device__ inline bool     sys__scheduler__stopped(void);
+
 /* The inline sections (▶ "INLINE" in `scheduler__impl.cuh`): one entered and one left, by `compute_inline`; and whether
  * the computation this runner runs may be given up at a slice — not inside one. */
 /* A wait parked (▶ "A WAIT PARKED" in `scheduler__impl.cuh`): whether the computation on `base` may be parked on an

@@ -418,6 +418,18 @@ static void x86_avx2__override_gemv_groups(uint16_t* out, nn__turboquant__groups
     x86_avx2__groups_call c = { out, g, x86_avx2__zzprivate_xf, 0, 0, total, cols, over, x86_avx2__zzprivate_xd };
     x86_avx2__zzpackage_run(x86_avx2__zzprivate_blocks_for(total), x86_avx2__zzprivate_wide ? x86_avx2__zzprivate_groups_512 : x86_avx2__zzprivate_groups, &c);
 }
+
+/* ⭐ THE GROUPS OVER `n` INPUTS (NN-161): each input through the one-input door above — input `k` at `x + k·cols`, its
+ *   answers where nn's `groups_input` puts them — so each answer is the one-input door's bytes, and `n` inputs cost what `n`
+ *   one-input calls do. nn's body went an input at a time over its own one-input body: nn's sums, and a GPU's loops. */
+static void x86_avx2__override_gemv_groups_n(uint16_t* out, nn__turboquant__groups g, const uint16_t* x, uint64_t cols,
+                                             uint64_t n, uint64_t out_stride, unsigned int* over) {
+    for (uint64_t k = 0u; k < n; ++k) {
+        uint16_t* o = out;
+        const nn__turboquant__groups gk = nn__turboquant__groups_input(&g, &o, k, out_stride);
+        x86_avx2__override_gemv_groups(o, gk, x + k * cols, cols, over);
+    }
+}
 static void x86_avx2__override_gemv_groups_sum(uint16_t* out, nn__turboquant__groups g, const uint16_t* x, const uint16_t* w,
                                                const uint16_t* residual, uint64_t rows, uint64_t cols, unsigned int* over) {
     if (!x86_avx2__zzprivate_groups_fit(&g, cols) || !x86_avx2__zzprivate_x_room_for(g.count * cols)) {
@@ -708,13 +720,15 @@ static void x86_avx2__override_swiglu_clamped(uint16_t* act, const uint16_t* gu,
 /* ── THE DELTANET STEP: a head a pool block, eight of its state's columns at a time ──────────────────────── */
 typedef struct x86_avx2__step_call {
     float* S; const uint16_t* conved; const uint16_t* z; const uint16_t* beta; const uint16_t* g; const uint16_t* w;
-    uint16_t* out; uint64_t k_heads, v_heads, d, rows; unsigned int* over;
+    uint16_t* out; uint64_t k_heads, v_heads, d, rows; unsigned int gate; unsigned int* over;
 } x86_avx2__step_call;
-/* One value head's step: its state `Sh`, its `q`, `k`, `v` and `zh`, its gate and decay. ⛳ Shared by the one-position
- * door and the many-row one, so a position decoded and the same position read as a prompt row are the same bytes. */
+/* One value head's step: its state `Sh`, its `q`, `k`, `v` and `zh`, its gate and decay, its readout gated by silu(z) or
+ * σ(z) as `gate` says (`NN__DELTANET__GATE_*`, nn's). ⛳ Shared by the one-position door, the many-row one and the one
+ * with its gate named, so a position decoded and the same position read as a prompt row are the same bytes, and the
+ * gate's door with silu(z) the plain door's. */
 static inline void x86_avx2__zzprivate_step_head(float* Sh, const uint16_t* q, const uint16_t* k, const uint16_t* v, const uint16_t* zh,
                                                  uint16_t beta_h, uint16_t g_h, const uint16_t* w, uint16_t* oh, uint64_t d,
-                                                 unsigned int* over) {
+                                                 unsigned int gate, unsigned int* over) {
     float qf[256], kf[256];
     float qq = 0.0f, kk = 0.0f;
     for (uint64_t i = 0u; i < d; ++i) { qf[i] = _cvtsh_ss(q[i]); kf[i] = _cvtsh_ss(k[i]); qq += qf[i] * qf[i]; kk += kf[i] * kf[i]; }
@@ -746,7 +760,8 @@ static inline void x86_avx2__zzprivate_step_head(float* Sh, const uint16_t* q, c
     for (uint64_t j = 0u; j < d; ++j) {
         const float zr = _cvtsh_ss(zh[j]);
         const float zc = zr < -88.0f ? -88.0f : (zr > 88.0f ? 88.0f : zr);
-        oh[j] = nn__kernels__zzabi_to_half(_cvtsh_ss(oh[j]) * scale * _cvtsh_ss(w[j]) * (zc / (1.0f + expf(-zc))), over);
+        const float gz = gate == NN__DELTANET__GATE_SIGMOID ? 1.0f / (1.0f + expf(-zc)) : zc / (1.0f + expf(-zc));
+        oh[j] = nn__kernels__zzabi_to_half(_cvtsh_ss(oh[j]) * scale * _cvtsh_ss(w[j]) * gz, over);
     }
 }
 /* Head `block` through each of the call's rows in order, its state carried from one to the next in place: row `t` reads
@@ -759,7 +774,7 @@ static void x86_avx2__zzprivate_steps(void* a) {
         const uint16_t* r = c->conved + t * ch;
         x86_avx2__zzprivate_step_head(c->S + h * d * d, r + (h / rep) * d, r + c->k_heads * d + (h / rep) * d, r + 2ull * c->k_heads * d + h * d,
                                       c->z + t * vd + h * d, c->beta[t * c->v_heads + h], c->g[t * c->v_heads + h], c->w,
-                                      c->out + t * vd + h * d, d, c->over);
+                                      c->out + t * vd + h * d, d, c->gate, c->over);
     }
 }
 static inline bool x86_avx2__zzprivate_step_fit(uint64_t k_heads, uint64_t v_heads, uint64_t head_dim) {
@@ -771,7 +786,7 @@ static void x86_avx2__override_deltanet_step(float* S, const uint16_t* conved, c
     if (!x86_avx2__zzprivate_step_fit(k_heads, v_heads, head_dim)) {
         nn__deltanet__zzabi_launch_step(S, conved, z, beta, g, w, out, k_heads, v_heads, head_dim, over); return;
     }
-    x86_avx2__step_call c = { S, conved, z, beta, g, w, out, k_heads, v_heads, head_dim, 1u, over };
+    x86_avx2__step_call c = { S, conved, z, beta, g, w, out, k_heads, v_heads, head_dim, 1u, NN__DELTANET__GATE_SILU, over };
     x86_avx2__zzpackage_run((uint32_t)v_heads, x86_avx2__zzprivate_steps, &c);
 }
 /* ⭐ The prompt's rows: the step's own arithmetic a row at a time, so the two doors agree byte for byte. */
@@ -781,8 +796,65 @@ static void x86_avx2__override_deltanet_steps(float* S, const uint16_t* conved, 
     if (!x86_avx2__zzprivate_step_fit(k_heads, v_heads, head_dim)) {
         nn__deltanet__zzabi_launch_steps(S, conved, z, beta, g, w, out, k_heads, v_heads, head_dim, rows, over); return;
     }
-    x86_avx2__step_call c = { S, conved, z, beta, g, w, out, k_heads, v_heads, head_dim, rows, over };
+    x86_avx2__step_call c = { S, conved, z, beta, g, w, out, k_heads, v_heads, head_dim, rows, NN__DELTANET__GATE_SILU, over };
     x86_avx2__zzpackage_run((uint32_t)v_heads, x86_avx2__zzprivate_steps, &c);
+}
+/* ⭐ The same rows with the readout's gate named (Flash-Next's σ(z)): the one body, so silu(z) here is the plain door's
+ * bytes. */
+static void x86_avx2__override_deltanet_steps_gate(float* S, const uint16_t* conved, const uint16_t* z, const uint16_t* beta,
+                                                   const uint16_t* g, const uint16_t* w, uint16_t* out, uint64_t k_heads,
+                                                   uint64_t v_heads, uint64_t head_dim, uint64_t rows, unsigned int gate,
+                                                   unsigned int* over) {
+    if (!x86_avx2__zzprivate_step_fit(k_heads, v_heads, head_dim)
+        || (gate != NN__DELTANET__GATE_SILU && gate != NN__DELTANET__GATE_SIGMOID)) {
+        nn__deltanet__zzabi_launch_steps_gate(S, conved, z, beta, g, w, out, k_heads, v_heads, head_dim, rows, gate, over); return;
+    }
+    x86_avx2__step_call c = { S, conved, z, beta, g, w, out, k_heads, v_heads, head_dim, rows, gate, over };
+    x86_avx2__zzpackage_run((uint32_t)v_heads, x86_avx2__zzprivate_steps, &c);
+}
+
+/* ── THE MAP'S LOGITS OVER STREAMS OF FLOATS (DeepSeek's `hyper_logits_fp32`): a row a pool block, its sums in double ──
+ * A row's logit is `Σ fn·s / rms(s)` over every stream's every element — 20,480 at DeepSeek-V4.1's shape — and a stream
+ * may be as large as a sink token's (300,000 and more). nn's body on this family's one lane adds them in turn in a float:
+ * 4.7e-05 of the largest from the sums in double (`MEASURED` node03 2026-11-08, test/src_gemv_27b_bench.cpp, nn's host
+ * body's line). Here a row's two sums, the squares and the dot, are doubles — a half's float and a stream's float
+ * multiply exactly in one — over four lanes and two sums each, folded in one order, and the logit rounded to a float
+ * once. The squares are each row's own, the same sum in every row. */
+typedef struct x86_avx2__hyper_logits_call {
+    float* lg; const float* streams; const uint16_t* fn; uint64_t n; double eps;
+} x86_avx2__hyper_logits_call;
+static void x86_avx2__zzprivate_hyper_logits_fp32(void* a) {
+    const x86_avx2__hyper_logits_call* c = (const x86_avx2__hyper_logits_call*)a;
+    const uint64_t r = nn__silicon__block(), n = c->n;
+    const float* s = c->streams;
+    const uint16_t* f = c->fn + r * n;
+    __m256d q0 = _mm256_setzero_pd(), q1 = _mm256_setzero_pd(), d0 = _mm256_setzero_pd(), d1 = _mm256_setzero_pd();
+    uint64_t i = 0u;
+    for (; i + 8u <= n; i += 8u) {
+        const __m256 sv = _mm256_loadu_ps(s + i), fv = _mm256_cvtph_ps(_mm_loadu_si128((const __m128i*)(f + i)));
+        const __m256d slo = _mm256_cvtps_pd(_mm256_castps256_ps128(sv)), shi = _mm256_cvtps_pd(_mm256_extractf128_ps(sv, 1));
+        const __m256d flo = _mm256_cvtps_pd(_mm256_castps256_ps128(fv)), fhi = _mm256_cvtps_pd(_mm256_extractf128_ps(fv, 1));
+        q0 = _mm256_fmadd_pd(slo, slo, q0); q1 = _mm256_fmadd_pd(shi, shi, q1);
+        d0 = _mm256_fmadd_pd(flo, slo, d0); d1 = _mm256_fmadd_pd(fhi, shi, d1);
+    }
+    double qs[4], ds[4];
+    _mm256_storeu_pd(qs, _mm256_add_pd(q0, q1)); _mm256_storeu_pd(ds, _mm256_add_pd(d0, d1));
+    double sq = (qs[0] + qs[1]) + (qs[2] + qs[3]), dot = (ds[0] + ds[1]) + (ds[2] + ds[3]);
+    for (; i < n; ++i) {
+        const double v = s[i];
+        sq += v * v;
+        dot += (double)_cvtsh_ss(f[i]) * v;
+    }
+    c->lg[r] = (float)(dot / sqrt(sq / (double)n + c->eps));
+}
+static void x86_avx2__override_hyper_logits_fp32(float* lg, const float* streams, const uint16_t* fn, uint64_t hidden, uint64_t mult,
+                                                 float norm_eps) {
+    const uint64_t rows = NN__HYPER__MIX(mult);
+    if (hidden == 0u || mult == 0u || mult > NN__HYPER__MULT_MAX) {
+        nn__hyper__zzabi_launch_logits_fp32(lg, streams, fn, hidden, mult, norm_eps); return;
+    }
+    x86_avx2__hyper_logits_call c = { lg, streams, fn, mult * hidden, (double)norm_eps };
+    x86_avx2__zzpackage_run((uint32_t)rows, x86_avx2__zzprivate_hyper_logits_fp32, &c);
 }
 
 /* ── THE DELTANET'S CONV: a pool block a run of channels, the positions in turn ─────────────────────────────────────────
@@ -2233,6 +2305,7 @@ static inline void x86_avx2__override_doors(nn__doors* doors) {
     doors->turboquant_gemv      = x86_avx2__override_turboquant_gemv;
     doors->turboquant_gemv_int8 = x86_avx2__override_turboquant_gemv_int8;
     doors->turboquant_gemv_groups     = x86_avx2__override_gemv_groups;
+    doors->turboquant_gemv_groups_n   = x86_avx2__override_gemv_groups_n;
     doors->turboquant_gemv_groups_sum = x86_avx2__override_gemv_groups_sum;
     doors->turboquant_gemv_groups_int8     = x86_avx2__override_gemv_groups_int8;
     doors->turboquant_gemv_groups_sum_int8 = x86_avx2__override_gemv_groups_sum_int8;
@@ -2244,8 +2317,10 @@ static inline void x86_avx2__override_doors(nn__doors* doors) {
     doors->hadamard_blocks      = x86_avx2__override_hadamard_blocks;
     doors->deltanet_step        = x86_avx2__override_deltanet_step;
     doors->deltanet_steps       = x86_avx2__override_deltanet_steps;
+    doors->deltanet_steps_gate  = x86_avx2__override_deltanet_steps_gate;
     doors->deltanet_conv_step   = x86_avx2__override_deltanet_conv_step;
     doors->deltanet_conv_steps  = x86_avx2__override_deltanet_conv_steps;
+    doors->hyper_logits_fp32    = x86_avx2__override_hyper_logits_fp32;
     doors->expert_rows          = x86_avx2__override_expert_rows;
     doors->expert_rows_sum      = x86_avx2__override_expert_rows_sum;
     doors->expert_groups        = x86_avx2__override_expert_groups;

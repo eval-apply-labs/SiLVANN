@@ -33,7 +33,11 @@ slice gives up and a kill still ends. A verb never waits on another computation:
 waiting — `sys__result` in a `while`, or a step continued on the answer.
 Every request carries the process it is of, inherited by what it asks: `(sys__scheduler__pid)` says which, and
 `(sys__scheduler__kill pid)` takes its queued work off every worker's queue, their answers an error (`SCKL`), and ends
-its steps still running at their next move, or slice; what it did is not undone.
+its steps still running at their next move, or slice; what it did is not undone. `(sys__scheduler__stop pid)` is the milder level: the process
+is asked to end at the token it is on, which its program reads once a token with `(sys__scheduler__stopped)` — `generate`
+does. The host has the same two (`Machine.new_process`, `as_process`, `kill`, `stop`): each conversation's turn is a
+process, the server's `/cartridges/<id>/stop` asks it to stop, and `/cartridges/<id>/kill` kills it, its answer so far
+kept and its conversation read again from its tokens at its next message.
 
 Every package has a README; read `engine/src/README.md` first, then `sys`'s and `nn`'s.
 
@@ -162,7 +166,9 @@ program.
 `engine/src/silicon_families/add_a_family.md`. A family answers a small contract: memory and copies, a launch, and a
 handful of arithmetic primitives (the lanes' sums, a half to a float, the tile it likes its GEMM in). The library's
 kernels are written once against those answers; a family may also override a door with its own code, as
-`amd_rocm6_wave64`, `nvidia_cuda12`, `khronos_opencl2` and `x86_avx2` do for the hottest ones — `nvidia_cuda12` runs
+the AMD families (`amd_rocm6_wave64` for the MI50 on ROCm 6, `amd_rocm10` from the MI100 on with ROCm 7 and later, and
+for the Radeons of RDNA4 in wave64, one source), `nvidia_cuda12`, `khronos_opencl2` and `x86_avx2` do for the hottest ones — `amd_rocm10` the prompt's GEMM
+tiles on the matrix cores (`v_mfma`), `nvidia_cuda12`
 the GEMMs, the gemvs and the attention's scores on the tensor cores (`mma.sync`), and `x86_avx2` its matrix products
 with AVX-512 where the processor has it, and its int8 products with VNNI where it has that too, chosen when the
 library loads (`SILVANN_CPU_AVX512=0` keeps AVX2, `SILVANN_CPU_VNNI=0` AVX-512's int8). Where nn
@@ -177,17 +183,21 @@ logit of each other. What holds to the bit is one configuration against itself: 
 same logits in every run (`test/src_runtime_repeat.py`). With a card's tier of experts the requests since boot are part of
 the configuration: the tier warms as it is used, and an expert computed on the card rounds otherwise than on the CPU, so
 the same requests in the same order from boot give the same logits, and one request alone after others may not.
-`khronos_opencl2`
-runs on the MI50 through ROCm's OpenCL (nn's verbs, the 27B and the 35B against HF); `nvidia_cuda12` on an RTX 5060 Ti
-(nn's verbs, every pack but GLM's against HF); `khronos_opencl1_igpu`, for integrated GPUs whose OpenCL is 1.2, on the
-same card through NVIDIA's OpenCL (nn's verbs, the 27B against HF): its build writes nn's kernels as OpenCL C 1.2 with
-every pointer's address space worked out (`engine/scripts/opencl1_kernel_source.py`), and its folder's README says what
-it is for and how a device is added. Both OpenCL families are built by every Linux install, with nothing installed for them: the headers are
+The OpenCL families are two sources, each built as two families, as the AMD ones are: `khronos_opencl2_base` as
+`khronos_opencl2` (any GPU whose OpenCL is 2.0) and `intel_opencl2` (Intel's from Gen9), and `khronos_opencl1_base` as
+`nvidia_opencl1` (an NVIDIA card CUDA does not take) and `intel_opencl1_igpu` (Intel's integrated GPUs before Gen9).
+`khronos_opencl2` runs on the MI50 through ROCm's OpenCL (nn's verbs, the 27B and the 35B against HF); `nvidia_cuda12` on
+an RTX 5060 Ti (nn's verbs, every pack but GLM's against HF); `nvidia_opencl1` on the same card through NVIDIA's OpenCL
+(nn's verbs, the 27B against HF) and on a GTX 1080 Ti (nn's verbs, the 35B against HF): the 1.2 build writes nn's kernels
+as OpenCL C 1.2 with every pointer's address space worked out (`engine/scripts/opencl1_kernel_source.py`), and
+`khronos_opencl1_base`'s README says what each 1.2 family is for and how a device is added. `intel_opencl2` and
+`intel_opencl1_igpu` have not run on a card. The OpenCL families are built by every Linux install, with nothing installed for them: the headers are
 Khronos' own, carried in `engine/scripts/third_party/OpenCL-Headers`, and they link against a stub of the OpenCL loader
 made from `cl.h` (`libOpenCL.so.1`, the name every loader carries), so the machine's own loader is the one that runs. They
-take a card only when no other family does — an NVIDIA card below compute capability 7.5 (a GTX 10x0) goes to
-`khronos_opencl1_igpu`, an AMD card without ROCm's HIP to `khronos_opencl2` — and where there is no loader they do not
-load and the others run.
+take a card only when no other family does — an NVIDIA card below compute capability 7.5 (a GTX 10x0), or a Turing card
+without tensor cores (a GTX 16xx, whose CUDA kernels lose their tensor cores' speed), goes to `nvidia_opencl1`, an Intel GPU to `intel_opencl2` or `intel_opencl1_igpu`, an AMD card no AMD family lists, or
+without ROCm's HIP, to
+`khronos_opencl2` — and where there is no loader they do not load and the others run. One OpenCL family runs in a process.
 
 ## When a card faults
 

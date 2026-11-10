@@ -35,7 +35,7 @@
  *
  * ── THE ROW ──────────────────────────────────────────────────────────────────────────────────────────
  * Every package's door list has this shape: `X(PKG, RETURN, NAME, FUNCTION, (PARAMETERS))`. The FUNCTION
- * is what the family defines for the door. `sys`'s are each family's own, `<family>__<name>` — `amd_rocm6_wave64__memory_allocate` —
+ * is what the family defines for the door. `sys`'s are each family's own, `<family>__<name>` — `amd_rocm_base__memory_allocate` —
  * named here through `SYS__SILICON_FAMILY__OF_THIS`, which resolves in the translation unit that builds a
  * family — it defines `SYS__SILICON_FAMILY__THIS` first. */
 #define SYS__SILICON_FAMILY__ZZPRIVATE_NAME2(FAMILY, WHAT)  FAMILY##__##WHAT

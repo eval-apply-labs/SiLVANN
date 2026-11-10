@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
-# SiLVANN's image for AMD's cards: the release installed by install.sh with the families for the AMD architecture
-# `AMD_ARCH` names (gfx906 — an MI50 or MI60 — by default) and for the CPU (x86_avx2), built with ROCm's compiler and
+# SiLVANN's image for the MI50 and MI60: the release installed by install.sh with the families for the AMD architecture
+# `AMD_ARCH` names (gfx906, the one amd_rocm6_wave64 builds) and for the CPU (x86_avx2), built with ROCm 6's compiler and
 # copied onto a plain Ubuntu 22.04 that holds ROCm's HIP runtime and no compiler. The models and the conversations
 # live in a folder of yours at /data; the UI is the app, on port 8080.
 #
@@ -8,7 +8,7 @@
 #   podman build -f docker/Dockerfile.amd -t silvann:amd .                           GitHub's default branch
 #   podman build -f docker/Dockerfile.amd --build-arg SILVANN_SOURCE=<a repository> --build-arg SILVANN_REF=<branch> \
 #                -t silvann:amd .                                                    another repository or branch
-#   podman build -f docker/Dockerfile.amd --build-arg AMD_ARCH=gfx90a -t silvann:amd-gfx90a .   another architecture
+#   ⛳ the MI100 on (gfx908 … gfx950) are amd_rocm10's, built with ROCm 7 or later: an image of their own, not this one
 #
 # The release comes from a repository's URL, as install.sh fetches it — no mount of the build's own, which Ubuntu 22.04's
 # Podman (3.4, buildah 1.23) does not take: a checkout with changes of its own goes in by a repository it is pushed to.

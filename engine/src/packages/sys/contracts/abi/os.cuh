@@ -125,9 +125,13 @@ static inline long sys__os__cpu_l2_bytes(void);
 
 /* ── the cards the system names ──────────────────────────────────────────────────────────────────────────────────
  *   `cards` writes each GPU's name the system itself can give, as the families include cards, `name_bytes` a name, up
- *   to `most`, and answers how many: Linux's from the AMD kernel driver's topology (`gfx906`); Windows' from OpenCL's
- *   loader, every GPU but NVIDIA's (which its own driver names) by its OpenCL device name — an AMD card's is its `gfx`.
+ *   to `most`, and answers how many: Linux's from the AMD kernel driver's topology (`gfx906`), or inside WSL2, which has
+ *   none, AMD's GPUs by OpenCL's loader; Windows' from OpenCL's loader, every GPU but NVIDIA's (which its own driver
+ *   names) by its OpenCL device name — an AMD card's is its `gfx`.
  *   In the order the system lists them, the same on every call. */
 static inline uint32_t sys__os__cards(char* names, uint32_t name_bytes, uint32_t most);
+/*   `intel_gpus` the same for Intel's GPUs where `cards` does not name them — Linux's, by OpenCL's loader, asked only where
+ *   the system shows a display device of Intel's — and none where it does (Windows'). */
+static inline uint32_t sys__os__intel_gpus(char* names, uint32_t name_bytes, uint32_t most);
 
 #endif /* SILVANN__PACKAGES_SYS_CONTRACTS_ABI_OS_CUH */

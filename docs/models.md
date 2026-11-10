@@ -15,6 +15,7 @@ columns [`results.md`](results.md)'s are in, its card linking that kind of machi
 | Qwen 3.8 27B (dense) | `D4` | 15 GB — 4 bits | [eval-apply/silvann_tq_D4_qwen3.8_27b](https://huggingface.co/eval-apply/silvann_tq_D4_qwen3.8_27b) |
 | Qwen 3.6 35B-A3B (mixture of experts, 3B active) | `D8E4` | 19 GB — experts 4 bits, the rest 8 | [eval-apply/silvann_tq_D8E4_qwen3.6_35b_a3b](https://huggingface.co/eval-apply/silvann_tq_D8E4_qwen3.6_35b_a3b) |
 | Qwen 3.5 122B-A10B (mixture of experts, 10B active) | `D8E4`, for 12 GB cards | 67 GB — experts 4 bits, the rest 8 | [eval-apply/silvann_tq_D8E4_qwen3.5_122b_a10b](https://huggingface.co/eval-apply/silvann_tq_D8E4_qwen3.5_122b_a10b) |
+| Qwen 3.8 Flash-Next (512 experts, 10 active; an n-gram memory) | `D8E4` | 111 GB — experts 4 bits, the rest 8; 48 GB of it the n-gram memory's table, read from the disk | [eval-apply/silvann_tq_D8E4_qwen3.8_flash_next](https://huggingface.co/eval-apply/silvann_tq_D8E4_qwen3.8_flash_next) |
 | GLM 5.3 Flash | `D8E4` | 166 GB — experts 4 bits, the rest 8 | [eval-apply/silvann_tq_D8E4_glm_5.3_flash](https://huggingface.co/eval-apply/silvann_tq_D8E4_glm_5.3_flash) |
 | DeepSeek-V4.1-Flash-1017 (384 experts, 6 active; text and pictures) | `D8E4` | 492 GB — experts 4 bits, the rest 8; 203 GB of it the n-gram memory's tables, read from the disk | [eval-apply/silvann_tq_D8E4_deepseek_v4.1_flash_1017](https://huggingface.co/eval-apply/silvann_tq_D8E4_deepseek_v4.1_flash_1017) |
 | Qwen-Image 2.1 (pictures from a prompt: a 7B diffusion transformer, Qwen3-VL 8B's text model as its encoder) | `D8` | 18 GB — the transformer and the encoder 8 bits, the picture decoder 16 | [eval-apply/silvann_tq_D8_qwen_image_2.1](https://huggingface.co/eval-apply/silvann_tq_D8_qwen_image_2.1) |
@@ -31,7 +32,10 @@ is in [`results.md`](results.md#how-good-each-pack-is-perplexity). `python3 silv
 and `download-model NAME` fetches one into `models/`.
 
 Each model keeps its own licence, which is in its folder once downloaded: Qwen's and Mistral's Apache-2.0, GLM's and
-DeepSeek's MIT.
+DeepSeek's MIT — but Qwen 3.8 Flash-Next's, the Qwen Community License 1.0.
+⚠ Qwen 3.8 Flash-Next's licence asks for a separate licence from Qwen before a Model-as-a-Service or AI work-assistant
+business uses it commercially (its own internal use excepted), and for its name to be shown in a product past
+100,000,000 monthly users or US$20,000,000 monthly revenue: read its `LICENSE` before serving it to others.
 ⚠ Qwen-Image 2.1's is the Qwen Research License Agreement: research and other non-commercial use only. A picture model
 runs as a server's model of its own: [`users.md`](users.md#a-picture-model-qwen-image-21).
 
@@ -187,6 +191,38 @@ server's own memory beside them and the spare miss what the system has free by u
 tokens a second after a prompt, 9.7 in the chat; from RAM 15.9 and 17.5). From the disk its cache keeps 83-86% of a
 token's experts with 28-32 GB, 72% with 16 GB (249-492 MB read a token). Holding the disk to 5 GB/s did not change its
 answer; to 2.5 GB/s it slowed its prompt by 25%. Through OpenCL 2.0 a card allocates at most 85% of itself at once.
+
+## Qwen 3.8 Flash-Next
+
+<!-- rates:model Qwen 3.8 Flash-Next -->
+| GPU | RAM | CPU | Disk | Setup | Prefill | Decode | Max context | Version |
+|---|---|---|---|---|---|---|---|---|
+| [16 GB · RTX 5060 Ti](results.md#a-16-gb-card) | 32 GB | Xeon W-2123 (4 cores) | NVMe array, 5.7 GB/s | `D8E4` · the experts from the disk (`auto`) | 29.2-29.4 positions/s | 10.61-10.64 tokens/s after 2k | — | v0.26.0 |
+| [16 GB · RTX 5060 Ti](results.md#a-16-gb-card) | 32 GB | Xeon W-2123 (4 cores) | NVMe array, 5.7 GB/s | `D8E4` · the experts from the disk, a 9.5 GB tier | 28.6 positions/s | 12.66-12.73 tokens/s after 2k | — | v0.26.0 |
+| [16 GB · RTX 5060 Ti](results.md#a-16-gb-card) | 62 GB | Xeon W-2123 (4 cores) | — | `D8E4` · the experts in RAM, a 9.5 GB tier (`auto`) | 83.8 positions/s | 18.22-18.25 tokens/s after 2k | — | v0.26.0 |
+| [16 GB · MI50](results.md#a-16-gb-card) | 32 GB | 2× Xeon E5-2680 v4 (28 cores) | NVMe array | `D8E4` · the experts from the disk (`auto`) | 37.3-38.0 positions/s | 11.82-11.84 tokens/s after 2k | — | v0.26.0 |
+| [16 GB · MI50](results.md#a-16-gb-card) | 62 GB | 2× Xeon E5-2680 v4 (28 cores) | — | `D8E4` · the experts in RAM, a 10 GB tier (`auto`) | 81.0-82.2 positions/s | 21.37-21.55 tokens/s after 2k | — | v0.26.0 |
+<!-- /rates -->
+
+The lineup's middle model — a 16 GB card, 32 GB of RAM and a fast NVMe drive. A mixture of 512 experts, 10 of them a
+token's, over 48 layers (36 linear attention, 12 full attention), with an n-gram memory as DeepSeek's: its table (48 GB)
+stays on the disk and is read a row at a time as each token asks for it, so the pack belongs on an NVMe drive — a fast
+drive, not more RAM, is what the table wants. Its routed experts (57 GB) run on the CPU: in RAM where they fit beside the
+server, otherwise read from the disk into a cache in RAM, the ones used most kept. Past about 2,048 positions its attention
+reads the positions an indexer chooses, so a conversation reaches the model's own length, 262,144 positions.
+
+On the same home machine as the 122B — a 16 GB card, 32 GB of RAM, the experts from the disk — it answers 1.30× as fast
+(10.6 tokens a second against 8.1) and reads a prompt 1.45× as fast; with 62 GB, the experts in RAM, 1.10× (18.2 against
+16.6) (`measurements/2026-11-08_middle_row_tier_from_disk_precision.md`). A tier on the card fed from the disk's cache
+takes it to 12.7 tokens a second at 32 GB; the server does not choose that setup on its own yet, so a config names it:
+
+```json
+{"options": {"experts_from": "disk", "card_experts_gb": 9.5}}
+```
+
+On the precision's 16 GB card a 9.5 GB tier boots beside a 2,384-position context and 10 GB does not. With `multi_user` "yes" it answers a
+conversation on each card, each card a tier of its own — 2.02× one conversation's tokens a second on two 16 GB cards
+([`results.md`](results.md#several-conversations-at-once)) — or two on one card, with no tier.
 
 ## GLM 5.3 Flash
 

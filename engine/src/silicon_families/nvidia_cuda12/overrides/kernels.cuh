@@ -53,6 +53,42 @@ static __device__ __forceinline__ void nvidia_cuda12__zzpackage_mma(float* c, ui
 #endif
 }
 
+/* ⭐ THE 4-BIT LEVELS IN REGISTERS (NN-168) — nn's sixteen levels (`nn__turboquant__zzabi_levels(4)`) as two tables of
+ *   bytes, four registers each: `tl` their low bytes, `th` their high bytes, level `4w + b` at byte `b` of word `w`. A word's
+ *   eight 4-bit codes become four A registers by byte permutes alone — no table in shared memory, no load to wait for.
+ *   `__byte_perm` reads a selector nibble's low three bits, so a code `k` picks byte `k & 7` from levels 0-7 and from
+ *   levels 8-15 alike, and a third permute takes the one its top bit names (llama.cpp's 16-entry table, a byte table a
+ *   half). Pair `i` is the levels of codes `2i` and `2i + 1`, the lower code's in the low half: the register the
+ *   pair table gave for byte `i`. The levels are nn's, bit for bit. `MEASURED` the door bench on a B200 (sm_100,
+ *   measurements/2026-11-08_nn168_levels_in_registers_b200.md): where every lane looked a byte up in a 256-entry table
+ *   in shared memory, the 27B's MLP gate and up at 4 bits moved 1.15 TB/s; with the codes used raw (no lookup, wrong
+ *   answers) 2.15; the table copied once a bank (no conflict) 0.96-1.20; looked up in registers 1.41. */
+static __device__ __forceinline__ void nvidia_cuda12__zzpackage_levels4(uint32_t tl[4], uint32_t th[4]) {
+    const uint16_t* lev4 = nn__turboquant__zzabi_levels(4u);
+#pragma unroll
+    for (uint32_t w = 0u; w < 4u; ++w) {
+        tl[w] = th[w] = 0u;
+#pragma unroll
+        for (uint32_t b = 0u; b < 4u; ++b) {
+            tl[w] |= (uint32_t)(lev4[4u * w + b] & 0xFFu) << (8u * b);
+            th[w] |= (uint32_t)(lev4[4u * w + b] >> 8) << (8u * b);
+        }
+    }
+}
+static __device__ __forceinline__ void nvidia_cuda12__zzpackage_levels4_pairs(uint32_t q, const uint32_t tl[4], const uint32_t th[4],
+                                                                              uint32_t h[4]) {
+    const uint32_t upper = 0x32103210u | ((q & 0x88888888u) >> 1);  /* a code's byte from the upper eight where its top bit is set */
+    uint32_t lo[2], hi[2];
+#pragma unroll
+    for (uint32_t i = 0u; i < 2u; ++i) {
+        const uint32_t sh = 16u * i;
+        lo[i] = __byte_perm(__byte_perm(tl[0], tl[1], q >> sh), __byte_perm(tl[2], tl[3], q >> sh), upper >> sh);
+        hi[i] = __byte_perm(__byte_perm(th[0], th[1], q >> sh), __byte_perm(th[2], th[3], q >> sh), upper >> sh);
+    }
+    h[0] = __byte_perm(lo[0], hi[0], 0x5140u); h[1] = __byte_perm(lo[0], hi[0], 0x7362u);
+    h[2] = __byte_perm(lo[1], hi[1], 0x5140u); h[3] = __byte_perm(lo[1], hi[1], 0x7362u);
+}
+
 /* ⭐ SIXTEEN BYTES INTO SHARED MEMORY WITHOUT A REGISTER — `cp.async`, Ampere's (`sm_80`) and on: the copy is issued and
  *   the lane goes on; `copies_issued` closes the lane's copies so far into a group, and `copies_landed` waits until at
  *   most `pending` groups (0 or 1) are still on their way. `valid` false writes sixteen zero bytes and reads nothing.

@@ -54,7 +54,9 @@ def with_cards(path, num_cards, options, multi_user=None):
     conversation per card"*: on ONE card "yes" seats two conversations there (`seats` 2, the card on one's dense part
     while the CPU computes the other's experts), with no tier — two seats share the card and the tier is one seat's — the
     limit case, worth it as far as the card's dense part takes as long as the CPU's experts; a family that seats none
-    keeps one, its tier inclusive. More cards refused for a family that runs on one or seats none, or where `options`
+    keeps one, its tier inclusive. Over several cards, a conversation a card: each card keeps a tier of its own for its
+    conversation where the family builds one (`TIER_A_CARD`, ⚖ 2026-11-02 *"one conversation per card cleanly, jack up the
+    l1 cache"*) — the config's `card_experts_gb`, or the autotune's — and none where it does not yet. More cards refused for a family that runs on one or seats none, or where `options`
     already names another number. `options`' own `tensor_parallel` is still read where `num_cards` is left out (the configs written before
     it). `num_cards` and `multi_user` are the config's own keys, beside `options`: inside them refused, with where they
     go."""
@@ -100,11 +102,12 @@ def with_cards(path, num_cards, options, multi_user=None):
             if "experts_on" in takes:                   # a seat's experts the CPU's, the card on the other's dense part
                 options["experts_on"] = "cpu"
             return options
-        apart = bool(getattr(arch, "CONVERSATION_A_CARD", False)) and _routed(path)   # a card each, no tier yet
+        apart = bool(getattr(arch, "CONVERSATION_A_CARD", False)) and _routed(path)   # a card each
+        tiered = apart and bool(getattr(arch, "TIER_A_CARD", False))                 # ...and a tier on each (NN-166)
         if not (seats or apart):
             raise Refused("%s holds one conversation over its cards: num_cards 1 with multi_user \"yes\", or multi_user "
                           "\"no\" to split it over %d" % (name, n))
-        if apart and float(options.get("card_experts_gb") or 0):
+        if apart and not tiered and float(options.get("card_experts_gb") or 0):
             raise Refused("a conversation a card takes no tier of experts on its card yet: no card_experts_gb with "
                           "multi_user \"yes\" over %d cards" % n)
         # the option a conversation a card is: `cards`, or the family's own where `cards` is its group's (DeepSeek's)
@@ -112,8 +115,9 @@ def with_cards(path, num_cards, options, multi_user=None):
         if key in options and list(options[key]) != list(range(n)):
             raise Refused("num_cards %d and options.%s %s say two things: num_cards alone" % (n, key, options[key]))
         options["experts_from"], options[key] = "ram", list(range(n))
-        if apart:                                       # the experts the CPU's, the cards' tiers none (▶ qwen3_5.py)
-            options["card_experts_gb"] = 0
+        if apart:                                       # the experts the CPU's, each card's tier its own or none
+            if not tiered:
+                options["card_experts_gb"] = 0
             if "experts_on" in takes:
                 options["experts_on"] = "cpu"
         return options
@@ -170,7 +174,7 @@ def programs_key(folder, architecture, max_context, options, silicon):
     """What a model's programs are composed from, as one digest: the pack, the settings, the silicon family, the model's
     Lisp files, and the source of the code that binds what they read — this package and the bundle loader whose type ids
     and plane offsets they carry. ⛳ The silicon is in it since a composer reads it: `embed_on` "auto" puts the embedding
-    on a CPU worker through khronos_opencl1_igpu alone, and a dense model's programs then hand it work — `MEASURED`
+    on a CPU worker through the OpenCL 1.2 families alone, and a dense model's programs then hand it work — `MEASURED`
     2026-10-26, a CPU-alone boot of the 27B read a file an OpenCL 1.2 boot had written and refused at its worker 1."""
     from .model_folder import NL
     h = hashlib.sha256()

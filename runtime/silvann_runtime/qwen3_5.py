@@ -31,7 +31,7 @@ from . import experts_file, expert_tier, sampling
 from .autotune import card_memory
 from .vision import video_ram
 from .generate import GENERATE_MOST, STOPS_MOST, Generates
-from .machine import EngineError
+from .machine import CPU_FAMILIES, EngineError, OPENCL1_FAMILIES
 from .model_folder import NL, Refused
 
 GU, DN = NL.GATE_UP, NL.DOWN
@@ -49,7 +49,7 @@ class Qwen35(Generates):
 
     def __init__(self, folder, machine, max_context=4096, fused_moe=True, kv="tiered", tiers=None, experts_on="card",
                  experts_from="auto", experts_dir=None, layers=None, chunk=256, experts_ram_gb=None, card_experts_gb=0,
-                 card_landing="auto", card_line=None, card_shared="auto", experts_int8=False, experts_lock=False, experts_register="auto", picture_pixels=1 << 22,
+                 card_landing="auto", card_line=None, card_shared="auto", experts_int8=False, experts_lock=False, experts_register="auto", igpu_cpu=None, picture_pixels=1 << 22,
                  picture_weights="auto", tensor_parallel=1, lend_cache=True, mtp="no", mtp_rows=False, mtp_pairs=True,
                  stream=False, embed_on="auto", experts_ahead="auto", seats=1, cards=None):
         if folder.architecture not in ARCHITECTURES:
@@ -229,7 +229,7 @@ class Qwen35(Generates):
         # ⭐ THE EMBEDDING ON THE CPU — ⚖ 2026-10-26 *"why cant we let the embedding be processed by the cpu?"* · *"it does
         #   save a lot of vram that can instead be used for the context"*: a token needs one row of the table, which the CPU
         #   worker decodes from its own RAM and the card copies across (HIDDEN halves), so the table never reaches the card.
-        #   Where the card's family keeps mapped RAM as a copy on the card — khronos_opencl1_igpu — the card's reading its row
+        #   Where the card's family keeps mapped RAM as a copy on the card — an OpenCL 1.2 family's — the card's reading its row
         #   in place costs the table's room there and its crossing whole each token (`MEASURED` 196 ms up and 191 back for
         #   1.3 GB on the precision's RTX 5060 Ti, measurements/2026-10-26_nn96_embedding_cpu_precision.md); elsewhere the
         #   card reads the row from RAM where it lies. `"auto"`: the CPU there, where the experts already have the worker.
@@ -237,7 +237,7 @@ class Qwen35(Generates):
             raise Refused("embed_on is 'auto', 'card' or 'cpu', not %r" % (embed_on,))
         if embed_on == "cpu" and self.CARDS != 1:
             raise Refused("embed_on 'cpu' is one card's: a group's card 0 reads the table in place")
-        self.EMBED_CPU = embed_on == "cpu" or (embed_on == "auto" and self.CARDS == 1 and machine.silicon == "khronos_opencl1_igpu")
+        self.EMBED_CPU = embed_on == "cpu" or (embed_on == "auto" and self.CARDS == 1 and machine.silicon in OPENCL1_FAMILIES)
         # ⛳ A DENSE MODEL'S CPU WORKER IS THE EMBEDDING'S ALONE (⚖ 2026-10-26 *"i'd rather do 3, as that saves 1.2 gb"*): the
         #   27B's 1.2 GB table off the card, which through OpenCL 1.2 kept it twice and filled a 16 GB card. A worker standing
         #   in a token's program polls for work while it stands (▶ `eng__opcodes__await_instructions`) — measured beside the
@@ -251,7 +251,7 @@ class Qwen35(Generates):
         #   card, its rows the same to the bit. `picture_weights` "card" keeps it there; a machine whose worker is a CPU has
         #   the one memory, so its slot
         self.VIS_RAM = self.VIS and (picture_weights == "ram"
-                                     or (picture_weights == "auto" and machine.silicon not in ("host", "x86_avx2")))
+                                     or (picture_weights == "auto" and machine.silicon not in ("host",) + CPU_FAMILIES))
         # ⭐ THE CARD'S TIER OF ROUTED EXPERTS (NN-48) — the experts on the CPU, and `card_experts_gb` of them on the card as
         #   well: the card computes the picks it holds, the CPU the rest; an expert the CPU computed earns a slot by nn's
         #   qualifier and is copied whole from the CPU's memory while the card computes (`card_landing` a visit at most, "auto"
@@ -314,10 +314,12 @@ class Qwen35(Generates):
                 or not all(isinstance(c, int) and not isinstance(c, bool) and c >= 0 for c in cards):
             raise Refused("cards is a list of one or more cards, each once, not %r" % (cards,))
         self.CARD_IDS, self.NCARDS = cards, len(cards)
+        # ⭐ ...EACH CARD A TIER OF ITS OWN (NN-166, seats.md ⑥ — ⚖ 2026-11-02 *"one conversation per card cleanly, jack up
+        #   the l1 cache"*): promoted by its one conversation's picks alone, inclusive, lent its own cache's unreached rows
+        #   (▶ `_load_seat_cards`, `_lend`, `_room`); its seat's chain the tiered one (▶ qwen3_5.lisp's chain)
         if self.NCARDS > 1:
             why = [w for w, on in (("routed experts", not self.MOE),
                                    ("the experts on the CPU (experts_on 'cpu')", not self.CPU_EXPERTS),
-                                   ("no card tier (card_experts_gb 0)", bool(self.CARD_GB)),
                                    ("no draft (mtp 'no')", self.MTP is not None),
                                    ("no group (tensor_parallel 1)", self.CARDS > 1), ("a seat a card (seats 1)", seats > 1),
                                    ("no slice (stream false)", self.STREAM_ON), ("the embedding on the card", self.EMBED_CPU),
@@ -336,12 +338,13 @@ class Qwen35(Generates):
         if self.CPU_EXPERTS:
             self.EXPERTS_FROM = experts_file.choose(experts_from, self.cpu_arena, video_ram(folder.config))
             self.experts_dir = experts_dir or os.path.join(folder.path, "experts")
-        # a card's tier copies an expert from its place in the CPU's memory, which only the experts loaded into RAM have
-        # (`SRC`): from the disk or mapped it would ask for experts and never hold one — `MEASURED` 2026-10-12 from the disk
-        # (measurements/2026-10-12_nvme_array_122b_glm.md), `REASONED` mapped, from `SRC`
-        if self.CARD_GB and self.EXPERTS_FROM != "ram":
-            raise Refused("a card's tier of experts is copied from the experts in RAM — experts_from 'ram', not %r"
-                          % self.EXPERTS_FROM)
+        # a card's tier copies an expert from its place in the CPU's memory: in RAM its slot from the load (`SRC`), from
+        #   the disk the slot the CPU worker's cache holds it in when the promotion is made (NN-164, nn's EXCLUSIVE 2: the
+        #   tier promotes a layer's most picked, the top of that cache); mapped it has none to copy from, so refused —
+        #   `REASONED` from `SRC`
+        if self.CARD_GB and self.EXPERTS_FROM not in ("ram", "disk"):
+            raise Refused("a card's tier of experts is copied from the experts in RAM or their cache there — experts_from "
+                          "'ram' or 'disk', not %r" % self.EXPERTS_FROM)
         if self.SEATS > 1 and self.EXPERTS_FROM == "disk":
             raise Refused(experts_file.SEATED_FROM_DISK)
         # `experts_lock`: the CPU's experts in RAM locked there, so the system cannot swap them out (▶ `experts_file.lock_check`)
@@ -352,6 +355,37 @@ class Qwen35(Generates):
         self.EXPERTS_REGISTER, self.REGISTERED_GB = experts_file.register_of(
             experts_register, self.EXPERTS_FROM if self.CPU_EXPERTS else "card", self.CARD_GB, machine.silicon), 0.0
         self.REGISTER_REQUIRED = experts_register is True
+        # ⚗ THE CPU WORKER AN INTEGRATED GPU, BESIDE THE CARD — EXPERIMENTAL (NN-142; ⚖ 2026-10-29 *"does the engine recognises
+        #   when it has a igpu and a dedicated gpu so it computes the ram experts with the igpu instead of using the cpu?"* ·
+        #   2026-11-09 *"so we can let the cpu cores free during gemv"* · *"make it an experimental flag as igpu_cpu"*): the
+        #   worker the experts in RAM and an OpenCL 1.2 card's embedding go to an integrated GPU where the machine has one
+        #   beside its card (`Machine.integrated`: an OpenCL family's GPU whose memory is the host's) — the RAM both read, the
+        #   card's kernels their arithmetic, the CPU left free. `"auto"` it where there is one, `"yes"` refused where there
+        #   is none, `"no"` the CPU's own; by default `"no"`, and `"auto"` where `SILVANN_IGPU_CPU=1` (which also has Linux
+        #   name Intel's GPUs, ▶ cards_present.cuh). Its slots are its family's addresses, not the host's: a card's tier
+        #   copying from them, their registration with the card or their lock in RAM, the CPU's int8 arithmetic, the disk's
+        #   cache and a group of cards are refused beside it.
+        if igpu_cpu is None:
+            igpu_cpu = "auto" if os.environ.get("SILVANN_IGPU_CPU") == "1" else "no"
+        if igpu_cpu not in ("auto", "yes", "no", True, False):
+            raise Refused("igpu_cpu is 'auto', 'yes' or 'no', not %r" % (igpu_cpu,))
+        self.IGPU = machine.integrated() if self.CPU_WORKER and igpu_cpu not in ("no", False) else None
+        if igpu_cpu in ("yes", True) and self.IGPU is None:
+            raise Refused("igpu_cpu 'yes': no integrated GPU beside the card%s" % (
+                "" if self.CPU_WORKER else " — and nothing is the CPU's (experts_on 'cpu' puts the experts in RAM)"))
+        if self.IGPU is not None:
+            why = [w for w, on in (("one card (no tensor_parallel group, no conversation a card)", self.CARDS > 1 or self.NCARDS > 1),
+                                   ("the experts in RAM (experts_from 'ram')", self.CPU_EXPERTS and self.EXPERTS_FROM != "ram"),
+                                   ("no int8 experts (experts_int8 false: the CPU's arithmetic)", self.EXPERTS_INT8),
+                                   ("no card tier (card_experts_gb 0)", bool(self.CARD_GB)),
+                                   ("no lock (experts_lock false)", self.EXPERTS_LOCK),
+                                   ("no registration (experts_register not true)", self.REGISTER_REQUIRED)) if on]
+            if why:
+                if igpu_cpu in ("yes", True):
+                    raise Refused("the integrated GPU as the CPU worker takes %s" % ", ".join(why))
+                self.IGPU = None                    # "auto": the CPU's, as this setup asks of it
+            else:
+                self.EXPERTS_REGISTER = False
         # ⭐ FROM THE DISK, THE EXPERTS ARE A CACHE IN THE CPU WORKER'S OWN MEMORY — read from the file into a slot when a
         #   token picks one that is not there, straight from the drive, the layer's least recently used given up for it.
         #   `"mapped"` maps the file instead. ▶ glm5.py's, and nn's loader.
@@ -679,10 +713,10 @@ class Qwen35(Generates):
         """The machine's workers: the card, and the CPU when the experts are there — or the cards of a tensor-parallel
         group, worker `k` device `k`."""
         if self.CARDS > 1:
-            return [(self.m.silicon, k) for k in range(self.CARDS)] + ([("x86_avx2", 0)] if self.CPU_EXPERTS else [])
+            return [(self.m.silicon, k) for k in range(self.CARDS)] + ([(self.m.cpu, 0)] if self.CPU_EXPERTS else [])
         if self.NCARDS > 1:                                # a conversation a card: the cards, then the CPU
-            return [(self.m.silicon, c) for c in self.CARD_IDS] + [("x86_avx2", 0)]
-        return [(self.m.silicon, 0)] + ([("x86_avx2", 0)] if self.CPU_WORKER else [])
+            return [(self.m.silicon, c) for c in self.CARD_IDS] + [(self.m.cpu, 0)]
+        return [(self.m.silicon, 0)] + ([self.IGPU or (self.m.cpu, 0)] if self.CPU_WORKER else [])
 
     # ── ② the load ───────────────────────────────────────────────────────────────────────────────────────────
     def load(self, progress=None):
@@ -752,11 +786,7 @@ class Qwen35(Generates):
         if self.SEATS > 1:
             self._seat_views(0)
         if self.CPLAN is not None:
-            self.CALIBRATION = expert_tier.calibrate(
-                m, CARD, self.CPU, self.KRS_AT, self.EPLAN.slot_bytes, self.C_HANDS_AT, self.HAND_ROW, 2 * self.H,
-                (2 * (self.H + 16 + self.INTER) + 7) & ~7, self.TOPK, self.EXPERTS,
-                lambda n: "(ai_qwen_3__experts_rows c_hands exrc%d c_rrows %d)" % (self.run_layers[0], n),
-                self.CHUNK, fixed=self.CARD_LINE)
+            self._calibrate_line()
         if self.CPLAN is not None and self.CARD_LANDING is None:
             self._from_speeds()                     # after the line: a visit's landings from its copy reading
         self.active_lora, self._lora_cache = self.folder.lora, {}     # a LoRA chosen at boot is in the slots already
@@ -770,7 +800,7 @@ class Qwen35(Generates):
         (▶ `_seat_views`); the CPU worker the experts once, with the first card loaded, and a hand-off for each card (▶
         `_cpu_hand_off`). Card 0's come last, so the bindings as they stand are card 0's."""
         m, b = self.m, self.b
-        self.state_at, self.seat_state_at, self.slot_at, self.SEAT_AT_OF = {}, {}, {}, {}
+        self.state_at, self.seat_state_at, self.slot_at, self.SEAT_AT_OF, self.LEND_OF = {}, {}, {}, {}, {}
         self.state_of = [self.state_at]
         self.MASK_CELLS = {}
         for k in reversed(range(self.NCARDS)):
@@ -795,6 +825,9 @@ class Qwen35(Generates):
                     self.seat_state_at.setdefault(k * self.CARD_SEATS + local, {})[l] = at
                 if progress and k == self.NCARDS - 1:
                     progress(i + 1, len(self.run_layers))
+            if self.CPLAN is not None:                 # its tier, every layer's band of it, empty at boot
+                for l in self.run_layers:
+                    loader.layer_width(l, self.T_CEXP, self.EXPERTS)
             if loader.handed() != 0:
                 raise Refused("%d slots were reserved and never published on card %d" % (loader.handed(), k))
             self._buffers()
@@ -805,9 +838,22 @@ class Qwen35(Generates):
             else:
                 self._cpu_hand_off()
             m.act_as(k)
+            if self.CPLAN is not None:
+                self._tier_tables()                     # its tier, by the program's names, over the CPU's experts
+                m.act_as(k)
+                self._lend()                            # lent its own cache's unreached rows
+                m.act_as(k)
             self._bindings()
             if k == self.NCARDS - 1:
                 m.define_programs(self._procedures)
+                # the promotion line and a visit's landings measured once, on the first card loaded, and bound before its
+                #   views are frozen: every card's tier made after takes them (the cards one model of card)
+                if self.CPLAN is not None:
+                    m.act_as(k)
+                    self._calibrate_line()
+                    if self.CARD_LANDING is None:
+                        self._from_speeds()
+                    m.act_as(k)
             self._seat_views(k)
         self.state_at.update(self.seat_state_at[0])
         self._card_k = 0
@@ -868,11 +914,7 @@ class Qwen35(Generates):
         self._bindings()
         m.define_programs(self._procedures)
         if self.CPLAN is not None:          # a prompt's rows through card 0's tier: its line, as one card's (▶ `load`)
-            self.CALIBRATION = expert_tier.calibrate(
-                m, CARD, self.CPU, self.KRS_AT, self.EPLAN.slot_bytes, self.C_HANDS_AT, self.HAND_ROW, 2 * self.H,
-                (2 * (self.H + 16 + self.INTER) + 7) & ~7, self.TOPK, self.EXPERTS,
-                lambda n: "(ai_qwen_3__experts_rows c_hands exrc%d c_rrows %d)" % (self.run_layers[0], n),
-                self.CHUNK, fixed=self.CARD_LINE)
+            self._calibrate_line()
         if self.CPLAN is not None and (self.CARD_SHARED is None or self.CARD_LANDING is None):
             self._from_speeds()                     # after the line: a visit's landings from its copy reading
         self.active_lora, self._lora_cache = self.folder.lora, {}
@@ -1526,6 +1568,20 @@ class Qwen35(Generates):
                         + [nm("signs"), nm("one"), nm(scratch), self.H, self.INTER_OF[card]] + [d(l, n) for n in ms]
                         + [self.EPS] + flag)
 
+    def _calibrate_line(self):
+        """`nn__expert_major__vram_promotion_threshold_picks`, measured and bound (▶ `expert_tier.calibrate`): the card
+        loading now's copy (card 0 but with a conversation a card) against the CPU's `experts_rows` over its hand-off."""
+        self.CALIBRATION = expert_tier.calibrate(
+            self.m, self._card_k, self.CPU, self.KRS_AT, self.EPLAN.slot_bytes, self.C_HANDS_AT, self.HAND_ROW, 2 * self.H,
+            (2 * (self.H + 16 + self.INTER) + 7) & ~7, self.TOPK, self.EXPERTS,
+            lambda n: "(ai_qwen_3__experts_rows c_hands exrc%d c_rrows %d)" % (self.run_layers[0], n),
+            self.CHUNK, fixed=self.CARD_LINE)
+
+    def _tier_owners(self):
+        """(worker, k) for each tier the load makes now: a group's every card, its tier by card k's names — or one card's,
+        or with a conversation a card the card loading now, its tier by the program's own names, which its views freeze."""
+        return [(self._card_k, 0)] if self.CARDS == 1 else [(k, k) for k in range(self.CARDS)]
+
     def _tier_tables(self, card=0):
         """The card's tier (▶ nn's `nn__expert_tier`): its experts tables, a position's and a chunk's, each with its own
         scratch; the tier, fed from the CPU's memory where every expert is there (the experts in RAM); and the binding —
@@ -1545,8 +1601,8 @@ class Qwen35(Generates):
             if card == 0 and self.T_SLICE is not None:      # a slice's: the experts' scratch over all its rows
                 m.table("exks%d" % l, ["signs", self._slice_plane("scratch"), "zero_h"] + cells)
         self._tier(card)
-        if self.CARDS == 1:
-            expert_tier.bind(m, {CARD: "tier_card"}, len(self.workers()))
+        if self.CARDS == 1:                 # one card's, or a conversation a card's: the card loading now
+            expert_tier.bind(m, {self._card_k: "tier_card"}, len(self.workers()))
 
     def _slice_plane(self, name):
         """A part of the slice (▶ `_plan`'s SLICE) as a plane of its slot: a view the rows' words read and write."""
@@ -1558,21 +1614,27 @@ class Qwen35(Generates):
         share of its slots a layer every card keeps: none until it is known (`_from_speeds`)."""
         shared = int(round((self.CARD_SHARED or 0.0) * self.CARD_SLOTS / len(self.run_layers)))
         expert_tier.tier(self.m, self._named("tier_card", card), self.T_CEXP, self.EXPERTS, self.TOPK, self.H, self.INTER,
-                         self.EPLAN, self.LAYERS, {l: "src%d" % l for l in self.run_layers if l in self.SRC},
+                         self.EPLAN, self.LAYERS,
+                         {l: "src%d" % l for l in self.run_layers if l in self.SRC} if self.EXPERTS_FROM != "disk" else None,
                          landing=self.CARD_LANDING or 1, ranks=self.CARDS, shared=shared,
-                         stream=self.T_STREAM, stream_batch=getattr(self, "STREAM_BATCH", expert_tier.STREAM_BATCH))
+                         stream=self.T_STREAM, stream_batch=getattr(self, "STREAM_BATCH", expert_tier.STREAM_BATCH),
+                         slots=dict(worker=self.CPU, type=0) if self.EXPERTS_FROM == "disk" else None,
+                         # ⭐ A PROMPT STREAMED FROM THE DISK (NN-165): an expert a slice picks that the cache does not
+                         #   hold read into it from the layer's file, a batch ahead of its copy to the ring
+                         backings={l: self._backing[(self.CPU, l)] for l in self.run_layers}
+                         if self.EXPERTS_FROM == "disk" and self.T_STREAM is not None else None)
 
     def _from_speeds(self):
         """`card_shared` "auto" in a group and `card_landing` "auto": a CPU pick against a card expert and an expert's
         copy, timed here (▶ `expert_tier.speeds` — the first layer's first experts, the head's product on card 0 priced to a
         routed expert's bytes; the copy the line's calibration read, or `expert_tier.copy_seconds` where the line is fixed),
         the slice and a visit's landings from them, and every card's tier made again with them."""
-        m, l = self.m, self.run_layers[0]
-        cpu_s, card_s = expert_tier.speeds(m, CARD, self.CPU, "picks", list(range(self.TOPK)),
+        m, l, card = self.m, self.run_layers[0], self._card_k
+        cpu_s, card_s = expert_tier.speeds(m, card, self.CPU, "picks", list(range(self.TOPK)),
                                            "(ai_qwen_3__experts c_hand picks exc%d c_routed)" % l,
                                            self.EPLAN.slot_bytes / expert_tier.head_bytes(self.HPLAN))
         calibrated = (getattr(self, "CALIBRATION", None) or {}).get("copy_ms")
-        copy_s = calibrated / 1e3 if calibrated else expert_tier.copy_seconds(m, CARD, self.HEAD_AT + self.HPLAN.at_up_data,
+        copy_s = calibrated / 1e3 if calibrated else expert_tier.copy_seconds(m, card, self.HEAD_AT + self.HPLAN.at_up_data,
                                                                               min(self.CPLAN.slot_bytes, self.HPLAN.up_data))
         if self.CARD_SHARED is None:
             self.CARD_SHARED = expert_tier.slice_of(cpu_s, card_s)
@@ -1581,11 +1643,11 @@ class Qwen35(Generates):
         if self.CARD_LANDING is None:
             self.CARD_LANDING = expert_tier.landing_of(cpu_s, copy_s)
         self.CARD_SPEEDS["landing"] = self.CARD_LANDING
-        for k in range(self.CARDS):
-            m.act_as(k)
+        for w, k in self._tier_owners():
+            m.act_as(w)
             self._tier(k)
-        m.act_as(CARD)
-        expert_tier.bind(m, {k: self._named("tier_card", k) for k in range(self.CARDS)}, len(self.workers()))
+        m.act_as(card)
+        expert_tier.bind(m, {w: self._named("tier_card", k) for w, k in self._tier_owners()}, len(self.workers()))
 
     # ── the cache's unreached rows lent to the tier (NN-93) ──────────────────────────────────────────────────────
     # ⚖ 2026-10-17: *"progressively shrink the l1 cache as the context grows, maybe in chunks of 8k tokens... this way we
@@ -1604,11 +1666,13 @@ class Qwen35(Generates):
         if L is None:
             return
         starts, ends = [], []
+        # its card's seat's state — a conversation a card's, the card loading now's (▶ `_load_seat_cards`)
+        state = self.seat_state_at[self._card_k * self.CARD_SEATS] if self.NCARDS > 1 else self.state_at
         for l in self.run_layers:
             if self.kinds[l] != "f":
                 continue
             for half in (self.KVPLAN.at_up_data, self.KVPLAN.at_down_data):
-                start = self.state_at[l] + half + self.TIER["warm_c"][0]
+                start = state[l] + half + self.TIER["warm_c"][0]
                 starts.append(start)
                 ends.append((start + self.WARM * L["row"]) // 4096 * 4096)
         depth = min((e - (s + 4095) // 4096 * 4096) // b for s, e in zip(starts, ends))
@@ -1616,19 +1680,26 @@ class Qwen35(Generates):
             self.LEND = None
             return
         was = self.m.worker
-        self.m.act_as(CARD)
+        self.m.act_as(self._card_k)
         self._int_array("lend_ends", ends)
         self.m.must("(nn__expert__lend %d %d lend_ends)" % (self.T_CEXP, depth), "the cache's rows lent to the tier")
         self.m.act_as(was)
-        L.update(starts=starts, ends=ends, depth=depth, live=0, until=-1)
         self.LENT_GB = depth * len(ends) * b / 2 ** 30
+        if self.NCARDS > 1:
+            # ⭐ A CONVERSATION A CARD: each card's tier lent its own cache, given back as its own conversation grows (▶
+            #   `_room`'s card)
+            self.LEND_OF[self._card_k] = dict(L, starts=starts, ends=ends, depth=depth, live=0, until=-1)
+            self._room(0, exact=True, card=self._card_k)
+            return
+        L.update(starts=starts, ends=ends, depth=depth, live=0, until=-1)
         self._room(0, exact=True)
 
-    def _room(self, n, exact=False):
+    def _room(self, n, exact=False, card=None):
         """The cache's first `n` positions free to be written: the lent slots in their rows withheld — the rows rounded up
         to LEND_CHUNK, so the tier gives way a chunk at a time. `exact`: set for a conversation of `n` positions coming
-        onto the card, the slots past its rows lent again."""
-        L = self.LEND
+        onto the card, the slots past its rows lent again. With a conversation a card, the seat's card's alone — `card`
+        names it at the load, before its views are frozen."""
+        L = self.LEND if self.NCARDS == 1 else self.LEND_OF.get(self.place(self.SEAT)[0] if card is None else card)
         if L is None or (not exact and n <= L["until"]):
             return
         rows = -(-max(0, n - self.SINK - self.HOT) // self.LEND_CHUNK) * self.LEND_CHUNK
@@ -1636,10 +1707,14 @@ class Qwen35(Generates):
         deep = max(0, min(L["depth"], min((e - s - need) // b for s, e in zip(L["starts"], L["ends"]))))
         live = deep * len(L["ends"])
         if live != L["live"]:
-            was = self.m.worker
-            self.m.act_as(CARD)
-            got = self.m.must("(nn__expert__lent %d %d)" % (self.T_CEXP, live), "the tier's lent slots")
-            self.m.act_as(was)
+            text = "(nn__expert__lent %d %d)" % (self.T_CEXP, live)
+            if self.NCARDS > 1 and card is None:      # a seat's thread: on its card's block, in its view (▶ `_run`)
+                got = self._run(text, "seat %d's tier's lent slots" % self.SEAT)
+            else:
+                was = self.m.worker
+                self.m.act_as(CARD if card is None else card)
+                got = self.m.must(text, "the tier's lent slots")
+                self.m.act_as(was)
             if got != live:
                 raise Refused("the tier holds %d lent slots, not %d" % (got, live))
             L["live"] = live
@@ -1647,8 +1722,9 @@ class Qwen35(Generates):
         L["until"] = min(self.max_context, self.SINK + self.HOT + free // L["row"])
 
     def lent(self):
-        """The cache's rows lent to the tier now: (slots live, GB), or None where the tier is lent none."""
-        L = self.LEND
+        """The cache's rows lent to the tier now: (slots live, GB), or None where the tier is lent none — with a
+        conversation a card, the seat's card's."""
+        L = self.LEND if self.NCARDS == 1 else self.LEND_OF.get(self.place(self.SEAT)[0])
         return None if L is None else (L["live"], L["live"] * self.CPLAN.slot_bytes / 2 ** 30)
 
     def _int_array(self, name, values):
@@ -1885,6 +1961,7 @@ class Qwen35(Generates):
     SEATS_MOST = 4
     SEATS_ON_A_CARD = True              # multi_user "yes" on one card seats two (▶ `with_cards`); a dense model one
     CONVERSATION_A_CARD = True          # multi_user "yes" over several cards a conversation a card (`cards`); "no" a group
+    TIER_A_CARD = True                  # ...each card a tier of its own for its conversation (NN-166, ▶ `_load_seat_cards`)
     # ⭐ EVERY SEAT STEPS ON ITS OWN: a seat's position and prompt run on the card's block in its own view (`step`,
     #   `prefill`), so the session drives each seat from a thread of its own (▶ session's `ALONE`)
     ALONE = True
@@ -1961,6 +2038,19 @@ class Qwen35(Generates):
     def seat_state_regions(self, length, seat):
         """`state_regions` of seat `seat`'s conversation: its slot of every layer's state."""
         return self.state_regions(length, where=self.seat_state_at[seat])
+
+    def seat_state_write(self, length, blobs, seat):
+        """Seat `seat`'s conversation's state, as its regions were read, written back onto its card — its rows withheld
+        from its card's tier first (a conversation a card's tier is lent its cache's unreached rows)."""
+        with self.on_seat(seat):
+            self._room(length, exact=True)
+        was = self.m.worker
+        self.m.act_as(self.place(seat)[0])
+        try:
+            for (at, _), blob in zip([r for r in self.seat_state_regions(length, seat) if r[1]], blobs):
+                self.m.write(at, blob)
+        finally:
+            self.m.act_as(was)
 
     def reset(self):
         """A conversation from nothing on the seat `on_seat` chose: every DeltaNet layer's state and window to zero. The

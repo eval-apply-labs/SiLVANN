@@ -1,8 +1,10 @@
 # syntax=docker/dockerfile:1.7
 # SiLVANN's image: the release installed by install.sh — the one line a Linux machine runs — with the families for
-# every NVIDIA card nvidia_cuda12 lists, for an older one OpenCL 1.2's (khronos_opencl1_igpu: compute capability below
-# 7.5, a GTX 10x0) and for the CPU (x86_avx2), then copied onto a plain Ubuntu 22.04 that holds no compiler. The models
-# and the conversations live in a folder of yours at /data; the UI is the app, on port 8080.
+# every NVIDIA card nvidia_cuda12 lists, for an older one or a GTX 16xx OpenCL 1.2's (nvidia_opencl1: compute capability
+# below 7.5, a GTX 10x0, or Turing without tensor cores), for the CPU (x86_avx2) and, beside them, for an Intel integrated
+# GPU (intel_opencl2, intel_opencl1_igpu — ⚗ experimental, used only with `-e SILVANN_IGPU_CPU=1 --device /dev/dri`),
+# then copied onto a plain Ubuntu 22.04 that holds no compiler. The models and the conversations live in a folder of yours at /data; the UI is the app, on port
+# 8080.
 #
 #   from the release's folder:
 #   podman build -f docker/Dockerfile -t silvann .                                   GitHub's default branch
@@ -41,13 +43,14 @@ ARG SILVANN_COMMIT=
 COPY install.sh /tmp/install.sh
 RUN SILVANN_DIR=/opt/silvann SILVANN_BIN=/usr/local/bin \
     SILVANN_SOURCE=${SILVANN_SOURCE} SILVANN_REF=${SILVANN_REF} \
-    SILVANN_SILICON_FAMILIES="x86_avx2 nvidia_cuda12 khronos_opencl1_igpu" SILVANN_NONFREE=0 \
+    SILVANN_SILICON_FAMILIES="x86_avx2 nvidia_cuda12 nvidia_opencl1 intel_opencl2 intel_opencl1_igpu" SILVANN_NONFREE=0 \
     SILVANN_NVCC=/usr/local/cuda/bin/nvcc \
     bash /tmp/install.sh \
  && cd /opt/silvann \
  && test -f lib/silicon_families/libsilvann_nvidia_cuda12.so \
  && test -f lib/silicon_families/libsilvann_x86_avx2.so \
- && test -f lib/silicon_families/libsilvann_khronos_opencl1_igpu.so \
+ && test -f lib/silicon_families/libsilvann_nvidia_opencl1.so \
+ && test -f lib/silicon_families/libsilvann_intel_opencl2.so \
  && commit=$(git rev-parse HEAD) \
  && { [ -z "${SILVANN_COMMIT}" ] || [ "$commit" = "${SILVANN_COMMIT}" ] \
       || { echo "SILVANN_REF is at $commit, not SILVANN_COMMIT ${SILVANN_COMMIT}"; exit 1; }; } \
@@ -62,9 +65,10 @@ RUN SILVANN_DIR=/opt/silvann SILVANN_BIN=/usr/local/bin \
 FROM ${UBUNTU}
 ARG DEBIAN_FRONTEND=noninteractive
 # the OpenCL loader, and NVIDIA's OpenCL named to it: `--gpus all` hands in the driver's libnvidia-opencl but not its
-#   .icd, which CDI's description mounts over this one
+#   .icd, which CDI's description mounts over this one; and Intel's OpenCL (its compute runtime, Gen8 to Gen12 in 22.04's
+#   archive), which drives an integrated GPU handed in with `--device /dev/dri`
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates git python3 tini ocl-icd-libopencl1 \
+ && apt-get install -y --no-install-recommends ca-certificates git python3 tini ocl-icd-libopencl1 intel-opencl-icd \
  && rm -rf /var/lib/apt/lists/* \
  && mkdir -p /etc/OpenCL/vendors && echo libnvidia-opencl.so.1 > /etc/OpenCL/vendors/nvidia.icd \
  && useradd --uid 1000 --create-home --shell /bin/bash silvann \

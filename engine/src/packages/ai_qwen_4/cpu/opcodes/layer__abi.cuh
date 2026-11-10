@@ -119,13 +119,60 @@ static sys__heap_node ai_qwen_4__gated_pre__zzabi_apply(const sys__heap_node* ar
     return nn__doors_answer(&argv[3]);
 }
 
-/* ── `(ai_qwen_4__attention m table kc vc pos y shape)` -> `y` ────────────────────────────────────────────────────── */
+/* ── QSA's indexer: a block's key, and a query's choice ──────────────────────────────────────────────────────────────
+ * The block `b` of RATIO positions whose keys `ik` holds (ID halves a position) pooled into `ip`'s row `b`: their mean
+ * (nn's `index_pool` with every gate and position weight 0), normed by IKN, roped on its first ROT at the block's first
+ * position — `nb` blocks from `b` at once, their angles a launch each into `csb` (ROT floats a block). `zeros` is
+ * RATIO·ID·nb halves of scratch, `pn` ID·nb. */
+static inline void ai_qwen_4__layer__zzprivate_pool(const nn__doors* doors, unsigned int* over, const ai_qwen_4__table* t,
+                                                    const ai_qwen_4__shape* s, uint64_t ik, uint64_t ip, uint64_t b, uint64_t nb,
+                                                    uint64_t zeros, uint64_t pn, uint64_t csb) {
+    const uint64_t ID = s->v[AI_QWEN_4__SH__ID], RATIO = s->v[AI_QWEN_4__SH__RATIO], ROT = s->v[AI_QWEN_4__SH__ROT];
+    const float theta = (float)s->v[AI_QWEN_4__SH__THETA], eps = s->r[AI_QWEN_4__SH__EPS];
+    doors->vector_zero((uint16_t*)(uintptr_t)zeros, RATIO * ID * nb);
+    doors->index_pool((uint16_t*)(uintptr_t)(ip + 2u * b * ID), (const uint16_t*)(uintptr_t)(ik + 2u * b * RATIO * ID),
+                      (const uint16_t*)(uintptr_t)zeros, (const uint16_t*)(uintptr_t)zeros, 0u, nb, ID, RATIO, over);
+    doors->rmsnorm_rows((uint16_t*)(uintptr_t)pn, (const uint16_t*)(uintptr_t)(ip + 2u * b * ID),
+                        (const uint16_t*)(uintptr_t)t->at[AI_QWEN_4__LT__IKN], ID, nb, ID, ID, eps, over);
+    for (uint64_t j = 0u; j < nb; ++j)
+        doors->rope_angles((float*)(uintptr_t)(csb + 4u * j * ROT), (b + j) * RATIO, theta, ROT);
+    doors->rope_rows((uint16_t*)(uintptr_t)(ip + 2u * b * ID), (const uint16_t*)(uintptr_t)pn, (const float*)(uintptr_t)csb,
+                     nb, 1u, ID, ID, ROT, over);
+}
+
+/* The positions query `iq` (IH heads of ID, normed and roped) attends at position `pos` past every block's being chosen:
+ * the scores of its `(pos + 1) / RATIO` finished blocks into `sc` — Σ_h relu(q_h · k)/√ID, through `index_scores`
+ * with every head's weight 1, which halves every score alike and so chooses the same — the best BUDGET / RATIO of them
+ * and the unfinished block's positions into `idx` in position order, their keys and values gathered into `kg` and `vg`.
+ * Answers how many. */
+static inline uint64_t ai_qwen_4__layer__zzprivate_choose(const nn__doors* doors, const ai_qwen_4__shape* s, uint64_t iq,
+                                                          uint64_t ip, uint64_t kc, uint64_t vc, uint64_t pos, uint64_t sc,
+                                                          uint64_t idx, uint64_t cnt, uint64_t kg, uint64_t vg) {
+    const uint64_t IH = s->v[AI_QWEN_4__SH__IH], ID = s->v[AI_QWEN_4__SH__ID], RATIO = s->v[AI_QWEN_4__SH__RATIO];
+    const uint64_t best = s->v[AI_QWEN_4__SH__BUDGET] / RATIO, KVW = s->v[AI_QWEN_4__SH__KVH] * s->v[AI_QWEN_4__SH__AD];
+    const uint64_t blocks = (pos + 1u) / RATIO, tail = pos + 1u - blocks * RATIO, count = best * RATIO + tail;
+    doors->index_scores((float*)(uintptr_t)sc, (const uint16_t*)(uintptr_t)iq, (const uint16_t*)(uintptr_t)s->at[AI_QWEN_4__SH__ONES],
+                        (const uint16_t*)(uintptr_t)ip, IH, ID, blocks, 1.0f / sqrtf((float)ID));
+    doors->index_select((uint32_t*)(uintptr_t)idx, (uint32_t*)(uintptr_t)cnt, (const float*)(uintptr_t)sc, blocks, best, RATIO,
+                        blocks * RATIO, tail);
+    doors->index_gather((uint16_t*)(uintptr_t)kg, (const uint16_t*)(uintptr_t)kc, (const uint32_t*)(uintptr_t)idx, count, KVW);
+    doors->index_gather((uint16_t*)(uintptr_t)vg, (const uint16_t*)(uintptr_t)vc, (const uint32_t*)(uintptr_t)idx, count, KVW);
+    return count;
+}
+
+/* Whether position `pos`'s query chooses among its blocks: past BUDGET / RATIO finished blocks, every one is not chosen. */
+static inline bool ai_qwen_4__layer__zzprivate_sparse(const ai_qwen_4__shape* s, uint64_t pos) {
+    return (pos + 1u) / s->v[AI_QWEN_4__SH__RATIO] > s->v[AI_QWEN_4__SH__BUDGET] / s->v[AI_QWEN_4__SH__RATIO];
+}
+
+/* ── `(ai_qwen_4__attention m table kc vc ik ip pos y shape)` -> `y` ──────────────────────────────────────────────── */
 static sys__heap_node ai_qwen_4__attention__zzabi_apply(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx) {
-    if (argc != 7u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
-    uint64_t m = 0, m_room = 0, kc = 0, kc_room = 0, vc = 0, vc_room = 0, y = 0, y_room = 0;
-    if (argv[4].dtype != SYS__KIND__VALUE_INT || !nn__primitives__room(&argv[0], &m, &m_room)
+    if (argc != 9u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
+    uint64_t m = 0, m_room = 0, kc = 0, kc_room = 0, vc = 0, vc_room = 0, ik = 0, ik_room = 0, ip = 0, ip_room = 0, y = 0, y_room = 0;
+    if (argv[6].dtype != SYS__KIND__VALUE_INT || !nn__primitives__room(&argv[0], &m, &m_room)
      || !nn__primitives__room(&argv[2], &kc, &kc_room) || !nn__primitives__room(&argv[3], &vc, &vc_room)
-     || !nn__primitives__room(&argv[5], &y, &y_room))
+     || !nn__primitives__room(&argv[4], &ik, &ik_room) || !nn__primitives__room(&argv[5], &ip, &ip_room)
+     || !nn__primitives__room(&argv[7], &y, &y_room))
         return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
     ai_qwen_4__table t;
     ai_qwen_4__shape s;
@@ -133,11 +180,16 @@ static sys__heap_node ai_qwen_4__attention__zzabi_apply(const sys__heap_node* ar
     if (why != 0ull) return sys__engine__abi__error(why);
     const uint64_t H = s.v[AI_QWEN_4__SH__HIDDEN], QH = s.v[AI_QWEN_4__SH__QH], KVH = s.v[AI_QWEN_4__SH__KVH];
     const uint64_t AD = s.v[AI_QWEN_4__SH__AD], ROT = s.v[AI_QWEN_4__SH__ROT], QW = QH * AD, KVW = KVH * AD;
-    const uint64_t pos = argv[4].args[0], length = pos + 1u;
-    if (QH % KVH != 0u || ROT > AD || ROT % 2u != 0u || pos >= (1ull << 24)
+    const uint64_t IH = s.v[AI_QWEN_4__SH__IH], ID = s.v[AI_QWEN_4__SH__ID], RATIO = s.v[AI_QWEN_4__SH__RATIO];
+    const uint64_t IW = IH * ID + ID, PICK = (s.v[AI_QWEN_4__SH__BUDGET] / RATIO) * RATIO + RATIO - 1u;
+    const uint64_t pos = argv[6].args[0], length = pos + 1u, blocks = length / RATIO;
+    const bool sparse = ai_qwen_4__layer__zzprivate_sparse(&s, pos);
+    if (QH % KVH != 0u || ROT > AD || ROT > ID || ROT % 2u != 0u || pos >= (1ull << 24)
      || !ai_qwen_4__table__zzpackage_matrix(&t, AI_QWEN_4__LT__Q) || !ai_qwen_4__table__zzpackage_matrix(&t, AI_QWEN_4__LT__K)
      || !ai_qwen_4__table__zzpackage_matrix(&t, AI_QWEN_4__LT__V) || !ai_qwen_4__table__zzpackage_matrix(&t, AI_QWEN_4__LT__O)
-     || !ai_qwen_4__table__zzpackage_vector(&t, AI_QWEN_4__LT__QN, AD) || !ai_qwen_4__table__zzpackage_vector(&t, AI_QWEN_4__LT__KN, AD))
+     || !ai_qwen_4__table__zzpackage_vector(&t, AI_QWEN_4__LT__QN, AD) || !ai_qwen_4__table__zzpackage_vector(&t, AI_QWEN_4__LT__KN, AD)
+     || !ai_qwen_4__table__zzpackage_matrix(&t, AI_QWEN_4__LT__IX) || !ai_qwen_4__table__zzpackage_vector(&t, AI_QWEN_4__LT__IQN, ID)
+     || !ai_qwen_4__table__zzpackage_vector(&t, AI_QWEN_4__LT__IKN, ID))
         return sys__engine__abi__error(AI_QWEN_4__LAYER__FAULT_TABLE);
     const uint64_t scratch = s.at[AI_QWEN_4__SH__SCRATCH], signs = s.at[AI_QWEN_4__SH__SIGNS], cs = s.at[AI_QWEN_4__SH__CS];
     const uint64_t scores = s.at[AI_QWEN_4__SH__SCORES];
@@ -147,8 +199,19 @@ static sys__heap_node ai_qwen_4__attention__zzabi_apply(const sys__heap_node* ar
     const uint64_t qb = ai_qwen_4__layer__zzprivate_take(&next, QW), gsig = ai_qwen_4__layer__zzprivate_take(&next, QW);
     const uint64_t ao = ai_qwen_4__layer__zzprivate_take(&next, QW), aog = ai_qwen_4__layer__zzprivate_take(&next, QW);
     const uint64_t aogr = ai_qwen_4__layer__zzprivate_take(&next, QW), sg = ai_qwen_4__layer__zzprivate_take(&next, 2u * QW);
+    /* the indexer's: its map, its query normed, a block's mean normed, zeros for the pool, the block's angles; the scores of
+     * every finished block, the chosen positions and their count, their keys and values */
+    const uint64_t ixo = ai_qwen_4__layer__zzprivate_take(&next, IW), iq = ai_qwen_4__layer__zzprivate_take(&next, IH * ID);
+    const uint64_t pn = ai_qwen_4__layer__zzprivate_take(&next, ID), zeros = ai_qwen_4__layer__zzprivate_take(&next, RATIO * ID);
+    const uint64_t csb = ai_qwen_4__layer__zzprivate_take(&next, 2u * ROT);
+    const uint64_t sc = ai_qwen_4__layer__zzprivate_take(&next, sparse ? 2u * blocks : 0u);
+    const uint64_t idx = ai_qwen_4__layer__zzprivate_take(&next, 2u * PICK), cnt = ai_qwen_4__layer__zzprivate_take(&next, 2u);
+    const uint64_t kg = ai_qwen_4__layer__zzprivate_take(&next, sparse ? PICK * KVW : 0u);
+    const uint64_t vg = ai_qwen_4__layer__zzprivate_take(&next, sparse ? PICK * KVW : 0u);
+    const uint64_t attended = sparse ? (s.v[AI_QWEN_4__SH__BUDGET] / RATIO) * RATIO + (length - blocks * RATIO) : length;
     if (!nn__primitives__fits(H, m_room) || !nn__primitives__fits(H, y_room) || !nn__primitives__fits(length * KVW, kc_room)
-     || !nn__primitives__fits(length * KVW, vc_room) || !nn__primitives__fits(2u * QH * length, s.room[AI_QWEN_4__SH__SCORES])
+     || !nn__primitives__fits(length * KVW, vc_room) || !nn__primitives__fits(length * ID, ik_room)
+     || !nn__primitives__fits(blocks * ID, ip_room) || !nn__primitives__fits(2u * QH * attended, s.room[AI_QWEN_4__SH__SCORES])
      || !nn__primitives__fits(2u * ROT, s.room[AI_QWEN_4__SH__CS]) || next - scratch > s.room[AI_QWEN_4__SH__SCRATCH])
         return sys__engine__abi__error(AI_QWEN_4__LAYER__FAULT_ROOM);
     const nn__doors* doors = nn__doors_for(ctx);
@@ -173,13 +236,28 @@ static sys__heap_node ai_qwen_4__attention__zzabi_apply(const sys__heap_node* ar
                         AD, KVH, AD, AD, eps, over);
     doors->rope_rows((uint16_t*)(uintptr_t)k, (const uint16_t*)(uintptr_t)k, (const float*)(uintptr_t)cs, 1u, KVH, AD, KVW, ROT, over);
     doors->vector_copy((uint16_t*)(uintptr_t)(vc + 2u * pos * KVW), (const uint16_t*)(uintptr_t)vv, KVW);
-    /* every position 0 … pos, as nn's `decode` attends them */
-    doors->attention_scores((float*)(uintptr_t)scores, (const uint16_t*)(uintptr_t)qb, (const uint16_t*)(uintptr_t)kc, QH, KVH, AD, length);
-    doors->attention_mix((uint16_t*)(uintptr_t)ao, (const float*)(uintptr_t)scores, (const uint16_t*)(uintptr_t)vc, QH, KVH, AD, length, over);
+    /* the indexer: its map of `m`, its key into `ik`'s row, and the block `pos` ends pooled into `ip` */
+    ai_qwen_4__layer__zzprivate_mv(doors, over, &t, AI_QWEN_4__LT__IX, m, mr, ixo, IW, H);
+    doors->vector_copy((uint16_t*)(uintptr_t)(ik + 2u * pos * ID), (const uint16_t*)(uintptr_t)(ixo + 2u * IH * ID), ID);
+    if (length % RATIO == 0u)
+        ai_qwen_4__layer__zzprivate_pool(doors, over, &t, &s, ik, ip, blocks - 1u, 1u, zeros, pn, csb);
+    if (!sparse) {
+        /* every position 0 … pos, as nn's `decode` attends them */
+        doors->attention_scores((float*)(uintptr_t)scores, (const uint16_t*)(uintptr_t)qb, (const uint16_t*)(uintptr_t)kc, QH, KVH, AD, length);
+        doors->attention_mix((uint16_t*)(uintptr_t)ao, (const float*)(uintptr_t)scores, (const uint16_t*)(uintptr_t)vc, QH, KVH, AD, length, over);
+    } else {
+        /* the indexer's query heads normed and roped as the query's, then the positions it chooses, attended */
+        doors->rmsnorm_rows((uint16_t*)(uintptr_t)iq, (const uint16_t*)(uintptr_t)ixo, (const uint16_t*)(uintptr_t)t.at[AI_QWEN_4__LT__IQN],
+                            ID, IH, ID, ID, eps, over);
+        doors->rope_rows((uint16_t*)(uintptr_t)iq, (const uint16_t*)(uintptr_t)iq, (const float*)(uintptr_t)cs, 1u, IH, ID, IH * ID, ROT, over);
+        const uint64_t n = ai_qwen_4__layer__zzprivate_choose(doors, &s, iq, ip, kc, vc, pos, sc, idx, cnt, kg, vg);
+        doors->attention_scores((float*)(uintptr_t)scores, (const uint16_t*)(uintptr_t)qb, (const uint16_t*)(uintptr_t)kg, QH, KVH, AD, n);
+        doors->attention_mix((uint16_t*)(uintptr_t)ao, (const float*)(uintptr_t)scores, (const uint16_t*)(uintptr_t)vg, QH, KVH, AD, n, over);
+    }
     doors->vector_pointwise_mul((uint16_t*)(uintptr_t)aog, (const uint16_t*)(uintptr_t)ao, (const uint16_t*)(uintptr_t)gsig, QW, over);
     doors->hadamard_rotate((uint16_t*)(uintptr_t)aogr, (const uint16_t*)(uintptr_t)aog, (const uint16_t*)(uintptr_t)signs, QW, over);
     ai_qwen_4__layer__zzprivate_mv(doors, over, &t, AI_QWEN_4__LT__O, aog, aogr, y, H, QW);
-    return nn__doors_answer(&argv[5]);
+    return nn__doors_answer(&argv[7]);
 }
 
 /* ── `(ai_qwen_4__deltanet m table s32 cwin y shape)` -> `y` ──────────────────────────────────────────────────────── */
@@ -458,27 +536,35 @@ static sys__heap_node ai_qwen_4__deltanet_rows__zzabi_apply(const sys__heap_node
     return nn__doors_answer(&argv[4]);
 }
 
-/* ── `(ai_qwen_4__attention_rows m table kc vc first n y shape)` -> `y` ───────────────────────────────────────────── */
+/* ── `(ai_qwen_4__attention_rows m table kc vc ik ip first n y shape)` -> `y` ───────────────────────────────────────── */
 static sys__heap_node ai_qwen_4__attention_rows__zzabi_apply(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx) {
-    if (argc != 8u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
-    uint64_t m = 0, m_room = 0, kc = 0, kc_room = 0, vc = 0, vc_room = 0, y = 0, y_room = 0;
-    if (argv[4].dtype != SYS__KIND__VALUE_INT || !nn__primitives__room(&argv[0], &m, &m_room)
+    if (argc != 10u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
+    uint64_t m = 0, m_room = 0, kc = 0, kc_room = 0, vc = 0, vc_room = 0, ik = 0, ik_room = 0, ip = 0, ip_room = 0, y = 0, y_room = 0;
+    if (argv[6].dtype != SYS__KIND__VALUE_INT || !nn__primitives__room(&argv[0], &m, &m_room)
      || !nn__primitives__room(&argv[2], &kc, &kc_room) || !nn__primitives__room(&argv[3], &vc, &vc_room)
-     || !nn__primitives__room(&argv[6], &y, &y_room))
+     || !nn__primitives__room(&argv[4], &ik, &ik_room) || !nn__primitives__room(&argv[5], &ip, &ip_room)
+     || !nn__primitives__room(&argv[8], &y, &y_room))
         return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
     ai_qwen_4__table t;
     ai_qwen_4__shape s;
     uint64_t n = 0u;
     const uint64_t why = ai_qwen_4__layer__zzprivate_open(argv, argc, 1u, &t, &s);
     if (why != 0ull) return sys__engine__abi__error(why);
-    if (!ai_qwen_4__rows__zzprivate_n(&argv[5], &s, &n)) return sys__engine__abi__error(AI_QWEN_4__LAYER__FAULT_TABLE);
+    if (!ai_qwen_4__rows__zzprivate_n(&argv[7], &s, &n)) return sys__engine__abi__error(AI_QWEN_4__LAYER__FAULT_TABLE);
     const uint64_t H = s.v[AI_QWEN_4__SH__HIDDEN], QH = s.v[AI_QWEN_4__SH__QH], KVH = s.v[AI_QWEN_4__SH__KVH];
     const uint64_t AD = s.v[AI_QWEN_4__SH__AD], ROT = s.v[AI_QWEN_4__SH__ROT], QW = QH * AD, KVW = KVH * AD;
-    const uint64_t first = argv[4].args[0], to = first + n;
-    if (QH % KVH != 0u || ROT > AD || ROT % 2u != 0u || first >= (1ull << 24)
+    const uint64_t IH = s.v[AI_QWEN_4__SH__IH], ID = s.v[AI_QWEN_4__SH__ID], RATIO = s.v[AI_QWEN_4__SH__RATIO];
+    const uint64_t IW = IH * ID + ID, best = s.v[AI_QWEN_4__SH__BUDGET] / RATIO, PICK = best * RATIO + RATIO - 1u;
+    const uint64_t first = argv[6].args[0], to = first + n;
+    /* rows 0 … dense − 1 choose every block (their positions at most PICK − 1), the rest each its own */
+    const uint64_t dense = first >= PICK ? 0u : (PICK - first < n ? PICK - first : n);
+    const uint64_t b_lo = first / RATIO, nb = to / RATIO - b_lo;             /* the blocks the chunk finishes */
+    if (QH % KVH != 0u || ROT > AD || ROT > ID || ROT % 2u != 0u || first >= (1ull << 24)
      || !ai_qwen_4__table__zzpackage_matrix(&t, AI_QWEN_4__LT__Q) || !ai_qwen_4__table__zzpackage_matrix(&t, AI_QWEN_4__LT__K)
      || !ai_qwen_4__table__zzpackage_matrix(&t, AI_QWEN_4__LT__V) || !ai_qwen_4__table__zzpackage_matrix(&t, AI_QWEN_4__LT__O)
-     || !ai_qwen_4__table__zzpackage_vector(&t, AI_QWEN_4__LT__QN, AD) || !ai_qwen_4__table__zzpackage_vector(&t, AI_QWEN_4__LT__KN, AD))
+     || !ai_qwen_4__table__zzpackage_vector(&t, AI_QWEN_4__LT__QN, AD) || !ai_qwen_4__table__zzpackage_vector(&t, AI_QWEN_4__LT__KN, AD)
+     || !ai_qwen_4__table__zzpackage_matrix(&t, AI_QWEN_4__LT__IX) || !ai_qwen_4__table__zzpackage_vector(&t, AI_QWEN_4__LT__IQN, ID)
+     || !ai_qwen_4__table__zzpackage_vector(&t, AI_QWEN_4__LT__IKN, ID))
         return sys__engine__abi__error(AI_QWEN_4__LAYER__FAULT_TABLE);
     const uint64_t scratch = s.at[AI_QWEN_4__SH__SCRATCH], signs = s.at[AI_QWEN_4__SH__SIGNS], cs = s.at[AI_QWEN_4__SH__CS];
     const uint64_t scores = s.at[AI_QWEN_4__SH__SCORES];
@@ -488,8 +574,22 @@ static sys__heap_node ai_qwen_4__attention_rows__zzabi_apply(const sys__heap_nod
     const uint64_t kk = ai_qwen_4__layer__zzprivate_take(&next, n * KVW), qn = ai_qwen_4__layer__zzprivate_take(&next, n * QW);
     const uint64_t att = ai_qwen_4__layer__zzprivate_take(&next, n * QW), gated = ai_qwen_4__layer__zzprivate_take(&next, n * QW);
     const uint64_t arot = ai_qwen_4__layer__zzprivate_take(&next, n * QW);
+    /* the indexer's (▶ the position's verb): its map a row, the chosen rows' query heads gathered and normed, the blocks'
+     * zeros, means and angles, one chosen row's scores, positions, keys and values at a time */
+    const uint64_t ixo = ai_qwen_4__layer__zzprivate_take(&next, n * IW);
+    const uint64_t iqc = ai_qwen_4__layer__zzprivate_take(&next, (n - dense) * IH * ID);
+    const uint64_t iq = ai_qwen_4__layer__zzprivate_take(&next, (n - dense) * IH * ID);
+    const uint64_t zeros = ai_qwen_4__layer__zzprivate_take(&next, nb * RATIO * ID), pn = ai_qwen_4__layer__zzprivate_take(&next, nb * ID);
+    const uint64_t csb = ai_qwen_4__layer__zzprivate_take(&next, nb * 2u * ROT);
+    const uint64_t sc = ai_qwen_4__layer__zzprivate_take(&next, dense < n ? 2u * (to / RATIO) : 0u);
+    const uint64_t idx = ai_qwen_4__layer__zzprivate_take(&next, 2u * PICK), cnt = ai_qwen_4__layer__zzprivate_take(&next, 2u);
+    const uint64_t kg = ai_qwen_4__layer__zzprivate_take(&next, dense < n ? PICK * KVW : 0u);
+    const uint64_t vg = ai_qwen_4__layer__zzprivate_take(&next, dense < n ? PICK * KVW : 0u);
+    const uint64_t dense_scores = dense * QH * (first + dense), chosen_scores = dense < n ? QH * PICK : 0u;
     if (!nn__primitives__fits(n * H, m_room) || !nn__primitives__fits(n * H, y_room) || !nn__primitives__fits(to * KVW, kc_room)
-     || !nn__primitives__fits(to * KVW, vc_room) || s.room[AI_QWEN_4__SH__SCORES] / 4u < n * QH * to
+     || !nn__primitives__fits(to * KVW, vc_room) || !nn__primitives__fits(to * ID, ik_room)
+     || !nn__primitives__fits((to / RATIO) * ID, ip_room)
+     || s.room[AI_QWEN_4__SH__SCORES] / 4u < (dense_scores > chosen_scores ? dense_scores : chosen_scores)
      || s.room[AI_QWEN_4__SH__CS] / 4u < n * ROT || next - scratch > s.room[AI_QWEN_4__SH__SCRATCH])
         return sys__engine__abi__error(AI_QWEN_4__LAYER__FAULT_ROOM);
     const nn__doors* doors = nn__doors_for(ctx);
@@ -510,16 +610,40 @@ static sys__heap_node ai_qwen_4__attention_rows__zzabi_apply(const sys__heap_nod
     doors->rmsnorm_rows((uint16_t*)(uintptr_t)kfirst, (const uint16_t*)(uintptr_t)kk, (const uint16_t*)(uintptr_t)t.at[AI_QWEN_4__LT__KN],
                         AD, n * KVH, AD, AD, eps, over);
     doors->rope_rows((uint16_t*)(uintptr_t)kfirst, (const uint16_t*)(uintptr_t)kfirst, (const float*)(uintptr_t)cs, n, KVH, AD, KVW, ROT, over);
-    /* row r over positions 0 … first + r, gated by σ of its heads' gates, the output projection */
-    doors->attention_causal_scores_grouped((float*)(uintptr_t)scores, (const uint16_t*)(uintptr_t)qn, (const uint16_t*)(uintptr_t)kc,
-                                           QH, KVH, AD, first, n);
-    doors->attention_causal_softmax((float*)(uintptr_t)scores, QH, first, n);
-    doors->attention_causal_mix((uint16_t*)(uintptr_t)att, (const float*)(uintptr_t)scores, (const uint16_t*)(uintptr_t)vc,
-                                QH, KVH, AD, first, n, over);
+    /* the indexer: its map of every row, each row's key into `ik`, and every block the chunk finishes pooled into `ip` */
+    ai_qwen_4__rows__zzprivate_gemm(doors, over, &t, AI_QWEN_4__LT__IX, m, mr, ixo, pairs, n, IW, H);
+    doors->vector_copy_rows((uint16_t*)(uintptr_t)(ik + 2u * first * ID), ID, (const uint16_t*)(uintptr_t)(ixo + 2u * IH * ID), IW, ID, n);
+    if (nb != 0u) ai_qwen_4__layer__zzprivate_pool(doors, over, &t, &s, ik, ip, b_lo, nb, zeros, pn, csb);
+    /* rows that choose every block: over positions 0 … first + r, as before the indexer */
+    if (dense != 0u) {
+        doors->attention_causal_scores_grouped((float*)(uintptr_t)scores, (const uint16_t*)(uintptr_t)qn, (const uint16_t*)(uintptr_t)kc,
+                                               QH, KVH, AD, first, dense);
+        doors->attention_causal_softmax((float*)(uintptr_t)scores, QH, first, dense);
+        doors->attention_causal_mix((uint16_t*)(uintptr_t)att, (const float*)(uintptr_t)scores, (const uint16_t*)(uintptr_t)vc,
+                                    QH, KVH, AD, first, dense, over);
+    }
+    /* the rest, a row at a time: its indexer query normed and roped, the positions it chooses, attended as a position's */
+    if (dense < n) {
+        const uint64_t rest = n - dense;
+        doors->vector_copy_rows((uint16_t*)(uintptr_t)iqc, IH * ID, (const uint16_t*)(uintptr_t)(ixo + 2u * dense * IW), IW, IH * ID, rest);
+        doors->rmsnorm_rows((uint16_t*)(uintptr_t)iq, (const uint16_t*)(uintptr_t)iqc, (const uint16_t*)(uintptr_t)t.at[AI_QWEN_4__LT__IQN],
+                            ID, rest * IH, ID, ID, eps, over);
+        doors->rope_rows((uint16_t*)(uintptr_t)iq, (const uint16_t*)(uintptr_t)iq, (const float*)(uintptr_t)(cs + 4u * dense * ROT),
+                         rest, IH, ID, IH * ID, ROT, over);
+        for (uint64_t r = dense; r < n; ++r) {
+            const uint64_t got = ai_qwen_4__layer__zzprivate_choose(doors, &s, iq + 2u * (r - dense) * IH * ID, ip, kc, vc, first + r,
+                                                                     sc, idx, cnt, kg, vg);
+            doors->attention_scores((float*)(uintptr_t)scores, (const uint16_t*)(uintptr_t)(qn + 2u * r * QW), (const uint16_t*)(uintptr_t)kg,
+                                    QH, KVH, AD, got);
+            doors->attention_mix((uint16_t*)(uintptr_t)(att + 2u * r * QW), (const float*)(uintptr_t)scores, (const uint16_t*)(uintptr_t)vg,
+                                 QH, KVH, AD, got, over);
+        }
+    }
+    /* gated by σ of its heads' gates, the output projection */
     doors->attention_gate_rows((uint16_t*)(uintptr_t)gated, (const uint16_t*)(uintptr_t)att, (const uint16_t*)(uintptr_t)qg, n * QH, AD, over);
     doors->hadamard_rotate((uint16_t*)(uintptr_t)arot, (const uint16_t*)(uintptr_t)gated, (const uint16_t*)(uintptr_t)signs, n * QW, over);
     ai_qwen_4__rows__zzprivate_gemm(doors, over, &t, AI_QWEN_4__LT__O, gated, arot, y, pairs, n, H, QW);
-    return nn__doors_answer(&argv[6]);
+    return nn__doors_answer(&argv[8]);
 }
 
 /* ── `(ai_qwen_4__shared_rows x xr table out n shape)` -> `out` ───────────────────────────────────────────────────── */

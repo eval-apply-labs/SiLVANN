@@ -166,16 +166,47 @@ static uint64_t nn__routed__zzprivate_slot_in(const nn__routed* r, uint64_t ring
     return nn__expert__slot(r->layer, ring - 1u, expert, &me) ? me.args[NN__EXPERT__SLOT_AT] : 0ull;
 }
 
+/* ⭐ FROM THE DISK (NN-165): expert `x` of the tier's layer (the tier's number) read into the disk tier's cache from the
+ * layer's file — as PART_WORKER, whose cache it is and whose reads the loader keeps; that worker computes none of a
+ * streamed chunk's picks, so it is idle meanwhile — `pinned` (the tier's numbers) kept from being given up for it; with
+ * `wait`, landed before it answers. False where the tier names no file for the layer or the read is refused. */
+static bool nn__routed__zzprivate_stream_read(const nn__expert_tier* tier, uint64_t x, const uint64_t* pinned, unsigned npinned,
+                                              bool wait) {
+    if (tier->exclusive != 2u || tier->backings == 0ull || tier->layer >= sys__node_array__length(tier->backings)) return false;
+    const sys__heap_node b = sys__node_array__borrow(tier->backings, tier->layer);
+    nn__expert__backing backing;
+    if (!sys__heap_node__carries_reference(b.dtype) || !nn__expert__backing_of(b.args[0], &backing)) return false;
+    const sys__engine__ctx* cpu = sys__engine__ctx_of((unsigned int)tier->part_worker);
+    if (cpu == 0) return false;
+    const int acting = sys__silicon__host_acting_as();
+    sys__silicon__host_act_as((int)tier->part_worker);
+    int got = nn__expert__request(cpu->family, tier->layer, tier->part_type, x, &backing, false, pinned, npinned, 0);
+    if (got == NN__EXPERT__REFUSED && wait) {          /* every read the worker may have in flight: they land first */
+        (void)nn__expert__settle(tier->layer, tier->part_type);
+        got = nn__expert__request(cpu->family, tier->layer, tier->part_type, x, &backing, false, pinned, npinned, 0);
+    }
+    const bool ok = got != NN__EXPERT__REFUSED && (!wait || nn__expert__settle_one(tier->layer, tier->part_type, x));
+    sys__silicon__host_act_as(acting);
+    return ok;
+}
+
 /* ⭐ AN EXPERT STREAMED (NN-115 ②): where the tier does not hold expert `e`, promoted into the ring from the tier's sources
  * — its copy queued, the card's queue waiting for it where it is settled — `pinned` (this batch's and the next's) kept
- * from being given up for it. 0, or the fault to answer with. */
+ * from being given up for it. A disk tier's cache not holding it, read into it first (▶ `stream_read`). 0, or the fault
+ * to answer with. */
 static uint64_t nn__routed__zzprivate_stream_one(sys__engine__ctx* ctx, const nn__routed* r, const nn__expert_tier* tier,
                                                  uint64_t e, const uint64_t* pinned, unsigned npinned) {
     /* the tier holds it, or its promotion into the tier is on its way: computed there, the card waiting for that copy */
     if (!nn__expert__settle_one(r->layer, r->type, e)) return NN__ROUTED__FAULT_EXPERT;
     if (nn__routed__zzprivate_slot(r, e) != 0ull) return 0u;
     nn__expert__gather g;
-    if (!nn__expert_tier__stitch(tier, r->first + e, &g)) return NN__ROUTED__FAULT_EXPERT;
+    if (!nn__expert_tier__stitch(tier, r->first + e, &g)) {
+        uint64_t held[2u * NN__ROUTED__BATCH_MAX];                   /* the pins in the tier's numbers, the cache's */
+        const unsigned nh = npinned < 2u * NN__ROUTED__BATCH_MAX ? npinned : 2u * NN__ROUTED__BATCH_MAX;
+        for (unsigned i = 0u; i < nh; ++i) held[i] = r->first + pinned[i];
+        if (!nn__routed__zzprivate_stream_read(tier, r->first + e, held, nh, true) || !nn__expert_tier__stitch(tier, r->first + e, &g))
+            return NN__ROUTED__FAULT_EXPERT;
+    }
     const uint64_t ring = tier->stream - 1u;
     int got = nn__expert__promote(ctx->family, r->layer, ring, e, &g, pinned, npinned);
     if (got == NN__EXPERT__REFUSED) {                    /* every record in flight: the layer's admitted first, then again */
@@ -581,6 +612,14 @@ static uint64_t nn__routed__rows(sys__engine__ctx* ctx, const nn__doors* doors, 
     if (stream && pad == 0) fault = NN__ROUTED__FAULT_SHAPE;
     unsigned turn = 0u;                                              /* the batches computed, for the compute marks */
     uint64_t pinned[2u * NN__ROUTED__BATCH_MAX];
+    /* ⭐ FROM THE DISK (NN-165): the first two batches' reads queued at once, each later batch's a batch ahead of its copy */
+    const bool disk = stream && tier->exclusive == 2u && tier->backings != 0ull;
+    if (disk && used > 0u && P > 0u && fault == 0u) {
+        const uint64_t n2 = 2u * batch < used ? 2u * batch : used;
+        uint64_t held[2u * NN__ROUTED__BATCH_MAX];
+        for (uint64_t o = 0u; o < n2; ++o) held[o] = first + order[o];
+        for (uint64_t o = 0u; o < n2; ++o) (void)nn__routed__zzprivate_stream_read(tier, first + order[o], held, (unsigned)n2, false);
+    }
     if (stream && used > 0u && P > 0u && fault == 0u) {             /* the first batch: one expert, the card starts on it */
         pinned[0] = order[0];
         fault = nn__routed__zzprivate_stream_one(ctx, r, tier, order[0], pinned, 1u);
@@ -641,6 +680,13 @@ static uint64_t nn__routed__rows(sys__engine__ctx* ctx, const nn__doors* doors, 
             if (turn > 0u && !sys__pad__compute_reached(pad, (turn - 1u) & 1u)) fault = NN__PRIMITIVES__FAULT_NO_DEVICE;
             unsigned np = 0u;
             for (uint64_t o = b0; o < n1; ++o) pinned[np++] = order[o];
+            if (disk) {                                              /* the batch after it on its way from the disk */
+                const uint64_t n2 = n1 + batch < used ? n1 + batch : used;
+                uint64_t held[2u * NN__ROUTED__BATCH_MAX];
+                unsigned nh = 0u;
+                for (uint64_t o = b1; o < n2; ++o) held[nh++] = first + order[o];
+                for (uint64_t o = n1; o < n2; ++o) (void)nn__routed__zzprivate_stream_read(tier, first + order[o], held, nh, false);
+            }
             for (uint64_t o = b1; o < n1 && fault == 0u; ++o) fault = nn__routed__zzprivate_stream_one(ctx, r, tier, order[o], pinned, np);
         }
         ++turn;

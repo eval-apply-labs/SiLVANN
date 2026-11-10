@@ -20,6 +20,7 @@ with `Busy` at once. ⚖ *"retry in 5 s is what the silvann ui will do (or the r
 convention and it is the caller that will do it"* — so the runtime keeps no queue and never retries.
 """
 import json
+import contextlib
 import threading
 import time
 import uuid
@@ -180,6 +181,7 @@ class Runtime:
                 raise Busy("a turn is on the card")
             t = _Turn(c, list(new_tokens), max_new, sampler, set(stop), on_token)
             t.images = list(images)
+            t.process(getattr(self.model, "m", None))
             self._running = t
         threading.Thread(target=self._serve, args=(t,), daemon=True).start()
         return t
@@ -189,9 +191,14 @@ class Runtime:
 
     def _serve(self, t):
         try:
-            t.result = self._run(t)
-        except Exception as exc:                      # a turn that fails answers its failure
-            t.error = exc
+            with t.as_its_process():
+                t.result = self._run(t)
+        except Exception as exc:                      # a turn that fails answers its failure — or, killed, its answer so far
+            if t.killed:
+                t.result = t.answer
+                self.active, t.cartridge.state = None, None     # its state torn: every token it has seen run again next turn
+            else:
+                t.error = exc
         t.done.set()
 
     def _run(self, t):
@@ -257,7 +264,7 @@ class Runtime:
         # ⭐ THE ANSWER GENERATED ON THE CARD where the model has the loop and the token is chosen there — `GENERATE_CALL`
         #   tokens a call, so a stream sees them in that many at a time and a cancel waits for at most that many
         on_card = getattr(m, "GENERATES", False) and (greedy or card)
-        answer = []
+        answer = t.answer = []
         while True:
             answer.append(tok)
             c.tokens.append(tok)
@@ -403,6 +410,7 @@ class SeatedRuntime(Runtime):
                 k = empty[0] if empty else min(free, key=lambda j: self.used[j])
             t = _Turn(c, list(new_tokens), max_new, sampler, set(stop), on_token)
             t.images, t.seat, t.phase = list(images), k, "new"
+            t.process(getattr(self.model, "m", None))
             self.running[k] = t
             self._running = t
             self._work.notify_all()
@@ -503,7 +511,7 @@ class SeatedRuntime(Runtime):
                 k, t = new[0]
                 try:
                     self._seat(k, t.cartridge)
-                    with self.model.on_seat(k):
+                    with self.model.on_seat(k), t.as_its_process():
                         tok, t.how = self._prompt(t)
                     t.phase, t.answer = "answer", []
                     self._emit(k, t, tok)
@@ -536,7 +544,7 @@ class SeatedRuntime(Runtime):
     def _single(self, k, t):
         m, c, tok = self.model, t.cartridge, t.answer[-1]
         h = self._head(t, tok)
-        with m.on_seat(k):
+        with m.on_seat(k), t.as_its_process():
             out = m.step(tok, c.length, greedy=h == "(head)", sample=h if isinstance(h, str) and h != "(head)" else None)
             if not isinstance(h, str):
                 out = h(m.logits())
@@ -573,6 +581,8 @@ class SeatedRuntime(Runtime):
             if error is not None and self.held[k] is t.cartridge:
                 self.held[k] = None                  # its seat's state unknown after a failure: written again when it returns
                 t.cartridge.state, t.cartridge.length, t.cartridge.lag = None, 0, 0
+        if error is not None and t.killed:            # killed (NN-160): its answer so far, its seat's state read again
+            error = None
         t.result, t.error = (None if error is not None else t.answer), error
         t.done.set()
 
@@ -582,7 +592,33 @@ class _Turn:
         self.cartridge, self.new_tokens, self.max_new = cartridge, new_tokens, max_new
         self.sampler, self.stop, self.on_token = sampler, stop, on_token
         self.done, self.result, self.error, self.cancelled = threading.Event(), None, None, False
-        self.images = []
+        self.images, self.answer, self.killed = [], [], False
+        self.machine, self.pid = None, 0
+
+    # ⭐ A TURN IS A PROCESS (NN-160, ▶ machine.py's `as_process`): its work — the prompt, every step and `generate` call,
+    #   what they ask — made as one process of the machine's, which the two levels of a stop act on.
+    def process(self, machine):
+        """The turn's process, a new one of `machine`'s (none without one: its stop is the flag alone)."""
+        if machine is not None and hasattr(machine, "new_process"):
+            self.machine, self.pid = machine, machine.new_process()
+
+    def as_its_process(self):
+        return self.machine.as_process(self.pid) if self.pid else contextlib.nullcontext()
+
+    def cancel(self):
+        """⭐ THE STOP — the answer ends at the token it is on: the turn reads `cancelled` between its calls, and inside one
+        `generate`'s loop reads its process asked to stop (`sys__scheduler__stopped`) once a token. What it did stays."""
+        self.cancelled = True
+        if self.pid:
+            self.machine.stop(self.pid)
+
+    def kill(self):
+        """⭐ THE PKILL — whatever of the turn is in flight torn down (`sys__scheduler__kill`: its queued work off every
+        queue, its running step ended at its next move or slice, their answers SCKL). Its answer so far is its answer, and
+        its conversation's state is read again from its tokens at its next turn."""
+        self.cancelled = self.killed = True
+        if self.pid:
+            self.machine.kill(self.pid)
 
     def wait(self, timeout=None):
         self.done.wait(timeout)

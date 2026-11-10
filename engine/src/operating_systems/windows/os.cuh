@@ -369,5 +369,10 @@ static inline uint32_t sys__os__cards(char* names, uint32_t name_bytes, uint32_t
     }
     return n;
 }
+/* Intel's GPUs are among those OpenCL's loader names to `cards` above. */
+static inline uint32_t sys__os__intel_gpus(char* names, uint32_t name_bytes, uint32_t most) {
+    (void)names; (void)name_bytes; (void)most;
+    return 0u;
+}
 
 #endif /* SILVANN__OPERATING_SYSTEMS_WINDOWS_OS_CUH */

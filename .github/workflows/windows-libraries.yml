@@ -76,7 +76,7 @@ jobs:
       - name: The families
         shell: pwsh
         env:
-          SILVANN_SILICON_FAMILIES: x86_avx2 nvidia_cuda12 khronos_opencl2 khronos_opencl1_igpu
+          SILVANN_SILICON_FAMILIES: x86_avx2 nvidia_cuda12 khronos_opencl2 intel_opencl2 nvidia_opencl1 intel_opencl1_igpu
         run: |
           python -m pip install --quiet -r scripts/requirements.txt
           python scripts/build.py
@@ -109,6 +109,39 @@ jobs:
         with:
           name: families-logs
           path: lib/**/*.log
+
+  # the portable app (NN-162): SiLVANN.exe and its folder — Python's embeddable build with the runtime's packages, the
+  #   evaluator for it, the families, the release's tree — built by scripts/portable/build_portable.ps1 and attached to the
+  #   tag's release as silvann_portable_windows_x64.zip
+  portable:
+    needs: [evaluator, families]
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: built
+      - name: The portable app's folder
+        shell: pwsh
+        run: pwsh scripts/portable/build_portable.ps1 -Lib built -Out portable
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: silvann_portable_windows_x64
+          path: portable/silvann_portable_windows_x64.zip
+          if-no-files-found: error
+      - name: Attached to the tag's release
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          gh release view "$tag" > /dev/null 2>&1 || gh release create "$tag" --verify-tag --title "SiLVANN $tag" \
+            --notes "SiLVANN $tag."
+          gh release upload "$tag" portable/silvann_portable_windows_x64.zip --clobber
 
   zip:
     needs: [evaluator, families]
