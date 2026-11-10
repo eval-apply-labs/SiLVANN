@@ -47,7 +47,7 @@ Expand-Archive -Path $zip -DestinationPath $Py -Force
 
 # ④ the runtime's packages, for that Python, with this machine's Python of its minor version
 $have = (& python -c "import sys; print('%d%d' % sys.version_info[:2])")
-if ($have -ne $Minor) { throw "this machine's python is $have, the embeddable build's $Minor: their packages' ABIs differ" }
+if ($have -ne $Minor) { throw "this machine's python is $have, the embeddable build's ${Minor}: their packages' ABIs differ" }
 & python -m pip install --quiet --only-binary=:all: --target (Join-Path $Py "Lib\site-packages") -r (Join-Path $Tree "scripts\requirements.txt")
 if ($LASTEXITCODE -ne 0) { throw "pip could not install requirements.txt for the embeddable build" }
 
@@ -61,7 +61,9 @@ $vcvars = Join-Path $vs "VC\Auxiliary\Build\vcvars64.bat"
 # without Microsoft's Visual C++ Redistributable has none of them, and the embeddable build carries vcruntime140 alone,
 # so the folder carries the set from the toolset that built them, one version together. Microsoft lets an app carry
 # them in its own folder; they go beside pythonw.exe, the first folder Windows looks in for a process's libraries.
-$redist = (cmd /c "`"$vcvars`" >nul && echo %VCToolsRedistDir%" | Select-Object -Last 1).Trim()
+# (`set` after vcvars64 has run: an `echo %VCToolsRedistDir%` on the same line is expanded when cmd reads the line, before)
+$redist = ((cmd /c "`"$vcvars`" >nul && set VCToolsRedistDir" | Where-Object { $_ -like "VCToolsRedistDir=*" } |
+    Select-Object -Last 1) -replace "^VCToolsRedistDir=", "").Trim()
 $crt = Get-ChildItem (Join-Path $redist "x64") -Directory -Filter "Microsoft.VC*.CRT" -ErrorAction SilentlyContinue |
     Select-Object -First 1
 if (-not $crt) { throw "no C++ runtime among Visual Studio's redistributables ($redist x64\Microsoft.VC*.CRT)" }
