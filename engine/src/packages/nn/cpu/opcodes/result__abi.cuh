@@ -231,8 +231,12 @@ static nn__buffer__bounce* nn__buffer__zzprivate_bounce(unsigned w, uint64_t byt
     return c;
 }
 
-/* ⭐⭐ `(nn__buffer__copy from worker to bytes [1])` -> `to`: `bytes` of `from`, a buffer of the worker named, into `to`,
- * one of this verb's own worker. ⚖ *"so in case of a single card or a single card type the buffer remains on gpu,
+/* ⭐⭐ `(nn__buffer__copy from to bytes [1])` -> `to`: `bytes` of `from`, wherever its bytes are, into `to`, one of this
+ * verb's own worker. A buffer records the memory it was carved from — the pool of one worker, a card's or the CPU's
+ * (`NN__BUFFER__OWNER`), fixed for its life whoever holds it — and its bytes are read through that worker's device, so
+ * a program hands the copy the buffer an answer brought it and names no worker (⚖ 2026-11-11 *"no one names a worker
+ * to read a computing variable, they just name the return variable"*): a worker's number in its place is refused NBNW,
+ * a source that records no memory NBUN. ⚖ *"so in case of a single card or a single card type the buffer remains on gpu,
  * if there are different card types the program is written that it also copies the buffer out"* — so the program
  * says when a tensor crosses, and this is the crossing: the source's device bound and waited for (its work may
  * still be running), its bytes read into RAM, this worker's device bound again and the bytes written. On node03's
@@ -246,21 +250,22 @@ static nn__buffer__bounce* nn__buffer__zzprivate_bounce(unsigned w, uint64_t byt
  *   they were overlapping"*: waited for, the CPUs' copy of a card's hand waited for the card's own experts, queued just
  *   before, and the CPUs' experts ran after the card's instead of beside them. */
 static sys__heap_node nn__buffer__zzabi_apply_copy(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx) {
-    if (argc != 4u && argc != 5u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
-    if (argc == 5u && (argv[4].dtype != SYS__KIND__VALUE_INT || argv[4].args[0] != 1u))
+    if (argc >= 2u && argv[1].dtype == SYS__KIND__VALUE_INT) return sys__engine__abi__error(NN__BUFFER__FAULT_NAMED);
+    if (argc != 3u && argc != 4u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
+    if (argc == 4u && (argv[3].dtype != SYS__KIND__VALUE_INT || argv[3].args[0] != 1u))
         return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
-    const bool ready = argc == 5u;
+    const bool ready = argc == 4u;
     uint64_t from = 0, from_room = 0, to = 0, to_room = 0;
-    if (!nn__primitives__room_of_any(&argv[0], &from, &from_room) || argv[1].dtype != SYS__KIND__VALUE_INT
-     || !nn__primitives__room(&argv[2], &to, &to_room) || argv[3].dtype != SYS__KIND__VALUE_INT)
+    if (!nn__primitives__room_of_any(&argv[0], &from, &from_room)
+     || !nn__primitives__room(&argv[1], &to, &to_room) || argv[2].dtype != SYS__KIND__VALUE_INT)
         return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
-    const uint64_t bytes = argv[3].args[0];
+    const uint64_t bytes = argv[2].args[0];
     if (bytes == 0ull || bytes > from_room || bytes > to_room) return sys__engine__abi__error(NN__PRIMITIVES__FAULT_BOUNDS);
-    /* ⛳ THE SOURCE IS READ WHATEVER WORKER HOLDS IT — that is the crossing — but it must be the worker named: the
-     *   bytes are read through that worker's device. */
+    /* ⛳ THE SOURCE IS READ WHEREVER ITS BYTES ARE — that is the crossing — through the device of the worker whose
+     *   memory it was carved from, the one it records. */
     const uint64_t owner = nn__primitives__owner(&argv[0]);
-    if (owner != 0ull && owner != argv[1].args[0] + 1ull) return sys__engine__abi__error(NN__BUFFER__FAULT_OWNER);
-    const sys__engine__ctx* src = sys__engine__ctx_of((unsigned int)argv[1].args[0]);
+    if (owner == 0ull) return sys__engine__abi__error(NN__BUFFER__FAULT_UNOWNED);
+    const sys__engine__ctx* src = sys__engine__ctx_of((unsigned int)(owner - 1ull));
     if (src == 0 || src->fault_word == 0 || nn__doors_for(ctx) == 0) return sys__engine__abi__error(NN__PRIMITIVES__FAULT_NO_DEVICE);
     const bool elsewhere = src->family != ctx->family || src->device != ctx->device;
     bool ok = !elsewhere || sys__silicon__bind_device(src->family, src->device);
@@ -287,7 +292,7 @@ static sys__heap_node nn__buffer__zzabi_apply_copy(const sys__heap_node* argv, u
     if (kept != 0) sys__os__lock_give(&kept->lock);
     else free(bounce);
     if (!ok) return sys__engine__abi__error(NN__PRIMITIVES__FAULT_NO_DEVICE);
-    return nn__doors_answer(&argv[2]);
+    return nn__doors_answer(&argv[1]);
 }
 SYS__ENGINE__ABI__BRIDGE(nn__buffer__zzabi_adapter_copy,        nn__buffer__zzabi_apply_copy)
 

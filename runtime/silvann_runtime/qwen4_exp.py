@@ -807,9 +807,11 @@ class Qwen4Exp(Generates):
             m.act_as(CPU)
             loader = m.loader()
             self.SRC = {}                          # every expert's address in the CPU's memory: what a card's tier copies
-            for l in layers:
+            for i, l in enumerate(layers):
                 loader.layer_width(l, 0, self.EXPERTS)
                 self.SRC[l] = [loader.load_expert(self.b, e, 0, l, x, self.EXPERTS) for x in range(self.EXPERTS)]
+                if progress:                       # the experts' load said a layer at a time, as the dense part's
+                    progress(i + 1, len(layers))
             if loader.handed() != 0:
                 raise Refused("%d expert slots were reserved and never published" % loader.handed())
         m.act_as(CPU)

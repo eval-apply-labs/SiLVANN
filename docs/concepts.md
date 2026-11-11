@@ -69,7 +69,7 @@ Three things follow that a fixed inference graph does not have:
 1. **A program can rewrite itself as it runs.** `while` is not a loop in C: each turn it rewrites its own form —
    the action, then the test again — so a loop of any length holds what one turn holds.
 2. **A program can hand a program to another worker.** `sys__scheduler__add` gives a frozen program (a picture) to
-   another worker — a CPU socket, when a card runs the rest of the model — and `sys__wait` reads its answer.
+   another worker — a CPU socket, when a card runs the rest of the model — and `sys__wait_for_result` reads its answer.
    That is how GLM 5.3 Flash's experts run on the CPU while its other layers run on the card.
 3. **The model's output can be a program the same machine runs.** The day a model emits a plan as data, the engine
    that runs the model also runs the plan — code and code generator on one machine. ▶ `directions.md`.

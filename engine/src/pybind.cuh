@@ -588,7 +588,7 @@ PYBIND11_MODULE(SILVANN_MODULE_NAME, m) {
     }, py::arg("bindings"), py::arg("program"),
        "Run a program with every booted block available to it. -> (kind, value, ran).");
 
-    /* Scheduling from out here, as a program's `sys__scheduler__add`, `sys__result` and `sys__wait` do, from the host's own
+    /* Scheduling from out here, as a program's `sys__scheduler__add`, `sys__result` and `sys__wait_for_result` do, from the host's own
      * slot (▶ `engine/abi/residency.cuh`). The blocks are resident, so they work whatever another thread is running,
      * and a block runs what they queue when it parks. */
     m.def("place", [](unsigned block, unsigned long long bindings, unsigned long long program) {

@@ -53,7 +53,7 @@
  * inter-try delay of a BOUNDED spin on ANOTHER block's base while collecting a result — the compute
  * opcode's collect, and the dispatcher's in `engine/abi/running.cuh`.
  * ⛔ SO TURNING THIS MOVES A TIMEOUT: the dispatcher's, `ENG__ABI__DISPATCH_TRIES` tries of two compare-and-swaps
- * and this wait. `sys__wait`'s bound is not priced through it — it is the clock's (`SYS__COMPUTING_BASE__WAIT_NS`),
+ * and this wait. `sys__wait_for_result`'s bound is not priced through it — it is the clock's (`SYS__COMPUTING_BASE__WAIT_NS`),
  * since a try of this wait alone costs what the processor's pause costs. ⇒ ★ IT IS THE ONE
  * ENTRY HERE THAT DOES NOT KEEP THE OPENING PROMISE — it cannot be different without something else being
  * different too — so whoever turns it re-derives the try count beside it.

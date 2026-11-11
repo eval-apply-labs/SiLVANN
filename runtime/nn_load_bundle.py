@@ -105,6 +105,19 @@ def is_norm(short_name):
             or re.search(r"(^|\.)norm_(key|query|conv)\.weight$", short_name) is not None)
 
 
+# ⭐ A LAYER'S EXPERTS READ AHEAD IN LONG RUNS (NN-182), where the system does not read ahead of a mapped file's faults
+#   itself: Windows. Spans nearer than WARM_GAP are read as one run, WARM_RUN bytes a read. `SILVANN_READ_AHEAD` 1 or 0
+#   asks for it or not on any system.
+#   ⛳ NOT ON LINUX, which reads ahead of the faults while the copy runs: `MEASURED` 2026-11-11 on node03, a cold boot
+#   with the experts copied into RAM, the read-ahead on against off — Qwen 3.6 35B-A3B from a spinning RAID 96.4 and
+#   98.1 s against 92.5 and 93.7, Qwen 3.8 Flash-Next from NVMe 133.2 and 133.9 s against 115.4 and 117.9
+#   (measurements/2026-11-11_nn182_read_ahead_node03.md): the read made first and the copy after, where the system
+#   overlaps them.
+WARM_RUN = 16 << 20
+WARM_GAP = 1 << 20
+READ_AHEAD = os.environ.get("SILVANN_READ_AHEAD", "1" if os.name == "nt" else "0") == "1"
+
+
 class Refused(Exception):
     """⛳ NAMED, AND NOT A RETURN CODE — the same choice `nn_unpack_model` makes and for the same
     reason: a bundle this loader cannot slice is not a degraded mode, and a caller that continued
@@ -251,6 +264,39 @@ class Bundle:
             f = open(p, "rb")
             self._blob[layer] = (f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ))
         return self._blob[layer][1]
+
+    def warm(self, layer, spans):
+        """⭐ `spans` of the layer's file — (offset, bytes) each — read ahead in long sequential runs, so the slices a load
+        takes of them after come from the system's file cache, which the mmap shares, on Windows as on Linux. Answers the
+        bytes read.
+        ⛳ WHY: an expert is four slices of two records, gate_up's codes and scales and down's, four regions far apart in
+        the file. Taken through the mmap, each page untouched is a fault and a small read, the four streams interleaved.
+        Linux reads ahead on its own; Windows reads little ahead of a mapped file's fault, `REASONED`, and a disk capped
+        on operations a second then gives ~1 MB/s: Flash-Next's experts copied into RAM sat for minutes on a rented
+        Windows PC, its CPU idle and its disk 100% busy at ~1 MB/s (NN-182) — 57 GB in ~16 hours at that rate."""
+        layer = self._store(layer)
+        runs = []
+        for at, n in sorted(spans):
+            if runs and at <= runs[-1][0] + runs[-1][1] + WARM_GAP:
+                start = runs[-1][0]
+                runs[-1] = (start, max(runs[-1][0] + runs[-1][1], at + n) - start)
+            else:
+                runs.append((at, n))
+        if not runs:
+            return 0
+        p = os.path.join(self.layer_dir(layer), self.manifest["layout"]["weights_bin"])
+        buf = memoryview(bytearray(min(WARM_RUN, max(n for _, n in runs))))
+        read = 0
+        with open(p, "rb", buffering=0) as f:
+            for at, n in runs:
+                f.seek(at)
+                while n > 0:
+                    got = f.readinto(buf[:min(n, len(buf))])
+                    if not got:
+                        break
+                    n -= got
+                    read += got
+        return read
 
     def record(self, layer, short_name):
         """One record, by the name it carries after the layer prefix is stripped — the overlay's when it has one. A
@@ -513,6 +559,16 @@ def align_up(n, to=4096):
     return ((n + to - 1) // to) * to
 
 
+def warm(records):
+    """The byte ranges `records` read in their layers' files, read ahead in long runs (▶ `Bundle.warm`) — each record's
+    own bundle and layer, an overlay's from the overlay. Answers the bytes read."""
+    spans = {}
+    for r in records:
+        each = r.each if isinstance(r, StackedRecord) else [r]
+        spans.setdefault((id(r.bundle), r.layer), (r.bundle, r.layer, []))[2].extend((e.offset, e.nbytes) for e in each)
+    return sum(bundle.warm(layer, s) for bundle, layer, s in spans.values())
+
+
 class SlotPlan:
     """Where each slice lands inside one slot, and how big the slot has to be.
 
@@ -705,6 +761,8 @@ class Loader:
         EXACTLY THE WINDOW IN WHICH THE SLOT IS OBSERVABLY OUTSTANDING."""
         gu = bundle.record(layer, GATE_UP)
         dn = bundle.record(layer, DOWN)
+        if which == 0 and READ_AHEAD:              # a layer's first expert: the layer's experts read ahead (NN-182)
+            warm((gu, dn))
         gd, gl = gu.expert_slices(which, experts)
         dd, dl = dn.expert_slices(which, experts)
         for got, want, what in ((len(gd), plan.up_data, "gate_up codes"),
@@ -726,6 +784,8 @@ class Loader:
         down rows — each worker loads only its own, into its own memory."""
         gu = bundle.record(layer, GATE_UP)
         dn = bundle.record(layer, DOWN)
+        if which == 0 and part == 0 and READ_AHEAD:   # read ahead once a layer, for every part (NN-182)
+            warm((gu, dn))
         gu_rows, dn_rows = gu.expert_rows(experts), dn.expert_rows(experts)
         inter, n, m = gu_rows // 2, gu_rows // 2 // parts, dn_rows // parts
         g0, d0 = which * gu_rows, which * dn_rows

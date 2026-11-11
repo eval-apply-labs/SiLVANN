@@ -127,5 +127,7 @@ NN__BUFFER_RAM_CLASS_LIST(NN__BUFFER__ZZPRIVATE_RAM_DENSE_ROW)
 #define NN__BUFFER__FAULT_CONFIG    0x4E424346ull   /* "NBCF" — the card cannot read what the host summed */
 #define NN__BUFFER__FAULT_ROOM      0x4E42524Dull   /* "NBRM" — the carve does not fit the span it was given */
 #define NN__BUFFER__FAULT_OWNER     0x4E424F57ull   /* "NBOW" — a buffer of another worker, handed to this one's verb */
+#define NN__BUFFER__FAULT_UNOWNED   0x4E42554Eull   /* "NBUN" — a copy's source that records no memory */
+#define NN__BUFFER__FAULT_NAMED     0x4E424E57ull   /* "NBNW" — a copy that names a worker: its source says where it is */
 
 #endif /* SILVANN__PACKAGES_NN_CONTRACTS_OBJECTS_BUFFER_CUH */

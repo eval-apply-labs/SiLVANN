@@ -18,8 +18,12 @@ mkdir -p lib/silicon_families
 echo "== the evaluator"
 # its thread-locals one load each, as setup.py builds it — initial-exec on x86-64 alone (▶ there)
 TLS=""; [ "$(uname -m)" = x86_64 ] && TLS="-ftls-model=initial-exec"
+# Android's loader resolves a library's symbols from the libraries it names, so there the module names libpython
+# (docs/android.md)
+LIBPY=""
+[ "$(uname -o 2>/dev/null)" = Android ] && LIBPY=$("$PY" -c 'import sysconfig; v = sysconfig.get_config_var; print("-L%s -lpython%s" % (v("LIBDIR"), v("LDVERSION")))')
 g++ -x c++ -O2 -std=c++17 -pthread -fPIC -shared $TLS -DSILVANN_MODULE_NAME=silvann_engine_cpu \
-    -Iengine/src -I"$PYBIND" -I"$PYINC" engine/src/manifest.cu -o "lib/silvann_engine_cpu$SUFFIX"
+    -Iengine/src -I"$PYBIND" -I"$PYINC" engine/src/manifest.cu -o "lib/silvann_engine_cpu$SUFFIX" $LIBPY
 
 echo "== the silicon families"
 (cd engine && bash scripts/build_silicon_families.sh) || true    # a family whose toolchain is absent is skipped, not an error

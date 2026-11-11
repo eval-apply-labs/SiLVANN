@@ -91,6 +91,10 @@ static inline int64_t sys__os__file_read_at(sys__os__file file, void* to, size_t
  *   `memory_will_need`  those pages read ahead
  *   `memory_interleave` / `memory_bind`  a map's pages from the nodes in `nodes` (a bit a node, `most` bits) in turn,
  *                       or from those alone
+ *   `memory_policy_refused`  on the thread whose `memory_interleave` or `memory_bind` just answered false, asked
+ *                       before any other call: whether the system refused the call itself — it places no page by
+ *                       node here (a container's seccomp filter, a kernel without NUMA), and each page is on the node
+ *                       of the thread that first touches it — rather than the nodes asked for lacking the memory
  *   `memory_aligned`    `bytes` of the heap at a multiple of `alignment`, or 0, given back by `memory_aligned_free`
  *                       and by nothing else */
 static inline void* sys__os__memory_map(size_t bytes);
@@ -101,6 +105,7 @@ static inline bool sys__os__memory_resident(const void* at, size_t bytes, unsign
 static inline void sys__os__memory_will_need(void* at, size_t bytes);
 static inline bool sys__os__memory_interleave(void* base, size_t bytes, const unsigned long* nodes, unsigned long most);
 static inline bool sys__os__memory_bind(void* base, size_t bytes, const unsigned long* nodes, unsigned long most);
+static inline bool sys__os__memory_policy_refused(void);
 static inline void* sys__os__memory_aligned(size_t alignment, size_t bytes);
 static inline void sys__os__memory_aligned_free(void* at);
 

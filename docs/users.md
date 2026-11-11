@@ -94,9 +94,32 @@ generation only, which is much faster than building for every one, and `SILVANN_
 (the number is the card's compute capability: 120 for the RTX 50 series, 89 for the 40, 86 for the 30). A card is given
 to the family that includes it when the server starts; a model's config only picks which card (`card`, in [`config.md`](config.md)).
 
+### On Windows: the portable app
+
+One folder, nothing installed: `silvann_portable_windows_x64.zip`, attached to each
+[release](https://github.com/eval-apply-labs/SiLVANN/releases) from v0.26.1, holds `SiLVANN.exe`, Python's embeddable
+build with the runtime's packages, the evaluator and every silicon family the Windows build makes, Microsoft's C++
+runtime, and the release's tree. Unzip it anywhere you can write to and double-click `SiLVANN.exe`:
+
+- **The window** is Microsoft Edge in app mode, on a profile of its own, showing the UI — the chat, **Options** with
+  **Download models** and **start**, as `silvann ui` shows them. Edge comes with Windows 10 and 11; where it is not found,
+  the default browser opens the UI and a small message box stands for the window.
+- **The cards:** an NVIDIA card through CUDA (its driver from CUDA 12's line on), an AMD or Intel GPU through OpenCL with
+  its own driver, and the CPU alone (AVX2) where there is neither — the same libraries `install.ps1` takes.
+- **Your data** — the models, the conversations, the logs (`data\logs\ui.log`) — is in `data\` beside `SiLVANN.exe`;
+  where the folder cannot be written to (Program Files), in `Documents\SiLVANN`. The model started last starts again
+  with the app.
+- **Closing the window** ends the app: a small window says *SiLVANN is shutting down* while the conversations are
+  saved and the model's server stops, then everything the app started has ended. Closing that small window stops at once,
+  without saving; the conversations' files stay readable either way.
+- **Updating:** unzip the new release's folder and move the old one's `data\` into it.
+
+Smart App Control refuses the folder's libraries as it refuses `install.ps1`'s, below. The model's shell starts switched
+off, as on any Windows install ([`tools.md`](tools.md#where-the-models-commands-reach)).
+
 ### On Windows
 
-SiLVANN runs natively on Windows 10 and 11 (64-bit x86) from v0.12.0. It needs Python 3.10 to 3.14 (`winget install -e
+SiLVANN runs natively on Windows 10 and 11 (64-bit x86) from v0.12.0. It needs Python 3.11 to 3.14 (`winget install -e
 --id Python.Python.3.12`), Git (`winget install -e --id Git.Git`) and the card's own driver. In PowerShell, in the
 folder you want SiLVANN under:
 
@@ -338,6 +361,48 @@ off, since what it adds every conversation would run.
 `key`, a setting a skill's entry leaves `null`, and a tool switched off (`"enabled": "no"`). What else it asks stays the
 machine's, and the UI's list of the tools says which. `silvann users` lists the users and their conversations;
 `silvann users passwd <name>`, `silvann users remove <name> [--with-conversations]`.
+
+#### Signing in with your organisation's account (single sign-on)
+
+A server can let people sign in with the account they already have — Google, Microsoft Entra ID, Okta, Keycloak,
+Authentik, Dex, any OpenID Connect provider — and each is a user as above, with their own folder. Register SiLVANN with
+the provider as a web application (a confidential client): its redirect URI is the UI's address followed by
+`/_silvann/sso`, for example `https://chat.example.com/_silvann/sso` — an HTTPS address, so the UI sits behind a reverse
+proxy with a certificate. For terminals, also allow the device authorization grant (some providers call it "device
+code" or "limited input device"). Then write `sso.json` in the data folder, beside `models/`:
+
+```json
+{
+  "issuer": "https://login.example.com/realms/acme",
+  "client_id": "silvann",
+  "client_secret": "…",
+  "redirect_uri": "https://chat.example.com/_silvann/sso",
+  "label": "Acme",
+  "allow": {"domains": ["example.com"], "emails": ["contractor@elsewhere.org"]}
+}
+```
+
+From the next request every server on that data folder asks for a sign-in, even before it has a user. The UI's sign-in
+shows **Sign in with Acme** beside the password form; `silvann_cli --sign-on` (or Enter at its name prompt) prints a
+page and a code to type there, on this machine or a phone. The server checks the provider's answer itself: the ID token's
+signature against the provider's published keys, its issuer, that it was given to this client, that it has not expired,
+and that it belongs to the sign-in begun here.
+
+Who gets in:
+- **an account whose verified e-mail `allow` names**, by its domain or the address itself: a user is made at their first
+  sign-in, named from the e-mail (`alice@example.com` is `alice`; `alice-2` where `alice` is someone already). They have
+  no password; `silvann users passwd` gives them one if they should also sign in with it.
+- **an account linked to a user**: `silvann users link <name> <issuer> <subject>` lets an existing user, a password's
+  one among them, sign in with that account. The subject is the provider's id for the account: an account refused
+  says its own, so the person can send it to you. `silvann users unlink` undoes it, and `silvann users` lists each user's
+  accounts.
+- anyone else is refused, and no folder is made for them.
+
+`"verified_email": false` lets in an e-mail the provider does not mark as verified (Microsoft Entra ID marks none);
+`"scopes"` replaces the default `openid email profile`. `sso.json` holds the client's secret: the server reads it, and a
+user's model cannot (it is in the data folder, which the REPL's fence closes). Signing out ends SiLVANN's sign-in, not the
+provider's own session. A sign-in also ends when its user's password or linked accounts change, whichever process
+changed them. Single sign-on needs the `PyJWT` and `cryptography` packages, which the requirements install.
 
 ### The model's tool
 

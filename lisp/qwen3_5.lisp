@@ -34,14 +34,14 @@
     (if ROTATED
         (defun (embed_into tok into)
           (begin (sys__node_array__set EMB_TOK 0 tok)
-                 (sys__scheduler__add CPU names xe) (sys__wait CPU)
-                 (nn__buffer__copy c_emb CPU into HIDDEN_BYTES)
+                 (let ((emb_row (sys__scheduler__add CPU names xe)))       ; answered as the CPU's c_emb
+                   (nn__buffer__copy (sys__wait_for_result emb_row) into HIDDEN_BYTES))
                  (type x)))
         (defun (embed_into tok into)
           (let ((u (nn__buffer__getnew HIDDEN_BYTES)) (hu (nn__buffer__getnew HIDDEN_BYTES)))
             (sys__node_array__set EMB_TOK 0 tok)
-            (sys__scheduler__add CPU names xe) (sys__wait CPU)
-            (nn__buffer__copy c_emb CPU u HIDDEN_BYTES)
+            (let ((emb_row (sys__scheduler__add CPU names xe)))
+              (nn__buffer__copy (sys__wait_for_result emb_row) u HIDDEN_BYTES))
             (nn__hadamard__rotate u ones512 hu HIDDEN)
             (nn__vector__pointwise_mul hu signs_row into HIDDEN)
             (type x))))
@@ -72,8 +72,8 @@
 (if EMBED_ROWS_ON_CPU                                   ; EMBED_ON_CPU and ROTATED
     (defun (embed_rows n)
       (begin (sys__node_array__set EMB_TOK 1 n)
-             (sys__scheduler__add CPU names xer) (sys__wait CPU)
-             (nn__buffer__copy c_embs CPU xs (* n HIDDEN_BYTES))
+             (let ((emb_rows (sys__scheduler__add CPU names xer)))     ; answered as the CPU's c_embs
+               (nn__buffer__copy (sys__wait_for_result emb_rows) xs (* n HIDDEN_BYTES)))
              (type xs)))
     (defun (embed_rows n)
       (embed_rows_each n)))
@@ -121,7 +121,9 @@
 ;; ── a layer at a position, and a layer over a prompt's rows: the mixer, then the MLP — one of five ──────────────────
 ;; ① dense · ② the MoE as one word · ③ the MoE in three on the card · ④ the routed experts on the CPU · ⑤ and a card's
 ;; tier of them beside the CPU's. With the experts on the CPU the card routes into `hand`, the CPU worker runs the
-;; picture `xq` over the layer named in HERE (▶ qwen3_5_cpu.lisp), and the card closes the layer with the routed sum.
+;; picture `xq` over the layer named in HERE (▶ qwen3_5_cpu.lisp), and the card closes the layer with the routed sum:
+;; the answer `sys__scheduler__add` returns is the buffer the CPU computed into, so the card waits on that answer, not on
+;; the CPU, and copies from the buffer it is left holding.
 ;; the router into `hand` — and, where the experts are read ahead from the disk (AHEAD_NEXT, NN-138), the next layer's
 ;; router on the same input, its likeliest picks into `guess` for the CPU to read the first of (▶ qwen3_5_cpu.lisp `xq`)
 (defun (route i)
@@ -137,10 +139,9 @@
                      ;; the tier's visit first, so the CPU starts on its picks beside the card's, not after them
                      (ai_qwen_3__experts hand picks (nth EXPERTS_TIER i) routed_k nn__expert_tier 1)
                      (sys__node_array__set HERE 0 i)
-                     (sys__scheduler__add CPU names xq_ready)
-                     (ai_qwen_3__experts hand picks (nth EXPERTS_TIER i) routed_k nn__expert_tier)
-                     (sys__wait CPU)
-                     (nn__buffer__copy c_routed CPU routed HIDDEN_BYTES)
+                     (let ((expert_sum (sys__scheduler__add CPU names xq_ready)))
+                       (ai_qwen_3__experts hand picks (nth EXPERTS_TIER i) routed_k nn__expert_tier)
+                       (nn__buffer__copy (sys__wait_for_result expert_sum) routed HIDDEN_BYTES))
                      (nn__vector__add routed routed_k routed HIDDEN)
                      (ai_qwen_3__post_expert h1 hand routed (nth POST i) x)
                      (type x)))
@@ -148,8 +149,8 @@
               (begin (mixer i pos h1)
                      (route i)
                      (sys__node_array__set HERE 0 i)
-                     (sys__scheduler__add CPU names xq) (sys__wait CPU)
-                     (nn__buffer__copy c_routed CPU routed HIDDEN_BYTES)
+                     (let ((expert_sum (sys__scheduler__add CPU names xq)))
+                       (nn__buffer__copy (sys__wait_for_result expert_sum) routed HIDDEN_BYTES))
                      (ai_qwen_3__post_expert h1 hand routed (nth POST i) x)
                      (type x))))
         (if FUSED
@@ -166,7 +167,7 @@
 
 ;; a prompt's: with the experts on the CPU, the card routes every row into its hand row, the CPU runs each expert once
 ;; over the rows that picked it, the card closes every row — waited for without a bound, as a chunk's experts read from
-;; the disk can outlast `sys__wait`'s wait. A card's tier takes its share of the chunk first and computes it while
+;; the disk can outlast `sys__wait_for_result`'s wait. A card's tier takes its share of the chunk first and computes it while
 ;; the CPU computes the rest.
 (if ROUTED
     (if EXPERTS_ON_CPU
@@ -177,11 +178,10 @@
                      (nn__expert_tier__note hands nn__expert_tier (nth LAYER i) n HAND_ROW HAND_PICKS_AT
                                             nn__expert_major__vram_promotion_threshold_picks)
                      (sys__node_array__set HERE 0 i) (sys__node_array__set nrows 0 n)
-                     (sys__scheduler__add CPU names xr)
-                     (ai_qwen_3__experts_rows hands (nth EXPERTS_TIER_ROWS i) rrows_k n nn__expert_tier)
-                     (while '(eq? (sys__result CPU) (< 1 0)) '(< 0 1))
-                     (sys__wait CPU)
-                     (nn__buffer__copy c_rrows CPU rrows ROWS_BYTES)
+                     (let ((expert_sums (sys__scheduler__add CPU names xr)))
+                       (ai_qwen_3__experts_rows hands (nth EXPERTS_TIER_ROWS i) rrows_k n nn__expert_tier)
+                       (while '(eq? (sys__result expert_sums) (< 1 0)) '(< 0 1))
+                       (nn__buffer__copy (sys__wait_for_result expert_sums) rrows ROWS_BYTES))
                      (nn__vector__add rrows rrows_k rrows ROWS_HALVES)
                      (ai_qwen_3__post_expert_rows h1s hands rrows (nth POST i) xs n)
                      (type xs)))
@@ -189,10 +189,9 @@
               (begin (mixer_rows i first n)
                      (ai_qwen_3__pre_expert_rows h1s (nth PRE i) hands n)
                      (sys__node_array__set HERE 0 i) (sys__node_array__set nrows 0 n)
-                     (sys__scheduler__add CPU names xr)
-                     (while '(eq? (sys__result CPU) (< 1 0)) '(< 0 1))
-                     (sys__wait CPU)
-                     (nn__buffer__copy c_rrows CPU rrows ROWS_BYTES)
+                     (let ((expert_sums (sys__scheduler__add CPU names xr)))
+                       (while '(eq? (sys__result expert_sums) (< 1 0)) '(< 0 1))
+                       (nn__buffer__copy (sys__wait_for_result expert_sums) rrows ROWS_BYTES))
                      (ai_qwen_3__post_expert_rows h1s hands rrows (nth POST i) xs n)
                      (type xs))))
         (defun (rows_layer i first n)                  ; ② ③ — a chunk's MoE is one word either way
@@ -288,11 +287,12 @@
         (begin (mixer i (nth HERE 1) h1)
                (route i)
                (sys__node_array__set HERE 0 i)
-               (let ((r (sys__scheduler__add CPU names xq)))
-                 (sys__scheduler__continue CARD 0 c_close '(r)))))
+               (let ((expert_sum (sys__scheduler__add CPU names xq)))
+                 (sys__scheduler__continue CARD 0 c_close '(expert_sum)))))
+      ;; continued once the answer is filled, `expert_sum` bound to what it came to: the CPU's buffer
       (defun (chain_close)
         (let ((i (nth HERE 0)))
-          (nn__buffer__copy c_routed CPU routed HIDDEN_BYTES)
+          (nn__buffer__copy expert_sum routed HIDDEN_BYTES)
           (ai_qwen_3__post_expert h1 hand routed (nth POST i) x)
           (if (< (+ i 1) RUN) (chain_ask (+ i 1)) (ends (nth HERE 2)))))
       ;; with a card's tier (CARD_TIER — a conversation a card keeps one, NN-166): the tier's visit before the CPU is asked,
@@ -304,12 +304,12 @@
                      (route i)
                      (ai_qwen_3__experts hand picks (nth EXPERTS_TIER i) routed_k nn__expert_tier 1)
                      (sys__node_array__set HERE 0 i)
-                     (let ((r (sys__scheduler__add CPU names xq_ready)))
+                     (let ((expert_sum (sys__scheduler__add CPU names xq_ready)))
                        (ai_qwen_3__experts hand picks (nth EXPERTS_TIER i) routed_k nn__expert_tier)
-                       (sys__scheduler__continue CARD 0 c_close '(r)))))
+                       (sys__scheduler__continue CARD 0 c_close '(expert_sum)))))
             (defun (chain_close)
               (let ((i (nth HERE 0)))
-                (nn__buffer__copy c_routed CPU routed HIDDEN_BYTES)
+                (nn__buffer__copy expert_sum routed HIDDEN_BYTES)
                 (nn__vector__add routed routed_k routed HIDDEN)
                 (ai_qwen_3__post_expert h1 hand routed (nth POST i) x)
                 (if (< (+ i 1) RUN) (chain_ask (+ i 1)) (ends (nth HERE 2))))))

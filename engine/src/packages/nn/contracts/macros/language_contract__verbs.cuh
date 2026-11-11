@@ -206,8 +206,8 @@
     X(PKG, 48, "nn__expert__prefetch", nn__expert__zzabi_adapter_prefetch,         NN__EXPERT__PREFETCH) \
     X(PKG, 49, "nn__expert__settle",  nn__expert__zzabi_adapter_settle,            NN__EXPERT__SETTLE) \
     /* ⭐ A BUFFER FROM ANOTHER WORKER — ⚖ *"adding a buffer roster on the host so we can move around data between */ \
-    /* the cards"*: `(nn__buffer__copy from worker to bytes)` runs on the worker that receives, `from` on the     */ \
-    /* worker named, through RAM — after that worker's work is done.                                           */ \
+    /* the cards"*: `(nn__buffer__copy from to bytes)` runs on the worker that receives, `from` read where its    */ \
+    /* bytes are — the memory it records — through RAM, after that memory's worker is done.                     */ \
     X(PKG, 50, "nn__buffer__copy",    nn__buffer__zzabi_adapter_copy,              NN__BUFFER__COPY) \
     /* ⭐⭐ THE KV CACHE IN TIERS — ⚖ *"rotated from the start, tq8 for the warm tier … and tq4 for the cold"*: the     */ \
     /* rotation a head at a time, a rotated row quantised as the codec would, and a residual over TurboQuant rows.   */ \

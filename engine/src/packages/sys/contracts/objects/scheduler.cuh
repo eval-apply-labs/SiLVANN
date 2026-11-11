@@ -35,8 +35,7 @@
 #define SYS__SCHEDULER__CARRIED_PLACES  1u   /* the evaluator's places, held: the path from the program to the form
                                                 it stopped at                                                       */
 #define SYS__SCHEDULER__CARRIED_CURRENT 2u   /* that form, an offset the path holds                                 */
-#define SYS__SCHEDULER__CARRIED_ASKED   3u   /* from here, where anything was asked: the answer it last asked of
-                                                each block, block `b`'s at `3 + b`; the array ends here otherwise   */
+#define SYS__SCHEDULER__CARRIED_CELLS   3u   /* the array's length                                                   */
 
 /* How many steps a block keeps parked, each waiting for its gate's answer to fill (▶ `sys__scheduler__zzengine_next`).
  * One past them stays on the queue, taken again behind what came after it. */

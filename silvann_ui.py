@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Optional
 
 import httpx
+from fastapi.responses import RedirectResponse
 from nicegui import ui, app
 
 
@@ -131,6 +132,17 @@ class Client:
             await self.http.post(f"{self.endpoint}/users/sign_out")
         finally:
             self.use_token(None)
+
+    # ── single sign-on (NN-157): the server's provider, the page to send the browser to ──────────────────────────
+    async def sso(self) -> dict:
+        r = await self.http.get(f"{self.endpoint}/users/sso")
+        r.raise_for_status()
+        return r.json()
+
+    async def sso_start(self) -> dict:
+        r = await self.http.post(f"{self.endpoint}/users/sso/start")
+        r.raise_for_status()
+        return r.json()
 
     def set_endpoint(self, endpoint: str):
         self.endpoint = endpoint.rstrip("/")
@@ -1214,8 +1226,23 @@ async def page():
                 status_tip = ui.tooltip("connecting…")
         ui.separator()
 
-        # --- Nav rows (Chat / Options / Help) ---
+        # --- Nav rows (Dark mode / Help / Options / Chat): Chat last, so its conversations run down the drawer ---
         with ui.column().classes("w-full p-1 gap-0"):
+            theme_row = ui.row().classes("silvann-menu-item w-full")
+            with theme_row:
+                theme_icon = ui.icon("dark_mode")
+                theme_label = ui.label("Dark mode")
+
+            help_row = ui.row().classes("silvann-menu-item w-full")
+            with help_row:
+                ui.icon("help_outline")
+                ui.label("Help")
+
+            opts_row = ui.row().classes("silvann-menu-item w-full")
+            with opts_row:
+                ui.icon("settings")
+                ui.label("Options")
+
             chat_row = ui.row().classes("silvann-menu-item w-full")
             with chat_row:
                 ui.icon("chat")
@@ -1227,21 +1254,6 @@ async def page():
             convs_col = ui.column().classes("pl-3 pr-1 w-full gap-0 silvann-convs-col")
             with convs_col:
                 ui.label("(loading…)").classes("opacity-50 text-xs px-2 py-1")
-
-            opts_row = ui.row().classes("silvann-menu-item w-full")
-            with opts_row:
-                ui.icon("settings")
-                ui.label("Options")
-
-            help_row = ui.row().classes("silvann-menu-item w-full")
-            with help_row:
-                ui.icon("help_outline")
-                ui.label("Help")
-
-            theme_row = ui.row().classes("silvann-menu-item w-full")
-            with theme_row:
-                theme_icon = ui.icon("dark_mode")
-                theme_label = ui.label("Dark mode")
 
         ui.space()
         ui.separator()
@@ -3070,6 +3082,24 @@ async def page():
         sign_in_password.on("keydown.enter", lambda: asyncio.create_task(do_sign_in()))
         ui.button("Sign in", on_click=do_sign_in).classes("w-full")
 
+        # the server's provider (NN-157): its page, then back to /_silvann/sso with a code the server checks
+        async def do_sso():
+            try:
+                got = await client.sso_start()
+            except httpx.HTTPStatusError as ex:
+                sign_in_said.text = _said(ex.response)
+                return
+            except httpx.HTTPError as ex:
+                sign_in_said.text = "the server does not answer: %s" % ex
+                return
+            state["sso_state"] = got["state"]             # the page coming back checks the browser is this one
+            ui.navigate.to(got["url"])
+
+        with ui.column().classes("w-full gap-1") as sso_box:
+            ui.separator()
+            sso_button = ui.button("Sign in", on_click=do_sso).props("outline").classes("w-full").mark("sign-on")
+        sso_box.set_visibility(False)
+
     async def need_sign_in():
         if state.get("user_token"):
             state.pop("user_token", None)
@@ -3077,6 +3107,13 @@ async def page():
             client.use_token(None)
         signed_row.set_visibility(False)
         sign_in_said.text = ""
+        try:
+            provider = await client.sso()
+        except httpx.HTTPError:
+            provider = {}
+        if provider.get("on"):
+            sso_button.text = "Sign in with %s" % provider.get("label", "your organisation")
+        sso_box.set_visibility(bool(provider.get("on")))
         sign_in_dialog.open()
     client.on_signed_out = need_sign_in
 
@@ -3136,6 +3173,46 @@ async def page():
 
 # ---------- CLI ----------
 
+def _said(response) -> str:
+    """What a server's refusal says: its `detail`, else its first words."""
+    try:
+        return str(response.json().get("detail") or response.text[:200])
+    except ValueError:
+        return response.text[:200]
+
+
+@ui.page("/_silvann/sso")
+async def sso_back(code: str = "", state: str = "", error: str = "", error_description: str = ""):
+    """⭐ THE PROVIDER SENDS THE BROWSER BACK HERE (NN-157; sso.json's `redirect_uri` is this page's address): the state
+    checked against the one this browser kept when it left — a browser sent here by someone else's sign-on is refused —
+    then the code handed to the server, which checks the account itself and answers a token, as a password's sign-in
+    does; the chat after."""
+    session = app.storage.user.setdefault("silvann", _session_default())
+    expected = session.pop("sso_state", None)
+    said = ""
+    if error:
+        said = "the provider: %s" % (error_description or error)
+    elif not expected or not secrets.compare_digest(state.encode(), str(expected).encode()):
+        said = "this sign-on was not begun in this browser, or it was finished already: begin it again"
+    else:
+        try:
+            async with httpx.AsyncClient(timeout=30) as http:
+                r = await http.post(f"{session['endpoint'].rstrip('/')}/users/sso/finish",
+                                    json={"code": code, "state": state})
+            if r.status_code == 200:
+                got = r.json()
+                session["user_token"], session["user_name"] = got["token"], got["name"]
+                return RedirectResponse("/")
+            said = _said(r)
+        except httpx.HTTPError as ex:
+            said = "the server does not answer: %s" % ex
+    ui.add_head_html(PAGE_HEAD)
+    with ui.card().classes("absolute-center w-96 gap-2"):
+        ui.label("Sign in").classes("text-lg")
+        ui.label(said).classes("text-sm text-red-700").mark("sign-on-said")
+        ui.link("back to SiLVANN", "/")
+
+
 def _start_last():
     """The model a --local UI started last, started again as it was — the app opens where it was left."""
     try:
@@ -3152,6 +3229,20 @@ def _stop_all():
     stopped — ServerProcess.stop asks the server to save them first."""
     DOWNLOADS.cancel()
     SERVER.stop()
+
+
+def _quit_route(token):
+    """The portable app's stop (▶ release/scripts/portable/silvann_portable.py): a POST carrying the token the app gave
+    this UI stops it as `docker stop` does — _stop_all, then the process ends. Windows has no signal to ask a process
+    with: a terminate there is TerminateProcess, which runs none of it. Without the token the route does not exist."""
+    from fastapi import Header, HTTPException
+
+    @app.post("/_silvann/quit")
+    def quit_app(x_silvann_quit: str = Header(default="")):
+        if not secrets.compare_digest(x_silvann_quit.encode(), token.encode()):
+            raise HTTPException(403, "not this app's")
+        app.shutdown()                                     # the shutdown handlers run _stop_all
+        return {"stopping": True}
 
 
 def main():
@@ -3176,6 +3267,8 @@ def main():
         LOCAL_APP = True
         app.on_startup(_start_last)
         app.on_shutdown(_stop_all)
+        if os.environ.get("SILVANN_QUIT_TOKEN"):
+            _quit_route(os.environ["SILVANN_QUIT_TOKEN"])
 
     ui.run(port=args.port, title="SiLVANN", show=not args.no_browser, storage_secret="silvann-ui",
            reload=args.reload and not args.local, **({"host": args.host} if args.host else {}))

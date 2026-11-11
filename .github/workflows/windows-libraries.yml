@@ -9,10 +9,22 @@
 # for every card the family lists, so any driver of CUDA 12's line or newer runs it. The zip holds binaries: its
 # NOTICES.md says which, and each one's licence (ATTRIBUTION.md §7). The actions are pinned to their release commits,
 # because the job can write to the repository's releases.
+#
+# A release candidate's branch (rc/*) builds and checks everything, unsigned, its zips the run's artifacts. A release's
+# tag builds the same and attaches the zips to its release: a `n*` tag's unsigned, as an rc's are (and the `v*` tags'
+# before them), and only a `rel*` tag's signed — ⚖ 2026-11-11 *"i dont think we can afford a trial signature im afraid"*
+# · *"i'd do it as rel and n"*, every signature paid for. A `rel*` tag, once every build has passed, signs what runs on a
+# PC with Eval-Apply's certificate before
+# anything is zipped (`sign`) — only the files that changed since the last signed release: the rest are that release's
+# signed files, taken from its zips (scripts/sign_plan.py, `signed_manifest.json` on each release). SSL.com's eSigner
+# signs; its account's secrets are the `signing` environment's — ES_USERNAME, ES_PASSWORD, ES_CREDENTIAL_ID,
+# ES_TOTP_SECRET — and a `rel*` tag without them stops there when anything is to be signed, so a signed release's Windows
+# zips are signed or not made.
 name: "windows: libraries"
 on:
   push:
-    tags: ["v*"]
+    tags: ["v*", "n*", "rel*"]
+    branches: ["rc/**"]
   workflow_dispatch:
 
 permissions:
@@ -32,7 +44,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+        python: ["3.11", "3.12", "3.13", "3.14"]
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -97,11 +109,15 @@ jobs:
           Copy-Item $eula.FullName notices\CUDA_EULA.txt
           (& $env:SILVANN_NVCC --version | Select-Object -Last 2) | Out-File -Encoding utf8 notices\CUDA_VERSION.txt
           python -c "import importlib.metadata as m, shutil; d = m.distribution('pybind11'); f = [p for p in d.files if p.name.upper().startswith('LICENSE')][0]; shutil.copy(d.locate_file(f), r'notices\PYBIND11_LICENSE.txt')"
+      - name: SiLVANN.exe, the portable app's launcher, signed with the libraries
+        shell: pwsh
+        run: pwsh scripts/portable/build_launcher.ps1 -Exe lib/SiLVANN.exe
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: families
           path: |
             lib/silicon_families/libsilvann_*.dll
+            lib/SiLVANN.exe
             notices/
           if-no-files-found: error
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -110,11 +126,110 @@ jobs:
           name: families-logs
           path: lib/**/*.log
 
+  # Eval-Apply's certificate, on a release's tag alone and after every build above passed. Only what changed is signed:
+  #   scripts/sign_plan.py keys each file by what it is built from, and a file whose key is the last signed release's is
+  #   taken from that release's zips, its bytes checked against that release's manifest. The rest go through SSL.com's
+  #   CodeSignTool — its release's zip, checked by its hash — in one batch on one TOTP. CodeSignTool takes a DLL by its
+  #   name, so an evaluator (a .pyd, which is a DLL) is signed as .dll and named back: Authenticode's signature covers the
+  #   file's bytes, not its name. The files keep the layout they were built in, as one artifact, `signed`, with the
+  #   release's own `signed_manifest.json`.
+  sign:
+    needs: [evaluator, families]
+    if: startsWith(github.ref, 'refs/tags/rel')
+    runs-on: ubuntu-latest
+    environment: signing
+    env:
+      CODESIGNTOOL_URL: "https://github.com/SSLcom/CodeSignTool/releases/download/v1.3.2/CodeSignTool-v1.3.2.zip"
+      CODESIGNTOOL_SHA256: "f14b1e1ef14bfa1fd00279c363aab0debbf5dcfba0e4bcdce5d22bb771de0e3a"
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: built
+      - name: What is signed, and what the last signed release already holds
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          prev=-
+          mkdir -p "$RUNNER_TEMP/prev"
+          for t in $(gh release list --limit 30 --json tagName --jq '.[].tagName'); do
+            [ "$t" = "$tag" ] && continue
+            if gh release download "$t" --pattern signed_manifest.json --dir "$RUNNER_TEMP/prev" 2> /dev/null; then
+              prev="$RUNNER_TEMP/prev/signed_manifest.json"
+              echo "the last signed release: $t"
+              break
+            fi
+          done
+          python3 scripts/sign_plan.py plan built "$prev" "$RUNNER_TEMP/plan.json"
+          if grep -q '"action": "reuse"' "$RUNNER_TEMP/plan.json"; then
+            t=$(python3 -c "import json, sys; print(json.load(open(sys.argv[1]))['previous'])" "$RUNNER_TEMP/plan.json")
+            gh release download "$t" --pattern silvann_windows_x64.zip --pattern silvann_portable_windows_x64.zip \
+              --dir "$RUNNER_TEMP/prev"
+            python3 scripts/sign_plan.py reuse built "$RUNNER_TEMP/plan.json" "$RUNNER_TEMP/prev"
+          fi
+          python3 -c "import json, sys; f = json.load(open(sys.argv[1]))['files']; print(''.join(k + '\n' for k, v in sorted(f.items()) if v['action'] == 'sign'), end='')" \
+            "$RUNNER_TEMP/plan.json" > "$RUNNER_TEMP/to_sign.txt"
+          echo "TO_SIGN=$(wc -l < "$RUNNER_TEMP/to_sign.txt")" >> "$GITHUB_ENV"
+      - name: CodeSignTool
+        if: env.TO_SIGN != '0'
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/cst.zip" "$CODESIGNTOOL_URL"
+          echo "$CODESIGNTOOL_SHA256  $RUNNER_TEMP/cst.zip" | sha256sum -c -
+          unzip -q "$RUNNER_TEMP/cst.zip" -d "$RUNNER_TEMP/cst"
+          ls "$RUNNER_TEMP"/cst/jar/code_sign_tool-*.jar
+      - name: Signed
+        if: env.TO_SIGN != '0'
+        env:
+          ES_USERNAME: ${{ secrets.ES_USERNAME }}
+          ES_PASSWORD: ${{ secrets.ES_PASSWORD }}
+          ES_CREDENTIAL_ID: ${{ secrets.ES_CREDENTIAL_ID }}
+          ES_TOTP_SECRET: ${{ secrets.ES_TOTP_SECRET }}
+        run: |
+          for v in ES_USERNAME ES_PASSWORD ES_CREDENTIAL_ID ES_TOTP_SECRET; do
+            [ -n "${!v}" ] || { echo "::error::$v is not among the signing environment's secrets"; exit 1; }
+          done
+          in="$RUNNER_TEMP/unsigned"; out="$RUNNER_TEMP/signed"
+          mkdir -p "$in" "$out"
+          # each file the plan signs, under a name of its own, and where it came from
+          declare -A from
+          while read -r fid; do
+            f="built/$fid"
+            n=$(basename "$f")
+            case "$n" in *.pyd) n="${n%.pyd}.dll" ;; esac
+            [ -z "${from[$n]:-}" ] || { echo "::error::two files to sign named $n"; exit 1; }
+            from[$n]="$f"
+            cp "$f" "$in/$n"
+          done < "$RUNNER_TEMP/to_sign.txt"
+          echo "${#from[@]} files to sign"
+          export CODE_SIGN_TOOL_PATH="$RUNNER_TEMP/cst"
+          java="${JAVA_HOME_17_X64:-$JAVA_HOME}/bin/java"
+          (cd "$CODE_SIGN_TOOL_PATH" && "$java" -jar jar/code_sign_tool-*.jar batch_sign -username="$ES_USERNAME" \
+            -password="$ES_PASSWORD" -credential_id="$ES_CREDENTIAL_ID" -totp_secret="$ES_TOTP_SECRET" \
+            -input_dir_path="$in" -output_dir_path="$out")
+          # each one back where it came from, signed: one CodeSignTool did not write, or wrote unchanged, stops the run
+          for n in "${!from[@]}"; do
+            if [ ! -s "$out/$n" ] || cmp -s "$in/$n" "$out/$n"; then echo "::error::$n was not signed"; exit 1; fi
+            cp "$out/$n" "${from[$n]}"
+          done
+      - name: The release's manifest
+        run: |
+          python3 scripts/sign_plan.py manifest built "$RUNNER_TEMP/plan.json" "${GITHUB_REF#refs/tags/}" built/signed_manifest.json
+          ls -l built/evaluator-*/ built/families/lib/ built/families/lib/silicon_families/
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: signed
+          path: |
+            built/evaluator-*/
+            built/families/
+            built/signed_manifest.json
+          if-no-files-found: error
+
   # the portable app (NN-162): SiLVANN.exe and its folder — Python's embeddable build with the runtime's packages, the
   #   evaluator for it, the families, the release's tree — built by scripts/portable/build_portable.ps1 and attached to the
   #   tag's release as silvann_portable_windows_x64.zip
   portable:
-    needs: [evaluator, families]
+    needs: [evaluator, families, sign]
+    if: ${{ !cancelled() && !failure() }}   # on a release candidate's branch `sign` is skipped, and the files are unsigned
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -122,11 +237,30 @@ jobs:
         with:
           python-version: "3.12"
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: startsWith(github.ref, 'refs/tags/rel')
+        with:
+          name: signed
+          path: built
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: ${{ !startsWith(github.ref, 'refs/tags/rel') }}
         with:
           path: built
+      - name: Each signature, as Windows reads it
+        if: startsWith(github.ref, 'refs/tags/rel')
+        shell: pwsh
+        run: |
+          $files = @(Get-ChildItem built -Recurse -Include "*.pyd", "*.dll", "*.exe")
+          if (-not $files) { throw "nothing signed under built\" }
+          $bad = @()
+          foreach ($f in $files) {
+            $s = Get-AuthenticodeSignature $f.FullName
+            "{0}: {1}, {2}; timestamped by {3}" -f $f.Name, $s.Status, $s.SignerCertificate.Subject, $s.TimeStamperCertificate.Subject
+            if ($s.Status -ne "Valid" -or -not $s.TimeStamperCertificate) { $bad += $f.Name }
+          }
+          if ($bad) { throw "not signed and timestamped as Windows checks it: $($bad -join ', ')" }
       - name: The portable app's folder
         shell: pwsh
-        run: pwsh scripts/portable/build_portable.ps1 -Lib built -Out portable
+        run: pwsh scripts/portable/build_portable.ps1 -Lib built -Out portable -Launcher built/families/lib/SiLVANN.exe
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: silvann_portable_windows_x64
@@ -144,11 +278,18 @@ jobs:
           gh release upload "$tag" portable/silvann_portable_windows_x64.zip --clobber
 
   zip:
-    needs: [evaluator, families]
+    needs: [evaluator, families, sign]
+    if: ${{ !cancelled() && !failure() }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: startsWith(github.ref, 'refs/tags/rel')
+        with:
+          name: signed
+          path: built
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: ${{ !startsWith(github.ref, 'refs/tags/rel') }}
         with:
           path: built
       - name: The zip, stamped with what it was built from
@@ -187,3 +328,18 @@ jobs:
           gh release view "$tag" > /dev/null 2>&1 || gh release create "$tag" --verify-tag --title "SiLVANN $tag" \
             --notes "SiLVANN $tag. silvann_windows_x64.zip holds the Windows libraries install.ps1 takes."
           gh release upload "$tag" silvann_windows_x64.zip --clobber
+
+  # the release's manifest, attached last: the next release reuses this one's signed files only once both zips are on it
+  manifest:
+    needs: [sign, portable, zip]
+    if: startsWith(github.ref, 'refs/tags/rel')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: signed
+          path: built
+      - name: Attached to the tag's release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${GITHUB_REF#refs/tags/}" built/signed_manifest.json --clobber --repo "$GITHUB_REPOSITORY"

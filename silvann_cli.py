@@ -208,6 +208,32 @@ def _detail(r):
         return r.text[:300]
 
 
+def sign_on(http, provider):
+    """⭐ A TERMINAL SIGNED ON BY A DEVICE CODE (NN-157): the server asks its provider for a code, the user types it at the
+    provider's page — on this machine or their phone — and signs in there; the server, asked every few seconds, checks the
+    account and answers a token as a password's sign-in does."""
+    if not provider.get("device"):
+        sys.exit("[silvann] %s gives no device codes: sign in from the UI" % provider.get("label"))
+    r = http.post("/users/sso/device")
+    if r.status_code != 200:
+        sys.exit("[silvann] %s" % _detail(r))
+    got = r.json()
+    where = got.get("verification_uri_complete") or got.get("verification_uri")
+    print("[silvann] sign in with %s: open %s and enter the code %s%s%s" % (provider.get("label"), where, YELLOW,
+                                                                         got.get("user_code"), RESET), flush=True)
+    interval, until = max(1, int(got.get("interval") or 5)), time.time() + int(got.get("expires_in") or 600)
+    while time.time() < until:
+        time.sleep(interval)
+        r = http.post("/users/sso/device/poll", json={"handle": got["handle"]})
+        if r.status_code != 200:
+            sys.exit("[silvann] %s" % _detail(r))
+        done = r.json()
+        if done.get("token"):
+            print("%s[silvann] signed in as %s%s" % (DIM, done["name"], RESET))
+            return done
+    sys.exit("[silvann] the code expired: sign in again")
+
+
 def main():
     ap = argparse.ArgumentParser(description="A conversation with a running SiLVANN server, in the terminal.")
     ap.add_argument("--endpoint", default="http://localhost:8765", help="the server (default http://localhost:8765)")
@@ -219,6 +245,9 @@ def main():
     ap.add_argument("--user", default="cli-" + uuid.uuid4().hex[:8], help="the session the conversation belongs to")
     ap.add_argument("--sign-in", dest="sign_in", default=None, metavar="NAME",
                     help="a server with users: whose conversation it is — the password asked for, or SILVANN_PASSWORD")
+    ap.add_argument("--sign-on", dest="sign_on", action="store_true",
+                    help="a server with a provider (single sign-on): sign in with your organisation's account, by a "
+                         "code typed at its page")
     a = ap.parse_args()
 
     chat = Chat(a)
@@ -226,14 +255,23 @@ def main():
     try:
         h = chat.http.get("/health").json()
         if h.get("users"):                              # a server with users (NN-150): signed in before anything
-            import getpass
-            name = a.sign_in or input("[silvann] this server has users — name: ").strip()
-            password = os.environ.get("SILVANN_PASSWORD") or getpass.getpass("[silvann] %s's password: " % name)
-            r = chat.http.post("/users/sign_in", json={"name": name, "password": password})
-            if r.status_code == 401:
-                sys.exit("[silvann] wrong name or password")
-            r.raise_for_status()
-            chat.http.headers["Authorization"] = "Bearer " + r.json()["token"]
+            provider = chat.http.get("/users/sso").json() if not a.sign_in else {}
+            if a.sign_on and not provider.get("on"):
+                sys.exit("[silvann] this server has no provider to sign on with: --sign-in <name>")
+            name = "" if a.sign_on else a.sign_in or input(
+                "[silvann] this server has users — name%s: " % (" (or Enter to sign in with %s)" % provider["label"]
+                                                                 if provider.get("device") else "")).strip()
+            if not name and provider.get("device"):
+                got = sign_on(chat.http, provider)
+            else:
+                import getpass
+                password = os.environ.get("SILVANN_PASSWORD") or getpass.getpass("[silvann] %s's password: " % name)
+                r = chat.http.post("/users/sign_in", json={"name": name, "password": password})
+                if r.status_code == 401:
+                    sys.exit("[silvann] wrong name or password")
+                r.raise_for_status()
+                got = r.json()
+            chat.http.headers["Authorization"] = "Bearer " + got["token"]
         print("%s[silvann] %s at %s, a context of %s — /new · /sys <prompt> · /mode ask|chill|full-auto · /quit%s"
               % (DIM, h.get("model_id"), a.endpoint, h.get("max_context"), RESET))
         if system and not h.get("user_system_prompt"):

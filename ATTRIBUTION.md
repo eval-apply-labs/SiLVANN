@@ -55,6 +55,7 @@ Python packages the runtime imports (`scripts/requirements.txt`), installed by t
 | uvicorn | BSD-3-Clause |
 | pydantic | MIT |
 | httpx | BSD-3-Clause |
+| PyJWT, with `cryptography` | MIT; `cryptography` Apache-2.0 or BSD-3-Clause — the provider's ID token checked, for single sign-on |
 | nicegui | MIT |
 | Pillow | MIT-CMU (HPND) — a picture decoded and resized for the vision tower |
 | pypdf | BSD-3-Clause — a PDF's text, for a file attached to a message |

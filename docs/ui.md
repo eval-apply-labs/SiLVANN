@@ -6,10 +6,12 @@ another one; it can also start and stop a server on this machine (**Options**).
 
 ## The left drawer
 
-- **Chat**: the conversations, under the Chat row. Click one to open it.
-- **Options**: the models on this machine, their configs, and a server to start and stop.
-- **Help**: this guide and the release's documents.
+From the top:
+
 - **Dark mode** / **Light mode**: the page's colours. The choice is kept for this browser.
+- **Help**: this guide and the release's documents.
+- **Options**: the models on this machine, their configs, and a server to start and stop.
+- **Chat**: the conversations, under the Chat row. Click one to open it.
 
 The dot next to "SiLVANN" is the server's state: **gray** not asked yet, **green** answering, **red** unreachable. Its
 tooltip names the model. Which server the UI talks to is chosen at the bottom of **Options** ([below](#options-a-server-on-this-machine)).

@@ -36,7 +36,8 @@ static __device__ SYS__NOINLINE void sys__opcodes__zzabi_adapter_if(sys__heap_no
 /* The last nine. */
 static __device__ SYS__NOINLINE void sys__opcodes__zzabi_adapter_viewonly(sys__heap_node* base, uint64_t form);
 static __device__ SYS__NOINLINE void sys__opcodes__zzabi_adapter_bindings_set(sys__heap_node* base, uint64_t form);
-static __device__ SYS__NOINLINE void sys__opcodes__zzpackage_apply_wait(sys__heap_node* base, uint64_t form);
+static __device__ SYS__NOINLINE void sys__opcodes__zzpackage_apply_wait_for_device(sys__heap_node* base, uint64_t form);
+static __device__ SYS__NOINLINE void sys__opcodes__zzpackage_apply_wait_for_result(sys__heap_node* base, uint64_t form);
 static __device__ SYS__NOINLINE void sys__opcodes__zzabi_adapter_result(sys__heap_node* base, uint64_t form);
 static __device__ SYS__NOINLINE void sys__opcodes__zzabi_adapter_dict_put(sys__heap_node* base, uint64_t form);
 static __device__ SYS__NOINLINE void sys__opcodes__zzabi_adapter_dict_get(sys__heap_node* base, uint64_t form);

@@ -33,8 +33,10 @@ class Refused(Exception):
 #   such a word is refused at the boot with how to fetch the pack's own again, where it would otherwise stop at its
 #   first token on a word the evaluator does not know. A program that defines the word itself (a `defun` of it) answers
 #   it, and boots.
-RETIRED_WORDS = {"sys__compute": "(sys__scheduler__add cu names program [answer]), its value by (sys__wait answer)",
-                 "sys__completed": "(sys__result answer), which answers #t once the answer is filled"}
+RETIRED_WORDS = {"sys__compute": "(sys__scheduler__add cu names program [answer]), its value by (sys__wait_for_result answer)",
+                 "sys__completed": "(sys__result answer), which answers #t once the answer is filled",
+                 "sys__wait": "(sys__wait_for_result answer) — what an asked computation came to, read from its answer — "
+                              "or (sys__wait_for_device cu), a block waited for until it is idle,"}
 _RETIRED = re.compile(r"(?<![\w-])(%s)(?![\w-])" % "|".join(RETIRED_WORDS))
 
 

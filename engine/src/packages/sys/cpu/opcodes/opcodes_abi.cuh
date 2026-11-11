@@ -440,13 +440,13 @@ SYS__ENGINE__ABI__BRIDGE(sys__opcodes__zzabi_adapter_bindings_set, sys__opcodes_
 
 /* `(sys__scheduler__add block names actions [answer])` -> the answer: queue a computation on another block and carry on;
  * its value goes into the answer — `answer`, or a new one — which is handed back, and read with `sys__result` and
- * `sys__wait` (▶ `answer.cuh`). ⚖ 2026-11-05 *"(sys__scheduler__add CU names expert result) repeated with as much as
+ * `sys__wait_for_result` (▶ `answer.cuh`). ⚖ 2026-11-05 *"(sys__scheduler__add CU names expert result) repeated with as much as
  * the async results are needed"* · *"sys__scheduler__add returns an object, which we can bind with let"*.
  * ⭐⭐ IT QUEUES A REQUEST (▶ `scheduler__header.cuh`): the block runs its queue in the order it arrived whenever its
  * base is free, so work handed to a block that is computing waits its turn, and any number of blocks can hand one
  * work at once.
- * ⭐ THE ANSWER IS RECORDED AGAINST THE BLOCK TOO, for this computation, so a program that asks a block one thing at a
- * time can name the block when it reads (`(sys__wait block)`) rather than keep the answer.
+ * ⭐ THE ANSWER IS THE ONLY WAY TO WHAT IT CAME TO: nothing is recorded against the block, so a program keeps the answer
+ * it is handed — bound, or in an array — and reads it there.
  * ⭐ BOTH OPERANDS ARE READ-ONLY COPIES, AND THAT IS WHY THIS IS SAFE AT SIXTY BLOCKS: the receiving block
  * thaws its own program out of one and builds its own scopes over the other, so nothing either block
  * writes is anything the other can see. ⛔ An environment is refused here although the machinery beneath
@@ -489,32 +489,25 @@ static __device__ sys__heap_node sys__opcodes__zzabi_scheduler_add(const sys__he
         (void)sys__heap_object__release(answer);
         return sys__engine__abi__error(why);
     }
-    sys__scheduler__zzpackage_ask(me, cu, answer);
     return sys__heap_object__reference_to(answer);                /* ⛳ a hold handed over; the bridge gives it back */
 }
 SYS__ENGINE__ABI__BRIDGE(sys__opcodes__zzabi_adapter_scheduler_add, sys__opcodes__zzabi_scheduler_add)
 
-/* ⛳ `result` AND `wait` SHARE THEIR PREAMBLE, so it is written once: the answer an operand names — an answer, or a
- * block, read as what this computation last asked of it. It answers the answer, borrowed, or 0 with the reason in
- * `why`. */
+/* ⭐ THE DATA'S END AND THE BLOCK'S ARE TWO VERBS (⚖ 2026-11-11 *"we need a sys__wait_for_result function so it is
+ * separated the data from the compute end"*): `sys__result` and `sys__wait_for_result` read an answer, and only an answer
+ * — what a computation came to reaches a program through the answer it was asked into, never through the block that
+ * ran it; `sys__wait_for_device` asks a block whether it is idle, and hands nothing over. The preamble of the two that read an
+ * answer: the answer an operand is, borrowed, or 0 with the reason in `why`. */
 static __device__ inline uint64_t sys__opcodes__zzabi_answer_of(const sys__heap_node* argv, unsigned argc,
                                                                  uint64_t* why) {
     if (argc != 1u) { *why = SYS__OPCODES__FAULT_ARITY; return 0ull; }
-    uint64_t answer = 0ull;
-    if (argv[0].dtype == SYS__KIND__VALUE_INT) {
-        if (argv[0].args[0] >= (uint64_t)sys__silicon__block_count()) {
-            *why = SYS__COMPUTING_BASE__FAULT_NO_BLOCK;
-            return 0ull;
-        }
-        answer = sys__scheduler__zzpackage_asked((uint32_t)sys__silicon__block_id(), (uint32_t)argv[0].args[0]);
-    } else if (sys__heap_node__carries_reference(argv[0].dtype) && sys__answer__is(argv[0].args[0])) {
-        answer = argv[0].args[0];
-    } else {
-        *why = SYS__ANSWER__FAULT_KIND;
+    if (!sys__heap_node__carries_reference(argv[0].dtype) || !sys__answer__is(argv[0].args[0])) {
+        *why = SYS__ANSWER__FAULT_KIND;                  /* a block, or anything else: the data is read from its answer */
         return 0ull;
     }
+    const uint64_t answer = argv[0].args[0];
     /* ⛔ ONE NOBODY ASKED FOR WILL NEVER BE READY, so it is refused rather than polled or waited on for good. */
-    if (answer == 0ull || sys__answer__state(answer) == SYS__ANSWER__EMPTY) {
+    if (sys__answer__state(answer) == SYS__ANSWER__EMPTY) {
         *why = SYS__SCHEDULER__FAULT_NOT_ASKED;
         return 0ull;
     }
@@ -525,8 +518,8 @@ static __device__ inline uint64_t sys__opcodes__zzabi_answer_of(const sys__heap_
 /* `(sys__result answer)` — ⚖ *"sys__result r only tells us if the computing is still waiting or if the result is
  * ready"*: `#t` once the value is there, `#f` while it is on its way — a real truth, so a program polls with it in an
  * `if` or a `while`. ⛳ IT SAYS WHETHER THE VALUE IS THERE, NOT WHETHER IT WENT WELL — an error is a value too, and what
- * happened is `sys__wait`'s to hand over. It reads one word and takes no lock, so a program may ask as often as it
- * likes. A block in place of the answer is what this computation last asked of it. */
+ * happened is `sys__wait_for_result`'s to hand over. It reads one word and takes no lock, so a program may ask as often
+ * as it likes. */
 static __device__ sys__heap_node sys__opcodes__zzabi_result(const sys__heap_node* argv, unsigned argc,
                                                              sys__engine__ctx* ctx) {
     (void)ctx;
@@ -537,16 +530,16 @@ static __device__ sys__heap_node sys__opcodes__zzabi_result(const sys__heap_node
 }
 SYS__ENGINE__ABI__BRIDGE(sys__opcodes__zzabi_adapter_result, sys__opcodes__zzabi_result)
 
-/* `(sys__wait answer)` — the value, once the answer has it.
+/* `(sys__wait_for_result answer)` — the value, once the answer has it.
  * ⭐ IT LENDS THE VALUE OUT RATHER THAN TAKING IT: the answer keeps it, so a second reader is handed the same value —
- * ⚖ *"several readers of one answer"*. A block in place of the answer is what this computation last asked of it.
+ * ⚖ *"several readers of one answer"*.
  * ⭐⭐ NOT THERE YET, IT DOES NOT WAIT IN C (⚖ 2026-11-07 *"c opcodes do not wait but return and let the wait be done in
  * lisp"*, NN-158): a computation that may move is parked on the answer (▶ "A WAIT PARKED", `scheduler__impl.cuh`) — this
  * form left as it stands, the evaluator handing the computation to its own block with the answer its gate, and the form
  * applied again there once the answer fills. ⛳ What may not move — the host's, one inside `compute_inline`, one whose
  * park found no room — waits where it stands, up to `SYS__COMPUTING_BASE__WAIT_NS` by the clock with a back-off, and a
  * value that never comes answers ANSR, an error, never nothing. */
-static __device__ SYS__NOINLINE void sys__opcodes__zzpackage_apply_wait(sys__heap_node* base, uint64_t form) {
+static __device__ SYS__NOINLINE void sys__opcodes__zzpackage_apply_wait_for_result(sys__heap_node* base, uint64_t form) {
     if (sys__sublist__length(form) != 2ull) { sys__opcodes__fails(form, SYS__OPCODES__FAULT_ARITY); return; }
     const sys__heap_node arg = sys__sublist__nth(form, 1ull);
     uint64_t why = 0ull;
@@ -570,6 +563,47 @@ static __device__ SYS__NOINLINE void sys__opcodes__zzpackage_apply_wait(sys__hea
     const sys__heap_node value = sys__answer__read(answer);   /* a hold handed over */
     sys__opcodes__becomes(form, &value);
     if (sys__heap_node__carries_reference(value.dtype) && value.args[0] != 0ull) (void)sys__heap_object__release(value.args[0]);
+}
+
+/* Whether block `cu` is idle: its base free, nothing on its queue, no step parked there. */
+static __device__ inline bool sys__opcodes__zzprivate_idle(uint32_t cu) {
+    const sys__heap_node* base = sys__computing_base__get(cu);
+    if (base == 0 || sys__computing_base__status(base) != SYS__COMPUTING_BASE__FREE) return false;
+    const uint64_t queue = sys__scheduler__queue(cu);
+    if (queue != 0ull && sys__list__shared_length(queue) != 0ull) return false;
+    return sys__scheduler__zzengine_parked(cu) == 0u;
+}
+
+/* `(sys__wait_for_device cu)` — `#t` once block `cu` is idle: its base free, its queue empty, nothing parked there — whoever put
+ * the work on it. ⚖ 2026-11-11 *"it is for the block idle because this is a system's call for probing the state of the
+ * device, not to wait for compute results (where we have the wait_for_result method)"*: it hands no value over, and a
+ * program collects what it asked for with `sys__wait_for_result`. ⛳ IT WAITS WHERE IT STANDS — there is no answer to
+ * park on — up to `SYS__COMPUTING_BASE__WAIT_NS` by the clock, and a block still busy past it answers ANSR. ⛔ The block
+ * it runs on is refused, CBBS, as `sys__scheduler__add` refuses it: a block waiting is never idle. */
+static __device__ SYS__NOINLINE void sys__opcodes__zzpackage_apply_wait_for_device(sys__heap_node* base, uint64_t form) {
+    (void)base;
+    if (sys__sublist__length(form) != 2ull) { sys__opcodes__fails(form, SYS__OPCODES__FAULT_ARITY); return; }
+    const sys__heap_node arg = sys__sublist__nth(form, 1ull);
+    if (arg.dtype != SYS__KIND__VALUE_INT) { sys__opcodes__fails(form, SYS__OPCODES__FAULT_TYPE); return; }
+    if (arg.args[0] >= (uint64_t)sys__silicon__block_count()) {
+        sys__opcodes__fails(form, SYS__COMPUTING_BASE__FAULT_NO_BLOCK);
+        return;
+    }
+    const uint32_t cu = (uint32_t)arg.args[0];
+    if (cu == (uint32_t)sys__silicon__block_id()) { sys__opcodes__fails(form, SYS__COMPUTING_BASE__FAULT_BUSY); return; }
+    struct timespec since, now;
+    sys__os__clock(&since);
+    bool idle = sys__opcodes__zzprivate_idle(cu);
+    uint64_t waited = 0ull;
+    while (!idle && waited <= SYS__COMPUTING_BASE__WAIT_NS) {
+        sys__silicon__wait_cycles(SYS__COMPUTING_BASE__POLL_CYCLES);
+        idle = sys__opcodes__zzprivate_idle(cu);
+        sys__os__clock(&now);
+        waited = (uint64_t)(now.tv_sec - since.tv_sec) * 1000000000ull + (uint64_t)now.tv_nsec - (uint64_t)since.tv_nsec;
+    }
+    if (!idle) { sys__opcodes__fails(form, SYS__ANSWER__FAULT_RAN_OUT); return; }
+    const sys__heap_node yes = sys__opcodes__truth(true);
+    sys__opcodes__becomes(form, &yes);
 }
 
 /* ── THE DICTIONARY'S THREE DOORS ────────────────────────────────────────────────────────────────────── */

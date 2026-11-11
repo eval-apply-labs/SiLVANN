@@ -8,7 +8,7 @@
 name: "images"
 on:
   push:
-    tags: ["v*"]
+    tags: ["v*", "n*", "rel*"]
   workflow_dispatch:
 
 permissions:

@@ -1743,7 +1743,8 @@ class Glm5(Generates):
         return later[0] if later else None
 
     def _fused_body(self):
-        """The fused token's pictures — what each CPU runs of a layer — and its body, a layer after another."""
+        """The fused token's pictures — what each CPU runs of a layer, answered as the buffer it computed into — and its
+        body, a layer after another."""
         m, H = self.m, self.H
         if self.EPLAN is not None:
             for i, cpu in enumerate(self.CPUS):
@@ -1751,25 +1752,26 @@ class Glm5(Generates):
                 c = lambda name: self.cn(i, name)
                 for l in self.run_layers:
                     if self.moe[l]:
-                        m.picture("xf%d_%d" % (l, i), "(begin (nn__buffer__copy hand %d %s %d) (ai_z__glm_5_3__experts %s picks ex%d_%d %s))"
-                                  % (CARD, c("hand"), 2 * (H + self.TOPK), c("hand"), l, i, c("routed")))
+                        m.picture("xf%d_%d" % (l, i), "(begin (nn__buffer__copy hand %s %d) (ai_z__glm_5_3__experts %s picks ex%d_%d %s) %s)"
+                                  % (c("hand"), 2 * (H + self.TOPK), c("hand"), l, i, c("routed"), c("routed")))
             m.act_as(CARD)
         layers = []
         for l in self.run_layers:
             layers.append("(ai_z__glm_5_3__kda streams at%d)" % l if self.kinds[l] == "d" else "(ai_z__glm_5_3__mla streams at%d pos)" % l)
             if self.moe[l]:
-                # every socket handed its share of the picks, the shared expert on the card meanwhile, the shares summed
+                # every socket handed its share of the picks, the shared expert on the card meanwhile, every socket's answer
+                #   waited on and the shares — the buffers they came to — summed
                 ws = [(i, c["w"]) for i, c in enumerate(self.CPUS)]
                 before, after = "", ""
                 layers.append(before + "(ai_z__glm_5_3__route streams mo%d hand picks) " % l + after
                               + ("(ai_z__glm_5_3__experts hand picks exk%d routed_k %s) " % (l, expert_tier.BINDING) if self.CPLAN is not None else "")
-                              + " ".join("(sys__scheduler__add %d names xf%d_%d)" % (w, l, i) for i, w in ws)
-                              + " (ai_z__glm_5_3__shared hand mo%d) " % l
-                              + " ".join("(sys__wait %d)" % w for _, w in ws) + " "
+                              + "(let (" + " ".join("(expert_sum%d (sys__scheduler__add %d names xf%d_%d))" % (i, w, l, i) for i, w in ws) + ") "
+                              + "(ai_z__glm_5_3__shared hand mo%d) " % l
+                              + " ".join("(sys__wait_for_result expert_sum%d)" % i for i, _ in ws) + " "
                               # the CPUs done: an exclusive tier's writes back to RAM, held on half duplex, go now
                               + ("(nn__expert_tier__written %s) " % expert_tier.BINDING if self.CPLAN is not None else "")
-                              + " ".join("(nn__buffer__copy %s %d %s %d)" % (self.cn(i, "routed"), w, "routed" if i == 0 else "routed%d" % i,
-                                                                            2 * H) for i, w in ws) + " "
+                              + " ".join("(nn__buffer__copy (sys__wait_for_result expert_sum%d) %s %d)"
+                                         % (i, "routed" if i == 0 else "routed%d" % i, 2 * H) for i, _ in ws) + ") "
                               + " ".join("(nn__vector__add routed routed%d routed %d)" % (i, H) for i, _ in ws if i > 0)
                               + (" (nn__vector__add routed routed_k routed %d)" % H if self.CPLAN is not None else "")
                               + " (ai_z__glm_5_3__close streams mo%d routed)" % l)
@@ -1780,7 +1782,8 @@ class Glm5(Generates):
     # ── ③ the names the program is written against, and the program ──────────────────────────────────────────
     def _bindings(self):
         """What `lisp/glm5.lisp` reads: the shape, whether the card holds a tier, a layer's tables gathered into arrays
-        indexed by its place in the layers this machine runs, and each socket's worker, buffers and experts tables."""
+        indexed by its place in the layers this machine runs, and each socket's worker, the cell its answer is kept in,
+        its buffers and experts tables."""
         m, H, run, K = self.m, self.H, self.run_layers, self.TOPK
         head = lambda at, size: "(nn__expert__plane 0 %d 0 %d %d)" % (self.T_HEAD, at, size)
         tier = self.CPLAN is not None and not self.ON_CARD
@@ -1836,6 +1839,10 @@ class Glm5(Generates):
             m.node_array("EMB_TOK", 1)
             return
         m.array("SOCKET", [c["w"] for c in self.CPUS])
+        # each socket's answer to the last share the card asked of it, a seat's own past the first (▶ glm5.lisp's sockets)
+        for seat in seats:
+            m.node_array(sn("ASKED", seat), len(self.CPUS))
+        m.array("ASKED_OF", [sn("ASKED", seat) for seat in seats])
         m.array("ROUTED_INTO", ["routed" if i == 0 else "routed%d" % i for i in socket])
         m.array("C_HAND", [self.cn(i, "hand") for i in socket])
         m.array("C_ROUTED", [self.cn(i, "routed") for i in socket])
@@ -1904,7 +1911,8 @@ class Glm5(Generates):
         """A tensor-parallel group's program (NN-99 ④): card 0's sites redefined to take the group's sums — the rest of
         lisp/glm5.lisp as it is — and every other card's layers, a picture each it starts on them for a position: from card
         0's embedding (`tp_first`, its streams zeros, the group's sum of them the embedding on every card); and for a
-        prompt's chunk the same as rows (`tp_rows`, the chunk's place and length in TP_ROWS)."""
+        prompt's chunk the same as rows (`tp_rows`, the chunk's place and length in TP_ROWS). Card 0 binds each card's
+        answer as `group_card<k>` and waits on it once its own layers are done."""
         m, MH = self.m, self.MULT * self.H
         for k in range(1, self.P):
             m.act_as(k)
@@ -1927,16 +1935,17 @@ class Glm5(Generates):
         m.defun("(defun (moe i) (let ((s 0)) (ai_z__glm_5_3__route streams (nth MO i) hand picks) "
                 "(tier_and_sockets i) "
                 "(ai_z__glm_5_3__shared hand (nth MO i)) "
-                "(while '(< s SOCKETS) '(begin (sys__wait (nth SOCKET s)) (set! s (+ s 1)))) "
+                "(while '(< s SOCKETS) '(begin (sys__wait_for_result (nth ASKED s)) (set! s (+ s 1)))) "
                 "(if CARD_TIER (nn__expert_tier__written nn__expert_tier) 0) "
                 "(sockets_sum) (if CARD_TIER (nn__vector__add routed routed_k routed HIDDEN) 0) "
                 "(ai_z__glm_5_3__close streams (nth MO i) routed GROUP tsum)))")
         m.defun("(defun (layer i pos) (begin (mixer i pos) (if (nth MOE i) (moe i) (ai_z__glm_5_3__mlp streams (nth ML i) GROUP tsum)) "
                 "(type streams)))")
-        start = " ".join("(sys__scheduler__add %d names %s)" % (k, self.sfx("tp_first", k)) for k in range(1, self.P))
-        wait = " ".join("(sys__wait %d)" % k for k in range(1, self.P))
-        m.defun("(defun (position tok pos) (begin (sys__node_array__set TP_POS 0 pos) %s (embed tok) "
-                "(nn__partials__reduce GROUP streams streams %d) (layers_f pos) %s (type streams)))" % (start, MH, wait))
+        # every other card handed its picture, its answer bound for the let's body (`asks`), and waited on (`wait`)
+        asks = lambda pic: " ".join("(group_card%d (sys__scheduler__add %d names %s))" % (k, k, self.sfx(pic, k)) for k in range(1, self.P))
+        wait = " ".join("(sys__wait_for_result group_card%d)" % k for k in range(1, self.P))
+        m.defun("(defun (position tok pos) (begin (sys__node_array__set TP_POS 0 pos) (let (%s) (embed tok) "
+                "(nn__partials__reduce GROUP streams streams %d) (layers_f pos) %s) (type streams)))" % (asks("tp_first"), MH, wait))
         if self.CH:
             # a chunk's rows: lisp/glm5.lisp's rows sites, each taking the group's sum of the chunk's rows (card 0's MoE
             #   close its sockets' and its tier's routed rows, the other cards' none)
@@ -1950,10 +1959,10 @@ class Glm5(Generates):
                     "(if CARD_TIER (ai_z__glm_5_3__experts_rows hands (nth EXKR i) rrows_k n nn__expert_tier) 0) "
                     "(sockets_sum_rows) (if CARD_TIER (nn__vector__add rrows rrows_k rrows (* n HIDDEN)) 0) "
                     "(ai_z__glm_5_3__close_rows srows (nth MO i) rrows carries n rwork GROUP tsums)))")
-            start = " ".join("(sys__scheduler__add %d names %s)" % (k, self.sfx("tp_rows", k)) for k in range(1, self.P))
             m.defun("(defun (rows first n) (let ((i 0)) (sys__node_array__set TP_ROWS 0 first) (sys__node_array__set TP_ROWS 1 n) "
-                    "%s (nn__partials__reduce GROUP srows srows (* n %d)) (sys__node_array__set nrows 0 n) "
-                    "(while '(< i RUN) '(begin (rows_layer i first n) (set! i (+ i 1)))) %s (type srows)))" % (start, MH, wait))
+                    "(let (%s) (nn__partials__reduce GROUP srows srows (* n %d)) (sys__node_array__set nrows 0 n) "
+                    "(while '(< i RUN) '(begin (rows_layer i first n) (set! i (+ i 1)))) %s) (type srows)))"
+                    % (asks("tp_rows"), MH, wait))
         if self.T_SLICE is not None:
             # ⭐ A SLICE READ LAYER-MAJOR BY THE GROUP (NN-115 ④): lisp/glm5.lisp's `slice_layer`, each site taking the group's
             #   sum of a chunk's rows, every card's tier noting the slice and streaming its share of the layer's experts into
@@ -1975,12 +1984,11 @@ class Glm5(Generates):
                     % (part("SROWS_S", "SROW_HALVES"), g, part("SROWS_S", "SROW_HALVES"), g, part("SROWS_S", "SROW_HALVES"),
                        part("HANDS_S", "HAND_HALVES"), part("CARRIES_S", "CARRY_HALVES"), part("SROWS_S", "SROW_HALVES"), g,
                        part("SROWS_S", "SROW_HALVES"), part("RROWS_S", "HIDDEN"), part("CARRIES_S", "CARRY_HALVES"), g))
-            start = " ".join("(sys__scheduler__add %d names %s)" % (k, self.sfx("tp_slice", k)) for k in range(1, self.P))
             m.defun("(defun (rows_slice first k last_n w) (let ((i 0) (all (+ (* (- k 1) w) last_n))) "
                     "(sys__node_array__set TP_SLICE 0 first) (sys__node_array__set TP_SLICE 1 k) (sys__node_array__set TP_SLICE 2 last_n) "
-                    "(sys__node_array__set TP_SLICE 3 w) %s (nn__partials__reduce GROUP SROWS_S SROWS_S (* all SROW_HALVES)) "
+                    "(sys__node_array__set TP_SLICE 3 w) (let (%s) (nn__partials__reduce GROUP SROWS_S SROWS_S (* all SROW_HALVES)) "
                     "(sys__node_array__set nrows 0 w) (while '(< i RUN) '(begin (slice_layer i first k last_n w) (set! i (+ i 1)))) "
-                    "%s (type SROWS_S)))" % (start, wait))
+                    "%s) (type SROWS_S)))" % (asks("tp_slice"), wait))
 
     def _group_slice(self, k):
         """A slice through every layer on card `k` past the first, by its own names — its place, its chunks and their rows
@@ -2054,7 +2062,7 @@ class Glm5(Generates):
         moe = ("(ai_z__glm_5_3__route mres (nth MO i) hand picks) "
                "(if CARD_TIER (ai_z__glm_5_3__experts hand picks (nth EXK i) routed_k nn__expert_tier) 0) "
                "(sockets_start i xf) (ai_z__glm_5_3__shared hand (nth MO i)) "
-               "(while '(< s SOCKETS) '(begin (sys__wait (nth SOCKET s)) (set! s (+ s 1)))) "
+               "(while '(< s SOCKETS) '(begin (sys__wait_for_result (nth ASKED s)) (set! s (+ s 1)))) "
                "(if CARD_TIER (nn__expert_tier__written nn__expert_tier) 0) (sockets_sum) "
                "(if CARD_TIER (nn__vector__add routed routed_k routed HIDDEN) 0) (ai_z__glm_5_3__close mres (nth MO i) routed)")
         # the layer alone — what a prompt's positions give it, its cache's row written, no draft read
@@ -2080,23 +2088,24 @@ class Glm5(Generates):
         """⭐ A DRAFT'S CHECK, TWO POSITIONS A LAYER — composed of the one-position verbs (⚖ 2026-10-19: *"a lisp rewrite to do
         two straight experts compute in a row rather than verbs"*; a verb of ai_z__glm_5_3 once it stands). `(check a b p q)`:
         the token `a` at `p` and the draft `b` at `q` = p + 1 through every layer — each layer's attention for `p` then
-        `q` (a KDA layer's state and window kept between the two), both MoE routers, one hand-off to each socket for both
-        positions' experts while the card runs both shared experts, both closes — then both heads: CHECK holds the
-        greedy token after each, hnA and hnB the head's state at each (what the MTP layer reads). `(restore)` gives each
-        KDA layer its state as it was after `p`. ⛳ An MLA layer needs nothing given back: a position reads only rows it
-        has written, and `q`'s row is written again when `q` is run for real. MEASURED: ▶ test/src_glm5_mtp_generate.py"""
+        `q` (a KDA layer's state and window kept between the two), both MoE routers, each socket handed `p`'s experts and
+        then `q`'s, each answered as the buffer it computed into, while the card runs both shared experts, both closes —
+        then both heads: CHECK holds the greedy token after each, hnA and hnB the head's state at each (what the MTP layer
+        reads). `(restore)` gives each KDA layer its state as it was after `p`. ⛳ An MLA layer needs nothing given back: a
+        position reads only rows it has written, and `q`'s row is written again when `q` is run for real. MEASURED: ▶
+        test/src_glm5_mtp_generate.py"""
         m, H, M, CPU0 = self.m, self.H, self.MULT, self.CPUS[0]["w"]
         if self.CPLAN is not None:
             raise Refused("a draft's check runs without a card tier of experts, for now")
         # ⛔ NO BUFFER OR BINDING HERE — this composes programs, and a boot that reads them from programs.lisp never runs it:
         #   the second position's buffers are `_card_buffers`', its arrays `_bindings`'. MEASURED 2026-10-19: made here, a
-        #   boot whose programs were read had no `routed2_1` and no C_HAND2, and its checks faulted OPCT at `xfb`
+        #   boot whose programs were read had no `routed2_1` and no C_HAND2, and its checks faulted OPCT at the sockets' picture
         for cpu in self.CPUS:
             m.act_as(cpu["w"])
-            m.picture("xfb", "(let ((s (- (sys__worker) 1))) "
-                      "(nn__buffer__copy hand %d (nth C_HAND s) HAND_BYTES) (nn__buffer__copy hand2 %d (nth C_HAND2 s) HAND_BYTES) "
-                      "(ai_z__glm_5_3__experts (nth C_HAND s) picks (nth (nth EX s) (nth HERE 0)) (nth C_ROUTED s)) "
-                      "(ai_z__glm_5_3__experts (nth C_HAND2 s) picks2 (nth (nth EX s) (nth HERE 0)) (nth C_ROUTED2 s)))" % (CARD, CARD))
+            m.picture("xfp", "(let ((s (- (sys__worker) 1))) (nn__buffer__copy hand (nth C_HAND s) HAND_BYTES) "
+                      "(ai_z__glm_5_3__experts (nth C_HAND s) picks (nth (nth EX s) (nth HERE 0)) (nth C_ROUTED s)) (nth C_ROUTED s))")
+            m.picture("xfq", "(let ((s (- (sys__worker) 1))) (nn__buffer__copy hand2 (nth C_HAND2 s) HAND_BYTES) "
+                      "(ai_z__glm_5_3__experts (nth C_HAND2 s) picks2 (nth (nth EX s) (nth HERE 0)) (nth C_ROUTED2 s)) (nth C_ROUTED2 s))")
         m.act_as(CARD)
         m.view("names")
         rng = self.rng
@@ -2111,18 +2120,21 @@ class Glm5(Generates):
             else:
                 mix = "(ai_z__glm_5_3__mla streams at%d p) (ai_z__glm_5_3__mla streams2 at%d q)" % (l, l)
             if self.moe[l]:
+                # every socket asked for `p`'s experts, then every socket for `q`'s: each answer the buffer of one position's
+                #   share, waited on as it is copied across
                 sums = []
                 for k, cpu in enumerate(self.CPUS):
                     into, into2 = ("routed", "routed2") if k == 0 else ("routed%d" % k, "routed2_%d" % k)
-                    sums.append("(nn__buffer__copy %s %d %s %d) (nn__buffer__copy %s %d %s %d)"
-                                % (self.cn(k, "routed"), cpu["w"], into, 2 * H, self.cn(k, "routed2"), cpu["w"], into2, 2 * H))
+                    sums.append("(nn__buffer__copy (sys__wait_for_result expert_sum%d) %s %d) "
+                                "(nn__buffer__copy (sys__wait_for_result draft_sum%d) %s %d)" % (k, into, 2 * H, k, into2, 2 * H))
                     if k > 0:
                         sums.append("(nn__vector__add routed %s routed %d) (nn__vector__add routed2 %s routed2 %d)" % (into, H, into2, H))
+                asks = (" ".join("(expert_sum%d (sys__scheduler__add %d names xfp))" % (k, c["w"]) for k, c in enumerate(self.CPUS)) + " "
+                        + " ".join("(draft_sum%d (sys__scheduler__add %d names xfq))" % (k, c["w"]) for k, c in enumerate(self.CPUS)))
                 ffn = ("(ai_z__glm_5_3__route streams mo%d hand picks) (ai_z__glm_5_3__route streams2 mo%db hand2 picks2) "
-                       "(sys__node_array__set HERE 0 %d) %s (ai_z__glm_5_3__shared hand mo%d) (ai_z__glm_5_3__shared hand2 mo%db) %s %s "
+                       "(sys__node_array__set HERE 0 %d) (let (%s) (ai_z__glm_5_3__shared hand mo%d) (ai_z__glm_5_3__shared hand2 mo%db) %s) "
                        "(ai_z__glm_5_3__close streams mo%d routed) (ai_z__glm_5_3__close streams2 mo%db routed2)"
-                       % (l, l, i, " ".join("(sys__scheduler__add %d names xfb)" % c["w"] for c in self.CPUS), l, l,
-                          " ".join("(sys__wait %d)" % c["w"] for c in self.CPUS), " ".join(sums), l, l))
+                       % (l, l, i, asks, l, l, " ".join(sums), l, l))
             else:
                 ffn = "(ai_z__glm_5_3__mlp streams ml%d) (ai_z__glm_5_3__mlp streams2 ml%d)" % (l, l)
             m.defun("(defun (ck%d p q) (begin %s %s (type streams)))" % (l, mix, ffn))
@@ -2204,13 +2216,13 @@ class Glm5(Generates):
         if self.EMBED_CPU:                          # the first socket decodes the row (▶ lisp/glm5_cpu.lisp `xe`)
             m.act_as(self.CPUS[0]["w"])
             m.picture("xe", "(let ((tok (nth EMB_TOK 0))) (nn__turboquant__decode (nn__vector__range c_embedding (* tok %d) %d) "
-                      "(nn__vector__range c_embedding (+ %d tok) 1) c_emb 1 %d %d))"
+                      "(nn__vector__range c_embedding (+ %d tok) 1) c_emb 1 %d %d) c_emb)"
                       % (self.EMB_ROW_BYTES // 2, self.EMB_ROW_BYTES // 2, self.EMB_DATA_BYTES // 2, H, self.EMB_BITS))
             m.act_as(CARD)
-            m.defun("(defun (embed_e tok) (begin (sys__node_array__set EMB_TOK 0 tok) (sys__scheduler__add %d names xe) "
-                    "(sys__wait %d) (nn__buffer__copy c_emb %d u %d) (nn__hadamard__rotate u ones512 hu %d) "
-                    "(nn__vector__pointwise_mul hu signs_row e %d)))"
-                    % (self.CPUS[0]["w"], self.CPUS[0]["w"], self.CPUS[0]["w"], 2 * H, H, H))
+            m.defun("(defun (embed_e tok) (begin (sys__node_array__set EMB_TOK 0 tok) "
+                    "(let ((emb_row (sys__scheduler__add %d names xe))) (nn__buffer__copy (sys__wait_for_result emb_row) u %d)) "
+                    "(nn__hadamard__rotate u ones512 hu %d) (nn__vector__pointwise_mul hu signs_row e %d)))"
+                    % (self.CPUS[0]["w"], 2 * H, H, H))
         else:
             m.defun("(defun (embed_e tok) (begin (nn__turboquant__decode (nn__vector__range EMBEDDING (* tok %d) %d) "
                     "(nn__vector__range EMBEDDING (+ %d tok) 1) u 1 %d %d) (nn__hadamard__rotate u ones512 hu %d) "
@@ -2249,8 +2261,8 @@ class Glm5(Generates):
                 # the shared expert, which the card runs while the CPU runs the routed ones
                 m.defun("(defun (s%d) (begin %s (type sh)))"
                         % (l, self._swiglu(l, "mlp.shared_experts.", "sgu", "sact", "sactr", "hr", "sh", self.MINTER)))
-                m.defun("(defun (c%d) (begin (nn__buffer__copy c_routed %d routed %d) (nn__vector__add sh routed y %d) %s "
-                        "(type streams)))" % (l, CPU, H * 2, H, self._post()))
+                # the close, over the CPU's routed sum the layer has copied into `routed` (▶ the layers below)
+                m.defun("(defun (c%d) (begin (nn__vector__add sh routed y %d) %s (type streams)))" % (l, H, self._post()))
         if self.EPLAN is not None:
             m.act_as(CPU)
             p, I = self.EPLAN, self.MINTER
@@ -2266,12 +2278,14 @@ class Glm5(Generates):
                     % (j, pl(p.at_up_data, p.up_data), pl(p.at_up_lut, p.up_lut), 2 * I, H, self.E_D, I, self.LIMIT, I,
                        pl(p.at_down_data, p.down_data), pl(p.at_down_lut, p.down_lut), H, I, self.E_D, j, H, H)
                     for j in range(self.TOPK))
-                m.defun("(defun (x%d) (begin (nn__buffer__copy hr %d c_hr %d) (nn__buffer__copy weights %d c_w %d) "
-                        "(nn__vector__zero c_routed %d) %s (type c_routed)))" % (l, CARD, H * 2, CARD, 2 * self.TOPK, H, experts))
+                # the layer's experts over the card's input and weights, answered as c_routed
+                m.defun("(defun (x%d) (begin (nn__buffer__copy hr c_hr %d) (nn__buffer__copy weights c_w %d) "
+                        "(nn__vector__zero c_routed %d) %s c_routed))" % (l, H * 2, 2 * self.TOPK, H, experts))
                 m.picture("xw%d" % l, "(x%d)" % l)
             m.act_as(CARD)
         # ⭐ A TOKEN AS ONE PROGRAM: the card runs every layer, and hands each MoE layer's experts to the CPU's block —
-        #   `sys__scheduler__add` with that layer's picture over a snapshot of the names, `sys__wait` to collect it
+        #   `sys__scheduler__add` with that layer's picture over a snapshot of the names, its answer waited on with
+        #   `sys__wait_for_result` and the buffer it comes to copied across
         fused = self._fused_body() if self.FUSED else None
         fused_tok = fused
         if self.CH and self.EPLAN is not None:
@@ -2286,7 +2300,8 @@ class Glm5(Generates):
             m.defun("(defun (layers_f pos) (begin %s (type streams)))" % fused)
         if fused is None:
             # the layers as nn's words, a layer's latent row `at` and the positions it attends `len`
-            layers = " ".join(("(a%d at len) (sys__scheduler__add %d names xw%d) (s%d) (sys__wait %d) (c%d)" % (l, CPU, l, l, CPU, l))
+            layers = " ".join(("(a%d at len) (let ((expert_sum (sys__scheduler__add %d names xw%d))) (s%d) "
+                               "(nn__buffer__copy (sys__wait_for_result expert_sum) routed %d)) (c%d)" % (l, CPU, l, l, H * 2, l))
                               if self.moe[l] else "(a%d at len)" % l for l in self.run_layers)
             m.defun("(defun (position tok pos) (let ((at (* pos %d)) (len (+ pos 1))) (embed tok) %s (type streams)))"
                     % (self.LAT * 2, layers))
@@ -2306,16 +2321,17 @@ class Glm5(Generates):
         m.act_as(CARD)
 
     def _rows_procedures(self):
-        """A chunk of a prompt as rows: each CPU's picture over the chunk, and a procedure a layer."""
+        """A chunk of a prompt as rows: each CPU's picture over the chunk, answered as the routed rows it computed, and a
+        procedure a layer."""
         m, H = self.m, self.H
         for i, cpu in enumerate(self.CPUS):
             m.act_as(cpu["w"])
             c = lambda name: self.cn(i, name)
             for l in self.run_layers:
                 if self.moe[l]:
-                    m.picture("xr%d_%d" % (l, i), "(begin (nn__buffer__copy hands %d %s %d) "
-                              "(ai_z__glm_5_3__experts_rows %s exr%d_%d %s (sys__node_array__get nrows 0)))"
-                              % (CARD, c("hands"), self.CH * self.HAND, c("hands"), l, i, c("rrows")))
+                    m.picture("xr%d_%d" % (l, i), "(begin (nn__buffer__copy hands %s %d) "
+                              "(ai_z__glm_5_3__experts_rows %s exr%d_%d %s (sys__node_array__get nrows 0)) %s)"
+                              % (c("hands"), self.CH * self.HAND, c("hands"), l, i, c("rrows"), c("rrows")))
         m.act_as(CARD)
         ws = [(i, cpu["w"]) for i, cpu in enumerate(self.CPUS)]
         for l in self.run_layers:
@@ -2327,17 +2343,17 @@ class Glm5(Generates):
                          + ("(nn__expert_tier__note hands %s %d n %d %d %s) " % (expert_tier.BINDING, l, self.HAND, self.HAND - 8 * self.TOPK,
                                                                        expert_tier.THRESHOLD)
                             if self.CPLAN is not None else "")
-                         + " ".join("(sys__scheduler__add %d names xr%d_%d)" % (w, l, i) for i, w in ws) + " "
+                         + "(let (" + " ".join("(expert_sums%d (sys__scheduler__add %d names xr%d_%d))" % (i, w, l, i) for i, w in ws) + ") "
                          # the card's share computed while the CPUs compute theirs
                          + ("(ai_z__glm_5_3__experts_rows hands exkr%d rrows_k n %s) " % (l, expert_tier.BINDING) if self.CPLAN is not None else "")
-                         # ⛳ WAITED FOR WITHOUT A BOUND: `sys__wait` gives up after ~15 s, and a chunk's experts read
-                         #   from the disk can take longer — so the card asks `sys__result` until it says so, then
-                         #   collects. `(< 1 0)` is #f: the loop runs while completed is #f
-                         + " ".join("(while '(sys__eq (sys__result %d) (< 1 0)) '(< 0 1)) (sys__wait %d)" % (w, w)
-                                    for _, w in ws) + " "
+                         # ⛳ WAITED FOR WITHOUT A BOUND: `sys__wait_for_result` gives up after ~15 s where the computation
+                         #   cannot park, and a chunk's experts read from the disk can take longer — so the card asks
+                         #   `sys__result` of each answer until it is filled, then collects. `(< 1 0)` is #f: the loop
+                         #   runs while the answer is not filled
+                         + " ".join("(while '(sys__eq (sys__result expert_sums%d) (< 1 0)) '(< 0 1))" % i for i, _ in ws) + " "
                          + ("(nn__expert_tier__written %s) " % expert_tier.BINDING if self.CPLAN is not None else "")
-                         + " ".join("(nn__buffer__copy %s %d %s %d)" % (self.cn(i, "rrows"), w, "rrows" if i == 0 else "rrows%d" % i,
-                                                                       2 * H * self.CH) for i, w in ws) + " "
+                         + " ".join("(nn__buffer__copy (sys__wait_for_result expert_sums%d) %s %d)"
+                                    % (i, "rrows" if i == 0 else "rrows%d" % i, 2 * H * self.CH) for i, _ in ws) + ") "
                          + " ".join("(nn__vector__add rrows rrows%d rrows %d)" % (i, H * self.CH) for i, _ in ws if i > 0)
                          + (" (nn__vector__add rrows rrows_k rrows %d)" % (H * self.CH) if self.CPLAN is not None else "")
                          + " (ai_z__glm_5_3__close_rows srows mo%d rrows carries n rwork)" % l)

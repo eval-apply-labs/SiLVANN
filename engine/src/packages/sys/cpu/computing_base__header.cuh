@@ -162,7 +162,7 @@
  *   than freeing — see `WHERE IT LIVES` above for why that is a fact about its home and not its shape.
  *   It does not WAIT UNBOUNDED, and it waits in one place, which is not a question: `begin` backs off for
  *   `SYS__COMPUTING_BASE__POLL_CYCLES` when its swap loses, so an idle block polls instead of hammering.
- *   The lisp's `sys__wait` waits on an answer, not on a base: parked on it where the computation may move,
+ *   The lisp's `sys__wait_for_result` waits on an answer, not on a base: parked on it where the computation may move,
  *   else up to `SYS__COMPUTING_BASE__WAIT_NS` by the clock with that same back-off between its looks. Every question — `status`, `fault`, an answer's state — is a read,
  *   and a refused `claim` answers at once.
  *   It does not COPY in `init`: bindings and program are references handed over and held, not duplicated.

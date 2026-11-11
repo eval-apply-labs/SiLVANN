@@ -62,7 +62,8 @@ The package's own device-wide state sits in its rows of the system register, `nn
 ```
 standing up         nn__package__init
 buffers             nn__buffer__getnew  nn__buffer__getnew_ram  nn__vector__range  nn__vector__zero
-                    nn__buffer__copy — a buffer from another worker, through RAM
+                    nn__buffer__copy — a buffer from another worker, through RAM: `(nn__buffer__copy from to bytes)`,
+                      read where its bytes are, the memory the buffer records
                     nn__vector__widen — halves into floats, each exactly (a residual kept as floats)
 vector arithmetic   nn__vector__add  nn__vector__pointwise_mul  nn__vector__scale  nn__vector__scale_at
                     nn__vector__exp  nn__vector__softplus  nn__vector__dot_product
