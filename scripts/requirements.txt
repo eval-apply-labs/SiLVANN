@@ -6,6 +6,7 @@ fastapi>=0.139
 uvicorn>=0.51
 pydantic>=2.13
 httpx>=0.28
+PyJWT[crypto]>=2.8
 nicegui>=3.14
 pillow>=10.0
 pypdf>=5.0

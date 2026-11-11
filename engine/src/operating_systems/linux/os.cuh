@@ -3,6 +3,7 @@
 
 /* What this file needs, named where a reader — and an editor — can follow it. */
 #include <dlfcn.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
 #include <sched.h>
@@ -128,7 +129,15 @@ static inline bool sys__os__memory_interleave(void* base, size_t bytes, const un
 static inline bool sys__os__memory_bind(void* base, size_t bytes, const unsigned long* nodes, unsigned long most) {
     return syscall(SYS_mbind, base, bytes, 2 /* MPOL_BIND */, nodes, most, 0u) == 0;
 }
-static inline void* sys__os__memory_aligned(size_t alignment, size_t bytes) { return aligned_alloc(alignment, bytes); }
+/* `errno` as the failed `mbind` left it: EPERM where a seccomp filter refuses the call (`MEASURED` in a vast.ai
+ * container without CAP_SYS_NICE, measurements/2026-11-10_nn140_2xa40.md), ENOSYS where the kernel has no NUMA policy.
+ * A node without the memory, or not one the process may use, is EINVAL or ENOMEM, and stays a failure. */
+static inline bool sys__os__memory_policy_refused(void) { return errno == EPERM || errno == ENOSYS; }
+/* `posix_memalign`, which glibc and Android's bionic both have (bionic's `aligned_alloc` begins at API 28) */
+static inline void* sys__os__memory_aligned(size_t alignment, size_t bytes) {
+    void* at = 0;
+    return posix_memalign(&at, alignment, bytes) == 0 ? at : 0;
+}
 static inline void sys__os__memory_aligned_free(void* at) { free(at); }
 
 static inline void sys__os__cpus_clear(sys__os__cpus* set) { CPU_ZERO(set); }
@@ -137,9 +146,11 @@ static inline bool sys__os__cpus_has(const sys__os__cpus* set, int cpu) { return
 static inline int  sys__os__cpus_count(const sys__os__cpus* set) { return CPU_COUNT(set); }
 static inline bool sys__os__cpus_of_thread(sys__os__cpus* set) { return sched_getaffinity(0, sizeof *set, set) == 0; }
 static inline bool sys__os__cpus_to_thread(const sys__os__cpus* set) { return sched_setaffinity(0, sizeof *set, set) == 0; }
+/* Linux keeps an affinity a thread, and `sched_setaffinity(0, …)` sets the calling thread's — bionic has no
+ * `pthread_setaffinity_np` */
 static inline void sys__os__cpu_pin_thread(int cpu) {
     cpu_set_t set; CPU_ZERO(&set); CPU_SET(cpu, &set);
-    (void)pthread_setaffinity_np(pthread_self(), sizeof set, &set);
+    (void)sched_setaffinity(0, sizeof set, &set);
 }
 static inline int sys__os__cpu_now(void) { return sched_getcpu(); }
 /* ⛳ THE TOPOLOGY IS `/sys/devices/system/cpu`: a CPU's node is the `node<n>` link in its folder, its package and core

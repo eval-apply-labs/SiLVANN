@@ -14,6 +14,7 @@ with every model measured on that kind of machine, and the model's own page.
 <!-- rates:lookup -->
 | GPU | RAM | CPU | Disk | Model | Setup | Prefill | Decode | Max context | Or |
 |---|---|---|---|---|---|---|---|---|---|
+| [a phone](android.md) | 5.4 GB | 8 Arm cores | — | [Qwen 3.5 2B](models.md#qwen-35-2b) `D4` | Android (Termux), experimental | 9.1-10.5 positions/s | 7.03-7.73 tokens/s after 163 | — | — |
 | [none](results.md#no-graphics-card) | 16 GB | 4 cores | — | [Qwen 3.5 4B](models.md#qwen-35-4b) `D4` | the CPU alone | 18.9 positions/s | 7.95 tokens/s after 8k | 8,320 | — |
 | [8 GB](results.md#an-8-gb-card) | 32 GB | 4 cores | — | [Qwen 3.6 35B-A3B](models.md#qwen-36-35b-a3b) `D8E4` | the experts in RAM, a tier on the card | 94.9 positions/s | 14.34 tokens/s after 100k | 262,144 | the 4B on the card |
 | [16 GB](results.md#a-16-gb-card) | 32 GB | 4 cores | NVMe, 5.7 GB/s | [Qwen 3.8 Flash-Next](models.md#qwen-38-flash-next) `D8E4` | the experts from the disk | 29.2-29.4 positions/s | 10.61-10.64 tokens/s after 2k | — | the 122B from the disk |
@@ -39,6 +40,18 @@ with every model measured on that kind of machine, and the model's own page.
 
 ## By machine
 
+### A phone
+
+Experimental: an Android phone's Arm cores under Termux, the model in its RAM — [`android.md`](android.md) says how, and
+what is not there yet.
+
+<!-- rates:machine phone -->
+| Model | GPU | RAM | CPU | Disk | Setup | Prefill | Decode | Max context | Version |
+|---|---|---|---|---|---|---|---|---|---|
+| [Qwen 3.5 2B](models.md#qwen-35-2b) `D4` | none | 5.4 GB | Snapdragon G3x Gen 1 (8 Arm cores) | — | Android (Termux), `SILVANN_ARM_INT8=1` | 9.1-10.5 positions/s | 7.03-7.73 tokens/s after 163 | — | main |
+| [Qwen 3.5 2B](models.md#qwen-35-2b) `D4` | none | 5.4 GB | Snapdragon G3x Gen 1 (8 Arm cores) | — | Android (Termux), exact | 10.8-11.0 positions/s | 4.46-4.53 tokens/s after 163 | — | main |
+<!-- /rates -->
+
 ### No graphics card
 
 The CPU alone: the model in RAM, or its experts read from the disk.
@@ -46,6 +59,7 @@ The CPU alone: the model in RAM, or its experts read from the disk.
 <!-- rates:machine none -->
 | Model | GPU | RAM | CPU | Disk | Setup | Prefill | Decode | Max context | Version |
 |---|---|---|---|---|---|---|---|---|---|
+| [Qwen 3.5 2B](models.md#qwen-35-2b) `D4` | none | 125 GB | Xeon E5-2680 v4, 4 threads | — | the CPU alone | 26.4 positions/s | 7.55-7.64 tokens/s after 163 | — | main |
 | [Qwen 3.5 4B](models.md#qwen-35-4b) `D8` | none | 251 GB | 2× Xeon E5-2680 v4 (28 cores) | — | the CPU alone | 51.4 positions/s | 11.7 tokens/s after 550 | — | v0.22.0 |
 | [Qwen 3.5 4B](models.md#qwen-35-4b) `D4` | none | 62 GB | Xeon W-2123 (4 cores) | — | the CPU alone | 18.9 positions/s | 7.95 tokens/s after 8k | 8,320 | v0.22.0 |
 | [Qwen 3.5 4B](models.md#qwen-35-4b) `D4` | none | 251 GB | 2× Xeon E5-2680 v4 (28 cores) | — | the CPU alone | 55.3 positions/s | 17.8 tokens/s after 550 | — | v0.22.0 |
@@ -111,11 +125,11 @@ The CPU alone: the model in RAM, or its experts read from the disk.
 | [Qwen 3.5 122B-A10B](models.md#qwen-35-122b-a10b) `D8E4` | 16 GB · RTX 5060 Ti | 32 GB | Xeon W-2123 (4 cores) | NVMe array, 5.7 GB/s | the experts from the disk (`auto`) | 17.0 positions/s | 5.42 tokens/s after 100k | 110,000 | v0.24.0 |
 | [Qwen 3.5 122B-A10B](models.md#qwen-35-122b-a10b) `D8E4` | 16 GB · RTX 5060 Ti | 28 GB | Xeon W-2123 (4 cores) | NVMe, 5 GB/s | the experts from the disk | 18.8 positions/s | 7.5 tokens/s after 1k | — | v0.19.0 |
 | [Qwen 3.5 122B-A10B](models.md#qwen-35-122b-a10b) `D8E4` | 16 GB · RTX 5060 Ti | 61 GB | Xeon W-2123 (4 cores) | — | the experts in RAM, a 7.75 GB tier | 56.2 positions/s | 15.9 tokens/s after 2k | 32,768 | v0.21.0 |
-| [Qwen 3.8 Flash-Next](models.md#qwen-38-flash-next) `D8E4` | 16 GB · RTX 5060 Ti | 32 GB | Xeon W-2123 (4 cores) | NVMe array, 5.7 GB/s | the experts from the disk (`auto`) | 29.2-29.4 positions/s | 10.61-10.64 tokens/s after 2k | — | v0.26.0 |
-| [Qwen 3.8 Flash-Next](models.md#qwen-38-flash-next) `D8E4` | 16 GB · RTX 5060 Ti | 32 GB | Xeon W-2123 (4 cores) | NVMe array, 5.7 GB/s | the experts from the disk, a 9.5 GB tier | 28.6 positions/s | 12.66-12.73 tokens/s after 2k | — | v0.26.0 |
-| [Qwen 3.8 Flash-Next](models.md#qwen-38-flash-next) `D8E4` | 16 GB · RTX 5060 Ti | 62 GB | Xeon W-2123 (4 cores) | — | the experts in RAM, a 9.5 GB tier (`auto`) | 83.8 positions/s | 18.22-18.25 tokens/s after 2k | — | v0.26.0 |
-| [Qwen 3.8 Flash-Next](models.md#qwen-38-flash-next) `D8E4` | 16 GB · MI50 | 32 GB | 2× Xeon E5-2680 v4 (28 cores) | NVMe array | the experts from the disk (`auto`) | 37.3-38.0 positions/s | 11.82-11.84 tokens/s after 2k | — | v0.26.0 |
-| [Qwen 3.8 Flash-Next](models.md#qwen-38-flash-next) `D8E4` | 16 GB · MI50 | 62 GB | 2× Xeon E5-2680 v4 (28 cores) | — | the experts in RAM, a 10 GB tier (`auto`) | 81.0-82.2 positions/s | 21.37-21.55 tokens/s after 2k | — | v0.26.0 |
+| [Qwen 3.8 Flash-Next](models.md#qwen-38-flash-next) `D8E4` | 16 GB · RTX 5060 Ti | 32 GB | Xeon W-2123 (4 cores) | NVMe array, 5.7 GB/s | the experts from the disk (`auto`) | 29.2-29.4 positions/s | 10.61-10.64 tokens/s after 2k | — | main |
+| [Qwen 3.8 Flash-Next](models.md#qwen-38-flash-next) `D8E4` | 16 GB · RTX 5060 Ti | 32 GB | Xeon W-2123 (4 cores) | NVMe array, 5.7 GB/s | the experts from the disk, a 9.5 GB tier | 28.6 positions/s | 12.66-12.73 tokens/s after 2k | — | main |
+| [Qwen 3.8 Flash-Next](models.md#qwen-38-flash-next) `D8E4` | 16 GB · RTX 5060 Ti | 62 GB | Xeon W-2123 (4 cores) | — | the experts in RAM, a 9.5 GB tier (`auto`) | 83.8 positions/s | 18.22-18.25 tokens/s after 2k | — | main |
+| [Qwen 3.8 Flash-Next](models.md#qwen-38-flash-next) `D8E4` | 16 GB · MI50 | 32 GB | 2× Xeon E5-2680 v4 (28 cores) | NVMe array | the experts from the disk (`auto`) | 37.3-38.0 positions/s | 11.82-11.84 tokens/s after 2k | — | main |
+| [Qwen 3.8 Flash-Next](models.md#qwen-38-flash-next) `D8E4` | 16 GB · MI50 | 62 GB | 2× Xeon E5-2680 v4 (28 cores) | — | the experts in RAM, a 10 GB tier (`auto`) | 81.0-82.2 positions/s | 21.37-21.55 tokens/s after 2k | — | main |
 | [GLM 5.3 Flash](models.md#glm-53-flash) `D8E4` | 16 GB · RTX 5060 Ti | 14 GB | Xeon W-2123 (4 cores) | NVMe array, 5.7 GB/s | the experts from the disk, the next layer's read ahead | 9.1 positions/s | 2.21 tokens/s after 100k | 110,000 | v0.22.0 |
 | [GLM 5.3 Flash](models.md#glm-53-flash) `D8E4` | 16 GB · RTX 5060 Ti | 16 GB | Xeon W-2123 (4 cores) | NVMe array (4 drives) | the experts from the disk, a 12 GiB cache, the next layer's read ahead | — | 2.31 tokens/s after 256 | 32,768 | v0.22.0 |
 | [GLM 5.3 Flash](models.md#glm-53-flash) `D8E4` | 16 GB · RTX 5060 Ti | 62 GB | Xeon W-2123 (4 cores) | NVMe array, 5.7 GB/s | the experts from the disk (`auto`) | 8.6-8.7 positions/s | 3.65-3.68 tokens/s after 2k | 110,000 | v0.24.0 |

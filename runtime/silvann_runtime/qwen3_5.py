@@ -491,6 +491,11 @@ class Qwen35(Generates):
         # what the program reads of the two tables once the engine holds them and this program does not
         self.EMB_ROW_BYTES, self.EMB_BITS = int(self.emb_rec["row_bytes"]), int(self.emb_rec["d"])
         self.EMB_DATA_BYTES, self.HEAD_BITS = len(self.emb_data), 8 if self.HEADLESS else int(self.head_rec["d"])
+        # ⭐ THE TWO TABLES ARE THESE BYTES FROM HERE ON: the records' arrays are let go now, so while the engine takes its
+        #   copy (▶ `_head_and_embedding`) the load holds each table twice, not three times — a phone's whole room
+        for rec in (self.head_rec, self.emb_rec):
+            if rec is not None:
+                rec["vbr_data"] = rec["vbr_lut"] = None
         # ⭐ THE EMBEDDING, A TABLE IN RAM THE CARD READS IN PLACE: the rows, then the scales — a RAM buffer of its own class
         self.TABLE_BYTES = (len(self.emb_data) + len(self.emb_lut) + 255) // 256 * 256
         self.S_BYTES, self.W_BYTES = self.VH * self.LH * self.LH * 4, self.CONV_CH * 3 * 2

@@ -9,7 +9,7 @@ from this folder's engine and scripts\build.py, else built here as scripts\build
 It installs nothing system-wide and asks for no administrator: a tool it needs and does not find is named, with the line
 that installs it, and the installer stops. Run it again to update; models, user_sessions, the venv and the folder
 `silvann data` named stay. What it needs:
-  Python 3.10 to 3.14       python.org, or: winget install -e --id Python.Python.3.12
+  Python 3.11 to 3.14       python.org, or: winget install -e --id Python.Python.3.12
   Git                       winget install -e --id Git.Git
   a card's own driver       NVIDIA's for an NVIDIA card; AMD's or Intel's, whose OpenCL.dll the OpenCL families use
 and, only to build the libraries here (scripts\build.ps1, or a release whose libraries do not match):
@@ -74,10 +74,10 @@ function Check-Machine {
     $script:Python = Find-Python
     $missing = @()
     if (-not $script:Python) {
-        $missing += "Python 3.10 or newer: winget install -e --id Python.Python.3.12  (or python.org)"
+        $missing += "Python 3.11 or newer: winget install -e --id Python.Python.3.12  (or python.org)"
     } else {
-        & $script:Python -c "import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)"
-        if ($LASTEXITCODE -ne 0) { Fail "Python 3.10 or newer is needed; $script:Python is older." }
+        & $script:Python -c "import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)"
+        if ($LASTEXITCODE -ne 0) { Fail "Python 3.11 or newer is needed; $script:Python is older." }
     }
     if (-not (Get-Command git -ErrorAction SilentlyContinue)) { $missing += "Git: winget install -e --id Git.Git" }
     Stop-If-Missing $missing

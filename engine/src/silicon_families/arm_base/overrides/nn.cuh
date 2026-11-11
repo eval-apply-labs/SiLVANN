@@ -19,6 +19,33 @@
  *   bits the levels a table of 256 floats; at 16 a code is the weight. The products are nn's; the order they are added in
  *   is not, so an answer is within the bench's bound of nn's, not its bytes. */
 
+/* ── ⚗ EXPERIMENTAL — `SILVANN_ARM_INT8=1`: THE EXACT 4-BIT GEMVS IN nn's INT8 ARITHMETIC ─────────────────────────────
+ * One matrix at 4 and 8 bits (the head), the grouped and the grouped onto the residual at 4, handed to this family's int8 doors (▶ "THE GEMVS
+ * IN INTEGERS" below): `x` in blocks of 32 as int8, the levels as int8, a block's products through `sdot` — nn's int8 verb,
+ * ~1% of the rows' rms from the exact answer. For a phone, whose cores spend the exact route's time widening and
+ * multiplying floats rather than waiting on memory. Unset, every door below is as written. */
+static int arm_base__zzprivate_int8_lever = -1;
+static inline bool arm_base__zzprivate_int8_everywhere(void) {
+    if (arm_base__zzprivate_int8_lever < 0) {
+        const char* v = getenv("SILVANN_ARM_INT8");
+        arm_base__zzprivate_int8_lever = v != 0 && v[0] == '1' ? 1 : 0;
+    }
+    return arm_base__zzprivate_int8_lever == 1;
+}
+static void arm_base__override_turboquant_gemv_int8(uint16_t* out, const uint8_t* weights, uint64_t w_room, const uint8_t* luts,
+                                                    uint64_t l_room, const uint16_t* x, uint64_t d, uint64_t rows, uint64_t cols,
+                                                    unsigned int* over);
+static void arm_base__override_gemv_groups_int8(uint16_t* out, nn__turboquant__groups g, const uint16_t* x, uint64_t cols,
+                                                unsigned int* over);
+static void arm_base__override_gemv_groups_sum_int8(uint16_t* out, nn__turboquant__groups g, const uint16_t* x, const uint16_t* w,
+                                                    const uint16_t* residual, uint64_t rows, uint64_t cols, unsigned int* over);
+/* every matrix of the group 4 bits wide: the int8 doors' width */
+static inline bool arm_base__zzprivate_groups_four(const nn__turboquant__groups* g) {
+    if (g->count == 0u || g->count > NN__TURBOQUANT__GROUPS_MAX) return false;
+    for (uint64_t i = 0u; i < g->count; ++i) if (g->d[i] != 4u) return false;
+    return true;
+}
+
 /* ── the rows of one call, spread over the pool: each block a contiguous run of rows ───────────────────────────── */
 typedef struct arm_base__gemv_call {
     uint16_t* out; const uint8_t* weights; const uint8_t* luts; uint64_t row_bytes, rows, cols, d;
@@ -178,6 +205,9 @@ static inline uint32_t arm_base__zzprivate_blocks_for(uint64_t rows) {
 static void arm_base__override_turboquant_gemv(uint16_t* out, const uint8_t* weights, uint64_t w_room, const uint8_t* luts,
                                                uint64_t l_room, const uint16_t* x, uint64_t d, uint64_t rows, uint64_t cols,
                                                unsigned int* over) {
+    if ((d == 4u || d == 8u) && arm_base__zzprivate_int8_everywhere()) {
+        arm_base__override_turboquant_gemv_int8(out, weights, w_room, luts, l_room, x, d, rows, cols, over); return;
+    }
     const uint64_t row_bytes = nn__turboquant__row_bytes(d, cols);
     const bool fits = (d == 4u || d == 8u || d == 16u) && cols % 32u == 0u && row_bytes != 0u && rows <= w_room / row_bytes
                    && (d == 16u || rows <= l_room / 2u) && arm_base__zzprivate_x_room_for(cols);
@@ -232,6 +262,9 @@ static inline bool arm_base__zzprivate_groups_fit(const nn__turboquant__groups* 
     return true;
 }
 static void arm_base__override_gemv_groups(uint16_t* out, nn__turboquant__groups g, const uint16_t* x, uint64_t cols, unsigned int* over) {
+    if (arm_base__zzprivate_groups_four(&g) && arm_base__zzprivate_int8_everywhere()) {
+        arm_base__override_gemv_groups_int8(out, g, x, cols, over); return;
+    }
     if (!arm_base__zzprivate_groups_fit(&g, cols) || !arm_base__zzprivate_x_room_for(cols)) {
         nn__turboquant__zzabi_launch_gemv_groups(out, g, x, cols, over); return;
     }
@@ -254,6 +287,9 @@ static void arm_base__override_gemv_groups_n(uint16_t* out, nn__turboquant__grou
 }
 static void arm_base__override_gemv_groups_sum(uint16_t* out, nn__turboquant__groups g, const uint16_t* x, const uint16_t* w,
                                                const uint16_t* residual, uint64_t rows, uint64_t cols, unsigned int* over) {
+    if (arm_base__zzprivate_groups_four(&g) && arm_base__zzprivate_int8_everywhere()) {
+        arm_base__override_gemv_groups_sum_int8(out, g, x, w, residual, rows, cols, over); return;
+    }
     if (!arm_base__zzprivate_groups_fit(&g, cols) || !arm_base__zzprivate_x_room_for(g.count * cols)) {
         nn__turboquant__zzabi_launch_gemv_groups_sum(out, g, x, w, residual, rows, cols, over); return;
     }
@@ -722,7 +758,8 @@ static void arm_base__override_expert_groups_int8(uint16_t* out, nn__expert__gro
  * nn's int8 gemv (`kernels.cuh`): `x` quantised in blocks of 32 by nn's own (`nn__turboquant__zzabi_quantise`), once a call —
  * every group's own `x` for the weighted sum — the 4-bit codes as their int8 levels (`tbl`), a block's 32 products through
  * two `sdot`s, its exact integer sum, and nn's float steps as nn writes them, a block after another, the row's scale and
- * 1/127 last: nn's bytes. 4 bits; anything else is the generic door. */
+ * 1/127 last: nn's bytes. 4 bits, and the single gemv at 8 (a head): its 256 levels through four 64-entry tables, `tbl`
+ * then three `tbx`; anything else is the generic door. */
 typedef struct arm_base__gemv_i8_call {
     uint16_t* out; const uint8_t* weights; const uint8_t* luts; nn__turboquant__groups g; const int8_t* xq; const float* xs;
     const uint16_t* w; const uint16_t* residual; uint64_t rows, cols; unsigned int* over;
@@ -733,6 +770,60 @@ static inline float arm_base__zzprivate_dot_i8_4(const uint8_t* row, const int8_
     for (uint64_t k = 0; k < cols; k += 32u) {
         int8x16_t a, b;
         arm_base__int8_levels32(row + k / 2u, t8, &a, &b);
+        const int32x4_t s = vdotq_s32(vdotq_s32(vdupq_n_s32(0), a, vld1q_s8(xq + k)), b, vld1q_s8(xq + k + 16u));
+        part += (float)vaddvq_s32(s) * xs[k / 32u];
+    }
+    return part;
+}
+/* The 8-bit levels as int8: four tables of 64 levels, for `tbl` and `tbx`, and whether they are their mirror — a code
+ * past 127 the negative of code 255 - c's, as nn's generated levels are; the table is checked, not assumed. */
+typedef struct arm_base__int8_tables8 { int8x16x4_t t[4]; bool mirrored; } arm_base__int8_tables8;
+static inline arm_base__int8_tables8 arm_base__int8_levels8(void) {
+    const int8_t* lev = nn__turboquant__zzabi_levels_i8(8u);
+    arm_base__int8_tables8 t;
+    for (int q = 0; q < 4; ++q) t.t[q] = vld1q_s8_x4(lev + 64 * q);
+    t.mirrored = true;
+    for (int c = 0; c < 256; ++c) if (lev[c] != -lev[255 - c]) t.mirrored = false;
+    return t;
+}
+/* Sixteen 8-bit codes as their int8 levels from the mirror: a code past 127 read as 255 - c (its bits flipped) from the
+ * first two tables, and its level negated — two lookups, not four. */
+static inline int8x16_t arm_base__int8_levels16_8m(uint8x16_t c, const arm_base__int8_tables8* t) {
+    const int8x16_t s = vshrq_n_s8(vreinterpretq_s8_u8(c), 7);                       /* all ones past 127 */
+    const uint8x16_t i = veorq_u8(c, vreinterpretq_u8_s8(s));
+    const int8x16_t w = vqtbx4q_s8(vqtbl4q_s8(t->t[0], i), t->t[1], vsubq_u8(i, vdupq_n_u8(64u)));
+    return vsubq_s8(veorq_s8(w, s), s);                                                /* negated where s */
+}
+/* Sixteen 8-bit codes as their int8 levels: a code below 64 from the first table, and each later table, its index 64 less,
+ * fills the lanes whose code falls in it (`tbx` keeps a lane whose index is past its table). */
+static inline int8x16_t arm_base__int8_levels16_8(uint8x16_t c, const arm_base__int8_tables8* t) {
+    const uint8x16_t step = vdupq_n_u8(64u);
+    int8x16_t w = vqtbl4q_s8(t->t[0], c);
+    c = vsubq_u8(c, step); w = vqtbx4q_s8(w, t->t[1], c);
+    c = vsubq_u8(c, step); w = vqtbx4q_s8(w, t->t[2], c);
+    c = vsubq_u8(c, step); w = vqtbx4q_s8(w, t->t[3], c);
+    return w;
+}
+/* A row of 8-bit codes, a code a byte, against the quantised `x`: nn's sum over its blocks — the levels from the mirror
+ * when the table is one, else from all four tables. */
+static inline float arm_base__zzprivate_dot_i8_8m(const uint8_t* row, const int8_t* xq, const float* xs, uint64_t cols,
+                                                  const arm_base__int8_tables8* t) {
+    float part = 0.0f;
+    for (uint64_t k = 0; k < cols; k += 32u) {
+        const int8x16_t a = arm_base__int8_levels16_8m(vld1q_u8(row + k), t);
+        const int8x16_t b = arm_base__int8_levels16_8m(vld1q_u8(row + k + 16u), t);
+        const int32x4_t s = vdotq_s32(vdotq_s32(vdupq_n_s32(0), a, vld1q_s8(xq + k)), b, vld1q_s8(xq + k + 16u));
+        part += (float)vaddvq_s32(s) * xs[k / 32u];
+    }
+    return part;
+}
+static inline float arm_base__zzprivate_dot_i8_8(const uint8_t* row, const int8_t* xq, const float* xs, uint64_t cols,
+                                                 const arm_base__int8_tables8* t) {
+    if (t->mirrored) return arm_base__zzprivate_dot_i8_8m(row, xq, xs, cols, t);
+    float part = 0.0f;
+    for (uint64_t k = 0; k < cols; k += 32u) {
+        const int8x16_t a = arm_base__int8_levels16_8(vld1q_u8(row + k), t);
+        const int8x16_t b = arm_base__int8_levels16_8(vld1q_u8(row + k + 16u), t);
         const int32x4_t s = vdotq_s32(vdotq_s32(vdupq_n_s32(0), a, vld1q_s8(xq + k)), b, vld1q_s8(xq + k + 16u));
         part += (float)vaddvq_s32(s) * xs[k / 32u];
     }
@@ -751,6 +842,15 @@ static void arm_base__zzprivate_rows_i8_4(void* a) {
     uint64_t r0, r1; arm_base__zzprivate_rows(c->rows, &r0, &r1);
     for (uint64_t r = r0; r < r1; ++r) {
         const float part = arm_base__zzprivate_dot_i8_4(c->weights + r * (c->cols / 2u), c->xq, c->xs, c->cols, t8);
+        c->out[r] = nn__kernels__zzabi_to_half(part * arm_base__zzprivate_row_scale(c->luts, r) / 127.0f, c->over);
+    }
+}
+static void arm_base__zzprivate_rows_i8_8(void* a) {
+    const arm_base__gemv_i8_call* c = (const arm_base__gemv_i8_call*)a;
+    const arm_base__int8_tables8 t = arm_base__int8_levels8();
+    uint64_t r0, r1; arm_base__zzprivate_rows(c->rows, &r0, &r1);
+    for (uint64_t r = r0; r < r1; ++r) {
+        const float part = arm_base__zzprivate_dot_i8_8(c->weights + r * c->cols, c->xq, c->xs, c->cols, &t);
         c->out[r] = nn__kernels__zzabi_to_half(part * arm_base__zzprivate_row_scale(c->luts, r) / 127.0f, c->over);
     }
 }
@@ -791,7 +891,8 @@ static void arm_base__override_turboquant_gemv_int8(uint16_t* out, const uint8_t
                                                     uint64_t l_room, const uint16_t* x, uint64_t d, uint64_t rows, uint64_t cols,
                                                     unsigned int* over) {
     const uint64_t row_bytes = nn__turboquant__row_bytes(d, cols);
-    const bool fits = d == 4u && cols % 32u == 0u && row_bytes != 0u && rows <= w_room / row_bytes && rows <= l_room / 2u;
+    const bool fits = (d == 4u || d == 8u) && cols % 32u == 0u && row_bytes != 0u && rows <= w_room / row_bytes
+                   && rows <= l_room / 2u;
     if (fits) (void)arm_base__zzpackage_start();
     if (!fits || !arm_base__zzprivate_quantise_x32(x, cols)) {
         nn__turboquant__zzabi_launch_gemv_int8(out, weights, w_room, luts, l_room, x, d, rows, cols, over); return;
@@ -799,7 +900,8 @@ static void arm_base__override_turboquant_gemv_int8(uint16_t* out, const uint8_t
     arm_base__gemv_i8_call c = {};
     c.out = out; c.weights = weights; c.luts = luts; c.xq = arm_base__zzprivate_xq; c.xs = arm_base__zzprivate_xs;
     c.rows = rows; c.cols = cols; c.over = over;
-    arm_base__zzpackage_run(arm_base__zzprivate_blocks_for(rows), arm_base__zzprivate_rows_i8_4, &c);
+    arm_base__zzpackage_run(arm_base__zzprivate_blocks_for(rows), d == 8u ? arm_base__zzprivate_rows_i8_8 : arm_base__zzprivate_rows_i8_4,
+                            &c);
 }
 static void arm_base__override_gemv_groups_int8(uint16_t* out, nn__turboquant__groups g, const uint16_t* x, uint64_t cols,
                                                 unsigned int* over) {

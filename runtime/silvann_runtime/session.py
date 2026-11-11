@@ -21,6 +21,7 @@ convention and it is the caller that will do it"* — so the runtime keeps no qu
 """
 import json
 import contextlib
+import os
 import threading
 import time
 import uuid
@@ -89,8 +90,10 @@ class Cartridge:
         if header["has_state"]:
             for i, blob in enumerate(self.state):
                 arrays["s%d" % i] = np.frombuffer(blob, dtype=np.uint8)
-        with open(path, "wb") as fh:
+        part = str(path) + ".part"                 # whole or not at all: a process killed mid-save leaves the last one
+        with open(part, "wb") as fh:
             np.savez(fh, **arrays)
+        os.replace(part, path)
 
     @classmethod
     def load(cls, path):

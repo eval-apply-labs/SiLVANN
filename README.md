@@ -1,8 +1,8 @@
 # SiLVANN
 
-> **Developer preview, v0.26.1.** It runs the models below well on the hardware it was tested on, and it is shared
-> for people who can find their way around a build and a stack trace. NVIDIA cards are tested on four, a GeForce
-> RTX 5060 Ti and an RTX 5070 Ti, an H100 and a B200; Windows natively on one PC; macOS is not supported.
+> **Developer preview, v0.27.0.** It runs the models below well on the hardware it was tested on, and it is shared
+> for people who can find their way around a build and a stack trace. NVIDIA cards are tested on five, a GeForce
+> RTX 5060 Ti and an RTX 5070 Ti, an A100, an H100 and a B200; Windows natively on one PC; macOS is not supported.
 
 **Silicon Linked Virtualized Architecture for Neural Networks** — a from-scratch inference engine for large language
 models, and the three things it is made of:
@@ -39,6 +39,7 @@ measured on, how fast it reads a prompt and answers after one:
 <!-- rates:readme -->
 | GPU | RAM | CPU | Disk | Model | Setup | Prefill | Decode | Max context |
 |---|---|---|---|---|---|---|---|---|
+| [a phone](docs/android.md) | 5.4 GB | 8 Arm cores | — | [Qwen 3.5 2B](docs/models.md#qwen-35-2b) `D4` | Android (Termux), experimental | 9.1-10.5 positions/s | 7.03-7.73 tokens/s after 163 | — |
 | [none](docs/results.md#no-graphics-card) | 16 GB | 4 cores | — | [Qwen 3.5 4B](docs/models.md#qwen-35-4b) `D4` | the CPU alone | 18.9 positions/s | 7.95 tokens/s after 8k | 8,320 |
 | [8 GB](docs/results.md#an-8-gb-card) | 32 GB | 4 cores | — | [Qwen 3.6 35B-A3B](docs/models.md#qwen-36-35b-a3b) `D8E4` | the experts in RAM, a tier on the card | 94.9 positions/s | 14.34 tokens/s after 100k | 262,144 |
 | [16 GB](docs/results.md#a-16-gb-card) | 32 GB | 4 cores | NVMe, 5.7 GB/s | [Qwen 3.8 Flash-Next](docs/models.md#qwen-38-flash-next) `D8E4` | the experts from the disk | 29.2-29.4 positions/s | 10.61-10.64 tokens/s after 2k | — |
@@ -59,17 +60,17 @@ every machine one model was measured on, its packs and its notes: [`docs/models.
 names no setup chooses its own when the server starts, by trying it on the card: where its experts go, how much of the
 card holds the ones used most, the context the card has room for ([`docs/config.md`](docs/config.md)).
 
-**New in v0.26.1**, and in every release before it: [`docs/release_logs/v0.md`](docs/release_logs/v0.md).
+**New in v0.27.0**, and in every release before it: [`docs/release_logs/v0.md`](docs/release_logs/v0.md).
 
 ## Platforms
 
 - **Runs on:** Linux with an AMD card (ROCm 6 for the MI50, ROCm 7 or later from the MI100 on and for the Radeons of
   RDNA4), an NVIDIA card (CUDA 12)
   or OpenCL, or the CPU alone (AVX2 or
-  AVX-512); Windows with an NVIDIA card. Each machine it was measured on is in the table above.
-- **Not yet tested:** other AMD generations than the MI50 and the RX 9070 XT, NVIDIA cards before Hopper (the RTX 20
-  series, the A100; of the 30 and 40 series, two laptops' GPUs under WSL2),
-  integrated GPUs, and Windows' prebuilt libraries.
+  AVX-512); Windows with an NVIDIA card; and, experimentally, an Android phone's Arm cores
+  ([`docs/android.md`](docs/android.md)). Each machine it was measured on is in the table above.
+- **Not yet tested:** AMD's MI100, MI200s and MI300s and the Radeons before RDNA3 (RDNA3 has run through OpenCL 2.0);
+  NVIDIA's B300, and its cards before Pascal; Intel's GPUs and other integrated GPUs; Windows' prebuilt libraries.
 - **Not supported:** macOS.
 
 In full — what was checked on each, and what is not yet: [`docs/platforms.md`](docs/platforms.md).
@@ -100,9 +101,20 @@ the conversations, and the workspace where you put what it should read — and n
 ([why](docs/local_ai.md#container-first)). Updating, stopping, and the commands by hand:
 [`docker/README.md`](docker/README.md).
 
+### Windows: the portable app
+
+No installer and no command line: from the [latest release](https://github.com/eval-apply-labs/SiLVANN/releases/latest),
+download `silvann_portable_windows_x64.zip`, unzip it anywhere — a folder of yours, a USB drive — and double-click
+`SiLVANN.exe` in it. The chat opens in a window of its own; in **Options**, **Download models** fetches a model and
+**start** runs it. The folder carries its own Python and the libraries for every card the families list, so a card
+needs only its driver, and without one the CPU runs the models. Its models and conversations stay in its `data\` folder;
+closing the window saves them and ends everything it started
+([`docs/users.md`](docs/users.md#on-windows-the-portable-app)). Smart App Control refuses it as it refuses the
+installer's libraries (below).
+
 ### Windows: the installer
 
-You need Python 3.10 to 3.14, Git and your card's driver; if Python or Git is missing, `winget install -e --id
+You need Python 3.11 to 3.14, Git and your card's driver; if Python or Git is missing, `winget install -e --id
 Python.Python.3.12` and `winget install -e --id Git.Git`, then open a new PowerShell. In PowerShell, in the folder
 SiLVANN should go under:
 
