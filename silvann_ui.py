@@ -481,6 +481,21 @@ def new_config(model: str) -> dict:
             "pipeline_parallelism_next": "192.0.2.2:8766", "pipeline_parallelism_port": 8766}
 
 
+def ensure_config(model: str) -> tuple:
+    """(the config to select, what was done): a model folder with no config gets `configs/default.json`, every key at
+    its default (`new_config`) — ⚖ 2026-11-12 *"it tells me to pick a config when there is none (like deepseek) i suggest
+    in that case to generate an empty one by default"*. (None, why) where the folder will not take it."""
+    if not model or list_model_configs(model):
+        return None, ""
+    target = model_configs_dir(model) / "default.json"
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(new_config(model), indent=2), encoding="utf-8")
+    except OSError as e:
+        return None, "no config, and none could be made in %s: %s" % (target.parent, e)
+    return "default.json", "no config: made configs/default.json, every setting at its default"
+
+
 # local mode needs the server beside the UI; a machine with no model yet downloads one from the same panel
 LOCAL_AVAILABLE = SERVER_SCRIPT.exists()
 LOCAL_APP = False                                    # --local: the UI as the app over this machine's models
@@ -521,13 +536,48 @@ HELP_DOCS = [
 HELP_FIRST = "Using SiLVANN · The UI"
 
 
-def help_doc(path: Path) -> str:
-    """A document as the Help view shows it: Markdown as it is, any other text in a block of its own."""
+# ⭐ THE DOCUMENTS' PICTURES: docs/images/, served to the Help view under a path of its own — the release's public files,
+#   that folder alone. A document embeds a picture as GitHub shows it, a `<picture>` of a light and a dark file chosen by
+#   the system's theme; the Help view shows the one the UI's own theme asks for, at the address it serves it from.
+HELP_IMAGES_DIR = DOCS_DIR / "images"
+HELP_IMAGES_URL = "/silvann-help-images"
+HELP_PICTURE = re.compile(r'<picture>\s*<source[^>]*\bsrcset="([^"]+)"[^>]*>\s*<img\s+src="([^"]+)"([^>]*)>\s*</picture>')
+if HELP_IMAGES_DIR.is_dir():
+    app.add_static_files(HELP_IMAGES_URL, str(HELP_IMAGES_DIR))
+
+
+def help_image_url(current: Path, src: str) -> Optional[str]:
+    """The UI's address for a picture `current` names by a relative path — None where it is not a file of docs/images."""
+    if src.startswith("/") or re.match(r"[a-z][a-z0-9+.-]*:", src, re.I):
+        return None
+    path = (current.parent / src).resolve()
+    try:
+        rel = path.relative_to(HELP_IMAGES_DIR.resolve())
+    except ValueError:
+        return None
+    return HELP_IMAGES_URL + "/" + rel.as_posix() if path.is_file() else None
+
+
+def help_pictures(current: Path, text: str, dark: bool) -> str:
+    """`text` with each `<picture>` the Help view can serve made one image: the dark file or the light, its alt kept."""
+    def one(m):
+        url = help_image_url(current, m.group(1) if dark else m.group(2))
+        if url is None:
+            return m.group(0)
+        alt = re.search(r'\balt="([^"]*)"', m.group(3))
+        alt_attr = ' alt="%s"' % " ".join(alt.group(1).split()) if alt else ""
+        return '<img src="%s"%s style="max-width: 100%%; height: auto;">' % (url, alt_attr)
+    return HELP_PICTURE.sub(one, text)
+
+
+def help_doc(path: Path, dark: bool = False) -> str:
+    """A document as the Help view shows it: Markdown with its pictures served (▶ `help_pictures`), any other text in a
+    block of its own."""
     try:
         text = path.read_text(encoding="utf-8")
     except OSError as e:
         return f"_`{path.name}` could not be read: {e}_"
-    return text if path.suffix == ".md" else "```text\n" + text + "\n```"
+    return help_pictures(path, text, dark) if path.suffix == ".md" else "```text\n" + text + "\n```"
 
 
 HELP_HREF = re.compile(r"\]\(<?([^)\s>]+)")             # a Markdown link's target
@@ -706,8 +756,11 @@ def model_present(name: str) -> bool:
     """A model folder that is there, as silvann_runtime.fetch.present says: a text model's pack and config, or a picture
     model's — diffusers' model_index.json and its transformer packed."""
     d = MODELS_DIR / name
-    return ((d / "pack.json").is_file() and (d / "config.json").is_file()
-            or (d / "model_index.json").is_file() and (d / "transformer" / "pack.json").is_file())
+    try:
+        return ((d / "pack.json").is_file() and (d / "config.json").is_file()
+                or (d / "model_index.json").is_file() and (d / "transformer" / "pack.json").is_file())
+    except OSError:                    # a folder this process may not look into — a disk's own lost+found — is no model
+        return False
 
 
 def folder_bytes(path: Path) -> int:
@@ -1672,6 +1725,7 @@ async def page():
                 ).classes("w-80")
 
                 # CONFIG selector — scoped to the selected model's configs/ folder.
+                ensure_config(_init_model)
                 _init_cfgs = list_model_configs(_init_model) if _init_model else []
                 _init_cfg = (state["selected_config"] if state["selected_config"] in _init_cfgs
                              else ((_init_model and model_default_config(_init_model))
@@ -1716,6 +1770,9 @@ async def page():
                     # Selecting a model RESETS the config selector to that model's configs/ folder.
                     model = e.value
                     state["selected_model"] = model
+                    made, said = ensure_config(model)
+                    if said:
+                        safe_notify(said, type="positive" if made else "warning")
                     cfgs = list_model_configs(model)
                     new_cfg = model_default_config(model) or (cfgs[0] if cfgs else None)
                     config_select.set_options(cfgs, value=new_cfg)
@@ -1802,11 +1859,11 @@ async def page():
             help_paths = {"%s · %s" % (g, label): path for g, label, path in HELP_DOCS}
             help_shown = {"path": help_paths[HELP_FIRST]}
             help_doc_select = ui.select(list(help_paths), value=HELP_FIRST, label="Document").classes("w-96")
-            help_doc_md = ui.markdown(help_doc(help_paths[HELP_FIRST]))
+            help_doc_md = ui.markdown(help_doc(help_paths[HELP_FIRST], bool(state.get("dark", False))))
 
             def show_help(path: Path):
                 help_shown["path"] = path
-                help_doc_md.set_content(help_doc(path))
+                help_doc_md.set_content(help_doc(path, bool(state.get("dark", False))))
 
             help_doc_select.on_value_change(lambda e: show_help(help_paths[e.value]))
 
@@ -1893,6 +1950,7 @@ async def page():
         state["dark"] = not bool(state.get("dark", False))
         dark.set_value(state["dark"])
         show_theme()
+        help_doc_md.set_content(help_doc(help_shown["path"], state["dark"]))      # its pictures in the new theme
 
     show_theme()
     theme_row.on("click", on_theme_click)
@@ -2908,8 +2966,13 @@ async def page():
                 safe_notify("Pick a model first", type="warning")
                 return
             if not config_select.value:
-                safe_notify("Pick a config first", type="warning")
-                return
+                made, said = ensure_config(model_select.value)
+                if not made:
+                    safe_notify(said or "Pick a config first", type="warning")
+                    return
+                config_select.set_options(list_model_configs(model_select.value), value=made)
+                state["selected_config"] = made
+                safe_notify(said, type="positive")
             try:
                 model_dir = str(MODELS_DIR / model_select.value)
                 # a --local app starts it again when it is next started, once it has booted
@@ -2993,7 +3056,12 @@ async def page():
                     err.text = f"JSON parse error: {e}"
                     return
                 target = cfg_dir / name_in.value
-                target.write_text(json.dumps(parsed, indent=2, ensure_ascii=False), encoding="utf-8")
+                try:
+                    cfg_dir.mkdir(parents=True, exist_ok=True)      # a pack that came with no configs/ folder
+                    target.write_text(json.dumps(parsed, indent=2, ensure_ascii=False), encoding="utf-8")
+                except OSError as e:
+                    err.text = f"could not write {target}: {e}"
+                    return
                 safe_notify(f"saved {target.name}", type="positive")
                 dlg.close()
                 ui.navigate.reload()
@@ -3261,11 +3329,41 @@ def _quit_route(token):
         return {"stopping": True}
 
 
+def sign_in_on(data: Path) -> bool:
+    """Whether a server on `data` asks for a sign-in: a user there, or a provider to sign on with (▶
+    silvann_runtime/users.py's `Users.on`, read here without the runtime)."""
+    users = data / "users"
+    try:
+        return (data / "sso.json").is_file() or (users.is_dir() and any((d / "user.json").is_file() for d in users.iterdir()))
+    except OSError:                    # a folder this process may not read: no sign-in it can check, so none to open for
+        return False
+
+
+# ⭐ WHERE THE UI LISTENS: on every address only where it asks for a sign-in — ⚖ 2026-11-12 *"since we added users i
+#   think we can now unblock the setup, maybe add a simpler flag for those who want it locked down"*. With no user the chat
+#   has no login, and the model's tools act for whoever reaches it, so it stays this machine's; `--private` keeps it so
+#   with users too, and `--host` names an address outright (the container's image, the portable app).
+def listen_host(host: Optional[str], private: bool) -> tuple:
+    """(the address the UI listens on, why): `host` where it is named, else 127.0.0.1 where `private` or sign-in is off,
+    else 0.0.0.0."""
+    if host:
+        return host, "the address --host names"
+    if private:
+        return "127.0.0.1", "this machine alone (--private)"
+    if not sign_in_on(DATA_DIR):
+        return "127.0.0.1", "this machine alone: no sign-in yet (`silvann users add <name>` opens it to the network)"
+    return "0.0.0.0", "every address: sign-in is on"
+
+
 def main():
     global LOCAL_APP
     p = argparse.ArgumentParser()
     p.add_argument("--port", type=int, default=8080, help="port for the NiceGUI app (default 8080)")
-    p.add_argument("--host", default=None, help="the address the UI listens on (default NiceGUI's own)")
+    p.add_argument("--host", default=None,
+                   help="the address the UI listens on (default: every address where sign-in is on, this machine's "
+                        "alone where it is not)")
+    p.add_argument("--private", action="store_true",
+                   help="listen on this machine alone (127.0.0.1), whether or not sign-in is on")
     p.add_argument("--endpoint", default=None,
                    help="default SiLVANN server endpoint (override on first launch)")
     p.add_argument("--no-browser", action="store_true", help="don't auto-open the browser")
@@ -3286,8 +3384,10 @@ def main():
         if os.environ.get("SILVANN_QUIT_TOKEN"):
             _quit_route(os.environ["SILVANN_QUIT_TOKEN"])
 
+    host, why = listen_host(args.host, args.private)
+    print("[ui] listening on %s:%d — %s" % (host, args.port, why), flush=True)
     ui.run(port=args.port, title="SiLVANN", favicon=SILVANN_TILE, show=not args.no_browser, storage_secret="silvann-ui",
-           reload=args.reload and not args.local, **({"host": args.host} if args.host else {}))
+           reload=args.reload and not args.local, host=host)
 
 
 if __name__ in {"__main__", "__mp_main__"}:

@@ -1,6 +1,6 @@
 # SiLVANN
 
-> **Developer preview, v0.29.0.** It runs the models below well on the hardware it was tested on, and it is shared
+> **Developer preview, v0.29.1.** It runs the models below well on the hardware it was tested on, and it is shared
 > for people who can find their way around a build and a stack trace. NVIDIA cards are tested on five, a GeForce
 > RTX 5060 Ti and an RTX 5070 Ti, an A100, an H100 and a B200; Windows natively on one PC; macOS is not supported.
 
@@ -68,7 +68,7 @@ every machine one model was measured on, its packs and its notes: [`docs/models.
 names no setup chooses its own when the server starts, by trying it on the card: where its experts go, how much of the
 card holds the ones used most, the context the card has room for ([`docs/config.md`](docs/config.md)).
 
-**New in v0.29.0**, and in every release before it: [`docs/release_logs/v0.md`](docs/release_logs/v0.md).
+**New in v0.29.1**, and in every release before it: [`docs/release_logs/v0.md`](docs/release_logs/v0.md).
 
 ## Platforms
 

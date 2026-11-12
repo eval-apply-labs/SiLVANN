@@ -72,9 +72,9 @@ folder's name, the prefix of every function the family defines, the name of its 
 a boot asks for it by.
 
 Its number places it in the roster, `SILICON_FAMILIES__LIST` in `roster.cuh`: the host is 0, `x86_avx2` 50,
-`nvidia_opencl1` 75, `intel_opencl1_igpu` 80, `khronos_opencl2` 100, `intel_opencl2` 150, `amd_rocm6_wave64` 200,
-`amd_rocm10` 250, `nvidia_cuda12` 300. Numbers leave gaps on purpose, so a family can be placed
-between two others; they must rise down the list, and the build refuses one that does not, or one past
+`arm_neon` 55, `arm_gb10` 60, `nvidia_opencl1` 75, `intel_opencl1_igpu` 80, `khronos_opencl2` 100, `intel_opencl2`
+150, `amd_rocm6_wave64` 200, `amd_rocm10` 250, `nvidia_cuda12` 300. Numbers leave gaps on purpose, so a family can
+be placed between two others; they must rise down the list, and the build refuses one that does not, or one past
 `SYS__SILICON_FAMILY__SLOTS`. Numbers never move and are never reused, because a machine records the
 number of the silicon it stood up on.
 

@@ -129,7 +129,7 @@ class DeepSeek4(Generates):
             self.ENG = Engram(c, os.path.join(folder.path, "tokenizer.json"), engram_from,
                               used=[l for l in self.ENGRAM if l in self.run_layers])
         if engram_in not in ram_table.WHERE:
-            raise Refused("engram_in is 'auto', 'ram' or 'disk', not %r" % (engram_in,))
+            raise Refused("engram_in is %s, not %r" % (", ".join("'%s'" % w for w in ram_table.WHERE), engram_in))
         self._engram_in = engram_in              # where the tables are held: chosen once the experts' memory is (▶ below)
         for l in self.run_layers:
             r = self.RATIO[l]

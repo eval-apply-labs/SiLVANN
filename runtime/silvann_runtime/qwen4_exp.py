@@ -287,7 +287,7 @@ class Qwen4Exp(Generates):
         self.VERBS = verbs
         self.experts_dir = experts_dir or os.path.join(folder.path, "experts")
         if ngram_from not in ram_table.WHERE:
-            raise Refused("ngram_from is 'auto', 'ram' or 'disk', not %r" % (ngram_from,))
+            raise Refused("ngram_from is %s, not %r" % (", ".join("'%s'" % w for w in ram_table.WHERE), ngram_from))
         self.SLOTS = None
         if self.EXPERTS_FROM == "disk":
             # a table the config puts in RAM is held beside the cache, which its default size leaves room for

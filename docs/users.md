@@ -1,5 +1,18 @@
 # Running SiLVANN
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="images/users_dark.svg">
+  <img src="images/users_light.svg" alt="The ways in, each with the line to start from, what it needs and where the
+  chat then is. On Linux, a container (recommended): docker/setup.sh, with Podman or Docker, the chat at
+  http://silvann.localhost:8080 or the first free port after 8080; or installed: install.sh, with Python's venv and its
+  headers, g++ and git, then silvann ui, the chat at http://localhost:8090. On Windows 10 and 11, the portable app:
+  silvann_portable_windows_x64.zip unzipped and SiLVANN.exe double-clicked, a card needing only its driver, the chat in
+  its own window; or the installer: install.ps1 in PowerShell, with Python 3.11 to 3.14, Git and the card's driver, then
+  silvann ui, the chat at http://localhost:8090. On an Android phone, experimental: a build from source inside Termux,
+  the chat in a second Termux session with python silvann_cli.py. In Options, Download models fetches a model and start
+  runs it.">
+</picture>
+
 This is a **developer preview**: what it is tested on is in the [README](../README.md#platforms). If something does not
 build or run on your machine, you are expected to be able to read the error and the source. On Linux the recommended way
 to run it is a container ([below](#on-linux-a-container-recommended)); installed, it runs the same, and installing is the
@@ -45,7 +58,9 @@ container — the UI, the model's tool, a model's settings (§4) — with these 
   An update keeps the models, the conversations and the settings.
 - MP4 and other video files need PyAV, which the image leaves out: `docker/install_nonfree.sh`, once
   ([`docker/README.md`](../docker/README.md#what-the-image-leaves-out)).
-- The chat listens on this machine alone, and has no login.
+- The chat is this machine's alone until it asks for a sign-in. The setup offers to make a first user (Enter skips);
+  with one, other machines on your network reach the chat at this machine's address, each signing in
+  ([below](#several-people-on-one-server-a-user-each)). `--private` keeps it on this machine even then.
 
 The commands by hand, Docker instead of Podman, and Ubuntu 22.04's older Podman: [`docker/README.md`](../docker/README.md).
 
@@ -355,6 +370,11 @@ anything else, `silvann_cli --sign-in <name>` in a terminal (the password asked,
 client with `POST /users/sign_in` `{"name", "password"}` and the token it answers in `Authorization: Bearer <token>`. A
 sign-in lasts while it is used: twelve hours unused, a new password or the server's restart ends it. With no user, a
 server asks no one.
+
+Where the chat can be reached follows the sign-in: with none, on this machine alone; once it asks for one, from the
+network too — `silvann ui` listens on every address (it says so as it starts), and the container's setup publishes its
+port on them (`setup.sh update` after the first user). `--private` keeps either on this machine. The passwords cross
+the network as plain HTTP: fine on a network you trust; elsewhere, put a TLS proxy in front.
 
 A user sees and opens only the conversations in their folder; another's answers as one that is not there. The
 conversations made before the first user are nobody's until `silvann users adopt <name>` moves them into a folder.

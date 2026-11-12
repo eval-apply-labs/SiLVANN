@@ -1,5 +1,18 @@
 # The ideas behind SiLVANN
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="images/concepts_dark.svg">
+  <img src="images/concepts_light.svg" alt="One token's life, top to bottom: on the host, the Eval-Apply Generalized
+  Interpreter's evaluator walks the model's program a form at a time (generate, a token's position, every layer this
+  machine runs, then the sampler), and each verb launches its arithmetic on the worker that holds the data. On the
+  card, worker 0, through a silicon family: the token's embedding read from a table in RAM, the rotary angles, the
+  DeltaNet or attention mixer, the router, the layer's close, the final norm and the logits, and the sampler's
+  repetition penalty, temperature, top k and draw. On a CPU socket, worker 1, through x86_avx2: the routed experts,
+  sys__scheduler__add handing it a frozen program, the picture xq, whose answer the card waits on with
+  sys__wait_for_result and copies across. Only the token comes back to the host, each the next one's input, until an
+  end token.">
+</picture>
+
 SiLVANN's design did not fall out of a spec. Several of its choices started as intuitions about what a transformer
 is "really doing", and those intuitions still explain why the engine looks the way it does. Read the physics and
 the philosophy here as lenses, not mechanism: the engine runs ordinary linear algebra on ordinary silicon.

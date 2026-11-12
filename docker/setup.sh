@@ -7,7 +7,8 @@
 #
 # It finds Podman (or Docker) and the card — an AMD card, an NVIDIA card, or none — checks what the host needs and says
 # what is missing, makes the folder SiLVANN keeps everything in (~/SiLVANN), asks for a Brave Search API key for the
-# model's web search (Enter skips), pulls the image and starts it; then the chat is at http://localhost:8080.
+# model's web search (Enter skips) and for a first user (Enter skips), pulls the image and starts it; then the chat is at
+# http://localhost:8080 — and, once it asks for a sign-in, at this machine's address on the network too.
 #
 #   … | bash -s -- update        the newest image, the container made again over the same folder
 #   … | bash -s -- stop | start  stop it (giving it time to save the conversations), or start it again
@@ -18,13 +19,14 @@
 #                           or the first free one after it)
 #   --engine podman|docker  which, where both are installed     --no-search       ask for no search key
 #   --image <image>         an image of your own (docker/advanced.md, "Building an image") in place of the published one
+#   --private               the chat on this machine alone, even once it asks for a sign-in
 #
 # Everything else — SearXNG, names under localhost, a card a container, a model over several machines, building an
 # image — is in docker/advanced.md. Nothing here needs root, but where the host is missing something that does (a
 # group, NVIDIA's description of the card), the script names the command and stops.
 set -euo pipefail
 
-ACTION=setup; CARD=""; DATA="$HOME/SiLVANN"; PORT=""; NAME=silvann; ENGINE=""; DRY=0; SEARCH=1; OWN_IMAGE=""
+ACTION=setup; CARD=""; DATA="$HOME/SiLVANN"; PORT=""; NAME=silvann; ENGINE=""; DRY=0; SEARCH=1; OWN_IMAGE=""; PRIVATE=0
 IMAGE_BASE=ghcr.io/eval-apply-labs/silvann
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -37,12 +39,14 @@ while [ $# -gt 0 ]; do
         --image)   OWN_IMAGE=${2:-}; shift ;;
         --dry-run) DRY=1 ;;
         --no-search) SEARCH=0 ;;
+        --private) PRIVATE=1 ;;
         -h|--help) cat <<'USAGE'
 setup.sh [setup|update|stop|start] [--card amd|nvidia|cpu] [--data <folder>] [--port <port>] [--name <name>]
-         [--engine podman|docker] [--image <an image of your own>] [--no-search] [--dry-run]
+         [--engine podman|docker] [--image <an image of your own>] [--no-search] [--private] [--dry-run]
   setup    (the default) set SiLVANN up in a container and start it; the chat at http://localhost:8080
   update   the newest image, the container made again over the same folder
   stop     stop it, giving it time to save the conversations;  start  start it again
+  --private  the chat on this machine alone, even once it asks for a sign-in
 USAGE
             exit 0 ;;
         *) echo "setup.sh: unknown argument '$1' (--help lists them)" >&2; exit 2 ;;
@@ -293,8 +297,22 @@ make_net() {
     fi
 }
 make_net
+# ⭐ WHO REACHES THE CHAT: the network only where it asks for a sign-in — a user in the folder, or a provider to sign on
+#   with (▶ docs/users.md) — else this machine alone: with no sign-in the model's tools act for whoever reaches it.
+#   `--private` keeps it on this machine with users too.
+sign_in_on() { [ -f "$DATA/sso.json" ] || compgen -G "$DATA/users/*/user.json" >/dev/null; }
+if [ $PRIVATE = 0 ] && [ "$ACTION" = setup ] && [ $DRY = 0 ] && ! sign_in_on; then
+    echo
+    note "Other machines on your network can reach the chat once it asks for a sign-in."
+    tty_read "  A user name to make now (Enter keeps the chat on this machine alone): " FIRST_USER
+    if [ -n "$FIRST_USER" ]; then
+        "$ENGINE" run --rm -it "${FLAGS[@]}" -v "$VOLUME" "$IMAGE" silvann users add "$FIRST_USER" </dev/tty \
+            || note "The user was not made; the chat stays on this machine (later: $ENGINE exec -it $NAME silvann users add <name>)."
+    fi
+fi
+if [ $PRIVATE = 0 ] && sign_in_on; then PUBLISH="$PORT:8080"; else PUBLISH="127.0.0.1:$PORT:8080"; fi
 say "Starting SiLVANN…"
-run "$ENGINE" run -d --name "$NAME" --network "$NET" "${FLAGS[@]}" -p "127.0.0.1:$PORT:8080" -v "$VOLUME" "$IMAGE" >/dev/null
+run "$ENGINE" run -d --name "$NAME" --network "$NET" "${FLAGS[@]}" -p "$PUBLISH" -v "$VOLUME" "$IMAGE" >/dev/null
 if [ $DRY = 0 ]; then
     for i in $(seq 1 90); do answers "$PORT" && break; sleep 2; done
     answers "$PORT" || stop_here "SiLVANN did not answer on port $PORT." \
@@ -303,6 +321,15 @@ fi
 echo
 [ $DRY = 1 ] && { say "(a dry run: nothing was changed)"; exit 0; }
 say "SiLVANN is running: open $(address "$PORT")"
+if [ "$PUBLISH" = "$PORT:8080" ]; then
+    lan=$(hostname -I 2>/dev/null | awk '{print $1}')
+    note "From other machines on your network: http://${lan:-$(hostname)}:$PORT — each signs in (docs/users.md)."
+    note "Passwords cross the network unencrypted over plain HTTP: fine at home; elsewhere put a TLS proxy in front."
+else
+    note "The chat is this machine's alone. To open it to your network, make a user and update:"
+    note "  $ENGINE exec -it $NAME silvann users add <name>    then this same line with 'bash -s -- update'"
+    if [ $PRIVATE = 1 ]; then note "(--private keeps it here even then)"; fi
+fi
 note "In Options, 'Download models' fetches a model and 'start' runs it."
 note "Put files for the model in $DATA/workspace."
 note "Stop: $ENGINE stop -t 300 $NAME     Start again: $ENGINE start $NAME"

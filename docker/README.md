@@ -128,7 +128,10 @@ OpenCL is not built for (`ASSUMED`); there the native install sees the integrate
 
 - `--userns=keep-id` runs SiLVANN as you, so the files in `~/SiLVANN` stay yours.
 - `--group-add keep-groups` keeps your `video` and `render` groups, which own the AMD card.
-- `-p 127.0.0.1:8080:8080` keeps the chat to this machine: it has no login.
+- `-p 127.0.0.1:8080:8080` keeps the chat to this machine, as it must while it has no login. With a user
+  (`podman exec -it silvann silvann users add <name>`, [docs/users.md](../docs/users.md#several-people-on-one-server-a-user-each))
+  it asks for a sign-in, and `-p 8080:8080` lets other machines on your network reach it; `setup.sh` does so itself,
+  unless `--private`.
 - `-v ~/SiLVANN:/data` is the folder SiLVANN keeps everything in. With SELinux (Fedora and the like):
   `-v ~/SiLVANN:/data:Z`.
 

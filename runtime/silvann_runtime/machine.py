@@ -481,7 +481,7 @@ class Machine:
                                     moved N to in `worker_moved` (Qwen's CPU, worker 1, after a group's cards)
             (picture name form)     the form frozen and bound by name, for `sys__scheduler__add` to hand another block
             (view name)             the bindings as they stand, bound by name — what a computed block sees"""
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:            # its comments are UTF-8, whatever the system's own
             self._source_forms(read_all(f.read()), os.path.basename(path))
 
     def _source_forms(self, forms, name):
@@ -530,7 +530,7 @@ class Machine:
     def write_programs(self, path, heading, key):
         """The programs defined so far, as the Lisp they were written in, one after another — what a model IS in this
         engine, readable. ⛳ Written from the text each was defined with; nothing is reconstructed."""
-        with open(path, "w") as f:
+        with open(path, "w", encoding="utf-8") as f:
             f.write(";; %s\n;; key %s\n;; %d programs, in the order they were defined\n\n" % (heading, key, len(self.programs)))
             for what, worker, name, text in self.programs:
                 f.write(";; %s%s, as worker %d\n" % (what, "" if name is None else " " + name, worker))
@@ -540,7 +540,7 @@ class Machine:
     def programs_in(path, key):
         """The programs a file holds, [(what, worker, name, text)], if it was written for `key`; else None."""
         try:
-            with open(path) as f:
+            with open(path, encoding="utf-8") as f:
                 lines = f.read().split("\n")
         except OSError:
             return None

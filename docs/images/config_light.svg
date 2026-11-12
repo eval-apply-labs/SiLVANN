@@ -1,0 +1,159 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="980" viewBox="0 0 1200 980" role="img" aria-labelledby="t d">
+<title id="t">Where a model's parts live</title>
+<desc id="d">Where a model's parts can sit, and the setting in its config that moves each. The dense model on the card, or in RAM with "card": "cpu". The context's cache on the card, sized for max_context. The routed experts every one on the card (experts_on "card"), or on the CPU (experts_on "cpu"): copied into RAM, left to the system's page cache or read from the disk (experts_from "ram", "mapped", "disk"; "auto" chooses by the memory there is), with a tier of the experts used most on the card (card_experts_gb), promoted from RAM as they are picked. The n-gram memory's tables (ngram_from for Qwen 3.8 Flash-Next, engram_in for DeepSeek) copied into RAM, read into the system's file cache, which gives the memory back to other programs as they need it, or read from the disk. On Windows what a program puts on an NVIDIA card counts against the commit limit, the RAM and the page file together, though it takes none of the RAM.</desc>
+<style>.sans{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans',Helvetica,Arial,sans-serif}.mono{font-family:ui-monospace,SFMono-Regular,'SF Mono',Menlo,Consolas,'Liberation Mono',monospace}</style>
+<rect x="0.5" y="0.5" width="1199" height="979" rx="18" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="1"/>
+<text x="32" y="58" class="sans" font-size="28" font-weight="800"><tspan fill="#1f2328">Where a model's parts live</tspan></text>
+<text x="32" y="86" class="sans" font-size="16"><tspan fill="#59636e">and the setting in its config that moves each</tspan></text>
+<path d="M502 122 L502 114 L934 114 L934 122" fill="none" stroke="#59636e" stroke-width="1.5"/>
+<text x="718" y="106" class="sans" font-size="13" text-anchor="middle"><tspan fill="#59636e">the host's RAM</tspan></text>
+<rect x="32" y="128" width="224" height="804" rx="14" fill="#ffffff" stroke="#d1d9e0" stroke-width="1"/>
+<path d="M33 208 L255 208" fill="none" stroke="#d1d9e0" stroke-width="1"/>
+<rect x="268" y="128" width="216" height="804" rx="14" fill="#ffffff" stroke="#d1d9e0" stroke-width="1"/>
+<path d="M269 208 L483 208" fill="none" stroke="#d1d9e0" stroke-width="1"/>
+<rect x="496" y="128" width="216" height="804" rx="14" fill="#ffffff" stroke="#d1d9e0" stroke-width="1"/>
+<path d="M497 208 L711 208" fill="none" stroke="#d1d9e0" stroke-width="1"/>
+<rect x="724" y="128" width="216" height="804" rx="14" fill="#ffffff" stroke="#d1d9e0" stroke-width="1" stroke-dasharray="6 4"/>
+<path d="M725 208 L939 208" fill="none" stroke="#d1d9e0" stroke-width="1"/>
+<rect x="952" y="128" width="216" height="804" rx="14" fill="#ffffff" stroke="#d1d9e0" stroke-width="1"/>
+<path d="M953 208 L1167 208" fill="none" stroke="#d1d9e0" stroke-width="1"/>
+<text x="50" y="158" class="sans" font-size="15"><tspan fill="#1f2328" font-weight="700">a model's part</tspan></text>
+<text x="50" y="178" class="sans" font-size="12"><tspan fill="#59636e">and the settings that move it</tspan></text>
+<text x="284" y="158" class="sans" font-size="15"><tspan fill="#1f2328" font-weight="700">the card</tspan></text>
+<text x="284" y="178" class="sans" font-size="12"><tspan fill="#59636e">its own memory (VRAM)</tspan></text>
+<text x="512" y="158" class="sans" font-size="15"><tspan fill="#1f2328" font-weight="700">RAM</tspan></text>
+<text x="512" y="178" class="sans" font-size="12"><tspan fill="#59636e">what the process may hold</tspan></text>
+<text x="740" y="158" class="sans" font-size="15"><tspan fill="#1f2328" font-weight="700">the system's file cache</tspan></text>
+<text x="740" y="178" class="sans" font-size="12"><tspan fill="#59636e">gives the memory back to</tspan></text>
+<text x="740" y="194" class="sans" font-size="12"><tspan fill="#59636e">other programs as they need it</tspan></text>
+<text x="968" y="158" class="sans" font-size="15"><tspan fill="#1f2328" font-weight="700">the disk</tspan></text>
+<text x="968" y="178" class="sans" font-size="12"><tspan fill="#59636e">the model's folder</tspan></text>
+<rect x="44" y="222" width="4" height="79" rx="2" fill="#1d4ed8"/>
+<text x="58" y="235" class="sans" font-size="15"><tspan fill="#1f2328" font-weight="700">the dense model</tspan></text>
+<text x="58" y="251" class="sans" font-size="12.5"><tspan fill="#1d4ed8" font-weight="600" class="mono">card</tspan></text>
+<text x="58" y="267" class="sans" font-size="12.5"><tspan fill="#1d4ed8" font-weight="600" class="mono">num_cards</tspan><tspan fill="#59636e">, the one</tspan></text>
+<text x="58" y="283" class="sans" font-size="12.5"><tspan fill="#59636e">placement a config is meant</tspan></text>
+<text x="58" y="299" class="sans" font-size="12.5"><tspan fill="#59636e">to name</tspan></text>
+<rect x="276" y="220" width="200" height="61" rx="8" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="1"/>
+<rect x="284" y="228" width="4" height="45" rx="2" fill="#1d4ed8"/>
+<text x="296" y="239" class="mono" font-size="12.5"><tspan fill="#1d4ed8" font-weight="600">"card": "auto", 0, 1 …</tspan></text>
+<text x="296" y="255" class="sans" font-size="12.5"><tspan fill="#59636e">which of the machine's</tspan></text>
+<text x="296" y="271" class="sans" font-size="12.5"><tspan fill="#59636e">cards to run on</tspan></text>
+<rect x="276" y="289" width="200" height="77" rx="8" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="1"/>
+<rect x="284" y="297" width="4" height="61" rx="2" fill="#1d4ed8"/>
+<text x="296" y="308" class="mono" font-size="12.5"><tspan fill="#1d4ed8" font-weight="600">"num_cards": 2, 4 …</tspan></text>
+<text x="296" y="324" class="sans" font-size="12.5"><tspan fill="#59636e">with </tspan><tspan fill="#1f2328" class="mono">multi_user</tspan><tspan fill="#59636e"> </tspan><tspan fill="#1f2328" class="mono">"no"</tspan><tspan fill="#59636e">,</tspan></text>
+<text x="296" y="340" class="sans" font-size="12.5"><tspan fill="#59636e">every layer split over the</tspan></text>
+<text x="296" y="356" class="sans" font-size="12.5"><tspan fill="#59636e">machine's first cards</tspan></text>
+<rect x="504" y="220" width="200" height="61" rx="8" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="1"/>
+<rect x="512" y="228" width="4" height="45" rx="2" fill="#1d4ed8"/>
+<text x="524" y="239" class="mono" font-size="12.5"><tspan fill="#1d4ed8" font-weight="600">"card": "cpu"</tspan></text>
+<text x="524" y="255" class="sans" font-size="12.5"><tspan fill="#59636e">which uses no card (the</tspan></text>
+<text x="524" y="271" class="sans" font-size="12.5"><tspan fill="#59636e">CPU and its RAM)</tspan></text>
+<path d="M33 378 L255 378" fill="none" stroke="#d1d9e0" stroke-width="1"/>
+<path d="M269 378 L483 378" fill="none" stroke="#d1d9e0" stroke-width="1"/>
+<path d="M497 378 L711 378" fill="none" stroke="#d1d9e0" stroke-width="1"/>
+<path d="M725 378 L939 378" fill="none" stroke="#d1d9e0" stroke-width="1"/>
+<path d="M953 378 L1167 378" fill="none" stroke="#d1d9e0" stroke-width="1"/>
+<rect x="44" y="392" width="4" height="99" rx="2" fill="#0e7c7b"/>
+<text x="58" y="405" class="sans" font-size="15"><tspan fill="#1f2328" font-weight="700">the context's cache</tspan></text>
+<text x="58" y="425" class="sans" font-size="15"><tspan fill="#1f2328" font-weight="700">(KV)</tspan></text>
+<text x="58" y="441" class="sans" font-size="12.5"><tspan fill="#0e7c7b" font-weight="600" class="mono">max_context</tspan><tspan fill="#59636e"> · </tspan><tspan fill="#0e7c7b" font-weight="600" class="mono">kv</tspan></text>
+<text x="58" y="457" class="sans" font-size="12.5"><tspan fill="#1f2328" class="mono">"auto"</tspan><tspan fill="#59636e">: as many as the card</tspan></text>
+<text x="58" y="473" class="sans" font-size="12.5"><tspan fill="#59636e">holds beside the model, up</tspan></text>
+<text x="58" y="489" class="sans" font-size="12.5"><tspan fill="#59636e">to the model's own length</tspan></text>
+<rect x="276" y="390" width="200" height="78" rx="8" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="1"/>
+<rect x="284" y="398" width="4" height="62" rx="2" fill="#0e7c7b"/>
+<text x="296" y="409" class="mono" font-size="12.5"><tspan fill="#0e7c7b" font-weight="600">"max_context": "auto"</tspan></text>
+<text x="296" y="426" class="mono" font-size="12.5"><tspan fill="#0e7c7b" font-weight="600">kv: "tiered", "fp16"</tspan></text>
+<text x="296" y="442" class="sans" font-size="12.5"><tspan fill="#59636e">its cache is on the card</tspan></text>
+<text x="296" y="458" class="sans" font-size="12.5"><tspan fill="#59636e">from boot, sized for it</tspan></text>
+<path d="M33 507 L255 507" fill="none" stroke="#d1d9e0" stroke-width="1"/>
+<path d="M269 507 L483 507" fill="none" stroke="#d1d9e0" stroke-width="1"/>
+<path d="M497 507 L711 507" fill="none" stroke="#d1d9e0" stroke-width="1"/>
+<path d="M725 507 L939 507" fill="none" stroke="#d1d9e0" stroke-width="1"/>
+<path d="M953 507 L1167 507" fill="none" stroke="#d1d9e0" stroke-width="1"/>
+<rect x="44" y="521" width="4" height="63" rx="2" fill="#8250df"/>
+<text x="58" y="534" class="sans" font-size="15"><tspan fill="#1f2328" font-weight="700">the routed experts</tspan></text>
+<text x="58" y="550" class="sans" font-size="12.5"><tspan fill="#8250df" font-weight="600" class="mono">experts_on: "card"</tspan></text>
+<text x="58" y="566" class="sans" font-size="12.5"><tspan fill="#59636e">chosen at boot when the</tspan></text>
+<text x="58" y="582" class="sans" font-size="12.5"><tspan fill="#59636e">config does not say</tspan></text>
+<rect x="276" y="519" width="200" height="61" rx="8" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="1"/>
+<rect x="284" y="527" width="4" height="45" rx="2" fill="#8250df"/>
+<text x="296" y="538" class="mono" font-size="12.5"><tspan fill="#8250df" font-weight="600">experts_on: "card"</tspan></text>
+<text x="296" y="554" class="sans" font-size="12.5"><tspan fill="#59636e">every one of them on the</tspan></text>
+<text x="296" y="570" class="sans" font-size="12.5"><tspan fill="#59636e">card, written there at boot</tspan></text>
+<path d="M33 600 L255 600" fill="none" stroke="#d1d9e0" stroke-width="1" stroke-dasharray="3 3"/>
+<path d="M269 600 L483 600" fill="none" stroke="#d1d9e0" stroke-width="1" stroke-dasharray="3 3"/>
+<path d="M497 600 L711 600" fill="none" stroke="#d1d9e0" stroke-width="1" stroke-dasharray="3 3"/>
+<path d="M725 600 L939 600" fill="none" stroke="#d1d9e0" stroke-width="1" stroke-dasharray="3 3"/>
+<path d="M953 600 L1167 600" fill="none" stroke="#d1d9e0" stroke-width="1" stroke-dasharray="3 3"/>
+<rect x="44" y="614" width="4" height="111" rx="2" fill="#8250df"/>
+<text x="58" y="627" class="sans" font-size="12.5"><tspan fill="#8250df" font-weight="600" class="mono">experts_on: "cpu"</tspan><tspan fill="#59636e">, for a</tspan></text>
+<text x="58" y="643" class="sans" font-size="12.5"><tspan fill="#59636e">card too small to hold them</tspan></text>
+<text x="58" y="659" class="sans" font-size="12.5"><tspan fill="#1f2328" class="mono">experts_from: "auto"</tspan><tspan fill="#59636e">: in</tspan></text>
+<text x="58" y="675" class="sans" font-size="12.5"><tspan fill="#59636e">RAM when they fit there with</tspan></text>
+<text x="58" y="691" class="sans" font-size="12.5"><tspan fill="#59636e">about 3 GB to spare;</tspan></text>
+<text x="58" y="707" class="sans" font-size="12.5"><tspan fill="#59636e">otherwise the experts are</tspan></text>
+<text x="58" y="723" class="sans" font-size="12.5"><tspan fill="#59636e">read from the disk</tspan></text>
+<rect x="276" y="612" width="200" height="93" rx="8" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="1"/>
+<rect x="284" y="620" width="4" height="77" rx="2" fill="#8250df"/>
+<text x="296" y="631" class="mono" font-size="12.5"><tspan fill="#8250df" font-weight="600">card_experts_gb</tspan></text>
+<text x="296" y="647" class="sans" font-size="12.5"><tspan fill="#59636e">a tier of the experts used</tspan></text>
+<text x="296" y="663" class="sans" font-size="12.5"><tspan fill="#59636e">most on the card,</tspan></text>
+<text x="296" y="679" class="sans" font-size="12.5"><tspan fill="#59636e">promoted from RAM as</tspan></text>
+<text x="296" y="695" class="sans" font-size="12.5"><tspan fill="#59636e">they are picked</tspan></text>
+<rect x="504" y="612" width="200" height="45" rx="8" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="1"/>
+<rect x="512" y="620" width="4" height="29" rx="2" fill="#8250df"/>
+<text x="524" y="631" class="mono" font-size="12.5"><tspan fill="#8250df" font-weight="600">experts_from: "ram"</tspan></text>
+<text x="524" y="647" class="sans" font-size="12.5"><tspan fill="#59636e">copies them into RAM</tspan></text>
+<rect x="504" y="665" width="200" height="78" rx="8" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="1"/>
+<rect x="512" y="673" width="4" height="62" rx="2" fill="#8250df"/>
+<text x="524" y="684" class="mono" font-size="12.5"><tspan fill="#8250df" font-weight="600">experts_from: "disk"</tspan></text>
+<text x="524" y="701" class="mono" font-size="12.5"><tspan fill="#8250df" font-weight="600">experts_ram_gb</tspan></text>
+<text x="524" y="717" class="sans" font-size="12.5"><tspan fill="#59636e">how much RAM keeps the</tspan></text>
+<text x="524" y="733" class="sans" font-size="12.5"><tspan fill="#59636e">experts used</tspan></text>
+<rect x="732" y="612" width="200" height="61" rx="8" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="1"/>
+<rect x="740" y="620" width="4" height="45" rx="2" fill="#8250df"/>
+<text x="752" y="631" class="mono" font-size="12.5"><tspan fill="#8250df" font-weight="600">experts_from: "mapped"</tspan></text>
+<text x="752" y="647" class="sans" font-size="12.5"><tspan fill="#59636e">leaves that to the system's</tspan></text>
+<text x="752" y="663" class="sans" font-size="12.5"><tspan fill="#59636e">page cache</tspan></text>
+<rect x="960" y="612" width="200" height="61" rx="8" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="1"/>
+<rect x="968" y="620" width="4" height="45" rx="2" fill="#8250df"/>
+<text x="980" y="631" class="mono" font-size="12.5"><tspan fill="#8250df" font-weight="600">experts_from: "disk"</tspan></text>
+<text x="980" y="647" class="sans" font-size="12.5"><tspan fill="#59636e">reads them from a file as</tspan></text>
+<text x="980" y="663" class="sans" font-size="12.5"><tspan fill="#59636e">they are needed</tspan></text>
+<path d="M501 634.5 L486 634.5" stroke="#8250df" stroke-width="2" stroke-linecap="round"/><path d="M487 629.5 L487 639.5 L479 634.5 Z" fill="#8250df"/>
+<path d="M33 755 L255 755" fill="none" stroke="#d1d9e0" stroke-width="1"/>
+<path d="M269 755 L483 755" fill="none" stroke="#d1d9e0" stroke-width="1"/>
+<path d="M497 755 L711 755" fill="none" stroke="#d1d9e0" stroke-width="1"/>
+<path d="M725 755 L939 755" fill="none" stroke="#d1d9e0" stroke-width="1"/>
+<path d="M953 755 L1167 755" fill="none" stroke="#d1d9e0" stroke-width="1"/>
+<rect x="44" y="769" width="4" height="147" rx="2" fill="#9a6700"/>
+<text x="58" y="782" class="sans" font-size="15"><tspan fill="#1f2328" font-weight="700">the n-gram</tspan></text>
+<text x="58" y="802" class="sans" font-size="15"><tspan fill="#1f2328" font-weight="700">memory's tables</tspan></text>
+<text x="58" y="818" class="sans" font-size="12.5"><tspan fill="#9a6700" font-weight="600" class="mono">ngram_from</tspan><tspan fill="#59636e">, Flash-Next's</tspan></text>
+<text x="58" y="834" class="sans" font-size="12.5"><tspan fill="#9a6700" font-weight="600" class="mono">engram_in</tspan><tspan fill="#59636e">, DeepSeek's</tspan></text>
+<text x="58" y="850" class="sans" font-size="12.5"><tspan fill="#1f2328" class="mono">"auto"</tspan><tspan fill="#59636e">: RAM where they fit</tspan></text>
+<text x="58" y="866" class="sans" font-size="12.5"><tspan fill="#59636e">beside the experts' memory,</tspan></text>
+<text x="58" y="882" class="sans" font-size="12.5"><tspan fill="#59636e">else the disk; on Windows</tspan></text>
+<text x="58" y="898" class="sans" font-size="12.5"><tspan fill="#1f2328" class="mono">"cache"</tspan><tspan fill="#59636e"> where they fit, else</tspan></text>
+<text x="58" y="914" class="sans" font-size="12.5"><tspan fill="#59636e">the disk</tspan></text>
+<rect x="504" y="767" width="200" height="61" rx="8" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="1"/>
+<rect x="512" y="775" width="4" height="45" rx="2" fill="#9a6700"/>
+<text x="524" y="786" class="mono" font-size="12.5"><tspan fill="#9a6700" font-weight="600">"ram"</tspan></text>
+<text x="524" y="802" class="sans" font-size="12.5"><tspan fill="#59636e">copies it into RAM as the</tspan></text>
+<text x="524" y="818" class="sans" font-size="12.5"><tspan fill="#59636e">server starts</tspan></text>
+<rect x="732" y="767" width="200" height="77" rx="8" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="1"/>
+<rect x="740" y="775" width="4" height="61" rx="2" fill="#9a6700"/>
+<text x="752" y="786" class="mono" font-size="12.5"><tspan fill="#9a6700" font-weight="600">"cache"</tspan></text>
+<text x="752" y="802" class="sans" font-size="12.5"><tspan fill="#59636e">reads it through once as</tspan></text>
+<text x="752" y="818" class="sans" font-size="12.5"><tspan fill="#59636e">the server starts, so it is in</tspan></text>
+<text x="752" y="834" class="sans" font-size="12.5"><tspan fill="#59636e">the system's file cache</tspan></text>
+<rect x="960" y="767" width="200" height="61" rx="8" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="1"/>
+<rect x="968" y="775" width="4" height="45" rx="2" fill="#9a6700"/>
+<text x="980" y="786" class="mono" font-size="12.5"><tspan fill="#9a6700" font-weight="600">"disk"</tspan></text>
+<text x="980" y="802" class="sans" font-size="12.5"><tspan fill="#59636e">reads each row from the</tspan></text>
+<text x="980" y="818" class="sans" font-size="12.5"><tspan fill="#59636e">pack as a token asks for it</tspan></text>
+<text x="32" y="964" class="sans" font-size="12.5"><tspan fill="#59636e">Windows counts what a program puts on an NVIDIA card against the PC's commit limit — the RAM and the page file together — though the card's share takes none of the RAM.</tspan></text>
+</svg>

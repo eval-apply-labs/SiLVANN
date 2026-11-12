@@ -1,0 +1,144 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1203" viewBox="0 0 1200 1203" role="img" aria-labelledby="t d">
+<title id="t">One token's life</title>
+<desc id="d">One token's life, top to bottom: on the host, the Eval-Apply Generalized Interpreter's evaluator walks the model's program a form at a time (generate, a token's position, every layer this machine runs, then the sampler), and each verb launches its arithmetic on the worker that holds the data. On the card, worker 0, through a silicon family: the token's embedding read from a table in RAM, the rotary angles, the DeltaNet or attention mixer, the router, the layer's close, the final norm and the logits, and the sampler's repetition penalty, temperature, top k and draw. On a CPU socket, worker 1, through x86_avx2: the routed experts, sys__scheduler__add handing it a frozen program, the picture xq, whose answer the card waits on with sys__wait_for_result and copies across. Only the token comes back to the host, each the next one's input, until an end token.</desc>
+<style>.sans{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans',Helvetica,Arial,sans-serif}.mono{font-family:ui-monospace,SFMono-Regular,'SF Mono',Menlo,Consolas,'Liberation Mono',monospace}</style>
+<rect x="0.5" y="0.5" width="1199" height="1202" rx="18" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="1"/>
+<text x="32" y="58" class="sans" font-size="28" font-weight="800"><tspan fill="#1f2328">One token's life</tspan></text>
+<text x="32" y="86" class="sans" font-size="16"><tspan fill="#59636e">A program is an s-expression; the evaluator walks it and hands the arithmetic to the silicon that holds the data.</tspan></text>
+<rect x="32" y="112" width="420" height="965" rx="14" fill="#ffffff" stroke="#d1d9e0" stroke-width="1"/>
+<path d="M33 176 L451 176" fill="none" stroke="#d1d9e0" stroke-width="1" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="50" y="140" class="sans" font-size="15"><tspan fill="#1f2328" font-weight="700">on the host</tspan></text>
+<text x="50" y="162" class="sans" font-size="12.5"><tspan fill="#59636e">the Eval-Apply Generalized Interpreter's evaluator</tspan></text>
+<rect x="468" y="112" width="396" height="965" rx="14" fill="#ffffff" stroke="#d1d9e0" stroke-width="1"/>
+<path d="M469 176 L863 176" fill="none" stroke="#d1d9e0" stroke-width="1" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="486" y="140" class="sans" font-size="15"><tspan fill="#1f2328" font-weight="700">on the card</tspan></text>
+<text x="848" y="140" class="sans" font-size="12.5" text-anchor="end"><tspan fill="#59636e" class="mono">worker 0</tspan></text>
+<text x="486" y="162" class="sans" font-size="12.5"><tspan fill="#59636e">a silicon family</tspan><tspan fill="#59636e">: </tspan><tspan fill="#1f2328" class="mono">amd_rocm6_wave64</tspan><tspan fill="#59636e"> · …</tspan></text>
+<rect x="880" y="112" width="288" height="965" rx="14" fill="#ffffff" stroke="#d1d9e0" stroke-width="1"/>
+<path d="M881 176 L1167 176" fill="none" stroke="#d1d9e0" stroke-width="1" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="898" y="140" class="sans" font-size="15"><tspan fill="#1f2328" font-weight="700">on a CPU socket</tspan></text>
+<text x="1152" y="140" class="sans" font-size="12.5" text-anchor="end"><tspan fill="#59636e" class="mono">worker 1</tspan></text>
+<text x="898" y="162" class="sans" font-size="12.5"><tspan fill="#59636e">a worker of the </tspan><tspan fill="#1f2328" class="mono">x86_avx2</tspan><tspan fill="#59636e"> family</tspan></text>
+<text x="58" y="208" class="mono" font-size="12.5"><tspan fill="#59636e">(</tspan><tspan fill="#1f2328">generate</tspan><tspan fill="#1f2328"> </tspan><tspan fill="#1f2328">tok</tspan><tspan fill="#1f2328"> </tspan><tspan fill="#1f2328">pos</tspan><tspan fill="#1f2328"> </tspan><tspan fill="#1f2328">n</tspan><tspan fill="#1f2328"> </tspan><tspan fill="#1f2328">…</tspan><tspan fill="#59636e">)</tspan></text>
+<text x="438" y="208" class="sans" font-size="12" text-anchor="end"><tspan fill="#59636e" class="mono">generate.lisp</tspan></text>
+<text x="484" y="208" class="sans" font-size="12.5"><tspan fill="#59636e">an answer on the card — the tokens of an answer, each</tspan></text>
+<text x="484" y="224" class="sans" font-size="12.5"><tspan fill="#59636e">the next one's input</tspan></text>
+<text x="78" y="254" class="mono" font-size="12.5"><tspan fill="#59636e">(</tspan><tspan fill="#1f2328">position</tspan><tspan fill="#1f2328"> </tspan><tspan fill="#1f2328">tok</tspan><tspan fill="#1f2328"> </tspan><tspan fill="#1f2328">pos</tspan><tspan fill="#59636e">)</tspan></text>
+<text x="438" y="254" class="sans" font-size="12" text-anchor="end"><tspan fill="#59636e" class="mono">qwen3_5.lisp</tspan></text>
+<text x="98" y="286" class="mono" font-size="12.5"><tspan fill="#59636e">(</tspan><tspan fill="#1f2328">embed</tspan><tspan fill="#1f2328"> </tspan><tspan fill="#1f2328">tok</tspan><tspan fill="#59636e">)</tspan></text>
+<rect x="478" y="268" width="376" height="59" rx="8" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="1"/>
+<rect x="486" y="275" width="4" height="45" rx="2" fill="#0e7c7b"/>
+<text x="498" y="286" class="sans" font-size="12.5"><tspan fill="#0e7c7b" font-weight="600" class="mono">nn__turboquant__decode</tspan></text>
+<text x="498" y="302" class="sans" font-size="12.5"><tspan fill="#59636e">the token's embedding read by the card from a table</tspan></text>
+<text x="498" y="318" class="sans" font-size="12.5"><tspan fill="#59636e">in RAM</tspan></text>
+<path d="M190.775 282 L469 282" fill="none" stroke="#1d4ed8" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M468 277.5 L468 286.5 L476 282 Z" fill="#1d4ed8"/>
+<text x="98" y="351" class="mono" font-size="12.5"><tspan fill="#59636e">(</tspan><tspan fill="#0e7c7b" font-weight="600">nn__rope__angles</tspan><tspan fill="#1f2328"> </tspan><tspan fill="#1f2328">cs</tspan><tspan fill="#1f2328"> </tspan><tspan fill="#1f2328">pos</tspan><tspan fill="#1f2328"> </tspan><tspan fill="#1f2328">…</tspan><tspan fill="#59636e">)</tspan></text>
+<rect x="478" y="333" width="376" height="27" rx="8" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="1"/>
+<rect x="486" y="340" width="4" height="13" rx="2" fill="#0e7c7b"/>
+<text x="498" y="351" class="sans" font-size="12.5"><tspan fill="#0e7c7b" font-weight="600" class="mono">nn__rope__angles</tspan></text>
+<text x="634.4" y="351" class="sans" font-size="12.5"><tspan fill="#59636e">the rotary angles</tspan></text>
+<path d="M311.175 347 L469 347" fill="none" stroke="#1d4ed8" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M468 342.5 L468 351.5 L476 347 Z" fill="#1d4ed8"/>
+<text x="98" y="384" class="mono" font-size="12.5"><tspan fill="#59636e">(</tspan><tspan fill="#1f2328">layers</tspan><tspan fill="#1f2328"> </tspan><tspan fill="#1f2328">pos</tspan><tspan fill="#59636e">)</tspan></text>
+<text x="438" y="384" class="sans" font-size="12" text-anchor="end"><tspan fill="#59636e">every layer this machine runs</tspan></text>
+<text x="118" y="416" class="mono" font-size="12.5"><tspan fill="#59636e">(</tspan><tspan fill="#1f2328">layer</tspan><tspan fill="#1f2328"> </tspan><tspan fill="#1f2328">i</tspan><tspan fill="#1f2328"> </tspan><tspan fill="#1f2328">pos</tspan><tspan fill="#59636e">)</tspan></text>
+<text x="438" y="416" class="sans" font-size="12" text-anchor="end"><tspan fill="#59636e">④ the routed experts on the CPU</tspan></text>
+<text x="138" y="448" class="mono" font-size="12.5"><tspan fill="#59636e">(</tspan><tspan fill="#1f2328">mixer</tspan><tspan fill="#1f2328"> </tspan><tspan fill="#1f2328">i</tspan><tspan fill="#1f2328"> </tspan><tspan fill="#1f2328">pos</tspan><tspan fill="#1f2328"> </tspan><tspan fill="#1f2328">h1</tspan><tspan fill="#59636e">)</tspan></text>
+<rect x="478" y="430" width="376" height="59" rx="8" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="1"/>
+<rect x="486" y="437" width="4" height="45" rx="2" fill="#8250df"/>
+<text x="498" y="448" class="sans" font-size="12.5"><tspan fill="#8250df" font-weight="600" class="mono">ai_qwen_3__deltanet</tspan><tspan fill="#59636e"> · </tspan><tspan fill="#8250df" font-weight="600" class="mono">ai_qwen_3__attention</tspan></text>
+<text x="498" y="464" class="sans" font-size="12.5"><tspan fill="#59636e">a DeltaNet layer's or an attention layer's, its residual</tspan></text>
+<text x="498" y="480" class="sans" font-size="12.5"><tspan fill="#59636e">included</tspan></text>
+<path d="M268.4 444 L469 444" fill="none" stroke="#1d4ed8" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M468 439.5 L468 448.5 L476 444 Z" fill="#1d4ed8"/>
+<text x="138" y="513" class="mono" font-size="12.5"><tspan fill="#59636e">(</tspan><tspan fill="#1f2328">route</tspan><tspan fill="#1f2328"> </tspan><tspan fill="#1f2328">i</tspan><tspan fill="#59636e">)</tspan></text>
+<rect x="478" y="495" width="376" height="27" rx="8" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="1"/>
+<rect x="486" y="502" width="4" height="13" rx="2" fill="#8250df"/>
+<text x="498" y="513" class="sans" font-size="12.5"><tspan fill="#8250df" font-weight="600" class="mono">ai_qwen_3__pre_expert</tspan></text>
+<text x="672.025" y="513" class="sans" font-size="12.5"><tspan fill="#59636e">the router into </tspan><tspan fill="#1f2328" class="mono">hand</tspan></text>
+<path d="M215.725 509 L469 509" fill="none" stroke="#1d4ed8" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M468 504.5 L468 513.5 L476 509 Z" fill="#1d4ed8"/>
+<text x="138" y="556" class="mono" font-size="12.5"><tspan fill="#59636e">(</tspan><tspan fill="#9a6700" font-weight="600">sys__scheduler__add</tspan><tspan fill="#1f2328"> </tspan><tspan fill="#1f2328">CPU</tspan><tspan fill="#1f2328"> </tspan><tspan fill="#1f2328">names</tspan><tspan fill="#1f2328"> </tspan><tspan fill="#1f2328">xq</tspan><tspan fill="#59636e">)</tspan></text>
+<text x="138" y="588" class="mono" font-size="12.5"><tspan fill="#59636e">(</tspan><tspan fill="#9a6700" font-weight="600">sys__wait_for_result</tspan><tspan fill="#1f2328"> </tspan><tspan fill="#1f2328">expert_sum</tspan><tspan fill="#59636e">)</tspan></text>
+<rect x="478" y="570" width="376" height="55" rx="8" fill="#ffffff" stroke="#d1d9e0" stroke-width="1" stroke-dasharray="4 3"/>
+<text x="498" y="602" class="sans" font-size="12.5"><tspan fill="#59636e">the card waits on that answer, not on the CPU</tspan></text>
+<text x="138" y="649" class="mono" font-size="12.5"><tspan fill="#59636e">(</tspan><tspan fill="#0e7c7b" font-weight="600">nn__buffer__copy</tspan><tspan fill="#1f2328"> </tspan><tspan fill="#1f2328">…</tspan><tspan fill="#1f2328"> </tspan><tspan fill="#1f2328">routed</tspan><tspan fill="#1f2328"> </tspan><tspan fill="#1f2328">…</tspan><tspan fill="#59636e">)</tspan></text>
+<rect x="478" y="631" width="376" height="43" rx="8" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="1"/>
+<rect x="486" y="638" width="4" height="29" rx="2" fill="#0e7c7b"/>
+<text x="498" y="649" class="sans" font-size="12.5"><tspan fill="#0e7c7b" font-weight="600" class="mono">nn__buffer__copy</tspan></text>
+<text x="498" y="665" class="sans" font-size="12.5"><tspan fill="#59636e">copies from the buffer it is left holding</tspan></text>
+<path d="M366.225 645 L469 645" fill="none" stroke="#1d4ed8" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M468 640.5 L468 649.5 L476 645 Z" fill="#1d4ed8"/>
+<text x="138" y="698" class="mono" font-size="12.5"><tspan fill="#59636e">(</tspan><tspan fill="#8250df" font-weight="600">ai_qwen_3__post_expert</tspan><tspan fill="#1f2328"> </tspan><tspan fill="#1f2328">…</tspan><tspan fill="#59636e">)</tspan></text>
+<rect x="478" y="680" width="376" height="43" rx="8" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="1"/>
+<rect x="486" y="687" width="4" height="29" rx="2" fill="#8250df"/>
+<text x="498" y="698" class="sans" font-size="12.5"><tspan fill="#8250df" font-weight="600" class="mono">ai_qwen_3__post_expert</tspan></text>
+<text x="498" y="714" class="sans" font-size="12.5"><tspan fill="#59636e">closes the layer with the routed sum</tspan></text>
+<path d="M343.65 694 L469 694" fill="none" stroke="#1d4ed8" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M468 689.5 L468 698.5 L476 694 Z" fill="#1d4ed8"/>
+<text x="78" y="747" class="mono" font-size="12.5"><tspan fill="#59636e">(</tspan><tspan fill="#1f2328">head_sample</tspan><tspan fill="#1f2328"> </tspan><tspan fill="#1f2328">…</tspan><tspan fill="#59636e">)</tspan></text>
+<text x="438" y="747" class="sans" font-size="12" text-anchor="end"><tspan fill="#59636e" class="mono">sampling.lisp</tspan></text>
+<text x="484" y="747" class="sans" font-size="12.5"><tspan fill="#59636e">the sampler on the card — the next token drawn where</tspan></text>
+<text x="484" y="763" class="sans" font-size="12.5"><tspan fill="#59636e">the logits are</tspan></text>
+<text x="98" y="793" class="mono" font-size="12.5"><tspan fill="#59636e">(</tspan><tspan fill="#1f2328">logits</tspan><tspan fill="#59636e">)</tspan></text>
+<rect x="478" y="775" width="376" height="43" rx="8" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="1"/>
+<rect x="486" y="782" width="4" height="29" rx="2" fill="#0e7c7b"/>
+<text x="498" y="793" class="sans" font-size="12.5"><tspan fill="#0e7c7b" font-weight="600" class="mono">nn__rmsnorm__apply</tspan><tspan fill="#59636e"> · </tspan><tspan fill="#0e7c7b" font-weight="600" class="mono">nn__turboquant__gemv</tspan></text>
+<text x="498" y="809" class="sans" font-size="12.5"><tspan fill="#59636e">the final norm, then the logits</tspan></text>
+<path d="M168.2 789 L469 789" fill="none" stroke="#1d4ed8" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M468 784.5 L468 793.5 L476 789 Z" fill="#1d4ed8"/>
+<text x="98" y="842" class="mono" font-size="12.5"><tspan fill="#59636e">(</tspan><tspan fill="#0e7c7b" font-weight="600">nn__vector__penalize</tspan><tspan fill="#1f2328"> </tspan><tspan fill="#1f2328">…</tspan><tspan fill="#59636e">)</tspan></text>
+<rect x="478" y="824" width="376" height="43" rx="8" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="1"/>
+<rect x="486" y="831" width="4" height="29" rx="2" fill="#0e7c7b"/>
+<text x="498" y="842" class="sans" font-size="12.5"><tspan fill="#0e7c7b" font-weight="600" class="mono">nn__vector__penalize</tspan></text>
+<text x="498" y="858" class="sans" font-size="12.5"><tspan fill="#59636e">the repetition penalty over the recent tokens</tspan></text>
+<path d="M288.6 838 L469 838" fill="none" stroke="#1d4ed8" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M468 833.5 L468 842.5 L476 838 Z" fill="#1d4ed8"/>
+<text x="98" y="891" class="mono" font-size="12.5"><tspan fill="#59636e">(</tspan><tspan fill="#0e7c7b" font-weight="600">nn__vector__scale</tspan><tspan fill="#1f2328"> </tspan><tspan fill="#1f2328">…</tspan><tspan fill="#59636e">)</tspan></text>
+<rect x="478" y="873" width="376" height="27" rx="8" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="1"/>
+<rect x="486" y="880" width="4" height="13" rx="2" fill="#0e7c7b"/>
+<text x="498" y="891" class="sans" font-size="12.5"><tspan fill="#0e7c7b" font-weight="600" class="mono">nn__vector__scale</tspan></text>
+<text x="641.925" y="891" class="sans" font-size="12.5"><tspan fill="#59636e">the temperature</tspan></text>
+<path d="M266.025 887 L469 887" fill="none" stroke="#1d4ed8" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M468 882.5 L468 891.5 L476 887 Z" fill="#1d4ed8"/>
+<text x="98" y="924" class="mono" font-size="12.5"><tspan fill="#59636e">(</tspan><tspan fill="#0e7c7b" font-weight="600">nn__vector__top_k</tspan><tspan fill="#1f2328"> </tspan><tspan fill="#1f2328">…</tspan><tspan fill="#59636e">)</tspan></text>
+<rect x="478" y="906" width="376" height="27" rx="8" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="1"/>
+<rect x="486" y="913" width="4" height="13" rx="2" fill="#0e7c7b"/>
+<text x="498" y="924" class="sans" font-size="12.5"><tspan fill="#0e7c7b" font-weight="600" class="mono">nn__vector__top_k</tspan></text>
+<text x="641.925" y="924" class="sans" font-size="12.5"><tspan fill="#59636e">the </tspan><tspan fill="#1f2328" class="mono">k</tspan><tspan fill="#59636e"> largest and their softmax</tspan></text>
+<path d="M266.025 920 L469 920" fill="none" stroke="#1d4ed8" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M468 915.5 L468 924.5 L476 920 Z" fill="#1d4ed8"/>
+<text x="98" y="957" class="mono" font-size="12.5"><tspan fill="#59636e">(</tspan><tspan fill="#0e7c7b" font-weight="600">nn__vector__draw</tspan><tspan fill="#1f2328"> </tspan><tspan fill="#1f2328">…</tspan><tspan fill="#59636e">)</tspan></text>
+<rect x="478" y="939" width="376" height="27" rx="8" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="1"/>
+<rect x="486" y="946" width="4" height="13" rx="2" fill="#0e7c7b"/>
+<text x="498" y="957" class="sans" font-size="12.5"><tspan fill="#0e7c7b" font-weight="600" class="mono">nn__vector__draw</tspan></text>
+<text x="634.4" y="957" class="sans" font-size="12.5"><tspan fill="#59636e">the top-p cut, one draw</tspan></text>
+<path d="M258.5 953 L469 953" fill="none" stroke="#1d4ed8" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M468 948.5 L468 957.5 L476 953 Z" fill="#1d4ed8"/>
+<text x="98" y="990" class="mono" font-size="12.5"><tspan fill="#59636e">(</tspan><tspan fill="#0e7c7b" font-weight="600">nn__buffer__read</tspan><tspan fill="#1f2328"> </tspan><tspan fill="#1f2328">res</tspan><tspan fill="#59636e">)</tspan></text>
+<rect x="478" y="972" width="376" height="27" rx="8" fill="#f6f8fa" stroke="#0e7c7b" stroke-width="1.5"/>
+<rect x="486" y="979" width="4" height="13" rx="2" fill="#0e7c7b"/>
+<text x="498" y="990" class="sans" font-size="12.5"><tspan fill="#0e7c7b" font-weight="600" class="mono">nn__buffer__read</tspan></text>
+<text x="634.4" y="990" class="sans" font-size="12.5"><tspan fill="#0e7c7b" font-weight="700">only the token comes back</tspan></text>
+<path d="M476 986 L281.55 986" fill="none" stroke="#0e7c7b" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M282.55 980.75 L282.55 991.25 L273.55 986 Z" fill="#0e7c7b"/>
+<text x="78" y="1023" class="mono" font-size="12.5"><tspan fill="#59636e">(</tspan><tspan fill="#9a6700" font-weight="600">sys__node_array__set</tspan><tspan fill="#1f2328"> </tspan><tspan fill="#1f2328">OUT</tspan><tspan fill="#1f2328"> </tspan><tspan fill="#1f2328">i</tspan><tspan fill="#1f2328"> </tspan><tspan fill="#1f2328">tok</tspan><tspan fill="#59636e">)</tspan></text>
+<text x="78" y="1055" class="mono" font-size="12.5"><tspan fill="#59636e">(</tspan><tspan fill="#1f2328">stop?</tspan><tspan fill="#1f2328"> </tspan><tspan fill="#1f2328">tok</tspan><tspan fill="#59636e">)</tspan></text>
+<text x="438" y="1055" class="sans" font-size="12" text-anchor="end"><tspan fill="#59636e">until an end token</tspan></text>
+<path d="M1024 188 L1024 529" fill="none" stroke="#d1d9e0" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="2 5"/>
+<path d="M1024 684 L1024 1065" fill="none" stroke="#d1d9e0" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="2 5"/>
+<rect x="890" y="537" width="268" height="139" rx="8" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="1"/>
+<rect x="898" y="544" width="4" height="125" rx="2" fill="#8250df"/>
+<text x="910" y="556" class="sans" font-size="12.5"><tspan fill="#59636e">the picture </tspan><tspan fill="#1f2328" font-weight="700" class="mono">xq</tspan></text>
+<text x="1146" y="556" class="sans" font-size="11.5" text-anchor="end"><tspan fill="#59636e" class="mono">qwen3_5_cpu.lisp</tspan></text>
+<text x="910" y="576" class="mono" font-size="12"><tspan fill="#59636e">(</tspan><tspan fill="#0e7c7b" font-weight="600">nn__buffer__copy</tspan><tspan fill="#1f2328"> </tspan><tspan fill="#1f2328">hand</tspan><tspan fill="#1f2328"> </tspan><tspan fill="#1f2328">c_hand</tspan><tspan fill="#1f2328"> </tspan><tspan fill="#1f2328">…</tspan><tspan fill="#59636e">)</tspan></text>
+<text x="910" y="595" class="mono" font-size="12"><tspan fill="#59636e">(</tspan><tspan fill="#8250df" font-weight="600">ai_qwen_3__experts</tspan><tspan fill="#1f2328"> </tspan><tspan fill="#1f2328">c_hand</tspan><tspan fill="#1f2328"> </tspan><tspan fill="#1f2328">…</tspan><tspan fill="#59636e">)</tspan></text>
+<text x="910" y="612" class="sans" font-size="12.5"><tspan fill="#59636e">copies the card's hand across and</tspan></text>
+<text x="910" y="628" class="sans" font-size="12.5"><tspan fill="#59636e">runs the layer HERE names over it</tspan></text>
+<text x="910" y="649" class="sans" font-size="12.5"><tspan fill="#1f2328" font-weight="700" class="mono">c_routed</tspan></text>
+<text x="910" y="665" class="sans" font-size="12.5"><tspan fill="#59636e">the buffer it computed into</tspan></text>
+<path d="M403.85 552 L880 552" fill="none" stroke="#9a6700" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M879 546.75 L879 557.25 L888 552 Z" fill="#9a6700"/>
+<text x="666" y="543" class="sans" font-size="12.5" text-anchor="middle"><tspan fill="#9a6700" font-weight="600">a frozen program (a picture)</tspan></text>
+<path d="M888 645 L864 645" fill="none" stroke="#9a6700" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M865 639.75 L865 650.25 L856 645 Z" fill="#9a6700"/>
+<path d="M134 694 L105 694 L105 412 L109 412" fill="none" stroke="#59636e" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M108 408 L108 416 L115 412 Z" fill="#59636e"/>
+<path d="M74 1051 L65 1051 L65 250 L69 250" fill="none" stroke="#59636e" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M68 246 L68 254 L75 250 Z" fill="#59636e"/>
+<path d="M32 1103 L55 1103" fill="none" stroke="#1d4ed8" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M54 1098.5 L54 1107.5 L62 1103 Z" fill="#1d4ed8"/>
+<text x="76" y="1107" class="sans" font-size="12.5"><tspan fill="#59636e">the verbs of </tspan><tspan fill="#1f2328" class="mono">nn</tspan><tspan fill="#59636e"> and of a model's package — each launches its arithmetic on a card or on the CPU's cores</tspan></text>
+<path d="M32 1125 L54 1125" fill="none" stroke="#9a6700" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M53 1119.75 L53 1130.25 L62 1125 Z" fill="#9a6700"/>
+<text x="76" y="1129" class="sans" font-size="12.5"><tspan fill="#1f2328" class="mono">sys__scheduler__add</tspan><tspan fill="#59636e"> gives a frozen program (a picture) to another worker — a CPU socket, when a card runs the rest of the model — and </tspan><tspan fill="#1f2328" class="mono">sys__wait_for_result</tspan><tspan fill="#59636e"> reads</tspan></text>
+<text x="76" y="1145" class="sans" font-size="12.5"><tspan fill="#59636e">its answer.</tspan></text>
+<path d="M58 1169 L36 1169 L36 1158 L54 1158" fill="none" stroke="#59636e" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M54 1154 L54 1162 L61 1158 Z" fill="#59636e"/>
+<text x="76" y="1167" class="sans" font-size="12.5"><tspan fill="#1f2328" class="mono">while</tspan><tspan fill="#59636e"> is not a loop in C: each turn it rewrites its own form — the action, then the test again — so a loop of any length holds what one turn holds.</tspan></text>
+</svg>

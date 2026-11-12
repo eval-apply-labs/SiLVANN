@@ -1,0 +1,90 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1042" viewBox="0 0 1200 1042" role="img" aria-labelledby="t d">
+<title id="t">The ways in</title>
+<desc id="d">The ways in to SiLVANN, each with the line to start from, what it needs and where the chat then is. On Linux, a container (recommended): docker/setup.sh, with Podman or Docker, the chat at http://silvann.localhost:8080 or the first free port after 8080; or installed: install.sh, with Python's venv and its headers, g++ and git, then silvann ui, the chat at http://localhost:8090. On Windows 10 and 11, the portable app: silvann_portable_windows_x64.zip unzipped and SiLVANN.exe double-clicked, a card needing only its driver, the chat in its own window; or the installer: install.ps1 in PowerShell, with Python 3.11 to 3.14, Git and the card's driver, then silvann ui, the chat at http://localhost:8090. On an Android phone, experimental: a build from source inside Termux, the chat in a second Termux session with python silvann_cli.py. In Options, Download models fetches a model and start runs it.</desc>
+<style>.sans{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans',Helvetica,Arial,sans-serif}.mono{font-family:ui-monospace,SFMono-Regular,'SF Mono',Menlo,Consolas,'Liberation Mono',monospace}</style>
+<rect x="0.5" y="0.5" width="1199" height="1041" rx="18" fill="#161b22" stroke="#3d444d" stroke-width="1"/>
+<text x="32" y="58" class="sans" font-size="28" font-weight="800"><tspan fill="#e6edf3">The ways in</tspan></text>
+<text x="32" y="86" class="sans" font-size="16"><tspan fill="#9198a1">the line to start from, what each needs, and where the chat then is</tspan></text>
+<rect x="32" y="112" width="1136" height="318" rx="14" fill="#0d1117" stroke="#3d444d" stroke-width="1"/>
+<text x="52" y="144" class="sans" font-size="18"><tspan fill="#6c9cff" font-weight="800">Linux</tspan><tspan fill="#9198a1">  </tspan><tspan fill="#9198a1">where SiLVANN is tested most</tspan></text>
+<path d="M33 162 L1167 162" fill="none" stroke="#3d444d" stroke-width="1"/>
+<rect x="48" y="180" width="4" height="79" rx="2" fill="#6c9cff"/>
+<text x="62" y="192" class="sans" font-size="16"><tspan fill="#e6edf3" font-weight="700">a container</tspan></text>
+<rect x="174.514" y="178" width="99.605" height="19" rx="9.5" fill="none" stroke="#6c9cff" stroke-width="1"/>
+<text x="224.316" y="191.5" class="sans" font-size="11.5" text-anchor="middle"><tspan fill="#6c9cff" font-weight="600">recommended</tspan></text>
+<text x="62" y="216" class="sans" font-size="12.5"><tspan fill="#9198a1">the model's tool reaches one folder</tspan></text>
+<text x="62" y="232" class="sans" font-size="12.5"><tspan fill="#9198a1">of yours, </tspan><tspan fill="#e6edf3" font-weight="600" class="mono">~/SiLVANN</tspan><tspan fill="#9198a1">; the models run</tspan></text>
+<text x="62" y="248" class="sans" font-size="12.5"><tspan fill="#9198a1">as fast as an install runs them</tspan></text>
+<rect x="370" y="178" width="778" height="35" rx="8" fill="#151b23" stroke="#3d444d" stroke-width="1"/>
+<text x="316" y="198" class="sans" font-size="12.5"><tspan fill="#9198a1" font-weight="600">start</tspan></text>
+<text x="382" y="198" class="mono" font-size="12.5"><tspan fill="#e6edf3">curl -fsSL https://raw.githubusercontent.com/eval-apply-labs/SiLVANN/HEAD/</tspan><tspan fill="#6c9cff" font-weight="700">docker/setup.sh</tspan><tspan fill="#e6edf3"> | bash</tspan></text>
+<text x="316" y="233" class="sans" font-size="12.5"><tspan fill="#9198a1" font-weight="600">needs</tspan></text>
+<text x="382" y="233" class="sans" font-size="12.5"><tspan fill="#9198a1">Podman (or Docker) · the card — AMD, NVIDIA, or none · where something is missing, it says which command fixes it</tspan></text>
+<text x="316" y="257" class="sans" font-size="12.5"><tspan fill="#9198a1" font-weight="600">the chat</tspan></text>
+<text x="382" y="257" class="sans" font-size="12.5"><tspan fill="#6c9cff" font-weight="700" class="mono">http://silvann.localhost:8080</tspan><tspan fill="#e6edf3"> — or the first free port after </tspan><tspan fill="#e6edf3" font-weight="600" class="mono">8080</tspan></text>
+<path d="M33 277 L1167 277" fill="none" stroke="#3d444d" stroke-width="1"/>
+<rect x="48" y="295" width="4" height="117" rx="2" fill="#6c9cff"/>
+<text x="62" y="307" class="sans" font-size="16"><tspan fill="#e6edf3" font-weight="700">installed</tspan></text>
+<text x="62" y="331" class="sans" font-size="12.5"><tspan fill="#9198a1">puts a </tspan><tspan fill="#e6edf3" font-weight="600" class="mono">silvann</tspan><tspan fill="#9198a1"> command in</tspan></text>
+<text x="62" y="347" class="sans" font-size="12.5"><tspan fill="#e6edf3" font-weight="600" class="mono">~/.local/bin</tspan><tspan fill="#9198a1">; it installs nothing</tspan></text>
+<text x="62" y="363" class="sans" font-size="12.5"><tspan fill="#9198a1">system-wide and asks for no</tspan></text>
+<text x="62" y="379" class="sans" font-size="12.5"><tspan fill="#9198a1">password</tspan></text>
+<rect x="370" y="293" width="778" height="35" rx="8" fill="#151b23" stroke="#3d444d" stroke-width="1"/>
+<text x="316" y="313" class="sans" font-size="12.5"><tspan fill="#9198a1" font-weight="600">start</tspan></text>
+<text x="382" y="313" class="mono" font-size="12.5"><tspan fill="#e6edf3">curl -fsSL https://raw.githubusercontent.com/eval-apply-labs/SiLVANN/HEAD/</tspan><tspan fill="#6c9cff" font-weight="700">install.sh</tspan><tspan fill="#e6edf3"> | bash</tspan></text>
+<text x="382" y="348" class="sans" font-size="12.5"><tspan fill="#9198a1">in a terminal, in the folder you want SiLVANN under</tspan></text>
+<text x="316" y="370" class="sans" font-size="12.5"><tspan fill="#9198a1" font-weight="600">needs</tspan></text>
+<text x="382" y="370" class="sans" font-size="12.5"><tspan fill="#9198a1">Python's </tspan><tspan fill="#e6edf3" font-weight="600" class="mono">venv</tspan><tspan fill="#9198a1"> and its headers (</tspan><tspan fill="#e6edf3" font-weight="600" class="mono">python3-dev</tspan><tspan fill="#9198a1">), </tspan><tspan fill="#e6edf3" font-weight="600" class="mono">g++</tspan><tspan fill="#9198a1">, </tspan><tspan fill="#e6edf3" font-weight="600" class="mono">git</tspan><tspan fill="#9198a1"> · a card whose compiler is missing (CUDA's </tspan><tspan fill="#e6edf3" font-weight="600" class="mono">nvcc</tspan><tspan fill="#9198a1">, ROCm's </tspan><tspan fill="#e6edf3" font-weight="600" class="mono">hipcc</tspan><tspan fill="#9198a1">)</tspan></text>
+<text x="382" y="386" class="sans" font-size="12.5"><tspan fill="#9198a1">is named too; the CPU runs the models meanwhile</tspan></text>
+<text x="316" y="410" class="sans" font-size="12.5"><tspan fill="#9198a1" font-weight="600">the chat</tspan></text>
+<text x="382" y="410" class="sans" font-size="12.5"><tspan fill="#e6edf3" font-weight="600" class="mono">silvann ui</tspan><tspan fill="#e6edf3">: the chat, at </tspan><tspan fill="#6c9cff" font-weight="700" class="mono">http://localhost:8090</tspan></text>
+<rect x="32" y="444" width="1136" height="318" rx="14" fill="#0d1117" stroke="#3d444d" stroke-width="1"/>
+<text x="52" y="476" class="sans" font-size="18"><tspan fill="#39c5bb" font-weight="800">Windows</tspan><tspan fill="#9198a1">  </tspan><tspan fill="#9198a1">10 and 11 (64-bit x86)</tspan></text>
+<text x="1148" y="475" class="sans" font-size="12.5" text-anchor="end"><tspan fill="#e6edf3" font-weight="700">Linux</tspan><tspan fill="#9198a1"> </tspan><tspan fill="#e6edf3" font-weight="700">on</tspan><tspan fill="#9198a1"> </tspan><tspan fill="#e6edf3" font-weight="700">a</tspan><tspan fill="#9198a1"> </tspan><tspan fill="#e6edf3" font-weight="700">USB</tspan><tspan fill="#9198a1"> </tspan><tspan fill="#e6edf3" font-weight="700">SSD</tspan><tspan fill="#9198a1">: it can run beside Windows without touching it</tspan></text>
+<path d="M33 494 L1167 494" fill="none" stroke="#3d444d" stroke-width="1"/>
+<rect x="48" y="512" width="4" height="76" rx="2" fill="#39c5bb"/>
+<text x="62" y="524" class="sans" font-size="16"><tspan fill="#e6edf3" font-weight="700">the portable app</tspan></text>
+<text x="62" y="548" class="sans" font-size="12.5"><tspan fill="#9198a1">one folder, nothing installed; its</tspan></text>
+<text x="62" y="564" class="sans" font-size="12.5"><tspan fill="#9198a1">models and conversations stay in its</tspan></text>
+<text x="62" y="580" class="sans" font-size="12.5"><tspan fill="#e6edf3" font-weight="600" class="mono">data\</tspan><tspan fill="#9198a1"> folder</tspan></text>
+<text x="316" y="524" class="sans" font-size="12.5"><tspan fill="#9198a1" font-weight="600">start</tspan></text>
+<text x="382" y="524" class="sans" font-size="12.5"><tspan fill="#e6edf3" font-weight="600" class="mono">silvann_portable_windows_x64.zip</tspan><tspan fill="#9198a1">, attached to each release from v0.26.1: unzip it anywhere you can write to and</tspan></text>
+<text x="382" y="540" class="sans" font-size="12.5"><tspan fill="#9198a1">double-click </tspan><tspan fill="#e6edf3" font-weight="600" class="mono">SiLVANN.exe</tspan></text>
+<text x="316" y="562" class="sans" font-size="12.5"><tspan fill="#9198a1" font-weight="600">needs</tspan></text>
+<text x="382" y="562" class="sans" font-size="12.5"><tspan fill="#9198a1">a card needs only its driver, and without one the CPU runs the models</tspan></text>
+<text x="316" y="586" class="sans" font-size="12.5"><tspan fill="#9198a1" font-weight="600">the chat</tspan></text>
+<text x="382" y="586" class="sans" font-size="12.5"><tspan fill="#e6edf3">the window is Microsoft Edge in app mode, on a profile of its own, showing the UI</tspan></text>
+<path d="M33 606 L1167 606" fill="none" stroke="#3d444d" stroke-width="1"/>
+<rect x="48" y="624" width="4" height="120" rx="2" fill="#39c5bb"/>
+<text x="62" y="636" class="sans" font-size="16"><tspan fill="#e6edf3" font-weight="700">the installer</tspan></text>
+<text x="62" y="660" class="sans" font-size="12.5"><tspan fill="#9198a1">the </tspan><tspan fill="#e6edf3" font-weight="600" class="mono">silvann</tspan><tspan fill="#9198a1"> command is Linux's; it</tspan></text>
+<text x="62" y="676" class="sans" font-size="12.5"><tspan fill="#9198a1">installs nothing system-wide and</tspan></text>
+<text x="62" y="692" class="sans" font-size="12.5"><tspan fill="#9198a1">asks for no administrator</tspan></text>
+<rect x="370" y="622" width="778" height="54" rx="8" fill="#151b23" stroke="#3d444d" stroke-width="1"/>
+<text x="316" y="642" class="sans" font-size="12.5"><tspan fill="#9198a1" font-weight="600">start</tspan></text>
+<text x="382" y="642" class="mono" font-size="12.5"><tspan fill="#e6edf3">curl.exe -fsSLO https://raw.githubusercontent.com/eval-apply-labs/SiLVANN/HEAD/</tspan><tspan fill="#39c5bb" font-weight="700">install.ps1</tspan><tspan fill="#e6edf3"></tspan></text>
+<text x="382" y="661" class="mono" font-size="12.5"><tspan fill="#e6edf3">powershell -ExecutionPolicy Bypass -File .\</tspan><tspan fill="#39c5bb" font-weight="700">install.ps1</tspan><tspan fill="#e6edf3"></tspan></text>
+<text x="382" y="696" class="sans" font-size="12.5"><tspan fill="#9198a1">in PowerShell, in the folder you want SiLVANN under</tspan></text>
+<text x="316" y="718" class="sans" font-size="12.5"><tspan fill="#9198a1" font-weight="600">needs</tspan></text>
+<text x="382" y="718" class="sans" font-size="12.5"><tspan fill="#9198a1">Python 3.11 to 3.14, Git and your card's driver</tspan></text>
+<text x="316" y="742" class="sans" font-size="12.5"><tspan fill="#9198a1" font-weight="600">the chat</tspan></text>
+<text x="382" y="742" class="sans" font-size="12.5"><tspan fill="#e6edf3">in a new PowerShell, </tspan><tspan fill="#e6edf3" font-weight="600" class="mono">silvann ui</tspan><tspan fill="#e6edf3">: the chat opens at </tspan><tspan fill="#39c5bb" font-weight="700" class="mono">http://localhost:8090</tspan></text>
+<rect x="32" y="776" width="1136" height="206" rx="14" fill="#0d1117" stroke="#3d444d" stroke-width="1"/>
+<text x="52" y="808" class="sans" font-size="18"><tspan fill="#bc8cff" font-weight="800">an Android phone</tspan><tspan fill="#9198a1">  </tspan><tspan fill="#9198a1">experimental</tspan></text>
+<path d="M33 826 L1167 826" fill="none" stroke="#3d444d" stroke-width="1"/>
+<rect x="48" y="844" width="4" height="120" rx="2" fill="#bc8cff"/>
+<text x="62" y="856" class="sans" font-size="16"><tspan fill="#e6edf3" font-weight="700">inside Termux</tspan></text>
+<text x="62" y="880" class="sans" font-size="12.5"><tspan fill="#9198a1">it is a preview of a preview: one</tspan></text>
+<text x="62" y="896" class="sans" font-size="12.5"><tspan fill="#9198a1">device has run it; the model for a</tspan></text>
+<text x="62" y="912" class="sans" font-size="12.5"><tspan fill="#9198a1">phone is the 2B</tspan></text>
+<rect x="370" y="842" width="778" height="54" rx="8" fill="#151b23" stroke="#3d444d" stroke-width="1"/>
+<text x="316" y="862" class="sans" font-size="12.5"><tspan fill="#9198a1" font-weight="600">start</tspan></text>
+<text x="382" y="862" class="mono" font-size="12.5"><tspan fill="#e6edf3">git clone https://github.com/eval-apply-labs/SiLVANN &amp;&amp; cd SiLVANN</tspan><tspan fill="#bc8cff" font-weight="700"></tspan><tspan fill="#e6edf3"></tspan></text>
+<text x="382" y="881" class="mono" font-size="12.5"><tspan fill="#e6edf3">SILVANN_SILICON_FAMILIES=</tspan><tspan fill="#bc8cff" font-weight="700">arm_neon</tspan><tspan fill="#e6edf3"> bash scripts/build.sh</tspan></text>
+<text x="382" y="916" class="sans" font-size="12.5"><tspan fill="#e6edf3" font-weight="700">setting</tspan><tspan fill="#9198a1"> </tspan><tspan fill="#e6edf3" font-weight="700">it</tspan><tspan fill="#9198a1"> </tspan><tspan fill="#e6edf3" font-weight="700">up</tspan><tspan fill="#9198a1">: </tspan><tspan fill="#e6edf3" font-weight="600" class="mono">docs/android.md</tspan></text>
+<text x="316" y="938" class="sans" font-size="12.5"><tspan fill="#9198a1" font-weight="600">needs</tspan></text>
+<text x="382" y="938" class="sans" font-size="12.5"><tspan fill="#9198a1">Termux, from F-Droid · Armv8.2 with the dot product, which most phones from 2019 on have</tspan></text>
+<text x="316" y="962" class="sans" font-size="12.5"><tspan fill="#9198a1" font-weight="600">the chat</tspan></text>
+<text x="382" y="962" class="sans" font-size="12.5"><tspan fill="#e6edf3">the server in one Termux session, the chat in a second: </tspan><tspan fill="#e6edf3" font-weight="600" class="mono">python silvann_cli.py</tspan></text>
+<text x="32" y="1016" class="sans" font-size="14"><tspan fill="#9198a1">In </tspan><tspan fill="#e6edf3" font-weight="700">Options</tspan><tspan fill="#9198a1">, </tspan><tspan fill="#e6edf3" font-weight="700">Download</tspan><tspan fill="#9198a1"> </tspan><tspan fill="#e6edf3" font-weight="700">models</tspan><tspan fill="#9198a1"> fetches a model and </tspan><tspan fill="#e6edf3" font-weight="700">start</tspan><tspan fill="#9198a1"> runs it</tspan></text>
+</svg>

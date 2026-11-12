@@ -1,0 +1,145 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1112" viewBox="0 0 1200 1112" role="img" aria-labelledby="t d">
+<title id="t">A door and its fallback</title>
+<desc id="d">A door and its fallback. nn declares turboquant_gemv_int8 in its door list; a silicon family's library puts its override, amd_rocm_base__override_turboquant_gemv_int8, into nn's table. The override's fit test takes the bit depths, widths and alignment its kernel covers: where the call fits, the family's own kernel runs; where it does not, nn's generic door takes the call, silently, correct and sometimes far slower. On the OpenCL 2.0 families a kernel the card's compiler did not build is answered by nn's host body. When a profile shows nn__*__zzabi_launch_* for a door the family overrides, a fit test failed. Below, every family the build makes, under its source, with what answers the door in it.</desc>
+<style>.sans{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans',Helvetica,Arial,sans-serif}.mono{font-family:ui-monospace,SFMono-Regular,'SF Mono',Menlo,Consolas,'Liberation Mono',monospace}</style>
+<rect x="0.5" y="0.5" width="1199" height="1111" rx="18" fill="#161b22" stroke="#3d444d" stroke-width="1"/>
+<text x="32" y="58" class="sans" font-size="28" font-weight="800"><tspan fill="#e6edf3">A door and its fallback</tspan></text>
+<text x="32" y="86" class="sans" font-size="16"><tspan fill="#9198a1">The packages ask — each lists in its </tspan><tspan fill="#e6edf3" font-weight="500" class="mono">contracts/abi/gpu.cuh</tspan><tspan fill="#9198a1"> what it needs from silicon — and a family answers.</tspan></text>
+<rect x="32" y="112" width="548" height="149" rx="14" fill="#0d1117" stroke="#3d444d" stroke-width="1"/>
+<rect x="42" y="126" width="4" height="121" rx="2" fill="#39c5bb"/>
+<text x="56" y="140" class="sans" font-size="15"><tspan fill="#e6edf3" font-weight="700">① nn declares the door</tspan></text>
+<text x="56" y="160" class="mono" font-size="12"><tspan fill="#9198a1">packages/nn/contracts/abi/gpu.cuh</tspan></text>
+<text x="56" y="184" class="mono" font-size="12.5" xml:space="preserve"><tspan fill="#9198a1" font-weight="600">X</tspan><tspan fill="#9198a1">(</tspan><tspan fill="#9198a1" font-weight="600">PKG</tspan><tspan fill="#9198a1">,</tspan><tspan fill="#e6edf3"> </tspan><tspan fill="#9198a1" font-weight="600">void</tspan><tspan fill="#9198a1">,</tspan><tspan fill="#e6edf3"> </tspan><tspan fill="#39c5bb" font-weight="600">turboquant_gemv_int8</tspan><tspan fill="#9198a1">,</tspan></text>
+<text x="56" y="203" class="mono" font-size="12.5" xml:space="preserve"><tspan fill="#e6edf3">  </tspan><tspan fill="#39c5bb" font-weight="600">nn__turboquant__zzabi_launch_gemv_int8</tspan><tspan fill="#9198a1">,</tspan><tspan fill="#e6edf3"> </tspan><tspan fill="#9198a1">(</tspan><tspan fill="#9198a1">…</tspan><tspan fill="#9198a1">)</tspan><tspan fill="#9198a1">)</tspan></text>
+<text x="56" y="226" class="sans" font-size="12.5"><tspan fill="#9198a1">One row per door: the package forwarded in, the name the program calls it by,</tspan></text>
+<text x="56" y="243" class="sans" font-size="12.5"><tspan fill="#9198a1">the function that is the door (</tspan><tspan fill="#e6edf3" font-weight="500" class="mono">nn/gpu/doors.cuh</tspan><tspan fill="#9198a1">), and its parameters.</tspan></text>
+<rect x="620" y="112" width="548" height="149" rx="14" fill="#0d1117" stroke="#3d444d" stroke-width="1"/>
+<rect x="630" y="126" width="4" height="121" rx="2" fill="#6c9cff"/>
+<text x="644" y="140" class="sans" font-size="15"><tspan fill="#e6edf3" font-weight="700">② a family's library fills nn's table</tspan></text>
+<text x="644" y="160" class="mono" font-size="12"><tspan fill="#9198a1">silicon_families/amd_rocm_base/overrides/doors.cuh</tspan></text>
+<text x="644" y="184" class="mono" font-size="12.5" xml:space="preserve"><tspan fill="#e6edf3">doors</tspan><tspan fill="#9198a1">-</tspan><tspan fill="#9198a1">&gt;</tspan><tspan fill="#39c5bb" font-weight="600">turboquant_gemv_int8</tspan><tspan fill="#e6edf3"> </tspan><tspan fill="#9198a1">=</tspan></text>
+<text x="644" y="203" class="mono" font-size="12.5" xml:space="preserve"><tspan fill="#e6edf3">    </tspan><tspan fill="#6c9cff" font-weight="600">amd_rocm_base__override_turboquant_gemv_int8</tspan><tspan fill="#9198a1">;</tspan></text>
+<text x="644" y="226" class="sans" font-size="12.5"><tspan fill="#9198a1">The tables are filled from each package's list first, so a door the family does not</tspan></text>
+<text x="644" y="243" class="sans" font-size="12.5"><tspan fill="#9198a1">override is the package's own.</tspan></text>
+<path d="M586 176 L606 176" stroke="#9198a1" stroke-width="2" stroke-linecap="round"/><path d="M605 181.5 L605 170.5 L614 176 Z" fill="#9198a1"/>
+<path d="M894 265 L894 279" stroke="#9198a1" stroke-width="2" stroke-linecap="round"/><path d="M888.5 278 L899.5 278 L894 287 Z" fill="#9198a1"/>
+<rect x="32" y="291" width="1136" height="226" rx="14" fill="#0d1117" stroke="#3d444d" stroke-width="1"/>
+<rect x="42" y="305" width="4" height="198" rx="2" fill="#6c9cff"/>
+<text x="56" y="319" class="sans" font-size="15"><tspan fill="#e6edf3" font-weight="700">③ the override, and its fit test</tspan></text>
+<text x="56" y="339" class="mono" font-size="12"><tspan fill="#9198a1">silicon_families/amd_rocm_base/overrides/turboquant.cuh</tspan></text>
+<text x="56" y="358" class="sans" font-size="12.5"><tspan fill="#9198a1">The int8 GEMV at 4 bits; anything else is the generic door.</tspan></text>
+<text x="66" y="383" class="mono" font-size="12.5" xml:space="preserve"><tspan fill="#9198a1" font-weight="600">static</tspan><tspan fill="#e6edf3"> </tspan><tspan fill="#9198a1" font-weight="600">void</tspan><tspan fill="#e6edf3"> </tspan><tspan fill="#6c9cff" font-weight="600">amd_rocm_base__override_turboquant_gemv_int8</tspan><tspan fill="#9198a1">(</tspan><tspan fill="#9198a1">…</tspan><tspan fill="#9198a1">)</tspan><tspan fill="#e6edf3"> </tspan><tspan fill="#9198a1">{</tspan></text>
+<rect x="56" y="388" width="721.357" height="19" rx="4" fill="#151b23"/>
+<rect x="56" y="388" width="4" height="19" rx="2" fill="#d29922"/>
+<text x="66" y="402" class="mono" font-size="12.5" xml:space="preserve"><tspan fill="#e6edf3">    </tspan><tspan fill="#9198a1" font-weight="600">if</tspan><tspan fill="#e6edf3"> </tspan><tspan fill="#9198a1">(</tspan><tspan fill="#d29922" font-weight="600">d</tspan><tspan fill="#e6edf3"> </tspan><tspan fill="#9198a1">!</tspan><tspan fill="#9198a1">=</tspan><tspan fill="#e6edf3"> </tspan><tspan fill="#e6edf3">4u</tspan><tspan fill="#e6edf3"> </tspan><tspan fill="#9198a1">|</tspan><tspan fill="#9198a1">|</tspan><tspan fill="#e6edf3"> </tspan><tspan fill="#9198a1">!</tspan><tspan fill="#d29922" font-weight="600">amd_rocm_base__zzprivate_fits</tspan><tspan fill="#9198a1">(</tspan><tspan fill="#9198a1">…</tspan><tspan fill="#9198a1">)</tspan><tspan fill="#9198a1">)</tspan><tspan fill="#e6edf3"> </tspan><tspan fill="#9198a1">{</tspan></text>
+<text x="637.325" y="402" class="mono" font-size="12"><tspan fill="#d29922" font-weight="600">// the fit test</tspan></text>
+<rect x="56" y="407" width="721.357" height="19" rx="4" fill="#151b23"/>
+<rect x="56" y="407" width="4" height="19" rx="2" fill="#39c5bb"/>
+<text x="66" y="421" class="mono" font-size="12.5" xml:space="preserve"><tspan fill="#e6edf3">        </tspan><tspan fill="#39c5bb" font-weight="600">nn__turboquant__zzabi_launch_gemv_int8</tspan><tspan fill="#9198a1">(</tspan><tspan fill="#9198a1">…</tspan><tspan fill="#9198a1">)</tspan><tspan fill="#9198a1">;</tspan></text>
+<text x="637.325" y="421" class="mono" font-size="12"><tspan fill="#39c5bb" font-weight="600">// it does not fit</tspan></text>
+<text x="66" y="440" class="mono" font-size="12.5" xml:space="preserve"><tspan fill="#e6edf3">        </tspan><tspan fill="#9198a1" font-weight="600">return</tspan><tspan fill="#9198a1">;</tspan></text>
+<text x="66" y="459" class="mono" font-size="12.5" xml:space="preserve"><tspan fill="#e6edf3">    </tspan><tspan fill="#9198a1">}</tspan></text>
+<rect x="56" y="464" width="721.357" height="19" rx="4" fill="#151b23"/>
+<rect x="56" y="464" width="4" height="19" rx="2" fill="#6c9cff"/>
+<text x="66" y="478" class="mono" font-size="12.5" xml:space="preserve"><tspan fill="#e6edf3">    </tspan><tspan fill="#6c9cff" font-weight="600">amd_rocm_base__zzprivate_launch4</tspan><tspan fill="#9198a1">(</tspan><tspan fill="#6c9cff" font-weight="600">amd_rocm_base__zzprivate_int8_4</tspan><tspan fill="#9198a1">,</tspan><tspan fill="#e6edf3"> </tspan><tspan fill="#9198a1">…</tspan><tspan fill="#9198a1">)</tspan><tspan fill="#9198a1">;</tspan></text>
+<text x="637.325" y="478" class="mono" font-size="12"><tspan fill="#6c9cff" font-weight="600">// it fits</tspan></text>
+<text x="66" y="497" class="mono" font-size="12.5" xml:space="preserve"><tspan fill="#9198a1">}</tspan></text>
+<rect x="804" y="303" width="352" height="192" rx="14" fill="#1f1a0e" stroke="#d29922" stroke-width="1"/>
+<text x="828" y="329" class="sans" font-size="15"><tspan fill="#d29922" font-weight="700">the fit test</tspan></text>
+<text x="828" y="350" class="sans" font-size="12.5"><tspan fill="#9198a1">Whether a call is one the kernels here cover: 4 or</tspan></text>
+<text x="828" y="367" class="sans" font-size="12.5"><tspan fill="#9198a1">8 bits, whole blocks of 32 columns, rows 8-byte</tspan></text>
+<text x="828" y="384" class="sans" font-size="12.5"><tspan fill="#9198a1">aligned, an </tspan><tspan fill="#e6edf3" font-weight="500" class="mono">x</tspan><tspan fill="#9198a1"> the lanes can hold, and the rows</tspan></text>
+<text x="828" y="401" class="sans" font-size="12.5"><tspan fill="#9198a1">and scales it names actually present.</tspan></text>
+<text x="828" y="425" class="sans" font-size="12"><tspan fill="#9198a1">bit depths</tspan></text>
+<text x="910" y="425" class="mono" font-size="12"><tspan fill="#d29922" font-weight="600">d == 4u || d == 8u</tspan></text>
+<text x="828" y="443" class="sans" font-size="12"><tspan fill="#9198a1">widths</tspan></text>
+<text x="910" y="443" class="mono" font-size="12"><tspan fill="#d29922" font-weight="600">cols % 32u == 0u</tspan></text>
+<text x="910" y="461" class="mono" font-size="12"><tspan fill="#d29922" font-weight="600">cols &lt;= 32u * …_WAVE * …_HELD</tspan></text>
+<text x="828" y="479" class="sans" font-size="12"><tspan fill="#9198a1">alignment</tspan></text>
+<text x="910" y="479" class="mono" font-size="12"><tspan fill="#d29922" font-weight="600">(uintptr_t)weights % 8u == 0u</tspan></text>
+<path d="M306 521 L306 539" stroke="#6c9cff" stroke-width="2" stroke-linecap="round"/><path d="M300.5 538 L311.5 538 L306 547 Z" fill="#6c9cff"/>
+<path d="M894 521 L894 539" stroke="#39c5bb" stroke-width="2" stroke-linecap="round"/><path d="M888.5 538 L899.5 538 L894 547 Z" fill="#39c5bb"/>
+<rect x="32" y="551" width="548" height="129" rx="14" fill="#0d1117" stroke="#3d444d" stroke-width="1"/>
+<rect x="42" y="565" width="4" height="101" rx="2" fill="#6c9cff"/>
+<text x="56" y="579" class="sans" font-size="15"><tspan fill="#6c9cff" font-weight="700">it fits — the family's own kernel</tspan></text>
+<text x="56" y="603" class="mono" font-size="13.5"><tspan fill="#6c9cff" font-weight="700">amd_rocm_base__zzprivate_int8_4</tspan></text>
+<text x="56" y="622" class="sans" font-size="12.5"><tspan fill="#9198a1">in a profile: </tspan><tspan fill="#e6edf3" font-weight="500" class="mono">amd_rocm_base__zzprivate_int8_4</tspan></text>
+<text x="56" y="645" class="sans" font-size="12.5"><tspan fill="#9198a1">The card's four-way int8 dot product.</tspan></text>
+<text x="56" y="662" class="sans" font-size="12.5"><tspan fill="#9198a1">A door's faster body, put into the package's table in place of the generic one.</tspan></text>
+<rect x="620" y="551" width="548" height="271" rx="14" fill="#0d1117" stroke="#3d444d" stroke-width="1"/>
+<rect x="630" y="565" width="4" height="243" rx="2" fill="#39c5bb"/>
+<text x="644" y="579" class="sans" font-size="15"><tspan fill="#39c5bb" font-weight="700">it does not fit — nn's generic door</tspan></text>
+<text x="644" y="603" class="mono" font-size="13.5"><tspan fill="#39c5bb" font-weight="700">nn__turboquant__zzabi_launch_gemv_int8</tspan></text>
+<text x="644" y="622" class="sans" font-size="12.5"><tspan fill="#9198a1">its kernel </tspan><tspan fill="#e6edf3" font-weight="500" class="mono">nn__turboquant__zzabi_launch_gemv_int8__kernel</tspan><tspan fill="#9198a1"> runs</tspan></text>
+<text x="644" y="639" class="sans" font-size="12.5"><tspan fill="#e6edf3" font-weight="500" class="mono">nn__turboquant__zzabi_body_gemv_int8</tspan></text>
+<text x="644" y="662" class="sans" font-size="12.5"><tspan fill="#9198a1">Falls back to nn's generic body silently: correct, sometimes far slower.</tspan></text>
+<text x="644" y="679" class="sans" font-size="12.5"><tspan fill="#9198a1">An override computes what the generic body computes.</tspan></text>
+<rect x="640" y="693" width="510" height="105" rx="8" fill="#151b23" stroke="#3d444d" stroke-width="1" stroke-dasharray="4 3"/>
+<text x="656" y="714" class="sans" font-size="12.5"><tspan fill="#e6edf3">on </tspan><tspan fill="#39c5bb" font-weight="600" class="mono">khronos_opencl2</tspan><tspan fill="#e6edf3"> and </tspan><tspan fill="#39c5bb" font-weight="600" class="mono">intel_opencl2</tspan><tspan fill="#e6edf3"> (built from</tspan></text>
+<text x="656" y="731" class="sans" font-size="12.5"><tspan fill="#39c5bb" font-weight="600" class="mono">khronos_opencl2_base</tspan><tspan fill="#e6edf3">), where the card's compiler did not build the</tspan></text>
+<text x="656" y="748" class="sans" font-size="12.5"><tspan fill="#e6edf3">kernel:</tspan></text>
+<text x="656" y="771" class="sans" font-size="12.5"><tspan fill="#9198a1">A kernel that did not build is never launched: its door is nn's host body.</tspan></text>
+<text x="656" y="788" class="sans" font-size="12.5"><tspan fill="#9198a1">Its answer is nn's host body's, at the host's pace and the map's.</tspan></text>
+<rect x="32" y="696" width="548" height="126" rx="14" fill="#1f1a0e" stroke="#d29922" stroke-width="1"/>
+<text x="56" y="724" class="sans" font-size="15"><tspan fill="#d29922" font-weight="700">the symptom</tspan></text>
+<text x="56" y="744" class="sans" font-size="13.5"><tspan fill="#e6edf3">When a profile shows </tspan><tspan fill="#d29922" font-weight="700" class="mono">nn__*__zzabi_launch_*</tspan><tspan fill="#e6edf3"> for a door the family</tspan></text>
+<text x="56" y="764" class="sans" font-size="13.5"><tspan fill="#e6edf3">overrides, find which fit failed.</tspan></text>
+<text x="56" y="787" class="sans" font-size="12.5"><tspan fill="#9198a1">here: </tspan><tspan fill="#e6edf3" font-weight="500" class="mono">nn__turboquant__zzabi_launch_gemv_int8__kernel</tspan><tspan fill="#9198a1"> in the profile</tspan></text>
+<text x="56" y="804" class="sans" font-size="12.5"><tspan fill="#9198a1">where </tspan><tspan fill="#e6edf3" font-weight="500" class="mono">amd_rocm_base__zzprivate_int8_4</tspan><tspan fill="#9198a1"> would be</tspan></text>
+<rect x="32" y="838" width="1136" height="250" rx="14" fill="#0d1117" stroke="#3d444d" stroke-width="1"/>
+<text x="56" y="866" class="sans" font-size="15"><tspan fill="#e6edf3" font-weight="700">the silicon families</tspan><tspan fill="#9198a1"> — what answers </tspan><tspan fill="#39c5bb" font-weight="600" class="mono">turboquant_gemv_int8</tspan><tspan fill="#9198a1"> in each</tspan></text>
+<text x="56" y="885" class="sans" font-size="12.5"><tspan fill="#9198a1">A family may also override a door with its own code.</tspan></text>
+<rect x="56" y="915" width="206" height="50" rx="8" fill="#151b23" stroke="#3d444d" stroke-width="1"/>
+<rect x="64" y="923" width="4" height="34" rx="2" fill="#6c9cff"/>
+<text x="76" y="936" class="mono" font-size="13"><tspan fill="#e6edf3" font-weight="600">x86_avx2</tspan></text>
+<text x="76" y="954" class="sans" font-size="12"><tspan fill="#6c9cff">its own code, if the call fits</tspan></text>
+<rect x="273.5" y="915" width="206" height="50" rx="8" fill="#151b23" stroke="#3d444d" stroke-width="1"/>
+<rect x="281.5" y="923" width="4" height="34" rx="2" fill="#6c9cff"/>
+<text x="293.5" y="936" class="mono" font-size="13"><tspan fill="#e6edf3" font-weight="600">arm_neon</tspan></text>
+<text x="293.5" y="954" class="sans" font-size="12"><tspan fill="#6c9cff">its own code, if the call fits</tspan></text>
+<rect x="491" y="915" width="206" height="50" rx="8" fill="#151b23" stroke="#3d444d" stroke-width="1"/>
+<rect x="499" y="923" width="4" height="34" rx="2" fill="#6c9cff"/>
+<text x="511" y="936" class="mono" font-size="13"><tspan fill="#e6edf3" font-weight="600">arm_gb10</tspan></text>
+<text x="511" y="954" class="sans" font-size="12"><tspan fill="#6c9cff">its own code, if the call fits</tspan></text>
+<rect x="708.5" y="915" width="206" height="50" rx="8" fill="#151b23" stroke="#3d444d" stroke-width="1"/>
+<rect x="716.5" y="923" width="4" height="34" rx="2" fill="#39c5bb"/>
+<text x="728.5" y="936" class="mono" font-size="13"><tspan fill="#e6edf3" font-weight="600">nvidia_opencl1</tspan></text>
+<text x="728.5" y="954" class="sans" font-size="12"><tspan fill="#39c5bb">nn's generic door</tspan></text>
+<rect x="926" y="915" width="206" height="50" rx="8" fill="#151b23" stroke="#3d444d" stroke-width="1"/>
+<rect x="934" y="923" width="4" height="34" rx="2" fill="#39c5bb"/>
+<text x="946" y="936" class="mono" font-size="13"><tspan fill="#e6edf3" font-weight="600">intel_opencl1_igpu</tspan></text>
+<text x="946" y="954" class="sans" font-size="12"><tspan fill="#39c5bb">nn's generic door</tspan></text>
+<path d="M279.5 911 L279.5 904 L691 904 L691 911" fill="none" stroke="#9198a1" stroke-width="1.2"/>
+<rect x="417.142" y="896" width="136.216" height="16" rx="3" fill="#0d1117"/>
+<text x="485.25" y="908" class="sans" font-size="12" text-anchor="middle"><tspan fill="#9198a1">built from </tspan><tspan fill="#9198a1" font-weight="600" class="mono">arm_base</tspan></text>
+<path d="M714.5 911 L714.5 904 L1126 904 L1126 911" fill="none" stroke="#9198a1" stroke-width="1.2"/>
+<rect x="808.798" y="896" width="222.904" height="16" rx="3" fill="#0d1117"/>
+<text x="920.25" y="908" class="sans" font-size="12" text-anchor="middle"><tspan fill="#9198a1">built from </tspan><tspan fill="#9198a1" font-weight="600" class="mono">khronos_opencl1_base</tspan></text>
+<rect x="56" y="995" width="206" height="50" rx="8" fill="#151b23" stroke="#3d444d" stroke-width="1"/>
+<rect x="64" y="1003" width="4" height="34" rx="2" fill="#39c5bb"/>
+<text x="76" y="1016" class="mono" font-size="13"><tspan fill="#e6edf3" font-weight="600">khronos_opencl2</tspan></text>
+<text x="76" y="1034" class="sans" font-size="12"><tspan fill="#39c5bb">nn's generic door</tspan></text>
+<rect x="273.5" y="995" width="206" height="50" rx="8" fill="#151b23" stroke="#3d444d" stroke-width="1"/>
+<rect x="281.5" y="1003" width="4" height="34" rx="2" fill="#39c5bb"/>
+<text x="293.5" y="1016" class="mono" font-size="13"><tspan fill="#e6edf3" font-weight="600">intel_opencl2</tspan></text>
+<text x="293.5" y="1034" class="sans" font-size="12"><tspan fill="#39c5bb">nn's generic door</tspan></text>
+<rect x="491" y="995" width="206" height="50" rx="8" fill="#151b23" stroke="#3d444d" stroke-width="1"/>
+<rect x="499" y="1003" width="4" height="34" rx="2" fill="#6c9cff"/>
+<text x="511" y="1016" class="mono" font-size="13"><tspan fill="#e6edf3" font-weight="600">amd_rocm6_wave64</tspan></text>
+<text x="511" y="1034" class="sans" font-size="12"><tspan fill="#6c9cff">its own code, if the call fits</tspan></text>
+<rect x="708.5" y="995" width="206" height="50" rx="8" fill="#151b23" stroke="#3d444d" stroke-width="1"/>
+<rect x="716.5" y="1003" width="4" height="34" rx="2" fill="#6c9cff"/>
+<text x="728.5" y="1016" class="mono" font-size="13"><tspan fill="#e6edf3" font-weight="600">amd_rocm10</tspan></text>
+<text x="728.5" y="1034" class="sans" font-size="12"><tspan fill="#6c9cff">its own code, if the call fits</tspan></text>
+<rect x="926" y="995" width="206" height="50" rx="8" fill="#151b23" stroke="#3d444d" stroke-width="1"/>
+<rect x="934" y="1003" width="4" height="34" rx="2" fill="#6c9cff"/>
+<text x="946" y="1016" class="mono" font-size="13"><tspan fill="#e6edf3" font-weight="600">nvidia_cuda12</tspan></text>
+<text x="946" y="1034" class="sans" font-size="12"><tspan fill="#6c9cff">its own code, if the call fits</tspan></text>
+<path d="M62 991 L62 984 L473.5 984 L473.5 991" fill="none" stroke="#9198a1" stroke-width="1.2"/>
+<rect x="156.298" y="976" width="222.904" height="16" rx="3" fill="#0d1117"/>
+<text x="267.75" y="988" class="sans" font-size="12" text-anchor="middle"><tspan fill="#9198a1">built from </tspan><tspan fill="#9198a1" font-weight="600" class="mono">khronos_opencl2_base</tspan></text>
+<path d="M497 991 L497 984 L908.5 984 L908.5 991" fill="none" stroke="#9198a1" stroke-width="1.2"/>
+<rect x="616.582" y="976" width="172.336" height="16" rx="3" fill="#0d1117"/>
+<text x="702.75" y="988" class="sans" font-size="12" text-anchor="middle"><tspan fill="#9198a1">built from </tspan><tspan fill="#9198a1" font-weight="600" class="mono">amd_rocm_base</tspan></text>
+<text x="56" y="1070" class="sans" font-size="12.5"><tspan fill="#9198a1">The host family is compiled into the program itself.</tspan></text>
+</svg>

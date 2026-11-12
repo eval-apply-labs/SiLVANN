@@ -1,5 +1,18 @@
 # A model's config
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="images/config_dark.svg">
+  <img src="images/config_light.svg" alt="Where a model's parts live, and the setting in its config that moves each: the
+  dense model on the card (card, num_cards), or in RAM with card cpu; the context's cache on the card, sized for
+  max_context (kv tiered or fp16); the routed experts every one on the card (experts_on card), or on the CPU (experts_on
+  cpu), copied into RAM, left to the system's page cache or read from the disk (experts_from ram, mapped or disk, auto
+  choosing by the memory there is), with a tier of the experts used most on the card (card_experts_gb), promoted from
+  RAM as they are picked; the n-gram memory's tables (ngram_from for Qwen 3.8 Flash-Next, engram_in for DeepSeek)
+  copied into RAM, read into the system's file cache, which gives the memory back to other programs as they need it, or
+  read from the disk (ram, cache or disk); on Windows what a program puts on an NVIDIA card counts against the commit
+  limit, the RAM and the page file together, though it takes none of the RAM.">
+</picture>
+
 A model's config is a JSON file in its folder's `configs/`. The server reads it when it starts:
 
 - `models/<name>/configs/default.json` by default, written when the model is downloaded;

@@ -1,5 +1,18 @@
 # Working on SiLVANN
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="images/developers_dark.svg">
+  <img src="images/developers_light.svg" alt="A door and its fallback: nn declares the door turboquant_gemv_int8 in
+  its door list, and a silicon family's library puts its override into nn's table. The override's fit test takes the bit
+  depths, widths and alignment its kernel covers (4 bits, whole blocks of 32 columns, rows 8-byte aligned, an x the
+  lanes can hold): where the call fits, the family's own kernel runs; where it does not, nn's generic door takes the
+  call silently, correct and sometimes far slower; on the OpenCL 2.0 families a kernel the card's compiler did not build
+  is answered by nn's host body. The symptom: a profile showing nn__*__zzabi_launch_* for a door the family overrides
+  means a fit test failed. Below, every silicon family the build makes and what answers the door in it: its own code
+  where the call fits (x86_avx2, arm_neon, arm_gb10, amd_rocm6_wave64, amd_rocm10, nvidia_cuda12), or nn's generic door
+  (nvidia_opencl1, intel_opencl1_igpu, khronos_opencl2, intel_opencl2).">
+</picture>
+
 ## The shape of it
 
 ```
@@ -168,11 +181,15 @@ program.
 handful of arithmetic primitives (the lanes' sums, a half to a float, the tile it likes its GEMM in). The library's
 kernels are written once against those answers; a family may also override a door with its own code, as
 the AMD families (`amd_rocm6_wave64` for the MI50 on ROCm 6, `amd_rocm10` from the MI100 on with ROCm 7 and later, and
-for the Radeons of RDNA4 in wave64, one source), `nvidia_cuda12`, `khronos_opencl2` and `x86_avx2` do for the hottest ones — `amd_rocm10` the prompt's GEMM
+for the Radeons of RDNA4 in wave64, one source), `nvidia_cuda12`, the OpenCL families, the Arm families (`arm_neon`
+and `arm_gb10`) and `x86_avx2` do for the hottest ones — `amd_rocm10` the prompt's GEMM
 tiles on the matrix cores (`v_mfma`), `nvidia_cuda12`
 the GEMMs, the gemvs and the attention's scores on the tensor cores (`mma.sync`), and `x86_avx2` its matrix products
 with AVX-512 where the processor has it, and its int8 products with VNNI where it has that too, chosen when the
-library loads (`SILVANN_CPU_AVX512=0` keeps AVX2, `SILVANN_CPU_VNNI=0` AVX-512's int8). Where nn
+library loads (`SILVANN_CPU_AVX512=0` keeps AVX2, `SILVANN_CPU_VNNI=0` AVX-512's int8). An override takes a call
+only when its fit test passes — the widths, bit depths, alignment its kernels cover — and otherwise falls back to nn's
+generic body silently: correct, sometimes far slower. When a profile shows `nn__*__zzabi_launch_*` for a door the
+family overrides, find which fit failed. Where nn
 gives a door a one-row and a many-row form that agree to the bit — the mix of an attention and its causal form, a
 residual and its form over a prompt's rows, a norm and its rows — a family that answers one with its own arithmetic
 answers the other with the same.
