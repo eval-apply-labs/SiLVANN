@@ -60,9 +60,8 @@
  * nothing else; the shape of the distribution is a build constant. ⛳ Which is the architect's point
  * about SGPRs: a table that is the same for every row of every tensor is loaded once and is UNIFORM
  * ACROSS THE WAVE, where a per-row codebook is a VRAM read on the critical path of every row.
- * ⛔ THAT IS `REASONED`, NOT `MEASURED` — ▶ `nn_port.md` §⑧ for why this tree cannot measure it:
- * every door runs its body as one block of one thread (`gpu/doors.cuh`), and the one `threadIdx` in `packages/nn` is the guard that sends every other lane home. **No throughput claim here
- * has been observed, and none may be made until the gemv is parallelised.**
+ * ⛔ THAT IS `REASONED`, NOT `MEASURED`: this build reads no codebook row, so no run sets the two
+ * against each other.
  *
  * ── ⭐⭐ NO SIGN BIT, AND THAT IS THE BIT THE ARCHITECT WENT LOOKING FOR ──────────────────────────────
  * ⚖ *"use all 4 bits for data instead of 3 bits for data and one for parity because we can adjust the

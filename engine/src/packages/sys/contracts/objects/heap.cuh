@@ -325,8 +325,10 @@ typedef struct { unsigned int at[SYS__HEAP__COUNTER_N]; } sys__heap_counters;
  * reader that is not this block, so the tag is what tells that reader the head is not the one to read.
  * ⛔⛔ THE TAG IS WHAT KEEPS THIS HONEST — do not remove it as redundant. ⚖ *"one
  * thread per gpu and one for the orchestrator at id 0."* `MEASURED`: `eng_abi_boot(4)` stands
- * up FOUR runners on a CPU. ⚠ UNMEASURED under real contention — every program so far runs on block 0
- * with the others parked, so two runners have not yet raced here.
+ * up FOUR runners on a CPU. ⚠ UNMEASURED under contention, and the runners do meet here: a program hands
+ * work to other blocks (`sys__scheduler__add`), a card's runner and the CPU's compute at once, and an object
+ * made on one is let go on another. That the tag keeps the count honest between them is `REASONED` from the
+ * write-back in `cpu/heap__impl.cuh`, not measured under a race.
  *
  * ⛳ THE WRITE-BACK HAPPENS AT EXACTLY TWO MOMENTS and both already exist as lines in this file: when a
  * chunk fills and the block moves to the next, and when the block stops carving at all. */

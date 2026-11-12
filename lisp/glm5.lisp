@@ -19,7 +19,8 @@
 ;;                   LAYER (its number), AT (the attention site's table), MO / ML (the MLP site's, routed or dense),
 ;;                   EXK EXKR (the card's tier's experts tables, a position's and a chunk's), AHEAD_NEXT (the next MoE
 ;;                   layer's place in RUN where its experts are read ahead, 0 where they are not)
-;;   a socket each   SOCKETS of them: SOCKET (its worker), ROUTED_INTO / RROWS_INTO (where its share lands on the card);
+;;   a socket each   SOCKETS of them: SOCKET (its worker), ROUTED_INTO / RROWS_INTO (where its share lands on the card),
+;;                   ASKED (its answer to the last share the card asked of it — ASKED_OF a seat's own);
 ;;                   ▶ glm5_cpu.lisp for what each runs
 ;;   the buffers     streams xin h hr e u hu hand picks guess routed hm hn hnr srows hands carries rrows rwork … (▶ `_card_buffers`),
 ;;                   PROMPT (a chunk's tokens)
@@ -29,13 +30,13 @@
 ;; EMBEDDING is a table in RAM the card reads a row of in place: every token's packed row (EMB_HALVES halves each), then
 ;; every token's scale from EMB_SCALES on — the embedding stays in RAM and only a row crosses.
 ;; With EMBED_ON_CPU the table is the first socket's (c_embedding), which decodes the row (▶ glm5_cpu.lisp `xe`) for the
-;; card to copy across and un-rotate: where the card's family keeps mapped RAM as a copy of its own, the table neither
-;; crosses nor takes the card's room.
+;; card to copy across, from the buffer the answer comes to, and un-rotate: where the card's family keeps mapped RAM as a
+;; copy of its own, the table neither crosses nor takes the card's room.
 (if EMBED_ON_CPU
     (defun (embed_e tok)                               ; the token's row into e, decoded by the first socket
       (begin (sys__node_array__set EMB_TOK 0 tok)
-             (sys__scheduler__add (nth SOCKET 0) names xe) (sys__wait (nth SOCKET 0))
-             (nn__buffer__copy c_emb (nth SOCKET 0) u HIDDEN_BYTES)
+             (let ((emb_row (sys__scheduler__add (nth SOCKET 0) names xe)))      ; answered as the socket's c_emb
+               (nn__buffer__copy (sys__wait_for_result emb_row) u HIDDEN_BYTES))
              (nn__hadamard__rotate u ones512 hu HIDDEN)
              (nn__vector__pointwise_mul hu signs_row e HIDDEN)))
     (defun (embed_e tok)                               ; the token's row into e
@@ -84,22 +85,24 @@
 
 
 ;; ── the CPU sockets: each handed layer `i`'s share of its picks, and their shares summed back ─────────────────────────
-;; HERE names the layer for the picture each runs (▶ glm5_cpu.lisp). A socket's share lands in ROUTED_INTO's — the first
-;; socket's in `routed` — and the others are added onto it.
+;; HERE names the layer for the picture each runs (▶ glm5_cpu.lisp). Each socket's answer is kept in its cell of ASKED:
+;; the card waits on it there, and copies the buffer it comes to — the socket's share — into ROUTED_INTO's, the first
+;; socket's into `routed` and the others' added onto it.
 (defun (sockets_start i picture)
   (let ((s 0))
     (sys__node_array__set HERE 0 i)
-    (while '(< s SOCKETS) '(begin (sys__scheduler__add (nth SOCKET s) names picture) (set! s (+ s 1))))
+    (while '(< s SOCKETS)
+           '(begin (sys__node_array__set ASKED s (sys__scheduler__add (nth SOCKET s) names picture)) (set! s (+ s 1))))
     (type hand)))
 
 (defun (sockets_wait)
   (let ((s 0))
-    (while '(< s SOCKETS) '(begin (sys__wait (nth SOCKET s)) (set! s (+ s 1))))))
+    (while '(< s SOCKETS) '(begin (sys__wait_for_result (nth ASKED s)) (set! s (+ s 1))))))
 
 (defun (sockets_sum)
   (let ((s 0))
     (while '(< s SOCKETS)
-           '(begin (nn__buffer__copy (nth C_ROUTED s) (nth SOCKET s) (nth ROUTED_INTO s) HIDDEN_BYTES)
+           '(begin (nn__buffer__copy (sys__wait_for_result (nth ASKED s)) (nth ROUTED_INTO s) HIDDEN_BYTES)
                    (if (< 0 s) (nn__vector__add routed (nth ROUTED_INTO s) routed HIDDEN) 0)
                    (set! s (+ s 1))))
     (type routed)))
@@ -116,32 +119,32 @@
     (begin
       (defun (sockets_start i picture)
         (begin (sys__node_array__set HERE 0 i)
-               (sys__scheduler__add (nth SOCKET 0) names picture)
-               (sys__scheduler__add (nth SOCKET 1) names picture)
+               (sys__node_array__set ASKED 0 (sys__scheduler__add (nth SOCKET 0) names picture))
+               (sys__node_array__set ASKED 1 (sys__scheduler__add (nth SOCKET 1) names picture))
                (type hand)))
       (defun (sockets_wait)
-        (begin (sys__wait (nth SOCKET 0)) (sys__wait (nth SOCKET 1))))
+        (begin (sys__wait_for_result (nth ASKED 0)) (sys__wait_for_result (nth ASKED 1))))
       (defun (sockets_sum)
-        (begin (nn__buffer__copy (nth C_ROUTED 0) (nth SOCKET 0) (nth ROUTED_INTO 0) HIDDEN_BYTES)
-               (nn__buffer__copy (nth C_ROUTED 1) (nth SOCKET 1) (nth ROUTED_INTO 1) HIDDEN_BYTES)
+        (begin (nn__buffer__copy (sys__wait_for_result (nth ASKED 0)) (nth ROUTED_INTO 0) HIDDEN_BYTES)
+               (nn__buffer__copy (sys__wait_for_result (nth ASKED 1)) (nth ROUTED_INTO 1) HIDDEN_BYTES)
                (nn__vector__add routed (nth ROUTED_INTO 1) routed HIDDEN)
                (type routed))))
     (< 0 1))
 
-;; ⛳ A CHUNK'S SHARES ARE WAITED FOR WITHOUT A BOUND: `sys__wait` gives up after ~15 s, and a chunk's experts read from
-;;   the disk can take longer — so the card asks `sys__result` until a socket says so, then collects
+;; ⛳ A CHUNK'S SHARES ARE WAITED FOR WITHOUT A BOUND: `sys__wait_for_result` gives up after ~15 s where the computation
+;;   cannot park, and a chunk's experts read from the disk can take longer — so the card asks `sys__result` of each
+;;   socket's answer until it is filled, then collects
 (defun (sockets_sum_rows)
   (let ((s 0))
     (while '(< s SOCKETS)
-           '(begin (while '(eq? (sys__result (nth SOCKET s)) (< 1 0)) '(< 0 1))
-                   (sys__wait (nth SOCKET s))
+           '(begin (while '(eq? (sys__result (nth ASKED s)) (< 1 0)) '(< 0 1))
                    (set! s (+ s 1))))
     (if CARD_TIER (nn__expert_tier__written nn__expert_tier) 0)
     (set! s 0)
     ;; ⛳ THE CHUNK'S ROWS BACK, NOT A WHOLE CHUNK'S: a draft's check is two rows, and a chunk is 256 — MEASURED 2026-10-19,
     ;;   node-01, the two rows' hand-off was 5.5 ms a layer copying 256 rows' hands out and sums back (▶ src_glm5_rows2_profile)
     (while '(< s SOCKETS)
-           '(begin (nn__buffer__copy (nth C_RROWS s) (nth SOCKET s) (nth RROWS_INTO s) (* (nth nrows 0) HIDDEN_BYTES))
+           '(begin (nn__buffer__copy (sys__wait_for_result (nth ASKED s)) (nth RROWS_INTO s) (* (nth nrows 0) HIDDEN_BYTES))
                    (if (< 0 s) (nn__vector__add rrows (nth RROWS_INTO s) rrows (* (nth nrows 0) HIDDEN)) 0)
                    (set! s (+ s 1))))
     (type rrows)))
@@ -214,13 +217,14 @@
 ;; weights are the same for both. A section runs on seat `k` inside a `let` binding that seat's names — STREAMS_OF HAND_OF
 ;; PICKS_OF AT_OF MO_OF, each seat's by seat — so the sites above run unchanged, and the names are unbound when it ends.
 ;; The sockets read the names as they stood when the programs were defined: they are told the seat in HERE's second cell
-;; (▶ glm5_cpu.lisp `xf2`), each seat its own hand and routed share on each of them. A seat stepped a position at a time
-;; — `position` inside its `let`, which binds SEAT as well — hands its sockets the same way.
+;; (▶ glm5_cpu.lisp `xf2`), each seat its own hand and routed share on each of them, and the card keeps each seat's
+;; answers in its own array, ASKED_OF's. A seat stepped a position at a time — `position` inside its `let`, which binds
+;; SEAT as well — hands its sockets the same way.
 ;; The pair's step: seat 1 half a layer behind seat 0. A MoE layer runs seat 0's attention and router while the sockets
 ;; finish seat 1's previous experts, then seat 0's experts while the card runs seat 1's attention and router, then seat
 ;; 1's while the card runs seat 0's next layer — the card and the sockets each on one seat while the other works. A seat's
 ;; experts collected, the other's start before the first's are summed and closed: each seat's share lands in its own
-;; buffers on the sockets, so the sockets wait only for the hand-off.
+;; buffers on the sockets, and its answers in its own cells on the card, so the sockets wait only for the hand-off.
 (if (< 1 SEATS)
     (begin
       ;; a seat's attention and router: its picks read back
@@ -229,22 +233,28 @@
           (mixer i pos)
           (route i)
           (type streams)))
-      ;; the sockets handed a seat's picks
+      ;; the sockets handed a seat's picks, their answers kept in the seat's array
       (defun (seat_start k i)
         (let ((s 0))
           (sys__node_array__set HERE 0 i)
           (sys__node_array__set HERE 1 k)
-          (while '(< s SOCKETS) '(begin (sys__scheduler__add (nth SOCKET s) names xf2) (set! s (+ s 1))))
+          (while '(< s SOCKETS)
+                 '(begin (sys__node_array__set (nth ASKED_OF k) s (sys__scheduler__add (nth SOCKET s) names xf2))
+                         (set! s (+ s 1))))
           (type hand)))
+      ;; a seat's answers waited on
+      (defun (seat_wait k)
+        (let ((s 0))
+          (while '(< s SOCKETS) '(begin (sys__wait_for_result (nth (nth ASKED_OF k) s)) (set! s (+ s 1))))))
       ;; the card's shared expert on a seat's hand
       (defun (seat_shared k i)
         (let ((hand (nth HAND_OF k)) (MO (nth MO_OF k)))
           (ai_z__glm_5_3__shared hand (nth MO i))))
-      ;; a seat's shares copied off the sockets and summed into routed
+      ;; a seat's shares copied off the sockets, from the buffers its answers come to, and summed into routed
       (defun (seat_sum k)
         (let ((s 0))
           (while '(< s SOCKETS)
-                 '(begin (nn__buffer__copy (nth (nth C_ROUTED_OF k) s) (nth SOCKET s) (nth ROUTED_INTO s) HIDDEN_BYTES)
+                 '(begin (nn__buffer__copy (sys__wait_for_result (nth (nth ASKED_OF k) s)) (nth ROUTED_INTO s) HIDDEN_BYTES)
                          (if (< 0 s) (nn__vector__add routed (nth ROUTED_INTO s) routed HIDDEN) 0)
                          (set! s (+ s 1))))
           (type routed)))
@@ -255,14 +265,19 @@
           (ai_z__glm_5_3__close streams (nth MO i) routed)
           (type streams)))
       (defun (seat_back k i)
-        (begin (sockets_wait) (seat_finish k i)))
-      ;; a position at a time on seat SEAT: `moe`'s sockets told the seat and summed from its buffers (no tier with seats)
+        (begin (seat_wait k) (seat_finish k i)))
+      ;; a position at a time on seat SEAT: `moe`'s sockets told the seat, their answers kept in its array, waited on and
+      ;; summed from its buffers (no tier with seats)
       (defun (tier_and_sockets i)
         (let ((s 0))
           (sys__node_array__set HERE 0 i)
           (sys__node_array__set HERE 1 SEAT)
-          (while '(< s SOCKETS) '(begin (sys__scheduler__add (nth SOCKET s) names xf2) (set! s (+ s 1))))
+          (while '(< s SOCKETS)
+                 '(begin (sys__node_array__set (nth ASKED_OF SEAT) s (sys__scheduler__add (nth SOCKET s) names xf2))
+                         (set! s (+ s 1))))
           (type hand)))
+      (defun (sockets_wait)
+        (seat_wait SEAT))
       (defun (sockets_sum)
         (seat_sum SEAT))
       ;; a dense layer on a seat
@@ -280,11 +295,11 @@
                     (if (nth MOE i)
                         (begin (seat_front ka i pa)
                                (if out
-                                   (begin (sockets_wait) (seat_start ka i) (seat_finish kb behind))
+                                   (begin (seat_wait kb) (seat_start ka i) (seat_finish kb behind))
                                    (seat_start ka i))
                                (seat_shared ka i)
                                (seat_front kb i pb)
-                               (sockets_wait)
+                               (seat_wait ka)
                                (seat_start kb i)
                                (seat_finish ka i)
                                (seat_shared kb i)

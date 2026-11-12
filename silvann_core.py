@@ -25,6 +25,9 @@
     python3 silvann_core.py users remove <name> [--with-conversations]
     python3 silvann_core.py users adopt <name>        the conversations made before there were users moved into
                                                       <name>'s folder, every model's
+    python3 silvann_core.py users link <name> <issuer> <subject>    <name> signs on with that account of the provider's
+                                                      (sso.json; the subject is what a refused sign-on says)
+    python3 silvann_core.py users unlink <name> <issuer> <subject>  no longer: their sign-ins end
 
 A token makes Hugging Face's downloads faster than a client that is not signed in gets, and reaches a repository whose
 terms its account accepted. It is saved in `.huggingface_token` beside `models/` (only its owner may read it), which the
@@ -183,7 +186,12 @@ def users_command(argv):
             for name in names:
                 n = u.conversations(name)
                 print("%-32s %d conversation%s" % (name, n, "" if n == 1 else "s"))
-            if not names:
+                for iss, sub, email in u.accounts(name):
+                    print("%-32s   signs on as %s at %s (subject %s)" % ("", email or "-", iss, sub))
+            if not names and u.on():
+                print("no users yet: a server on this data folder asks for a sign-in, and its provider (sso.json) makes "
+                      "a user at their first sign-on where its allow lets them in")
+            elif not names:
                 print("no users: a server on this data folder asks no one to sign in. `silvann users add <name>` makes one")
             return 0
         if not rest:
@@ -205,6 +213,17 @@ def users_command(argv):
             u.remove(name, with_conversations="--with-conversations" in rest[1:])
             print("%s removed, their folder with them" % name)
             return 0
+        if what in ("link", "unlink"):
+            if len(rest) != 3:
+                raise SystemExit("users %s <name> <issuer> <subject>" % what)
+            if what == "link":
+                u.link(name, rest[1], rest[2])
+                print("%s signs on with %s's account %s from now on" % (name, rest[1], rest[2]))
+            else:
+                u.unlink(name, rest[1], rest[2])
+                print("%s no longer signs on with %s's account %s; their sign-ins on a running server end" % (
+                    name, rest[1], rest[2]))
+            return 0
         if what == "adopt":
             moved = u.adopt(name, str(DATA / "user_sessions"))
             print("%d conversation%s moved into %s's folder%s" % (len(moved), "" if len(moved) == 1 else "s", name,
@@ -212,7 +231,7 @@ def users_command(argv):
             return 0
     except _users.Refused as ex:
         raise SystemExit(str(ex))
-    raise SystemExit("users: list, add, passwd, remove or adopt — not %r" % what)
+    raise SystemExit("users: list, add, passwd, remove, adopt, link or unlink — not %r" % what)
 
 
 def main(argv):

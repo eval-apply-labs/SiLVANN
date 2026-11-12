@@ -2,12 +2,14 @@
 512 experts of 640 and a shared one, an n-gram embedding at its second layer — the matrices on the card, the routed experts
 on the CPU (NN-141).
 
-⛳ THE FIRST PROGRAM, IN nn's WORDS ALONE (▶ src/docs/design/pending/qwen4_exp.md ⑤): `lisp/qwen4_exp.lisp`'s sites are
-nn's words over each layer's table, no model package's verbs yet. A prompt is read a CHUNK at a time, a layer at a time:
+⛳ THE PROGRAM, ITS SITES ai_qwen_4's VERBS OR nn's WORDS (▶ src/docs/design/qwen4_exp.md ③): `lisp/qwen4_exp.lisp`'s
+sites over each layer's table are ai_qwen_4's verbs (`verbs`, the default) or the nn words each verb launches, in the same
+order. A prompt is read a CHUNK at a time, a layer at a time:
 each row's mixer as a position runs it, then the chunk's router picks into its hand rows and the CPU's routed experts over
 them once, expert-major (ai_qwen_3's `experts_rows`). This class makes what the program reads — the collections, the load,
-the buffers, the tables, the names (`_bindings`) — and the host's part of a position or a chunk: the n-gram rows
-(`ngram_qwen4.NGram`, from the pack's `ngram/`) written into `ngr` (a chunk's into `ngrR`) before it runs.
+the buffers, the tables, the names (`_bindings`) — and the host's part of a chunk: its n-gram rows
+(`ngram_qwen4.NGram`, from the pack's `ngram/`) written into `ngrR` before it runs. A position reads its own rows in the
+program (nn's `nn__ngram__rows`, ▶ `_ngram_table`).
 
 A conversation's STATE is the DeltaNet layers' fp32 state and conv window, the attention layers' keys and values and
 their indexer's keys (a position's, and a block's of RATIO positions), and the n-gram layer's normed values, a position
@@ -22,7 +24,7 @@ import threading
 
 import numpy as np
 
-from . import expert_tier, experts_file
+from . import expert_tier, experts_file, ram_table
 from .generate import STOPS_MOST, Generates
 from .model_folder import NL, Refused
 from .ngram_qwen4 import NGram
@@ -100,7 +102,8 @@ class Qwen4Exp(Generates):
 
     def __init__(self, folder, machine, max_context=2048, experts_from="auto", experts_dir=None, experts_ram_gb=None,
                  experts_ahead="auto", chunk=512, experts_int8=False, sockets=1, verbs=True, rows_from=8, seats=1,
-                 cards=None, prompt_on="auto", card_from=CARD_FROM, card_experts_gb=0, card_landing=1, layers=None):
+                 cards=None, prompt_on="auto", card_from=CARD_FROM, card_experts_gb=0, card_landing=1, layers=None,
+                 ngram_from="auto"):
         if folder.architecture not in ARCHITECTURES:
             raise Refused("%s is a %r model, not one of %s" % (folder.path, folder.architecture, ARCHITECTURES))
         if max_context > QSA_ALL and not verbs:
@@ -164,7 +167,7 @@ class Qwen4Exp(Generates):
         self.EXPERTS_INT8 = bool(experts_int8)
         self.HAND_ROW = ((2 * (self.H + 16 + self.INTER) + 7) & ~7) + 8 * self.TOPK
         self.EOS2 = np.array([self.ng.eos, self.ng.eos], dtype="<i4").tobytes()      # `prev2` before position 0
-        # ⭐ SEATS (NN-147, ⚖ 2026-10-31 seats.md ④): the conversations held on the card at once, each its own state, its
+        # ⭐ SEATS (NN-147, ▶ seats.md): the conversations held on the card at once, each its own state, its
         #   streams and its MoE carry, the weights one — the card on one seat's dense part while the CPU computes another's
         #   experts, as their chains interleave on the card's queue. A seat's programs run in its own view (▶ `load`), the
         #   program's names bound to its buffers; seat 0's are the names themselves.
@@ -199,7 +202,7 @@ class Qwen4Exp(Generates):
         # ⛔ SEVERAL CONVERSATIONS AT ONCE TAKE EVERY EXPERT IN RAM (▶ experts_file's SEATED_FROM_DISK)
         if self.SEATS > 1 and self.EXPERTS_FROM == "disk":
             raise Refused(experts_file.SEATED_FROM_DISK)
-        # ⭐ A PROMPT'S EXPERTS ON ITS OWN CARD (`prompt_on`, ▶ seats.md ⑥): a chunk's routed experts computed on the card
+        # ⭐ A PROMPT'S EXPERTS ON ITS OWN CARD (`prompt_on`, ▶ seats.md): a chunk's routed experts computed on the card
         #   of the seat reading it — the picks its tier holds from the tier, every other streamed from the CPU's memory
         #   through a ring of the card's own a batch ahead of the GEMM (nn's tier and its stream, NN-115 ②) — the CPU left
         #   to the other cards' answers. The promotion threshold is past any chunk's picks, so a prompt promotes nothing
@@ -232,7 +235,7 @@ class Qwen4Exp(Generates):
         #   picks it holds and the CPU the rest, the two sums added; an expert the CPU computed earns a slot by nn's
         #   qualifier and is copied whole from the CPU's memory while the card computes, `card_landing` a visit at most.
         #   ⚖ 2026-11-01 *"go ahead with the card tier knowing it will be an optimization reserved for the single seat user"*
-        #   (seats.md ④: one seat a card keeps the L1 tier, more drop it). ⛳ A routed sum split between the card and the CPU
+        #   (seats.md: one seat a card keeps the tier, more refuse it). ⛳ A routed sum split between the card and the CPU
         #   repeats from boot, not from one request to the next, as the tier fills (NN-70).
         if not isinstance(card_experts_gb, (int, float)) or isinstance(card_experts_gb, bool) or card_experts_gb < 0:
             raise Refused("card_experts_gb is the card's room for a tier of experts, in GB, not %r" % (card_experts_gb,))
@@ -283,10 +286,14 @@ class Qwen4Exp(Generates):
             raise Refused("verbs is true or false, not %r" % (verbs,))
         self.VERBS = verbs
         self.experts_dir = experts_dir or os.path.join(folder.path, "experts")
+        if ngram_from not in ram_table.WHERE:
+            raise Refused("ngram_from is 'auto', 'ram' or 'disk', not %r" % (ngram_from,))
         self.SLOTS = None
         if self.EXPERTS_FROM == "disk":
+            # a table the config puts in RAM is held beside the cache, which its default size leaves room for
             self.SLOTS = min(self.EXPERTS * self.LAYERS,
-                             experts_file.cache_bytes(self.EXPERTS * self.LAYERS * self.EPLAN.slot_bytes, experts_ram_gb)
+                             experts_file.cache_bytes(self.EXPERTS * self.LAYERS * self.EPLAN.slot_bytes, experts_ram_gb,
+                                                      self.ng.bytes if ngram_from == "ram" else 0)
                              // self.EPLAN.slot_bytes)
             if self.SLOTS < 4 * self.TOPK:
                 raise Refused("%d experts is too few for a cache of them" % self.SLOTS)
@@ -294,6 +301,17 @@ class Qwen4Exp(Generates):
         #   (▶ autotune's `_setup`: where the experts live, from what this process may hold); the load sets it again by its
         #   sockets' plan
         self.cpu_arena = (self.SLOTS if self.SLOTS is not None else self.EXPERTS * self.LAYERS) * self.EPLAN.slot_bytes
+        # ⭐ THE N-GRAM TABLE IN RAM (`ngram_from`, NN-185): "ram" copies the pack's `ngram/` into RAM at the load, and every
+        #   row a position or a prompt reads is read from there — the disk read for none (▶ `ngram_qwen4.NGram.hold`);
+        #   "cache" reads the file through into the system's cache at the load and every row from the file after, as
+        #   "disk" does; "disk" reads each from the file as it is asked for, through the system's cache. "auto": RAM where
+        #   the table fits beside the experts' memory chosen above, the process's own and the system's share — on Windows,
+        #   the cache where it fits beside them (▶ `ram_table.place`); the experts come first. The rows are the file's
+        #   bytes every way, and the tokens the same.
+        self.NGRAM_BESIDE = self.cpu_arena + (self.arena if ram_table.card_in_ram(machine) else 0)
+        self.NGRAM_FROM = ram_table.place(ngram_from, "ngram_from", self.ng.bytes, self.NGRAM_BESIDE, self.HOST_OWN)
+        self.TABLE = ("ngram_from", self.NGRAM_FROM, self.ng.bytes, self.NGRAM_BESIDE,     # what a setup says (▶ autotune)
+                      "the n-gram table")
         # ⭐ THE NEXT LAYER'S EXPERTS READ AHEAD (NN-138), as qwen3_5.py's: from the disk, each layer's router also runs the
         #   next layer's on its input — its `GUESS` likeliest picks, the likeliest first — and the CPU worker reads the first
         #   of them it does not hold while the layer computes. `experts_ahead`: "auto" as many as the disk starts in that
@@ -569,6 +587,8 @@ class Qwen4Exp(Generates):
         self.GLOBAL = {k: v[2] for k, v in self.GLOBAL.items()}       # their bytes the engine's now
         self._cpu_experts(progress)
         self._bindings()
+        if self.NGRAM_FROM == "ram":
+            self.ng.hold(progress)
         self._ngram_table()
         # ⭐ A SEAT'S NAMES ARE THE PROGRAM'S OWN: the last card's bound first and the programs defined over them, then
         #   each card's seats' frozen in the views their steps run in — a view is a snapshot, which nothing bound after it
@@ -592,6 +612,13 @@ class Qwen4Exp(Generates):
         self.emb_data = self.emb_lut = None
         self.b.release()                            # every layer's file let go (▶ `Bundle.release`): its pages are
                                                     # the experts' bytes again, copied out of it at the load
+        # ⛳ THE TABLE READ INTO THE CACHE LAST, once the layers' files are let go: until then their pages are the
+        #   process's, on Windows in its working set while a view of them is open, and a table read before them finds
+        #   no room the copy has not taken; read after, its pages are the cache's newest, which the system reuses last
+        #   (`REASONED` from Windows' standby list, reused oldest first; Linux's inactive list alike). A table read
+        #   through after the boot stays cached on Windows: measurements/2026-11-12_nn185_cache_windows_vm.md.
+        if self.NGRAM_FROM == "cache":
+            self.ng.warm(progress)
 
     def _dense(self, progress):
         """The acting card's whole dense model: every layer's matrices and the head's and mixer's."""
@@ -616,17 +643,26 @@ class Qwen4Exp(Generates):
             raise Refused("%d slots were reserved and never published" % loader.handed())
 
     def _ngram_table(self):
-        """⭐ THE N-GRAM ROWS IN THE PROGRAM (▶ nn's `nn__ngram__rows`): the table's file opened once, every card's, and
-        `NGT` — where its rows lie, the hash's multipliers, sizes and offsets, the end of text that stops the look back and
-        what a place past it reads as — so a position reads its own rows and a run of tokens is one program (`generate`).
-        A prompt's chunk keeps the host's (`prefill`, a chunk at a time)."""
+        """⭐ THE N-GRAM ROWS IN THE PROGRAM (▶ nn's `nn__ngram__rows`): the table's file opened once, every card's — or,
+        held in RAM, its address there (nn's A TABLE IN RAM) — and `NGT` — where its rows lie, the hash's multipliers,
+        sizes and offsets, the end of text that stops the look back and what a place past it reads as — so a position
+        reads its own rows and a run of tokens is one program (`generate`). A prompt's chunk keeps the host's (`prefill`, a
+        chunk at a time)."""
         ng, path = self.ng, os.path.join(self.folder.path, "ngram", "rows.e4m3")
-        if set(path) & set(" ()'\"\t"):
-            raise Refused("the n-gram table %r holds a character a program cannot name" % path)
-        kind, handle = self.m.run("(sys__file__open '%s)" % path)
-        if kind != self.m.K["sys__value_int"] or handle == 0:
-            raise Refused("the n-gram table %s could not be opened" % path)
-        self.m.table("NGT", [handle, 0, ng.width, 0, 0, ng.N, ng.per, ng.eos, ng.eos, 0, repr(float(ng.scale))]
+        if ng.ram is not None:
+            # the verb copies a row from the address with nothing to stop it past the table's end, as the file's end
+            #   stops a read: every head's rows inside the table
+            if int((ng.offsets + ng.sizes).max()) > ng.rows_n or int(ng.offsets.min()) < 0:
+                raise Refused("the n-gram table's heads reach past its %d rows" % ng.rows_n)
+            handle, at = 0, ng.ram.address
+        else:
+            if set(path) & set(" ()'\"\t"):
+                raise Refused("the n-gram table %r holds a character a program cannot name" % path)
+            kind, handle = self.m.run("(sys__file__open '%s)" % path)
+            if kind != self.m.K["sys__value_int"] or handle == 0:
+                raise Refused("the n-gram table %s could not be opened" % path)
+            at = 0
+        self.m.table("NGT", [handle, at, ng.width, 0, 0, ng.N, ng.per, ng.eos, ng.eos, 0, repr(float(ng.scale))]
                      + [int(v) for v in ng.mult] + [int(v) for v in ng.sizes.reshape(-1)]
                      + [int(v) for v in ng.offsets.reshape(-1)])
 
@@ -807,9 +843,11 @@ class Qwen4Exp(Generates):
             m.act_as(CPU)
             loader = m.loader()
             self.SRC = {}                          # every expert's address in the CPU's memory: what a card's tier copies
-            for l in layers:
+            for i, l in enumerate(layers):
                 loader.layer_width(l, 0, self.EXPERTS)
                 self.SRC[l] = [loader.load_expert(self.b, e, 0, l, x, self.EXPERTS) for x in range(self.EXPERTS)]
+                if progress:                       # the experts' load said a layer at a time, as the dense part's
+                    progress(i + 1, len(layers))
             if loader.handed() != 0:
                 raise Refused("%d expert slots were reserved and never published" % loader.handed())
         m.act_as(CPU)

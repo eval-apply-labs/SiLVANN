@@ -53,7 +53,7 @@
  * inter-try delay of a BOUNDED spin on ANOTHER block's base while collecting a result — the compute
  * opcode's collect, and the dispatcher's in `engine/abi/running.cuh`.
  * ⛔ SO TURNING THIS MOVES A TIMEOUT: the dispatcher's, `ENG__ABI__DISPATCH_TRIES` tries of two compare-and-swaps
- * and this wait. `sys__wait`'s bound is not priced through it — it is the clock's (`SYS__COMPUTING_BASE__WAIT_NS`),
+ * and this wait. `sys__wait_for_result`'s bound is not priced through it — it is the clock's (`SYS__COMPUTING_BASE__WAIT_NS`),
  * since a try of this wait alone costs what the processor's pause costs. ⇒ ★ IT IS THE ONE
  * ENTRY HERE THAT DOES NOT KEEP THE OPENING PROMISE — it cannot be different without something else being
  * different too — so whoever turns it re-derives the try count beside it.
@@ -78,24 +78,27 @@
  * nothing in the runtime notices a wait that never ends, so a holder that never lets go is a process
  * that hangs with no suspect. A bound turns that into a fault with a name.
  *
- * `REASONED`, not `MEASURED` — it is a guess at "longer than any legitimate holder", and no lock here has
- * met a second contender yet. ⛔ THAT IS A PROPERTY OF WHAT IS LOCKED AND NOT OF THE MACHINE, WHICH IS THE
- * PART A READER WILL GET BACKWARDS. The device runs many blocks at once — `reside`, `dispatch` and `grid`
- * all go out over the resolved block count, and the selftest boots four, then places work on three of them
- * and on block zero while the launch is up — but every caller of `sys__heap_object__lock` is a stack verb,
- * and a stack belongs to one block. ⇒ ★ THE GUESS IS UNTESTED BECAUSE NOTHING LOCKED IS SHARED, SO THE DAY
- * AN OBJECT IS SHARED BETWEEN BLOCKS IS THE DAY IT FIRST CARRIES WEIGHT. What would falsify it: a legitimate
- * holder that takes longer, which would show up as `OBJL`-tagged faults once something is contended.
- * ⛔⛔ AND A CPU EVALUATOR IS WHERE THAT DAY COMES FROM. ⚖ *"sys and the evaluator go host"* puts several
- * RUNNER THREADS in one address space over one heap — `cpu/silicon/atomic.cuh` has real atomics for
- * exactly that reason. The premise *"nothing locked is shared"* rests on every `sys__heap_object__lock`
- * caller being a stack verb and a stack belonging to one block — and a runner thread is the host's
- * block, so the shape may hold there too. **It has not been checked.**
+ * `REASONED`, not `MEASURED` — it is a guess at "longer than any legitimate holder", and no caller of this
+ * count has met a second contender yet. ⛔ THAT IS A PROPERTY OF WHAT IS LOCKED AND NOT OF THE MACHINE, WHICH
+ * IS THE PART A READER WILL GET BACKWARDS. The device runs many blocks at once — `reside`, `dispatch` and
+ * `grid` all go out over the resolved block count, and the selftest boots four, then places work on three of
+ * them and on block zero while the launch is up — but every caller of `sys__heap_object__lock` is a stack
+ * verb (`cpu/stack__impl.cuh`), and a stack belongs to one block. The objects several blocks share by design
+ * — a block's queue, an answer, a dictionary being written — take the same lock word through
+ * `sys__heap_object__zzpackage_lock_shared`, bounded by `SHARED_LOCK_TRIES` below and not by this.
+ * ⇒ ★ THE GUESS IS UNTESTED BECAUSE NO STACK IS SHARED, SO THE DAY A STACK IS SHARED BETWEEN BLOCKS IS THE
+ * DAY IT FIRST CARRIES WEIGHT. What would falsify it: a legitimate holder that takes longer, which would show
+ * up as `OBJL`-tagged faults once a stack is contended.
+ * ⛔⛔ AND THE HOST EVALUATOR'S RUNNERS ARE WHERE THAT DAY COMES FROM. ⚖ *"sys and the evaluator go host"*
+ * puts several RUNNER THREADS in one address space over one heap — `cpu/silicon/atomic.cuh` has real atomics
+ * for exactly that reason. The premise *"no stack is shared"* rests on every `sys__heap_object__lock` caller
+ * being a stack verb and a stack belonging to one block — and a runner thread is the host's block, so the
+ * shape may hold there too. **It has not been checked.**
  * ⇒ ★★ THIS ENTRY NAMES ITS OWN FALSIFIER, AND MULTI-RUNNER HOST EVALUATION IS WHERE IT WILL MEET IT —
  * which makes it the most valuable kind of comment and the easiest to walk past, because nothing about
- * it looks wrong. ⚠ `LOCK_TRIES` 64
- * is a guess that has never met a contender; the first genuinely shared object between runners is what
- * prices it. **UNMEASURED, and named here rather than discovered as an `OBJL` storm.** */
+ * it looks wrong. ⚠ `LOCK_TRIES` 64 is a guess that has never met a contender; the first stack genuinely
+ * shared between runners is what prices it. **UNMEASURED, and named here rather than discovered as an
+ * `OBJL` storm.** */
 #ifndef SYS__HEAP_OBJECT__LOCK_TRIES
 #define SYS__HEAP_OBJECT__LOCK_TRIES 64u
 #endif

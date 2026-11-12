@@ -55,9 +55,15 @@ typedef uint32_t sys__kind;
  * sentence that a different number has to carry — which is why `INVALID` sits after the kinds rather
  * than in front of them.
  * ⛳ AND IT IS THE PHASE CHECK AS WELL AS THE VALUE CHECK, for free: it names a generated constant, so a
- * build that never ran the phase that generates them fails on this line. */
+ * build that never ran the phase that generates them fails on this line.
+ * ⛳ NOT IN AN OPENCL CARD'S SOURCE (`__OPENCL_C_VERSION__`, which the OpenCL generators define): the kinds are `const`
+ *   variables, and OpenCL C's strictest compilers do not fold one into a constant expression (`MEASURED` Qualcomm's
+ *   Adreno 660: "static_assert expression is not an integral constant expression",
+ *   measurements/2026-11-11_nn184_adreno_razer_edge.md). The same constants are checked here by every host build. */
+#ifndef __OPENCL_C_VERSION__
 static_assert(SYS__KIND__STANDARD == 0u,
               "zero is a kind, and the answer to a question about a thing that is not there is not one: "
               "INVALID belongs after the kinds rather than in front of them, and this holds it there.");
+#endif
 
 #endif /* SILVANN__PACKAGES_SYS_CONTRACTS_OBJECTS_KIND_CUH */

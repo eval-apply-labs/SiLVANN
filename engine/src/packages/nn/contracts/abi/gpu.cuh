@@ -281,10 +281,19 @@ typedef struct nn__doors {
  * family answers it: the host runs no kernel. ▶ `nn/gpu/doors.cuh`, the one place it is called.
  * ⛳ THE KERNEL IS GIVEN TWO WAYS, AND A FAMILY TAKES THE ONE ITS RUNTIME USES: `kernel`, its address, for
  *   a runtime that launches by pointer (HIP, CUDA); `name`, for one that finds kernels by name in a
- *   program it built (OpenCL) — where `kernel` is null, because no such function was compiled. */
+ *   program it built (OpenCL) — where `kernel` is instead the door's host body (▶ below), because no kernel
+ *   function was compiled. */
 #ifndef __OPENCL_C_VERSION__
 static inline void nn__silicon__launch(const void* kernel, const char* name, uint32_t blocks, uint32_t threads,
                                        void** args, const size_t* sizes, uint32_t count);
+/* ⭐ A DOOR'S HOST BODY — what a family that finds its kernels by name (`SYS__SILICON_FAMILY__KERNELS_BY_NAME`, OpenCL) is
+ *   handed as `kernel`: the row's body run on the host over the door's own arguments (`args`, the door's arguments as a
+ *   struct), one lane of one block, which the family runs where its device's compiler did not build the row's kernel —
+ *   so a door is never left unanswered (▶ `nn/gpu/doors.cuh`). */
+typedef struct nn__silicon__host_body {
+    void (*body)(void* args);
+    void* args;
+} nn__silicon__host_body;
 #endif
 
 static __device__ inline float nn__silicon__expf(float x);

@@ -16,12 +16,17 @@
  * The look back stops at the first place before the position, at a negative token, and — a step back or more — at the
  * STOP token: that place and every one before it read as FILL. A live token reads as itself, or as MAP's entry for it.
  * ⛳ THE READS GO THROUGH THE SYSTEM'S CACHE — a handle's ordinary descriptor, not its direct one — since a common
- *   n-gram's rows are read again and again; NN__NGRAM__READERS threads read a position's rows at once. */
-#define NN__NGRAM__FILE        0u   /* the table's file, as `sys__file__open` answers it */
-#define NN__NGRAM__DATA_AT     1u   /* the byte row 0's values start at */
+ *   n-gram's rows are read again and again; NN__NGRAM__READERS threads read a position's rows at once.
+ * ⭐ A TABLE IN RAM (NN-185): a source whose file is 0 is the table's bytes in this process's memory, its `_AT` cell their
+ *   address — the runtime copies a file there at boot and keeps it for as long as the program runs — and a row is copied
+ *   from there, the disk never read. The runtime also checks that every head's offset and size stay inside the table, as
+ *   the file's end would have refused a row past it. */
+#define NN__NGRAM__FILE        0u   /* the table's file, as `sys__file__open` answers it — or 0, the rows in memory */
+#define NN__NGRAM__DATA_AT     1u   /* the byte row 0's values start at: in the file, or with FILE 0 their address */
 #define NN__NGRAM__ROW_BYTES   2u   /* a row's values: FP8 E4M3, a byte each */
-#define NN__NGRAM__SCALE_FILE  3u   /* 0: every value times SCALE; else the file of each row's E8M0 scales, one a 32 values */
-#define NN__NGRAM__SCALE_AT    4u   /* the byte row 0's scales start at */
+#define NN__NGRAM__SCALE_FILE  3u   /* the file of each row's E8M0 scales, one a 32 values — or 0: in memory at SCALE_AT,
+                                     * or with SCALE_AT 0 none, every value times SCALE */
+#define NN__NGRAM__SCALE_AT    4u   /* the byte row 0's scales start at: in SCALE_FILE, or with it 0 their address */
 #define NN__NGRAM__N           5u   /* the longest n-gram: the token and the N − 1 before it */
 #define NN__NGRAM__HEADS       6u   /* the rows an n-gram length hashes into */
 #define NN__NGRAM__STOP        7u   /* the token that ends the look back a step back or more (an end of text), or −1 */

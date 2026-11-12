@@ -68,7 +68,7 @@ extern "C" {
 /* ── SCHEDULING FROM OUTSIDE THE RUNNERS ─────────────────────────────────────────────────────────────
  * Three doors, and between them they are the whole of what the host does to a block that is already
  * running: queue work on it into an answer, ask whether the value is there, and read it. They are a program's
- * `(sys__scheduler__add …)`, `(sys__result …)` and `(sys__wait …)` from the slot past the runners
+ * `(sys__scheduler__add …)`, `(sys__result …)` and `(sys__wait_for_result …)` from the slot past the runners
  * (▶ `ENG__ABI__AS_THE_HOST`):
  * `place` makes the answer and hands it back, and any number of threads may each wait on their own, whichever block
  * computes it — a computation whose steps continue on other blocks (`sys__scheduler__continue`) fills it once. A
@@ -79,7 +79,7 @@ extern "C" {
  *   on a block that is running a program waits until that block parks.
  * ⛳ `place` TAKES HOLDS OF ITS OWN on both operands, as a program's request does, so the caller keeps its own; the
  *   answer it hands back is the caller's to release (`eng_abi_release`) once it has read it.
- * ⛳ `take` LENDS THE VALUE AS `sys__wait` DOES — the answer keeps it, so a second read gets the same — and hands over a
+ * ⛳ `take` LENDS THE VALUE AS `sys__wait_for_result` DOES — the answer keeps it, so a second read gets the same — and hands over a
  *   hold of its own: a reference answered is the caller's to release. */
 unsigned long long eng_abi_place(unsigned int block, unsigned long long bindings, unsigned long long program) {
     if (!eng__abi__zzpackage_live() || block >= eng__abi__zzpackage_machine.blocks) return 0ull;
@@ -102,7 +102,7 @@ int eng_abi_poll(unsigned long long answer, int* ready) {
 }
 
 /* `answer`'s value: its kind and its word, the value's hold the caller's. Answers 0, reading nothing, while it is not
- * there. An error is a value, as a program's `sys__wait` is handed one. */
+ * there. An error is a value, as a program's `sys__wait_for_result` is handed one. */
 int eng_abi_take(unsigned long long answer, unsigned int* dtype, unsigned long long* value) {
     if (dtype) *dtype = (unsigned int)SYS__KIND__VALUE_NULL;
     if (value) *value = 0ull;

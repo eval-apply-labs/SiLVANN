@@ -56,8 +56,10 @@ static __device__ inline void sys__scheduler__zzprivate_ring(uint32_t cu) {
     sys__os__lock_give(&door->lock);
 }
 
-/* Whether block `me` has a parked step whose gate has filled (▶ the parked steps, below). */
+/* Whether block `me` has a parked step whose gate has filled (▶ the parked steps, below); the list of holds it lets go
+ * of for another (▶ "A HOLD LET GO OF AT HOME", below). */
 static __device__ inline bool sys__scheduler__zzprivate_parked_ready(uint32_t me);
+static __device__ inline uint64_t sys__scheduler__zzprivate_homes(uint32_t block);
 
 static __device__ inline void sys__scheduler__zzengine_doze(uint32_t me, uint64_t ns) {
     if (me >= SYS__SCHEDULER__DOORS) {                        /* no door: a short nap, and a look again */
@@ -69,7 +71,9 @@ static __device__ inline void sys__scheduler__zzengine_doze(uint32_t me, uint64_
     sys__os__lock_take(&door->lock);
     (void)sys__silicon__cas_u32(&door->asleep, 0u, 1u);        /* asleep before the last look, a fence on its own */
     const uint64_t queue = sys__scheduler__queue(me);
-    if (queue != 0ull && !sys__list__shared_waiting(queue) && !sys__scheduler__zzprivate_parked_ready(me))
+    const uint64_t homes = sys__scheduler__zzprivate_homes(me);
+    if (queue != 0ull && !sys__list__shared_waiting(queue) && !sys__scheduler__zzprivate_parked_ready(me)
+        && (homes == 0ull || !sys__list__shared_waiting(homes)))
         sys__os__condition_wait_for(&door->bell, &door->lock, ns);
     (void)sys__silicon__cas_u32(&door->asleep, 1u, 0u);
     sys__os__lock_give(&door->lock);
@@ -95,8 +99,12 @@ static __device__ SYS__NOINLINE bool sys__scheduler__zzpackage_stand_up(void) {
     const uint64_t blocks = (bases.dtype == SYS__KIND__VALUE_INT && bases.args[0] != 0ull)
                           ? sys__node_array__length(bases.args[0]) : 0ull;
     const uint64_t queues = blocks != 0ull ? sys__scheduler__zzprivate_row_array(blocks) : 0ull;
-    const bool up = queues != 0ull
-                 && sys__system_register__set(SYS__SYSTEM_REGISTER__SCHEDULER_QUEUE_ARRAY, SYS__KIND__VALUE_INT, queues);
+    /* and a list a block of the holds it lets go of for another (▶ `sys__scheduler__decommission_on`), the same shape */
+    const uint64_t homes  = queues != 0ull ? sys__scheduler__zzprivate_row_array(blocks) : 0ull;
+    const bool up = queues != 0ull && homes != 0ull
+                 && sys__system_register__set(SYS__SYSTEM_REGISTER__SCHEDULER_QUEUE_ARRAY, SYS__KIND__VALUE_INT, queues)
+                 && sys__system_register__set(SYS__SYSTEM_REGISTER__SCHEDULER_DECOMMISSION_ARRAY, SYS__KIND__VALUE_INT,
+                                              homes);
     if (!up) {
         sys__fault__raise(0ull, SYS__SCHEDULER__FAULT_NOT_UP);
         return false;
@@ -116,37 +124,43 @@ static __device__ inline uint64_t sys__scheduler__queue(uint32_t block) {
     return sys__scheduler__zzprivate_list(sys__system_register__get(SYS__SYSTEM_REGISTER__SCHEDULER_QUEUE_ARRAY), block);
 }
 
-/* ── WHAT A COMPUTATION ASKED, BY BLOCK ──────────────────────────────────────────────────────────────────
- * A row a block, a slot a block it may ask: the answer its running computation last asked of that block, held. One
- * computation runs on a block at a time and only its runner touches its row, so the row is that computation's and
- * takes no lock; it is let go of when the computation ends. A block past the row's width keeps no record — its
- * program names its answers. */
-#define SYS__SCHEDULER__ASKED_BLOCKS SYS__SCHEDULER__DOORS
-static uint64_t sys__scheduler__zzprivate_asked[SYS__SCHEDULER__ASKED_BLOCKS][SYS__SCHEDULER__ASKED_BLOCKS];
-
-static __device__ inline uint64_t sys__scheduler__zzpackage_asked(uint32_t me, uint32_t cu) {
-    if (me >= SYS__SCHEDULER__ASKED_BLOCKS || cu >= SYS__SCHEDULER__ASKED_BLOCKS) return 0ull;
-    return sys__scheduler__zzprivate_asked[me][cu];
+/* ── A HOLD LET GO OF AT HOME (NN-181) ────────────────────────────────────────────────────────────────────────────
+ * ⛳ THE BLOCK'S OWN LIST, BESIDE ITS QUEUE AND NOT ON IT: a request is a computation, run in a base and answered; this
+ *   is one hold, let go of between computations, with nothing run and nothing to answer, so a block running a program
+ *   lets nothing go until it is free, and a block whose queue is a kill's to clear clears none of these. The list
+ *   takes its own hold on the append and the take hands it to the runner, which lets go of it on its own thread: the
+ *   object's release runs there as it would have where its last hold went, and finds itself at home. */
+static __device__ inline uint64_t sys__scheduler__zzprivate_homes(uint32_t block) {
+    return sys__scheduler__zzprivate_list(sys__system_register__get(SYS__SYSTEM_REGISTER__SCHEDULER_DECOMMISSION_ARRAY),
+                                          block);
 }
 
-static __device__ inline void sys__scheduler__zzpackage_ask(uint32_t me, uint32_t cu, uint64_t answer) {
-    if (me >= SYS__SCHEDULER__ASKED_BLOCKS || cu >= SYS__SCHEDULER__ASKED_BLOCKS) return;
-    const uint64_t was = sys__scheduler__zzprivate_asked[me][cu];
-    if (was == answer) return;
-    if (answer != 0ull) (void)sys__heap_object__retain(answer);
-    sys__scheduler__zzprivate_asked[me][cu] = answer;
-    if (was != 0ull) (void)sys__heap_object__release(was);
+static __device__ inline bool sys__scheduler__decommission_on(uint32_t cu, uint64_t object) {
+    const uint64_t homes = sys__scheduler__zzprivate_homes(cu);
+    if (homes == 0ull || object == 0ull) return false;
+    const sys__heap_node held = sys__heap_object__reference_to(object);
+    /* one value, so a refusal has nothing to take back: an object's release may call this, and lets go of nothing */
+    if (!sys__list__shared_append(homes, &held)) return false;
+    sys__scheduler__zzprivate_ring(cu);                    /* a block dozing wakes to let it go */
+    return true;
 }
 
-static __device__ inline void sys__scheduler__zzengine_forget_asked(uint32_t me) {
-    if (me >= SYS__SCHEDULER__ASKED_BLOCKS) return;
-    for (uint32_t cu = 0u; cu < SYS__SCHEDULER__ASKED_BLOCKS; ++cu) {
-        const uint64_t was = sys__scheduler__zzprivate_asked[me][cu];
-        if (was == 0ull) continue;
-        sys__scheduler__zzprivate_asked[me][cu] = 0ull;
-        (void)sys__heap_object__release(was);
+static __device__ inline uint32_t sys__scheduler__zzengine_decommissions(uint32_t me) {
+    const uint64_t homes = sys__scheduler__zzprivate_homes(me);
+    /* ⭐ THE LOOK WRITES NOTHING, as the queue's does: every idle turn of every block makes it */
+    if (homes == 0ull || !sys__list__shared_waiting(homes)) return 0u;
+    uint32_t went = 0u;
+    for (;;) {
+        const sys__heap_node held = sys__list__shared_take(homes);
+        if (!sys__heap_node__carries_reference(held.dtype) || held.args[0] == 0ull) break;
+        (void)sys__heap_object__release(held.args[0]);
+        went += 1u;
     }
+    return went;
 }
+
+/* The blocks that keep a row of their own here, the doors' width: a block past it parks nothing. */
+#define SYS__SCHEDULER__BLOCK_ROWS SYS__SCHEDULER__DOORS
 
 /* ── STEPS PARKED UNTIL THEIR GATE FILLS ───────────────────────────────────────────────────────────────────
  * ⚖ 2026-11-05 *"if we are waiting on a computation and sys_result still says waiting we can shove the computation at the
@@ -159,9 +173,9 @@ static __device__ inline void sys__scheduler__zzengine_forget_asked(uint32_t me)
  * A block past the row's width parks nothing: its gated step goes back on its queue, behind what came after it.
  * `zzprivate_gate`: the gate of the step a block is running, held until it is put away — its names bound in the step's
  * environment meanwhile (`zzengine_bind_gate`). */
-static sys__heap_node sys__scheduler__zzprivate_parked[SYS__SCHEDULER__ASKED_BLOCKS][SYS__SCHEDULER__PARKED][SYS__SCHEDULER__REQUEST_CELLS];
-static uint32_t sys__scheduler__zzprivate_parked_n[SYS__SCHEDULER__ASKED_BLOCKS];
-static uint64_t sys__scheduler__zzprivate_gate[SYS__SCHEDULER__ASKED_BLOCKS];
+static sys__heap_node sys__scheduler__zzprivate_parked[SYS__SCHEDULER__BLOCK_ROWS][SYS__SCHEDULER__PARKED][SYS__SCHEDULER__REQUEST_CELLS];
+static uint32_t sys__scheduler__zzprivate_parked_n[SYS__SCHEDULER__BLOCK_ROWS];
+static uint64_t sys__scheduler__zzprivate_gate[SYS__SCHEDULER__BLOCK_ROWS];
 
 /* A gate's answers: an array of pairs, the name at 2i and the answer at 2i + 1 (▶ `sys__scheduler__continue`). */
 static __device__ inline uint64_t sys__scheduler__zzprivate_gate_pairs(uint64_t gate) {
@@ -185,7 +199,7 @@ static __device__ inline bool sys__scheduler__zzprivate_open(const sys__heap_nod
 
 /* The first of block `me`'s parked steps whose gate filled — the oldest — or how many it has parked. */
 static __device__ inline uint32_t sys__scheduler__zzprivate_first_open(uint32_t me) {
-    if (me >= SYS__SCHEDULER__ASKED_BLOCKS) return 0u;
+    if (me >= SYS__SCHEDULER__BLOCK_ROWS) return 0u;
     const uint32_t n = sys__scheduler__zzprivate_parked_n[me];
     for (uint32_t i = 0u; i < n; ++i)
         if (sys__scheduler__zzprivate_open(sys__scheduler__zzprivate_parked[me][i])) return i;
@@ -193,17 +207,17 @@ static __device__ inline uint32_t sys__scheduler__zzprivate_first_open(uint32_t 
 }
 
 static __device__ inline bool sys__scheduler__zzprivate_parked_ready(uint32_t me) {
-    return me < SYS__SCHEDULER__ASKED_BLOCKS
+    return me < SYS__SCHEDULER__BLOCK_ROWS
         && sys__scheduler__zzprivate_first_open(me) < sys__scheduler__zzprivate_parked_n[me];
 }
 
 static __device__ inline uint32_t sys__scheduler__zzengine_parked(uint32_t me) {
-    return me < SYS__SCHEDULER__ASKED_BLOCKS ? sys__scheduler__zzprivate_parked_n[me] : 0u;
+    return me < SYS__SCHEDULER__BLOCK_ROWS ? sys__scheduler__zzprivate_parked_n[me] : 0u;
 }
 
 /* A taken request parked, its holds with it, and its gate told this block waits — or false, with no room. */
 static __device__ inline bool sys__scheduler__zzprivate_park(uint32_t me, const sys__heap_node* cells) {
-    if (me >= SYS__SCHEDULER__ASKED_BLOCKS || sys__scheduler__zzprivate_parked_n[me] >= SYS__SCHEDULER__PARKED) return false;
+    if (me >= SYS__SCHEDULER__BLOCK_ROWS || sys__scheduler__zzprivate_parked_n[me] >= SYS__SCHEDULER__PARKED) return false;
     sys__heap_node* at = sys__scheduler__zzprivate_parked[me][sys__scheduler__zzprivate_parked_n[me]];
     for (uint32_t k = 0u; k < SYS__SCHEDULER__REQUEST_CELLS; ++k) at[k] = cells[k];
     sys__scheduler__zzprivate_parked_n[me] += 1u;
@@ -231,7 +245,7 @@ static __device__ inline void sys__scheduler__zzprivate_let_go(const sys__heap_n
 }
 
 static __device__ inline uint64_t sys__scheduler__zzpackage_gate(uint32_t me) {
-    return me < SYS__SCHEDULER__ASKED_BLOCKS ? sys__scheduler__zzprivate_gate[me] : 0ull;
+    return me < SYS__SCHEDULER__BLOCK_ROWS ? sys__scheduler__zzprivate_gate[me] : 0ull;
 }
 
 /* ⭐ THE NAMES A STEP WAITED FOR, BOUND IN ITS ENVIRONMENT TO WHAT THEY CAME TO (⚖ 2026-11-05 *"names also contains the
@@ -242,12 +256,12 @@ static __device__ inline uint64_t sys__scheduler__zzpackage_gate(uint32_t me) {
  * the result itself, one jump from the name and not two — a scope of its own holding it, left again once the
  * evaluation ends, before `finish` lets the environment go. The answer is the gate's to hold until the step is put
  * away. */
-static bool sys__scheduler__zzprivate_gate_bound[SYS__SCHEDULER__ASKED_BLOCKS];
+static bool sys__scheduler__zzprivate_gate_bound[SYS__SCHEDULER__BLOCK_ROWS];
 
 static __device__ inline void sys__scheduler__zzengine_bind_gate(sys__heap_node* base, uint32_t me, bool enter) {
     const uint64_t gate = sys__scheduler__zzpackage_gate(me);
     const uint64_t n = sys__scheduler__zzprivate_gate_pairs(gate);
-    if (n == 0ull || base == 0 || me >= SYS__SCHEDULER__ASKED_BLOCKS) return;
+    if (n == 0ull || base == 0 || me >= SYS__SCHEDULER__BLOCK_ROWS) return;
     /* ⛳ LEFT ONLY WHERE ENTERED: a step that could not begin has no environment of its own to leave them in. */
     if (sys__scheduler__zzprivate_gate_bound[me] == enter) return;
     sys__scheduler__zzprivate_gate_bound[me] = enter;
@@ -268,7 +282,7 @@ static __device__ inline void sys__scheduler__zzengine_bind_gate(sys__heap_node*
 }
 
 static __device__ inline void sys__scheduler__zzprivate_forget_gate(uint32_t me) {
-    if (me >= SYS__SCHEDULER__ASKED_BLOCKS) return;
+    if (me >= SYS__SCHEDULER__BLOCK_ROWS) return;
     const uint64_t was = sys__scheduler__zzprivate_gate[me];
     sys__scheduler__zzprivate_gate[me] = 0ull;
     if (was != 0ull) (void)sys__heap_object__release(was);
@@ -334,7 +348,7 @@ static __device__ inline void sys__scheduler__zzprivate_killed_into(uint64_t ans
  * places emptied, and every hold its cells carry let go — on its answer, its names or the environment it moved with,
  * its program as it stands, its gate, what it carried. Each object whose last hold that was is taken apart by its own
  * kind, and lets go of what it holds: an environment of the values bound in it, a program of the values written into
- * it, the carried array of the places and the answers last asked. */
+ * it, the carried array of its modes and its places. */
 static __device__ inline void sys__scheduler__zzprivate_refuse(const sys__heap_node* cells) {
     const sys__heap_node a = cells[SYS__SCHEDULER__REQUEST_ANSWER];
     if (sys__heap_node__carries_reference(a.dtype)) sys__scheduler__zzprivate_killed_into(a.args[0]);
@@ -452,8 +466,8 @@ static __device__ inline bool sys__scheduler__continue(sys__heap_node* base, uin
  * names a second program, so no second program ever runs in that environment. The block that takes the request runs
  * the same evaluation on from the same form: the evaluator rewrites each form with its value, so the program as it
  * stands is the rest of the computation. What was its block's while it ran there and is its own goes in the same
- * array: its collection mode, and the answer it last asked of each block (`(sys__wait cu)` reads it). The names its
- * gate bound stay bound in its environment, and go with it. */
+ * array: its collection mode. The answers it holds are bound in its environment, as the names its gate bound are, and
+ * go with it. */
 static __thread uint64_t sys__scheduler__zzprivate_handed = 0ull;          /* the block it moves to, plus one, or 0 */
 static __thread uint64_t sys__scheduler__zzprivate_resume_places = 0ull;   /* a moved computation's places, held */
 static __thread uint64_t sys__scheduler__zzprivate_resume_current = 0ull;  /* and its form, held by them */
@@ -462,12 +476,12 @@ static __thread uint64_t sys__scheduler__zzprivate_resume_current = 0ull;  /* an
  * ⚖ 2026-11-07 *"the only place that needs attention and that must not wait on things is an opcode, so as long as we
  * specify that and that c opcodes do not wait but return and let the wait be done in lisp then we are good. we can also
  * say that sys__wait sends the computation to the back of the queue if the object is not available"* (NN-158).
- * `(sys__wait a)` on an answer not there yet leaves its form as it stands and hands the computation to its own block's
+ * `(sys__wait_for_result a)` on an answer not there yet leaves its form as it stands and hands the computation to its own block's
  * queue, as `continue_on` would, with `a` its gate: the block parks a gated step until its gate fills and runs it then,
  * before what was queued after it (`zzengine_next`), and there the same form is applied again and answers the value.
  * Nothing spins, and the block runs what else waits meanwhile. ⛔ ONLY WHAT MAY MOVE IS PARKED — an answer to fill, an
  * environment of its own, not inside `compute_inline` (a model's step keeps a worker's scratch between verbs) — and a
- * step whose park found no room once waits where it stands for the rest of it: `sys__wait` applied again would only try
+ * step whose park found no room once waits where it stands for the rest of it: `sys__wait_for_result` applied again would only try
  * again. Those wait as they always did, bounded, and a wait that runs out answers ANSR. */
 static __thread uint64_t sys__scheduler__zzprivate_park_gate = 0ull;   /* the answer a hand-off parks on, held, or 0 */
 static __thread bool     sys__scheduler__zzprivate_park_refused = false;   /* this step's park found no room */
@@ -532,12 +546,8 @@ static __device__ inline bool sys__scheduler__zzengine_move(sys__heap_node* base
         sys__fault__raise(0ull, SYS__SCHEDULER__FAULT_NOT_QUEUED);
         return false;
     }
-    bool asked = false;
-    for (uint32_t b = 0u; me < SYS__SCHEDULER__ASKED_BLOCKS && b < SYS__SCHEDULER__ASKED_BLOCKS && !asked; ++b)
-        asked = sys__scheduler__zzprivate_asked[me][b] != 0ull;
     const bool mode = sys__garbage_collection__zzpackage_manual();
-    const uint64_t carried = sys__node_array__create((uint64_t)SYS__SCHEDULER__CARRIED_ASKED
-                                                     + (asked ? (uint64_t)SYS__SCHEDULER__ASKED_BLOCKS : 0ull));
+    const uint64_t carried = sys__node_array__create((uint64_t)SYS__SCHEDULER__CARRIED_CELLS);
     if (carried == 0ull) {
         if (gate != 0ull) { (void)sys__heap_object__release(gate); sys__scheduler__zzprivate_park_refused = true; }
         sys__fault__raise(0ull, SYS__SCHEDULER__FAULT_NOT_QUEUED);
@@ -551,12 +561,6 @@ static __device__ inline bool sys__scheduler__zzengine_move(sys__heap_node* base
     ok = ok && sys__node_array__set(carried, SYS__SCHEDULER__CARRIED_CURRENT, &cell);
     const sys__heap_node path = sys__heap_object__reference_to(places);
     ok = ok && sys__node_array__set(carried, SYS__SCHEDULER__CARRIED_PLACES, &path);        /* its own hold */
-    for (uint32_t b = 0u; ok && asked && b < SYS__SCHEDULER__ASKED_BLOCKS; ++b) {
-        const uint64_t a = sys__scheduler__zzprivate_asked[me][b];
-        if (a == 0ull) continue;
-        const sys__heap_node ref = sys__heap_object__reference_to(a);
-        ok = sys__node_array__set(carried, (uint64_t)SYS__SCHEDULER__CARRIED_ASKED + b, &ref);
-    }
     const uint64_t env = base->args[SYS__COMPUTING_BASE__BINDINGS];
     ok = ok && sys__scheduler__zzprivate_queue(cu, env, program, answer, gate, carried);
     (void)sys__heap_object__release(carried);                       /* the request holds its own, if it was queued */
@@ -570,25 +574,20 @@ static __device__ inline bool sys__scheduler__zzengine_move(sys__heap_node* base
      *   below reads or writes them, and the evaluator only lets its holds go. */
     sys__computing_base__zzengine_set_answer(base, SYS__SCHEDULER__CONTINUED);
     (void)sys__heap_object__release(answer);
-    if (me < SYS__SCHEDULER__ASKED_BLOCKS) sys__scheduler__zzprivate_gate_bound[me] = false;   /* its names went with it */
+    if (me < SYS__SCHEDULER__BLOCK_ROWS) sys__scheduler__zzprivate_gate_bound[me] = false;   /* its names went with it */
     if (mode) (void)sys__garbage_collection__manual(false);                    /* the mode went too */
     sys__scheduler__zzprivate_inline = 0u;                                     /* and how deep inline it stood */
     return true;
 }
 
-/* What a moved computation carried, made block `me`'s as its step is taken: its mode, its asked row, and where its
- * evaluation stands, kept for `eng__eval` to take. False for a request that did not move. */
+/* What a moved computation carried, made block `me`'s as its step is taken: its mode and where its evaluation stands,
+ * kept for `eng__eval` to take. False for a request that did not move. */
 static __device__ inline bool sys__scheduler__zzprivate_unpack(uint32_t me, const sys__heap_node* carried) {
     if (!sys__heap_node__carries_reference(carried->dtype) || !sys__node_array__is(carried->args[0])) return false;
     const uint64_t from = carried->args[0];
     const sys__heap_node mode = sys__node_array__borrow(from, SYS__SCHEDULER__CARRIED_MODE);
     (void)sys__garbage_collection__manual(mode.dtype == SYS__KIND__VALUE_INT && (mode.args[0] & 1ull) == 1ull);
     sys__scheduler__zzprivate_inline = mode.dtype == SYS__KIND__VALUE_INT ? (unsigned int)(mode.args[0] >> 1) : 0u;
-    const uint64_t length = sys__node_array__length(from);
-    for (uint32_t b = 0u; (uint64_t)SYS__SCHEDULER__CARRIED_ASKED + b < length && b < SYS__SCHEDULER__ASKED_BLOCKS; ++b) {
-        const sys__heap_node a = sys__node_array__borrow(from, (uint64_t)SYS__SCHEDULER__CARRIED_ASKED + b);
-        if (sys__heap_node__carries_reference(a.dtype) && a.args[0] != 0ull) sys__scheduler__zzpackage_ask(me, b, a.args[0]);
-    }
     const sys__heap_node path = sys__node_array__borrow(from, SYS__SCHEDULER__CARRIED_PLACES);
     const sys__heap_node form = sys__node_array__borrow(from, SYS__SCHEDULER__CARRIED_CURRENT);
     if (!sys__heap_node__carries_reference(path.dtype) || path.args[0] == 0ull) return false;
@@ -773,7 +772,7 @@ static __device__ inline bool sys__scheduler__zzengine_killed(sys__heap_node* ba
 
 /* A block's parked steps of a process killed, refused: they wait on answers that may never fill. */
 static __device__ inline void sys__scheduler__zzprivate_drop_killed_parked(uint32_t me) {
-    if (me >= SYS__SCHEDULER__ASKED_BLOCKS || sys__silicon__read_u32(&sys__scheduler__zzprivate_kills) == 0u) return;
+    if (me >= SYS__SCHEDULER__BLOCK_ROWS || sys__silicon__read_u32(&sys__scheduler__zzprivate_kills) == 0u) return;
     for (uint32_t i = 0u; i < sys__scheduler__zzprivate_parked_n[me];) {
         if (!sys__scheduler__zzpackage_killed(sys__scheduler__zzprivate_request_pid(sys__scheduler__zzprivate_parked[me][i]))) {
             ++i;
@@ -786,6 +785,7 @@ static __device__ inline void sys__scheduler__zzprivate_drop_killed_parked(uint3
 }
 
 static __device__ inline bool sys__scheduler__zzengine_next(sys__heap_node* base, uint32_t me) {
+    (void)sys__scheduler__zzengine_decommissions(me);       /* what another block handed back, let go of here first */
     const uint64_t queue = sys__scheduler__queue(me);
     /* ⭐ THE LOOKS WRITE NOTHING: every idle turn of every block makes them, and a lock taken to count would bounce
      * the queue's line between the poller and every block appending to it. A parked step's gate is one word read. */
@@ -804,7 +804,7 @@ static __device__ inline bool sys__scheduler__zzengine_next(sys__heap_node* base
         /* ⭐ A PARKED STEP WHOSE GATE FILLED GOES FIRST, the oldest: it was queued before anything still on the
          * queue. */
         const uint32_t first = sys__scheduler__zzprivate_first_open(me);
-        if (me < SYS__SCHEDULER__ASKED_BLOCKS && first < sys__scheduler__zzprivate_parked_n[me]) {
+        if (me < SYS__SCHEDULER__BLOCK_ROWS && first < sys__scheduler__zzprivate_parked_n[me]) {
             sys__scheduler__zzprivate_unpark(me, first, taken);
             got = true;
         }
@@ -842,11 +842,10 @@ static __device__ inline bool sys__scheduler__zzengine_next(sys__heap_node* base
     sys__scheduler__zzprivate_pid = (unsigned int)sys__scheduler__zzprivate_request_pid(taken);   /* the step's process */
     sys__scheduler__zzprivate_inline = 0u;                         /* inline nowhere, unless it moved here so (unpack) */
     sys__scheduler__zzprivate_park_refused = false;                /* and free to park */
-    sys__scheduler__zzengine_forget_asked(me);                     /* a computation begins with nothing asked */
     sys__scheduler__zzprivate_forget_gate(me);
     const sys__heap_node gate = taken[SYS__SCHEDULER__REQUEST_GATE];
     if (sys__heap_node__carries_reference(gate.dtype) && gate.args[0] != 0ull) {
-        if (me < SYS__SCHEDULER__ASKED_BLOCKS) sys__scheduler__zzprivate_gate[me] = gate.args[0];
+        if (me < SYS__SCHEDULER__BLOCK_ROWS) sys__scheduler__zzprivate_gate[me] = gate.args[0];
         else (void)sys__heap_object__release(gate.args[0]);
     }
     /* `init` takes its own holds, so the queue's go back; a half request leaves the base at ERROR, which the post on
@@ -891,7 +890,6 @@ static __device__ inline void sys__scheduler__zzengine_put_away(sys__heap_node* 
      *   its hold is let go of after, the answer filled while the base still held it. */
     const uint64_t answer = sys__computing_base__zzengine_answer(base);
     sys__computing_base__zzengine_set_answer(base, 0ull);
-    sys__scheduler__zzengine_forget_asked(me);
     sys__scheduler__zzprivate_forget_gate(me);
     sys__scheduler__zzprivate_forget_resume();         /* a moved request that never began leaves nothing behind */
     sys__scheduler__zzprivate_pid = 0u;                 /* no step runs here: a request made now is a new process's */

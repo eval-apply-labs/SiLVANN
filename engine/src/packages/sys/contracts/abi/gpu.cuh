@@ -30,8 +30,8 @@
  * ⛳ ONE TABLE PER FAMILY, NOT ONE PER DEVICE: which device an operation acts on is the one the calling
  * thread bound with `bind_device`, which answers for the calling thread only, as both vendors' runtimes do.
  * ⚠ `bool` IS NOT YET THE BOUNDARY'S TYPE. A C `_Bool` and a C++ `bool` agree on every compiler this tree
- * builds with, but the boundary's rule is a fixed-width status, and it is owed on the day a door crosses
- * a binary rather than a translation unit. ▶ `docs/design/pending/evaluator_and_providers.md` §②.
+ * builds with, and that is what a door relies on as it crosses into a family's own library; the boundary's
+ * rule is a fixed-width status, owed to these rows.
  *
  * ── THE ROW ──────────────────────────────────────────────────────────────────────────────────────────
  * Every package's door list has this shape: `X(PKG, RETURN, NAME, FUNCTION, (PARAMETERS))`. The FUNCTION

@@ -57,10 +57,11 @@
     /* ⭐⭐ THE JOIN — WHAT LETS AN ARITHMETIC VERB READ A WEIGHT WITHOUT A SECOND COPY OF IT. Until    */ \
     /* this existed the load path put weights in PAGES and every compute verb took an `nn__buffer`      */ \
     /* whose bytes come from the POOL, so a real weight had to be loaded twice to be used once.         */ \
-    /* ⛔ IT IS MINTED FROM THE INDEX AND NEVER FROM A RAW ADDRESS: `(nn__expert__plane layer expert    */ \
-    /* offset bytes)` looks the expert UP and checks the span lies inside that expert's OWN slot, so a  */ \
-    /* program can never name memory it was not given. ⇒ ★ THE BOUND IS CHECKED BY THE THING THAT       */ \
-    /* KNOWS THE SLOT WIDTH — the same argument that makes `assign` take no class.                      */ \
+    /* ⛔ IT IS MINTED FROM THE INDEX AND NEVER FROM A RAW ADDRESS: `(nn__expert__plane layer type      */ \
+    /* which offset bytes)` looks the expert UP at `[layer][type][which]` and checks the span lies      */ \
+    /* inside that expert's OWN slot, so a program can never name memory it was not given.              */ \
+    /* ⇒ ★ THE BOUND IS CHECKED BY THE THING THAT KNOWS THE SLOT WIDTH — the same argument that makes   */ \
+    /* `assign` take no class.                                                                          */ \
     X(PKG, 14, "nn__expert__plane",   nn__expert__zzpackage_apply_plane,             NN__EXPERT__PLANE) \
     /* ⭐⭐ THE ROTATION — `R(v) = H·(S⊙v)`, and it is the GAUSSIAN family's PRECONDITION rather than an */ \
     /* optimisation beside it. A fixed codebook is only correct if every row is Gaussian; a row of      */ \
@@ -206,8 +207,8 @@
     X(PKG, 48, "nn__expert__prefetch", nn__expert__zzabi_adapter_prefetch,         NN__EXPERT__PREFETCH) \
     X(PKG, 49, "nn__expert__settle",  nn__expert__zzabi_adapter_settle,            NN__EXPERT__SETTLE) \
     /* ⭐ A BUFFER FROM ANOTHER WORKER — ⚖ *"adding a buffer roster on the host so we can move around data between */ \
-    /* the cards"*: `(nn__buffer__copy from worker to bytes)` runs on the worker that receives, `from` on the     */ \
-    /* worker named, through RAM — after that worker's work is done.                                           */ \
+    /* the cards"*: `(nn__buffer__copy from to bytes)` runs on the worker that receives, `from` read where its    */ \
+    /* bytes are — the memory it records — through RAM, after that memory's worker is done.                     */ \
     X(PKG, 50, "nn__buffer__copy",    nn__buffer__zzabi_adapter_copy,              NN__BUFFER__COPY) \
     /* ⭐⭐ THE KV CACHE IN TIERS — ⚖ *"rotated from the start, tq8 for the warm tier … and tq4 for the cold"*: the     */ \
     /* rotation a head at a time, a rotated row quantised as the codec would, and a residual over TurboQuant rows.   */ \

@@ -5,7 +5,7 @@
 /* ══ ai_qwen_3's VERBS — the Qwen3-Next / 3.5 / 3.6 layer's blocks, as single opcodes ═════════════════════
  * ⚖ *"we could do a qwen package where we combine nn words into a qwen opcode, and then at compose time we can
  * decide what is the situation"* · ruled: wave-local fusion, a plane table, the residual inside,
- * the package named ai_qwen_3. ▶ `docs/design/pending/qwen_package.md`. */
+ * the package named ai_qwen_3. ▶ `packages/ai_qwen_3/README.md`, "Why a layer is a few verbs". */
 #define ai_qwen_3__LANGUAGE_CONTRACT__VERBS(X, PKG)                                                    \
     /* ⭐⭐ THE SPARSE MoE BLOCK AND ITS RESIDUAL: `out = h1 + MoE(h1)` in nine launches of nn's doors,  */ \
     /* where the verbs it replaces make sixty-two. ▶ `cpu/opcodes/moe__abi.cuh`.                        */ \

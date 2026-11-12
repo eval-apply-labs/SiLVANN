@@ -114,7 +114,7 @@
  * why the wait is there, and it is deliberately the same delay for every block, since block N polls base
  * N and has no rival to fall out of phase with. And two sites multiply this length by a try count to
  * make a TIMEOUT, so the number decides an ANSWER: `ENG__ABI__DISPATCH_TIMED_OUT` and
- * `SYS__C_FIXED_STACK__FAULT_LOCK`; `sys__wait`'s bound is the clock's (`SYS__COMPUTING_BASE__WAIT_NS`).
+ * `SYS__C_FIXED_STACK__FAULT_LOCK`; `sys__wait_for_result`'s bound is the clock's (`SYS__COMPUTING_BASE__WAIT_NS`).
  * ⇒ ★ A BACKEND THAT MAKES THIS CHEAP BREAKS NO CORRECTNESS ARGUMENT; it restores full-rate idle polling
  * and turns a legitimately slow producer into a stale answer. Nobody here needs an exact interval, and
  * everybody needs roughly the length they asked for.

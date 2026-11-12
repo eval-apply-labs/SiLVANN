@@ -27,8 +27,10 @@ goes back at the moment that form is placed. What comes back holds everything un
     (let ((n v) ...) b ...) becomes `(sys__let env 'n v ... '(begin b ...))`
     (set! n v)              becomes `(sys__bindings__set env 'n v)` — the name quoted, the value not
     (defun (f a) b ...)     becomes `(sys__defun env 'f '(a) '(begin b ...))`
-⛳ THE ENVIRONMENT IS AN ARGUMENT TO ALL FOUR, because it is one to the verbs they become. A program
-written here names no environment; the composer puts the one it was given into the cells.
+    (=> s1 s2 ... sn)       becomes nesting, each step's answer the next step's first argument
+⛳ THE ENVIRONMENT IS AN ARGUMENT TO `let`, `set!` AND `defun`, because it is one to the verbs they become.
+A program written here names no environment; the composer writes 0 into that cell, which those verbs read as
+the environment of whatever computation runs the form (▶ `_env_cell`).
 ⛳ AND A BODY OF SEVERAL FORMS IS WRAPPED IN A `begin`, because those verbs take ONE body and a sequence
 needs a head or there is nothing to apply.
 """
@@ -61,9 +63,8 @@ SURFACE = {
 # first argument, so a program does not write one; `if` is here for a different reason — its arms are
 # QUOTED, and a program that wrote them quoted would be writing down what the engine requires rather than
 # what it means.
-# ⛳ THE SPELLING A PROGRAM WRITES -> THE `_lower_*` THAT HANDLES IT. It was a tuple and the method was
-# derived by stripping punctuation, which cannot name `=>` — and a table says what a derivation only
-# implies.
+# ⛳ THE SPELLING A PROGRAM WRITES -> THE `_lower_*` THAT HANDLES IT. A table, because a method name
+# derived by stripping punctuation cannot name `=>` — and a table says what a derivation only implies.
 LOWERED = {"let": "let", "set!": "set", "defun": "defun", "if": "if", "=>": "thread"}
 
 # The two truths, written as a value rather than a name: `#t` and `#f` are what a program hands a switch —
@@ -340,11 +341,11 @@ class Composer:
         #   evaluator resolves, and the arguments after it. That is how a procedure calls itself.
         return self._emit([self._form(head)] + [self._form(a) for a in node[1:]])
 
-    # ── the four the composer lowers ────────────────────────────────────────────────────────────────
+    # ── the five the composer lowers ────────────────────────────────────────────────────────────────
     def _env_cell(self):
         """⭐ 0: THE ENVIRONMENT OF WHATEVER COMPUTATION RUNS THE FORM — `let`, `set!` and `defun` resolve it from their
-        computing base. It was this composer's own environment, so a picture composed here and handed to another block
-        bound into the HOST's names there, and read its own, where nothing was bound. On the host it is the same one."""
+        computing base. Not this composer's own environment: a picture composed here and handed to another block would
+        bind into the HOST's names there, and read its own, where nothing was bound. On the host it is the same one."""
         if self.env is None:
             raise ComposerError("this form needs an environment and the composer was given none")
         return self._cell_int(0)

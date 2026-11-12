@@ -29,7 +29,9 @@
  *                     against a side table: "a side table asked whether anyone holds a thing is a
  *                     reference count that is not one."
  *   THE GENERATION    release fires at zero holders, so no stale reference can exist to be detected.
- *   THE FREE MASK     a list, with the object lock every push and pop in this tree already takes.
+ *   THE FREE MASK     a list, its worker's alone, popped and appended to with no lock: a list is one
+ *                     owner's (▶ `sys/cpu/list__header.cuh`), and only threads running as its worker
+ *                     reach it — `REASONED`, a premise nothing checks (▶ `activation_buffer_pool.md` §⑧).
  *   THE SLOT COUNT    "available?" is whether the list is empty. Nothing stores a number.
  *   THE RUN OFFSET    a buffer carries its own address. Nothing recomputes one from a base.
  *   THE 64-SLOT CAP   that was a one-word mask's limit wearing a design's clothes. A list has none.
@@ -44,9 +46,11 @@
  * system_register[hatch][nn_package_id][buffers][buffer_type]"*, and the node array sits on the buffer
  * types *"because buffer types are static"*.
  * ```
- *   hatch[nn][BUFFERS]        a node_array, one entry per class, each a reference to that class's list
- *   hatch[nn][BUFFER_SIZEOF]  a node_array, one entry per class, each a heap int: bytes per buffer
+ *   hatch[w][nn][BUFFERS]        a node_array, one entry per class, each a reference to that class's list
+ *   hatch[w][nn][BUFFER_SIZEOF]  a node_array, one entry per class, each a heap int: bytes per buffer
  * ```
+ * One hatch a worker `w`, so one pool a worker: `sys__package__own_row` reads the hatch of the worker the
+ * caller runs as.
  * ⛳ BOTH ARE COUNTED REFERENCES IN A HATCH ROW rather than words in a device static, which is what makes
  * the whole structure reachable from a release with no context AND owned by something that can let go of
  * it. A raw static holding a heap offset is a reference nothing retains.
@@ -193,6 +197,12 @@ static __device__ inline bool nn__buffer__zzpackage_carve(uint64_t span_at, uint
 /* ── RELEASE: THE BUFFER GOES HOME ───────────────────────────────────────────────────────────────────
  * ⛳ THE HOOK IS HANDED A HEAD AND THE LIST WANTS A REFERENCE, which is one line of arithmetic — the body
  * node is the head plus one, and its offset is what every other holder of this buffer has been using.
+ * ⭐ HOME IS THE WORKER THAT CARVED IT (NN-181): the free list is the running worker's, written by its thread alone
+ *   with no lock, so a buffer whose last hold goes on another worker's thread — an answer of the CPU's let go of on a
+ *   card's block — is handed to its owner's block (`sys__scheduler__decommission_on`), whose runner lets go of it on
+ *   its own thread between its computations, and this release runs again there and files it. The handing over takes a
+ *   hold, so the buffer outlives this release as the filing's append makes it; where the scheduler cannot take it (not
+ *   up, or coming down) it is filed here, as a buffer let go of at home is.
  * ⛔ IF THE FILING FAILS THE BUFFER IS LOST, and it is lost QUIETLY unless this says so: the count stays
  * at zero, the node's room goes back to the heap, and the span it named has no owner and no record. That
  * is the one outcome here with no later symptom, so it raises. */
@@ -200,6 +210,9 @@ static __device__ SYS__NOINLINE void nn__buffer__zzpackage_release_internal(sys_
                                                                           uint64_t* releaser_stack) {
     (void)releaser_stack;                     /* a buffer holds no other object, so nothing is handed on */
     if (head == 0) return;
+    const uint64_t owner = head[1].args[NN__BUFFER__OWNER];
+    if (owner != 0ull && owner != (uint64_t)sys__silicon__worker() + 1ull
+        && sys__scheduler__decommission_on((uint32_t)(owner - 1ull), sys__heap__offset(head + 1))) return;
     const uint64_t kind = head[1].args[NN__BUFFER__CLASS];
     const uint64_t list = nn__buffer__zzpackage_freelist(kind);
     if (list == 0ull) { sys__fault__raise(0ull, NN__BUFFER__FAULT_NO_POOL); return; }

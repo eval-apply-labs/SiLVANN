@@ -14,7 +14,7 @@ bitsandbytes' **NF4** verbatim at D=4; and rotation-then-precomputed-scalar-Lloy
 no calibration is **TurboQuant's** method, with the dense random rotation replaced by the RHT exactly
 as **QuIP#** does. Applying the same rotation to activations and the KV cache is **QuaRot**. Past a
 scalar codebook lies vector quantisation (QuIP#'s E8 lattices), which is what §⑭ means when it says
-the level placement is finished. ▶ `src/docs/design/pending/quant_families.md` §⓪.
+the level placement is finished. ▶ `src/docs/design/quant_families.md` §⓪.
 
 ⛔ This file produces FAMILY 2, which only `src/packages/nn/cpu/turboquant__impl.cuh` reads.
 
@@ -39,15 +39,17 @@ tensor-wide scale degrades *worse* as D rises (`+1.3%` at D=4 on `L3 down`, `+31
 scale the pooled energy is the SAME CONSTANT for every tensor in the model (D=4 -> 0.00942..0.00952
 across experts, q_proj and o_proj alike), so `sigma` is a function of D and nothing else. That is what
 makes "pick a D for this tensor" a meaningful act.
-▶ `src/docs/design/pending/quant_families.md` · `measurements/2026-09-21_scale_and_width_granularity.md`
+▶ `src/docs/design/quant_families.md` · the measurement's record is the archive repository `silvann`'s
+(`measurements/2026-09-21_scale_and_width_granularity.md`, not in this tree); this tree's
+`measurements/2026-09-21_span_does_not_change_the_error.md` ④ quotes its numbers.
 
 ── ⛔ WHAT THIS FILE DOES NOT DO, NAMED SO NOTHING READS AS FINISHED ─────────────────────────────────
 · IT DOES NOT CHOOSE THE LEVELS FOR YOU. `POLICY` below is a DEFAULT, and every entry in it is
   `ASSUMED` — no end-task run has scored any of them. What would falsify one: a perplexity or
   output-agreement run at that level against bf16. What depends on it: the whole pack's quality.
 · IT DOES NOT ROTATE THE ACTIVATION. A family-2 row decodes correctly and still computes a WRONG
-  product until the runtime applies the same `R` to the activation — `nn__hadamard__rotate` is verb
-  15 and the wiring is not done.
+  product unless the same `R` is applied to the activation — `nn__hadamard__rotate`, which the models'
+  programs call (`lisp/<family>.lisp`).
 · THE SIGN VECTOR IS GENERATED FROM A SEED HERE AND ALSO EMITTED AS A PLANE. ⚖ The plane is what was
   ruled (512 bytes for the whole model); the seed is kept so a reader can regenerate it. If the two
   ever disagree the PLANE is the file's truth.
@@ -106,9 +108,9 @@ SIGN_MASTER_BITS = 4096               # ⚖ the ruled plane: 512 bytes for the w
 #   {-1,+1} and `k` comes out of the Lloyd solve as 0.7979 = sqrt(2/pi) = E|X| for a unit Gaussian,
 #   which is the textbook one-bit quantiser. A weight becomes THE SIGN OF ITS ROTATED SELF times one
 #   fp16 a row — every magnitude inside the row is gone.
-#   ⛔ AND IT IS THE WORST CASE FOR THE WHOLE APPROACH, not a neutral one: `quant_families.md` §⑭ⓐ
-#   measures the rotation as worth -53.7% at D=1 rising to -91.8% at D=8, so q1 is exactly where the
-#   Hadamard helps LEAST. Expect ~60% rms on the weights. **Nothing should ship at this width.**
+#   ⛔ AND IT IS THE WORST CASE FOR THE WHOLE APPROACH, not a neutral one: `measurements/2026-09-21_bit_ladder_normal_layers.md`
+#   measures the rotation's error reduction smallest at D=1 on every tensor (layer 0's `down`: -53.7% at D=1,
+#   -91.7% at D=8), so q1 is exactly where the Hadamard helps LEAST. Expect ~60% rms on the weights. **Nothing should ship at this width.**
 # ⛳ THE ALLOWED VALUES, AND NOTHING MORE — ⚖ *"the ladder stays only as the possible allowed
 #   values."* A width is CHOSEN by `POLICY`, never searched for. ▶ the error table beside it.
 #
@@ -166,7 +168,7 @@ REF.table = table
 #
 # ⛔⛔ EVERY WIDTH BELOW IS `ASSUMED`, NOT `MEASURED`. They are placed by role and by row width, not by
 #   any score: nothing has run the model. The one thing that IS measured is what each width costs in
-#   error (`quant_families.md` §⑭) — and an error in weight space is not a quality in output space.
+#   error (`quant_families.md` §⑤) — and an error in weight space is not a quality in output space.
 #   ⇒ ★ THE MAP IS THE KNOB THIS FILE EXISTS TO EXPOSE. Do not read these numbers as recommendations.
 #
 # `RAW` means "do not QUANTISE this tensor": a 1-D tensor has no contraction axis to rotate, and the
@@ -411,7 +413,7 @@ def blocks_for(cols):
     with `cols % 128 >= 64`), and `65..127` for the rest — the band `cols % 128` in `[1,63]`, exactly as
     stated. A 64 tier would only shave that second band, and `MEASURED`, it shaves NONE of the real
     shapes: the one that needs padding is 4304, whose residue is 80 and which therefore already sits in
-    the cheap half. ▶ `quant_families.md`'s padding section for the full pricing.
+    the cheap half. ▶ `quant_families.md` §⑦ for the padding.
 
     ⛔⛔ **THE ZEROS GO AT THE FRONT AND THAT IS A CORRECTNESS CALL.** Pooled at the tail they would make
     the LAST block almost all zeros — an rms far below its neighbours' — while the row carries ONE scale
@@ -682,10 +684,10 @@ def selftest(raw=None, rows=6):
     ⇒ ★ AN AGGREGATE AGREEMENT IS A CLAIM ABOUT THE METRIC; a code-for-code one is a claim about the
     format. Only the second catches a butterfly order, a tie-break or a rounding mode."""
     ok_ladder = ladder_selftest()
-    raw = raw or os.environ.get("SILVANN_RAW_MODEL", "/mnt/data/bigdisk/qwen_36_35_a3b")
+    raw = raw or os.environ.get("SILVANN_RAW_MODEL", "")
     name = "model.language_model.layers.3.mlp.experts.down_proj"
     index = os.path.join(raw, "model.safetensors.index.json")
-    if not os.path.isfile(index):
+    if not raw or not os.path.isfile(index):
         print("SKIP — no raw model at %s (set SILVANN_RAW_MODEL); the ladder above still ran" % raw)
         return ok_ladder
     # ⛔⛔ TWO SUBJECTS, AND THE SECOND ONE EXISTS BECAUSE THE FIRST PASSES FOR THE WRONG REASON.

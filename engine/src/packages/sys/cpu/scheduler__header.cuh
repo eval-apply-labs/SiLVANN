@@ -19,9 +19,11 @@
  *     (sys__scheduler__add cu names program)         queue it on block `cu`: a new answer, handed back
  *     (sys__scheduler__add cu names program answer)  the same, into `answer`, which is handed back
  *     (sys__result answer)                           #t once the value is there, #f while it is on its way
- *     (sys__wait answer)                             the value, once it is there — the computation parked on the
+ *     (sys__wait_for_result answer)                  the value, once it is there — the computation parked on the
  *                                                    answer meanwhile, its block free; where it may not move (the
  *                                                    host's, inline), waited for where it stands, bounded
+ *     (sys__wait_for_device cu)                      #t once block `cu` is idle — its base free, its queue empty,
+ *                                                    nothing parked — a probe of the device, no value handed over
  *     (sys__scheduler__continue cu names program)    this computation goes on as `program` on block `cu` in `names` (0:
  *                                                    the names it runs in), into the same answer; this step fills
  *                                                    nothing, the next does
@@ -55,10 +57,9 @@
  * closure over its names with those names bound to the values they came to. A block that takes it earlier parks it and runs what is
  * queued behind it; the block that fills the last answer rings it. So two computations on one card each ask the CPU
  * and go on, and each one's next step runs while the other's experts are computed.
- * ⭐ A COMPUTATION KEEPS WHAT IT ASKED FOR BY BLOCK as well, so a program that asks a block one thing at a time names
- * the block rather than the answer: `(sys__result cu)` and `(sys__wait cu)` read the answer this computation last
- * asked of `cu` (▶ `sys__scheduler__zzpackage_asked`). That record is the running computation's, on its own block, and
- * goes with it.
+ * ⭐ WHAT A COMPUTATION CAME TO IS READ FROM ITS ANSWER, NEVER FROM THE BLOCK THAT RAN IT (⚖ 2026-11-11 *"no one names a
+ * worker to read a computing variable, they just name the return variable"*): a block may hold several askers' work, a
+ * pipeline's among them, so a block names no result. `(sys__wait_for_device cu)` is the block's own state, idle or not.
  *
  * ⛳ A CLOSURE RUN HERE AND NOW, IN THE MIDDLE OF A COMPUTATION, IS NOT THERE YET: the evaluator runs one evaluation a
  * block at a time and nothing inside it may start another (▶ `engine/eval.cuh`), so a closure is run as a block's next
@@ -86,6 +87,17 @@ static __device__ SYS__NOINLINE bool sys__scheduler__zzpackage_stand_up(void);
 /* A block's queue: the list, borrowed — perennial for the heap's life — or 0. */
 static __device__ inline uint64_t sys__scheduler__queue(uint32_t block);
 
+/* ⭐ A HOLD LET GO OF AT HOME (NN-181, ⚖ 2026-11-11 *"the deallocation just executes the deallocation code, which by
+ *   itself will ask a decommission on the rightful owner"*): an object whose memory is one worker's — a buffer carved
+ *   from its pool, filed back into its free list, which only its own thread writes — may lose its last hold on another
+ *   worker's thread. Its release hook then hands a hold of it to block `cu`, the worker that owns it, and returns: the
+ *   list takes its own hold, so the object outlives the release. That block's runner lets go of it between its
+ *   computations (`zzengine_decommissions`), on its own thread, where the same release files it home. Answers whether
+ *   it was handed over — false where the scheduler is not up, and the caller does what it did before. */
+static __device__ inline bool sys__scheduler__decommission_on(uint32_t cu, uint64_t object);
+/* What block `me` was handed to let go of, let go of here: answers how many. Its runner's, between computations. */
+static __device__ inline uint32_t sys__scheduler__zzengine_decommissions(uint32_t me);
+
 /* Queue a request on block `cu`, its value for `answer`, armed here (▶ `sys__answer__zzpackage_arm`). The request takes
  * its own holds on the bindings, the picture and the answer; the caller keeps its. Answers whether it was queued,
  * false having raised — the answer left as it was found where it was refused busy, and EMPTY where it was armed and
@@ -103,9 +115,9 @@ static __device__ inline bool sys__scheduler__continue(sys__heap_node* base, uin
  * stands, into the same answer. This says where, and the evaluator, finding it after the verb (`zzengine_handed`: the
  * block plus one, or 0, the word cleared), hands over what it holds (`zzengine_move`) and stops; the block that takes
  * it runs the evaluation on from the same form (`zzengine_resumed`: the places and the form, the places' hold handed
- * over). Its collection mode and what it asked each block go with it. False, having raised, where `base` has no
- * answer to fill or its step went on already (SCNQ), or where another program shares its environment (SCSH: the
- * host's, or one a continuation shares). */
+ * over). Its collection mode and how many `compute_inline` it stands inside go with it. False, having raised, where
+ * `base` has no answer to fill or its step went on already (SCNQ), or where another program shares its environment
+ * (SCSH: the host's, or one a continuation shares). */
 static __device__ inline bool     sys__scheduler__continue_on(sys__heap_node* base, uint32_t cu);
 static __device__ inline uint64_t sys__scheduler__zzengine_handed(void);
 static __device__ inline bool     sys__scheduler__zzengine_move(sys__heap_node* base, uint32_t cu, uint64_t program,
@@ -160,13 +172,6 @@ static __device__ inline bool     sys__scheduler__preemptive(void);
 static __device__ inline uint64_t sys__scheduler__zzpackage_gate(uint32_t me);
 static __device__ inline void     sys__scheduler__zzengine_bind_gate(sys__heap_node* base, uint32_t me, bool enter);
 static __device__ inline uint32_t sys__scheduler__zzengine_parked(uint32_t me);
-
-/* What the computation running on block `me` asked block `cu` for last: the answer, BORROWED — the record holds it
- * until the computation ends — or 0. `zzpackage_ask` records one, `zzengine_forget_asked` lets the record go at the
- * computation's end. Only block `me`'s runner reads or writes its own row. */
-static __device__ inline uint64_t sys__scheduler__zzpackage_asked(uint32_t me, uint32_t cu);
-static __device__ inline void     sys__scheduler__zzpackage_ask(uint32_t me, uint32_t cu, uint64_t answer);
-static __device__ inline void     sys__scheduler__zzengine_forget_asked(uint32_t me);
 
 /* The block's side (▶ `engine/opcodes.cuh`). `next`: its base, free, filled in the scheduler's name from the oldest of
  * its parked steps whose gate filled, or else from the oldest request on its queue that may run — one waiting for a

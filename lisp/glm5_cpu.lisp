@@ -2,7 +2,8 @@
 ;; A socket is a worker after the cards' — socket `s` is worker `s + FIRST_SOCKET` — and holds its part of every expert in its own
 ;; memory. Each picture copies the card's hand across and runs the layer HERE names over it, with that socket's experts
 ;; table: EX a position's, EXR a chunk's, each an array a socket of arrays a layer. C_HAND C_ROUTED C_HANDS C_RROWS are
-;; each socket's own buffers.
+;; each socket's own buffers. Each picture ends with the buffer it computed into, so that buffer is its answer: the card,
+;; waiting on the answer, is left holding it.
 
 (worker 1
   ;;   and where the card guessed the next MoE layer's picks (AHEAD_NEXT, NN-138), this socket's part of the first of the
@@ -13,28 +14,33 @@
   ;;   the card's launches for it waited behind their copies — MEASURED 2026-10-30, debian01 (the DL380), GLM on one card,
   ;;   no tier: 11.42 and 11.44 tokens/s against 12.10 and 12.02, the same tokens (measurements/2026-10-30_nn146_verbs_dl380.md)
   (picture xf (let ((s (- (sys__worker) FIRST_SOCKET)))
-                (nn__buffer__copy hand CARD (nth C_HAND s) HAND_BYTES 1)
+                (nn__buffer__copy hand (nth C_HAND s) HAND_BYTES 1)
                 (if (< 0 (nth AHEAD_NEXT (nth HERE 0)))
                     (ai_z__glm_5_3__experts (nth C_HAND s) picks (nth (nth EX s) (nth HERE 0)) (nth C_ROUTED s)
                                             guess (nth (nth EX s) (nth AHEAD_NEXT (nth HERE 0))) AHEAD SOCKETS)
-                    (ai_z__glm_5_3__experts (nth C_HAND s) picks (nth (nth EX s) (nth HERE 0)) (nth C_ROUTED s)))))
+                    (ai_z__glm_5_3__experts (nth C_HAND s) picks (nth (nth EX s) (nth HERE 0)) (nth C_ROUTED s)))
+                (nth C_ROUTED s)))
   ;; the card's tier visited and the card waited for (▶ glm5.lisp `tier_and_sockets`, VISIT_FIRST): the hand read beside
   ;;   the card's experts
   (picture xf_ready (let ((s (- (sys__worker) FIRST_SOCKET)))
-                      (nn__buffer__copy hand CARD (nth C_HAND s) HAND_BYTES 1)
-                      (ai_z__glm_5_3__experts (nth C_HAND s) picks (nth (nth EX s) (nth HERE 0)) (nth C_ROUTED s))))
+                      (nn__buffer__copy hand (nth C_HAND s) HAND_BYTES 1)
+                      (ai_z__glm_5_3__experts (nth C_HAND s) picks (nth (nth EX s) (nth HERE 0)) (nth C_ROUTED s))
+                      (nth C_ROUTED s)))
   ;; a seat's (▶ glm5.lisp's two seats): the seat in HERE's second cell, its hand, its picks and its own buffers here
   (picture xf2 (let ((s (- (sys__worker) FIRST_SOCKET)) (k (nth HERE 1)))
-                 (nn__buffer__copy (nth HAND_OF k) CARD (nth (nth C_HAND_OF k) s) HAND_BYTES 1)
+                 (nn__buffer__copy (nth HAND_OF k) (nth (nth C_HAND_OF k) s) HAND_BYTES 1)
                  (ai_z__glm_5_3__experts (nth (nth C_HAND_OF k) s) (nth PICKS_OF k) (nth (nth EX s) (nth HERE 0))
-                                         (nth (nth C_ROUTED_OF k) s))))
+                                         (nth (nth C_ROUTED_OF k) s))
+                 (nth (nth C_ROUTED_OF k) s)))
   (picture xr (let ((s (- (sys__worker) FIRST_SOCKET)))
-                (nn__buffer__copy hands CARD (nth C_HANDS s) (* (nth nrows 0) HAND))   ; the chunk's rows, not a whole chunk's
-                (ai_z__glm_5_3__experts_rows (nth C_HANDS s) (nth (nth EXR s) (nth HERE 0)) (nth C_RROWS s) (nth nrows 0))))
+                (nn__buffer__copy hands (nth C_HANDS s) (* (nth nrows 0) HAND))   ; the chunk's rows, not a whole chunk's
+                (ai_z__glm_5_3__experts_rows (nth C_HANDS s) (nth (nth EXR s) (nth HERE 0)) (nth C_RROWS s) (nth nrows 0))
+                (nth C_RROWS s)))
   ;; the embedding the first socket's (EMBED_ON_CPU, ▶ glm5.lisp `embed_e`): a token's row, decoded from c_embedding into c_emb
   (picture xe (let ((tok (nth EMB_TOK 0)))
                 (nn__turboquant__decode (nn__vector__range c_embedding (* tok EMB_HALVES) EMB_HALVES)
-                                        (nn__vector__range c_embedding (+ EMB_SCALES tok) 1) c_emb 1 HIDDEN EMB_BITS))))
+                                        (nn__vector__range c_embedding (+ EMB_SCALES tok) 1) c_emb 1 HIDDEN EMB_BITS)
+                c_emb)))
 
 ;; what a socket's block sees: the pictures, the tables, the card's hand, picks and guess — the bindings as they stand
 (view names)

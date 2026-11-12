@@ -8,7 +8,7 @@
 name: "images"
 on:
   push:
-    tags: ["v*"]
+    tags: ["v*", "n*", "rel*"]
   workflow_dispatch:
 
 permissions:
@@ -40,10 +40,13 @@ jobs:
         env:
           VARIANT: ${{ matrix.variant }}
           DOCKERFILE: ${{ matrix.dockerfile }}
+        # the tag's version without its prefix — `rel` a signed release's, `n` an unsigned one's, `v` the tags before
+        #   them — so `n0.28.0` is `:0.28.0-…` and its major `:0-…`. The build's RUN steps use the runner's own network:
+        #   in the default one they could not resolve Ubuntu's archive (n0.28.0's run, 2026-11-11)
         run: |
-          version=${GITHUB_REF_NAME#v}; major=${version%%.*}
+          version=${GITHUB_REF_NAME#rel}; version=${version#n}; version=${version#v}; major=${version%%.*}
           image=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/silvann
-          docker build -f "$DOCKERFILE" \
+          docker build --network=host -f "$DOCKERFILE" \
             --build-arg SILVANN_SOURCE="https://github.com/${GITHUB_REPOSITORY}" \
             --build-arg SILVANN_REF="${GITHUB_REF_NAME}" --build-arg SILVANN_COMMIT="${GITHUB_SHA}" \
             -t "$image:$version-$VARIANT" -t "$image:$major-$VARIANT" .

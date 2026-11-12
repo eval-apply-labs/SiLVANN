@@ -134,8 +134,12 @@ def hold(path, alone=False):
     """The folder held for this process: a lock on `experts/.folder.lock`, shared by every boot of it and taken alone by
     a move — so no layer's bytes are freed under another process that reads them. Its descriptor, which the caller keeps
     open as long as it reads the folder (▶ `Machine.shutdown`) — None where the folder cannot be written; Refused where
-    another process holds it the other way."""
-    import fcntl
+    another process holds it the other way. On a system without `fcntl` (Windows), None: nothing there moves a folder's
+    experts, so there is nothing to hold it against."""
+    try:
+        import fcntl
+    except ImportError:
+        return None
     d = os.path.join(path, "experts")
     try:
         os.makedirs(d, exist_ok=True)

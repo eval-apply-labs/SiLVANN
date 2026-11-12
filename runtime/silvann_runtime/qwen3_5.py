@@ -314,7 +314,7 @@ class Qwen35(Generates):
                 or not all(isinstance(c, int) and not isinstance(c, bool) and c >= 0 for c in cards):
             raise Refused("cards is a list of one or more cards, each once, not %r" % (cards,))
         self.CARD_IDS, self.NCARDS = cards, len(cards)
-        # ⭐ ...EACH CARD A TIER OF ITS OWN (NN-166, seats.md ⑥ — ⚖ 2026-11-02 *"one conversation per card cleanly, jack up
+        # ⭐ ...EACH CARD A TIER OF ITS OWN (NN-166, seats.md — ⚖ 2026-11-02 *"one conversation per card cleanly, jack up
         #   the l1 cache"*): promoted by its one conversation's picks alone, inclusive, lent its own cache's unreached rows
         #   (▶ `_load_seat_cards`, `_lend`, `_room`); its seat's chain the tiered one (▶ qwen3_5.lisp's chain)
         if self.NCARDS > 1:
@@ -491,6 +491,11 @@ class Qwen35(Generates):
         # what the program reads of the two tables once the engine holds them and this program does not
         self.EMB_ROW_BYTES, self.EMB_BITS = int(self.emb_rec["row_bytes"]), int(self.emb_rec["d"])
         self.EMB_DATA_BYTES, self.HEAD_BITS = len(self.emb_data), 8 if self.HEADLESS else int(self.head_rec["d"])
+        # ⭐ THE TWO TABLES ARE THESE BYTES FROM HERE ON: the records' arrays are let go now, so while the engine takes its
+        #   copy (▶ `_head_and_embedding`) the load holds each table twice, not three times — a phone's whole room
+        for rec in (self.head_rec, self.emb_rec):
+            if rec is not None:
+                rec["vbr_data"] = rec["vbr_lut"] = None
         # ⭐ THE EMBEDDING, A TABLE IN RAM THE CARD READS IN PLACE: the rows, then the scales — a RAM buffer of its own class
         self.TABLE_BYTES = (len(self.emb_data) + len(self.emb_lut) + 255) // 256 * 256
         self.S_BYTES, self.W_BYTES = self.VH * self.LH * self.LH * 4, self.CONV_CH * 3 * 2
@@ -1143,11 +1148,13 @@ class Qwen35(Generates):
         else:
             m.act_as(self.CPU)
             loader = m.loader()
-            for l in layers:
+            for i, l in enumerate(layers):
                 loader.layer_width(l, 0, self.EXPERTS)
                 for x in range(self.EXPERTS):
                     loader.load_expert(self.b, e, 0, l, x, self.EXPERTS)
                     self.SRC.setdefault(l, []).append(loader.placed[-1][3])
+                if progress:                       # the experts' load said a layer at a time, as the dense part's
+                    progress(i + 1, len(layers))
             if loader.handed() != 0:
                 raise Refused("%d expert slots were reserved and never published" % loader.handed())
         self._backing = backing
@@ -1806,6 +1813,7 @@ class Qwen35(Generates):
         m.node_array("TP_POS", 1)
         m.node_array("TP_N", 1)
         m.node_array("TP_I", P)
+        m.node_array("TP_ASKED", P)                 # each other card's answer, its share of the layers waited for there
         rows = lambda l: ("dr%d" if self.kinds[l] == "d" else "atr%d" if self.TIERED else "ar%d") % l   # noqa: E731
         for k in range(1, P):
             m.array(self._named("MIXER", k), [self._named("mx%d" % l, k) for l in run])
@@ -1896,11 +1904,14 @@ class Qwen35(Generates):
         h1, h12 = (rng(hb, 0, H), rng(hb, H, H)) if hb else ("h1", "h12")
         if self.CPU_EXPERTS:
             m.act_as(self.CPU)
-            m.picture("xqb", "(begin (nn__buffer__copy hand CARD c_hand HAND_BYTES) (nn__buffer__copy hand2 CARD c_hand2 HAND_BYTES) "
-                      "(ai_qwen_3__experts c_hand picks (nth EXPERTS_CPU (nth HERE 0)) c_routed) "
-                      "(ai_qwen_3__experts c_hand2 picks2 (nth EXPERTS_CPU (nth HERE 0)) c_routed2))")
-            m.picture("xr2", "(begin (nn__buffer__copy hands CARD c_hands %d) "
-                      "(ai_qwen_3__experts_rows c_hands (nth EXPERTS_CPU_ROWS (nth HERE 0)) c_rrows 2))" % (2 * self.HAND_ROW))
+            # each position's experts a computation of its own, queued one behind the other on the CPU's block, each
+            # answered as the buffer it computed into
+            m.picture("xq1", "(begin (nn__buffer__copy hand c_hand HAND_BYTES) "
+                      "(ai_qwen_3__experts c_hand picks (nth EXPERTS_CPU (nth HERE 0)) c_routed) c_routed)")
+            m.picture("xq2", "(begin (nn__buffer__copy hand2 c_hand2 HAND_BYTES) "
+                      "(ai_qwen_3__experts c_hand2 picks2 (nth EXPERTS_CPU (nth HERE 0)) c_routed2) c_routed2)")
+            m.picture("xr2", "(begin (nn__buffer__copy hands c_hands %d) "
+                      "(ai_qwen_3__experts_rows c_hands (nth EXPERTS_CPU_ROWS (nth HERE 0)) c_rrows 2) c_rrows)" % (2 * self.HAND_ROW))
             m.act_as(CARD)
             m.view("names")
         for i, l in enumerate(main):
@@ -1916,13 +1927,16 @@ class Qwen35(Generates):
             if not self.MOE:
                 ffn = "(nn__mlp__apply %s ml%d %s) (nn__mlp__apply %s ml%d %s)" % (h1, l, x, h12, l, x2)
             elif rows2:
-                ffn = ("(ai_qwen_3__pre_expert_rows h1s pre%d hands 2) (sys__node_array__set HERE 0 %d) (sys__scheduler__add CPU names xr2) "
-                       "(sys__wait CPU) (nn__buffer__copy c_rrows CPU rrows %d) (ai_qwen_3__post_expert_rows h1s hands rrows post%d xs 2)"
+                ffn = ("(ai_qwen_3__pre_expert_rows h1s pre%d hands 2) (sys__node_array__set HERE 0 %d) "
+                       "(let ((expert_sums (sys__scheduler__add CPU names xr2))) (nn__buffer__copy (sys__wait_for_result expert_sums) rrows %d)) "
+                       "(ai_qwen_3__post_expert_rows h1s hands rrows post%d xs 2)"
                        % (l, i, 4 * H, l))
             elif self.CPU_EXPERTS:
                 ffn = ("(ai_qwen_3__pre_expert %s pre%d hand picks) (ai_qwen_3__pre_expert %s pre%d hand2 picks2) "
-                       "(sys__node_array__set HERE 0 %d) (sys__scheduler__add CPU names xqb) (sys__wait CPU) "
-                       "(nn__buffer__copy c_routed CPU routed HIDDEN_BYTES) (nn__buffer__copy c_routed2 CPU routed2 HIDDEN_BYTES) "
+                       "(sys__node_array__set HERE 0 %d) "
+                       "(let ((expert_sum (sys__scheduler__add CPU names xq1)) (expert_sum2 (sys__scheduler__add CPU names xq2))) "
+                       "(nn__buffer__copy (sys__wait_for_result expert_sum) routed HIDDEN_BYTES) "
+                       "(nn__buffer__copy (sys__wait_for_result expert_sum2) routed2 HIDDEN_BYTES)) "
                        "(ai_qwen_3__post_expert %s hand routed post%d %s) (ai_qwen_3__post_expert %s hand2 routed2 post%d %s)"
                        % (h1, l, h12, l, i, h1, l, x, h12, l, x2))
             elif self.FUSED and pairs:

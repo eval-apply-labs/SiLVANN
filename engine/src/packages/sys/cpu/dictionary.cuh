@@ -734,7 +734,7 @@ static __device__ inline sys__heap_node sys__dictionary__number_key(uint64_t num
     return key;
 }
 
-/* ⛳ ONE PLACE BUILDS THE KEY, so the two verbs cannot disagree about what a key IS. An INTEGER goes
+/* ⛳ ONE PLACE BUILDS THE KEY, so the three verbs cannot disagree about what a key IS. An INTEGER goes
  * through `number_key`, which zeroes every word the ordering compares — a cell that merely happens to
  * hold the right number in `args[0]` may carry rubbish in the rest, and the comparator reads them.
  * ⇒ ★ A KEY IS A CANONICAL FORM AND NOT "THE CELL THE CALLER PASSED", which is the kind of difference

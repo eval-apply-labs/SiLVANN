@@ -3,6 +3,7 @@
 
 /* What this file needs, named where a reader — and an editor — can follow it. */
 #include <dlfcn.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
 #include <sched.h>
@@ -128,7 +129,15 @@ static inline bool sys__os__memory_interleave(void* base, size_t bytes, const un
 static inline bool sys__os__memory_bind(void* base, size_t bytes, const unsigned long* nodes, unsigned long most) {
     return syscall(SYS_mbind, base, bytes, 2 /* MPOL_BIND */, nodes, most, 0u) == 0;
 }
-static inline void* sys__os__memory_aligned(size_t alignment, size_t bytes) { return aligned_alloc(alignment, bytes); }
+/* `errno` as the failed `mbind` left it: EPERM where a seccomp filter refuses the call (`MEASURED` in a vast.ai
+ * container without CAP_SYS_NICE, measurements/2026-11-10_nn140_2xa40.md), ENOSYS where the kernel has no NUMA policy.
+ * A node without the memory, or not one the process may use, is EINVAL or ENOMEM, and stays a failure. */
+static inline bool sys__os__memory_policy_refused(void) { return errno == EPERM || errno == ENOSYS; }
+/* `posix_memalign`, which glibc and Android's bionic both have (bionic's `aligned_alloc` begins at API 28) */
+static inline void* sys__os__memory_aligned(size_t alignment, size_t bytes) {
+    void* at = 0;
+    return posix_memalign(&at, alignment, bytes) == 0 ? at : 0;
+}
 static inline void sys__os__memory_aligned_free(void* at) { free(at); }
 
 static inline void sys__os__cpus_clear(sys__os__cpus* set) { CPU_ZERO(set); }
@@ -137,9 +146,11 @@ static inline bool sys__os__cpus_has(const sys__os__cpus* set, int cpu) { return
 static inline int  sys__os__cpus_count(const sys__os__cpus* set) { return CPU_COUNT(set); }
 static inline bool sys__os__cpus_of_thread(sys__os__cpus* set) { return sched_getaffinity(0, sizeof *set, set) == 0; }
 static inline bool sys__os__cpus_to_thread(const sys__os__cpus* set) { return sched_setaffinity(0, sizeof *set, set) == 0; }
+/* Linux keeps an affinity a thread, and `sched_setaffinity(0, …)` sets the calling thread's — bionic has no
+ * `pthread_setaffinity_np` */
 static inline void sys__os__cpu_pin_thread(int cpu) {
     cpu_set_t set; CPU_ZERO(&set); CPU_SET(cpu, &set);
-    (void)pthread_setaffinity_np(pthread_self(), sizeof set, &set);
+    (void)sched_setaffinity(0, sizeof set, &set);
 }
 static inline int sys__os__cpu_now(void) { return sched_getcpu(); }
 /* ⛳ THE TOPOLOGY IS `/sys/devices/system/cpu`: a CPU's node is the `node<n>` link in its folder, its package and core
@@ -176,6 +187,18 @@ static inline void sys__os__cpu_ticks(unsigned long long* busy, unsigned long lo
         }
     }
     fclose(f);
+}
+/* A CPU's speed: the scheduler's `cpu_capacity` where the kernel keeps it (1024 the fastest CPU, each other in proportion —
+ * an Arm processor's big and little cores), else its highest clock in kHz (`cpufreq/cpuinfo_max_freq`); -1 where
+ * neither can be read. */
+static inline int sys__os__cpu_capacity(int cpu) {
+    char path[128];
+    snprintf(path, sizeof path, "/sys/devices/system/cpu/cpu%d/cpu_capacity", cpu);
+    const int capacity = sys__os__zzprivate_read_int(path);
+    if (capacity > 0) return capacity;
+    snprintf(path, sizeof path, "/sys/devices/system/cpu/cpu%d/cpufreq/cpuinfo_max_freq", cpu);
+    const int khz = sys__os__zzprivate_read_int(path);
+    return khz > 0 ? khz : -1;
 }
 static inline long sys__os__cpu_l2_bytes(void) { return sysconf(_SC_LEVEL2_CACHE_SIZE); }
 
@@ -228,7 +251,11 @@ static inline SYS__OS__ZZPRIVATE_ALWAYS uint32_t sys__os__zzprivate_opencl_gpus(
  * ⛳ WSL2 HAS NO KFD: its GPUs are `/dev/dxg`, behind Windows' driver, and the topology names none. There an AMD card is
  *   named as Windows names it, by OpenCL's loader (PCI vendor 0x1002) — ROCm's OpenCL inside WSL2, from the ROCm the AMD
  *   family then opens (`MEASURED` an RX 9070 XT on SaladCloud, ROCm 7.2: `gfx1201`,
- *   measurements/2026-11-10_amd_radeon_wave64.md). NVIDIA's cards are its driver's to name, there as here. */
+ *   measurements/2026-11-10_amd_radeon_wave64.md). NVIDIA's cards are its driver's to name, there as here.
+ * ⛳ QUALCOMM'S GPU IS ITS OWN KERNEL DRIVER'S, `kgsl`: `/sys/class/kgsl/kgsl-3d0/gpu_model` names it — `Adreno660v2` on
+ *   the Razer Edge, read by an app's own user where the folder itself is not listed (`MEASURED` in Termux,
+ *   measurements/2026-11-11_nn187_adreno_family_razer_edge.md). An Android phone's one GPU; no runtime is started to
+ *   learn it. */
 static inline __attribute__((always_inline)) uint32_t sys__os__cards(char* names, uint32_t name_bytes, uint32_t most) {
     uint32_t n = 0u;
     for (uint32_t node = 0u; node < 256u && n < most; ++node) {
@@ -246,6 +273,15 @@ static inline __attribute__((always_inline)) uint32_t sys__os__cards(char* names
                  version / 10000ull, (version / 100ull) % 100ull, version % 100ull);
     }
     if (n == 0u && access("/dev/dxg", F_OK) == 0) n = sys__os__zzprivate_opencl_gpus(names, name_bytes, most, 0x1002u);
+    FILE* kgsl = n < most ? fopen("/sys/class/kgsl/kgsl-3d0/gpu_model", "r") : 0;
+    if (kgsl != 0) {
+        char model[64];
+        if (fgets(model, sizeof model, kgsl) != 0) {
+            model[strcspn(model, " \r\n")] = 0;
+            if (model[0] != 0) snprintf(names + (size_t)(n++) * name_bytes, name_bytes, "%s", model);
+        }
+        fclose(kgsl);
+    }
     return n;
 }
 /* ⛳ LINUX'S INTEL GPUS, BY OPENCL'S LOADER — the kernel's topology above is AMD's driver's alone. Asked only where the

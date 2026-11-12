@@ -5,9 +5,10 @@ password and they get in and only see their chat folder"* · *"there should be a
 each users brave key maybe, etc)"*.
 
 A machine with no user is the machine it was: no sign-in, every conversation in `user_sessions/<model>/`. A user made
-(`silvann users add <name>`) turns sign-in on for every server on that data folder. A user's folder is theirs whole:
+(`silvann users add <name>`), or a provider to sign on with (`sso.json`, ▶ sso.py), turns sign-in on for every server on
+that data folder. A user's folder is theirs whole:
 ```
-  users/<name>/user.json                 their name and password (scrypt)
+  users/<name>/user.json                 their name, their password (scrypt) and the accounts they sign on with
   users/<name>/tools.json                their settings over the machine's tools file (▶ `UserToolbox`)
   users/<name>/user_sessions/<model>/    their conversations, as the machine's were
   users/<name>/workspace/                their REPL's workspace
@@ -66,6 +67,12 @@ class Refused(Exception):
     """What a users' command cannot do, said."""
 
 
+def _stamp(record):
+    """What a sign-in keeps of its user: their password and the accounts they sign on with — either changed, by this
+    process or the `silvann users` command, and the sign-in ends."""
+    return hashlib.sha256(json.dumps([record.get("password"), record.get("sso", [])], sort_keys=True).encode()).hexdigest()
+
+
 class Users:
     """The users of a data folder, and who is signed in to this process."""
 
@@ -97,8 +104,9 @@ class Users:
             return []
 
     def on(self):
-        """Whether sign-in is on: there is a user."""
-        return bool(self.names())
+        """Whether sign-in is on: there is a user, or a provider to sign on with (▶ sso.py) — whose users are made at their
+        first sign-in, so a server with none yet still asks."""
+        return bool(self.names()) or os.path.isfile(os.path.join(self.data, "sso.json"))
 
     def _record(self, name):
         try:
@@ -138,6 +146,67 @@ class Users:
         self._write(name, record)
         with self.lock:                                # a new password signs every session of theirs out
             self.tokens = {t: v for t, v in self.tokens.items() if v[0] != name}
+
+    # ── signing on (▶ sso.py): an account of a provider's — its issuer and subject — is one user's ──────────────
+    def linked(self, issuer, subject):
+        """The user an account signs on as, or None."""
+        for name in self.names():
+            for a in (self._record(name) or {}).get("sso", []):
+                if a.get("iss") == issuer and a.get("sub") == subject:
+                    return name
+        return None
+
+    def link(self, name, issuer, subject, email=None):
+        """`name` signs on with the account `issuer`/`subject` from now on."""
+        with self.lock:
+            record = self._record(name)
+            if record is None:
+                raise Refused("%s is no user here" % name)
+            other = self.linked(issuer, subject)
+            if other == name:
+                return
+            if other is not None:
+                raise Refused("that account signs on as %s: `silvann users unlink %s %s %s` first" % (other, other, issuer,
+                                                                                                    subject))
+            record.setdefault("sso", []).append({k: v for k, v in (("iss", issuer), ("sub", subject), ("email", email))
+                                                 if v})
+            self._write(name, record)
+
+    def unlink(self, name, issuer, subject):
+        with self.lock:
+            record = self._record(name)
+            if record is None:
+                raise Refused("%s is no user here" % name)
+            kept = [a for a in record.get("sso", []) if not (a.get("iss") == issuer and a.get("sub") == subject)]
+            if len(kept) == len(record.get("sso", [])):
+                raise Refused("%s does not sign on with that account" % name)
+            record["sso"] = kept
+            self._write(name, record)
+            self.tokens = {t: v for t, v in self.tokens.items() if v[0] != name}
+
+    def add_signed_on(self, wanted, issuer, subject, email=None):
+        """A user made at an account's first sign-on: named `wanted` (as a name may be: ▶ NAME), or `wanted-2`, `-3` … where
+        that is someone's — never someone's folder. No password: a password's sign-in refuses them until one is set.
+        Answers the name."""
+        base = re.sub(r"[^a-z0-9_-]", "-", (wanted or "").lower()).lstrip("-_")[:32] or "user"
+        with self.lock:
+            other = self.linked(issuer, subject)
+            if other is not None:
+                return other
+            name, n = base, 1
+            while self._record(name) is not None or os.path.exists(self.folder(name)):
+                n += 1
+                name = "%s-%d" % (base[:32 - len(str(n)) - 1], n)
+            self._write(name, {"name": name, "sso": [{k: v for k, v in (("iss", issuer), ("sub", subject),
+                                                                         ("email", email)) if v}],
+                               "created": time.time()})
+            for sub in ("user_sessions", "workspace"):
+                os.makedirs(os.path.join(self.folder(name), sub), exist_ok=True)
+            return name
+
+    def accounts(self, name):
+        """The accounts `name` signs on with: (issuer, subject, email) each."""
+        return [(a.get("iss"), a.get("sub"), a.get("email")) for a in (self._record(name) or {}).get("sso", [])]
 
     def conversations(self, name):
         """How many conversations a user has, every model's."""
@@ -189,29 +258,31 @@ class Users:
             return None
         token = secrets.token_urlsafe(32)
         with self.lock:
-            self.tokens[token] = [name, time.time()]
+            self.tokens[token] = [name, time.time(), _stamp(record)]
         return token
 
     def issue(self, name):
         """A token for `name` given by the server itself — a subagent's conversation on this server, made in its caller's
         folder (▶ the server's `_tool_agent`): no password is asked of the server's own Python."""
-        if self._record(name) is None:
+        record = self._record(name)
+        if record is None:
             return None
         token = secrets.token_urlsafe(32)
         with self.lock:
-            self.tokens[token] = [name, time.time()]
+            self.tokens[token] = [name, time.time(), _stamp(record)]
         return token
 
     def signed(self, token):
         """Who `token` signs in, or None: a token never given, given before this process started, unused for `IDLE`,
-        or its user's since removed or given a new password."""
+        or its user's since removed, given a new password, or given or taken an account to sign on with."""
         if not token:
             return None
         with self.lock:
             got = self.tokens.get(token)
             if got is None:
                 return None
-            if time.time() - got[1] > IDLE or self._record(got[0]) is None:
+            record = self._record(got[0])
+            if time.time() - got[1] > IDLE or record is None or _stamp(record) != got[2]:
                 self.tokens.pop(token, None)
                 return None
             got[1] = time.time()

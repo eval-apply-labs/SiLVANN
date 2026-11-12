@@ -250,14 +250,20 @@ static __device__ inline bool nn__expert__type_slot_of(uint64_t type, uint64_t a
  *
  * ⛔⛔ `give` TRUSTS ITS CALLER ABOUT ONE THING AND IT IS WORTH NAMING: that the slot is not ALREADY free.
  * Giving one twice links it to itself, and then two experts are handed one slot with nothing anywhere
- * reporting it. ⛳ WHAT MAKES THAT UNREACHABLE IS UPSTREAM, NOT HERE: `give` is only reached from `evict`
- * and `revoke`, and `evict` refuses an expert that is not resident — so a second eviction never arrives.
+ * reporting it. ⛳ WHAT MAKES THAT UNREACHABLE IS UPSTREAM, NOT HERE. `give` is reached from `evict`, which
+ * refuses an expert that is not resident — so a second eviction never arrives; from `revoke`, which gives
+ * only an address the handed list still names and drops it there; from `lent`, for slots made live that were
+ * never handed out; and from `reserve`'s unwind and the loader, each giving back a slot it took itself and
+ * did not admit.
  * ⇒ ★ THE GUARD IS ONE LEVEL UP, SO THE TEST FOR IT IS ONE LEVEL UP — a check that a second evict refuses
  * is what holds this invariant, and it is in the suite for that reason and not as a courtesy.
  * ⛔ A SCAN WOULD CATCH IT AND IS REFUSED: the list starts at every slot, so a scan is O(slots) on a path
  * that runs per eviction.
- * ⛳ AND THE WRITES ARE PLAIN: block zero is the sole writer while the workers have returned
- * (`expert_lru_node_array.md` §⑤ⓓ), which is the invariant the whole index is written under. */
+ * ⛳ AND THE WRITES ARE PLAIN: each worker's index, LRU and free lists are its own, written by its own
+ * computations a verb at a time — the loader's threads move bytes and never the index — and the one writer
+ * from another worker is an exclusive tier's commit, made acting as that worker (`expert_lru_node_array.md`
+ * §⑤ⓓ). That is the invariant the whole index is written under: by the shape of the computation, not by a
+ * lock. */
 
 /* One word of one row, written back. ⛳ Read-modify-write of the whole node, because that is the only door
  * `node_array` has — and the row is six words, so the cost is the same either way. */
@@ -309,7 +315,7 @@ static __device__ inline bool nn__expert__zzprivate_link_set(uint64_t type, uint
 
 /* Take the next free slot, answering which one it is and where. False when the collection is full, which
  * is an ordinary answer and not a fault — ⚖ `place` refuses on a full card by design, with no placeholder
- * eviction policy behind it. */
+ * eviction behind it; a read or a promotion evicts before it takes (`nn__loader__zzprivate_room`). */
 static __device__ inline bool nn__expert__type_take(uint64_t type, uint64_t* slot, uint64_t* at) {
     const uint64_t head = nn__expert__type_free(type);
     if (head == NN__EXPERT__TYPE_FREE_NONE) return false;
@@ -664,7 +670,7 @@ static __device__ inline bool nn__expert__layer_stand(uint64_t layer, uint64_t t
         slot.args[NN__EXPERT__SLOT_AT]    = 0ull;   slot.args[NN__EXPERT__SLOT_PREV]  = NN__EXPERT__NONE;
         slot.args[NN__EXPERT__SLOT_NEXT]  = NN__EXPERT__NONE;
         slot.args[NN__EXPERT__SLOT_AT_L2] = 0ull;   slot.args[NN__EXPERT__SLOT_TYPE]  = 0ull;
-        slot.args[5]                      = 0ull;   /* ⛳ spare — ▶ the header */
+        slot.args[5]                      = 0ull;   /* ⛳ the last two call times: none yet — ▶ the header */
         ok = sys__node_array__walk_set(&sw, &slot);
     }
     if (ok) {
@@ -989,8 +995,8 @@ static __device__ inline bool nn__expert__fetch(sys__silicon_family__id family, 
 static __device__ inline bool nn__expert__place(uint64_t type, uint64_t* address, uint64_t* slot) {
     if (address == NULL || slot == NULL) return false;
     if (type >= nn__expert__types()) return false;      /* a collection nobody stood */
-    /* ⛔ FALSE HERE IS A FULL COLLECTION AND NOT AN ERROR — ▶ the header: no eviction policy stands
-     * behind this yet, so the refusal is the honest answer. */
+    /* ⛔ FALSE HERE IS A FULL COLLECTION AND NOT AN ERROR — ▶ the header: a reservation evicts nothing
+     * (the loader's reads and promotions take a slot by their own rule), so the refusal is the honest answer. */
     return nn__expert__type_take(type, slot, address);
 }
 

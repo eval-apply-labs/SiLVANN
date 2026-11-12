@@ -14,9 +14,10 @@
   "silicon_families/arm_base/primitives/sys.cuh": 44,
   "silicon_families/khronos_opencl1_base/nn.cuh": 79,
   "silicon_families/khronos_opencl1_base/sys.cuh": 6,
+  "silicon_families/khronos_opencl2_base/nn.cuh": 32,
   "silicon_families/x86_avx2/primitives/pool.cuh": 56,
   "silicon_families/x86_avx2/primitives/sys.cuh": 44
  },
- "total_lines": 584,
+ "total_lines": 616,
  "waived": []
 }

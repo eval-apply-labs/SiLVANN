@@ -66,14 +66,15 @@ def free():
     return available()
 
 
-def cache_bytes(total, ram_gb=None):
+def cache_bytes(total, ram_gb=None, beside=0):
     """How much of `total` bytes of experts a cache in memory holds: `ram_gb` when a config says so, else what the process
-    may hold less a quarter of it, at least 3 GB and at most 8, for everything else. `MEASURED` on node03, the 35B under
-    an 8 GB cap: with 2 GB kept the cgroup killed the process (5.7 GB of its own memory and 1.5 GB of mapped files at the
-    kill) — the card's pinned host memory cannot be given back, and the cap counts it."""
+    may hold less a quarter of it, at least 3 GB and at most 8, for everything else — and less `beside`, what the process
+    holds in RAM beside its experts by the config's word (an n-gram table, ▶ `ram_table`). `MEASURED` on node03, the 35B
+    under an 8 GB cap: with 2 GB kept the cgroup killed the process (5.7 GB of its own memory and 1.5 GB of mapped files at
+    the kill) — the card's pinned host memory cannot be given back, and the cap counts it."""
     if ram_gb is not None:
         return min(total, int(float(ram_gb) * (1 << 30)))
-    held = limit()
+    held = limit() - int(beside)
     return max(0, min(total, held - min(8 << 30, max(3 << 30, held // 4))))
 
 
@@ -83,6 +84,11 @@ OWN = 2 << 30            # MEASURED on node03 (measurements/2026-10-14_v080rc1_o
                          # GLM), 2.0 with a Word file, a GIF and an MP4 answered — and, while a video is read, what that
                          # holds (`vision.video_ram`: the config's `max_tokens_per_video` of the model's tokens)
 SPARE = 500 << 20        # what is left to the system — ⚖ 2026-10-14, "a flat 500mb of spare ram"
+FILES_SHARE = 0.10       # what DeepSeek's experts in RAM, and an n-gram table copied there (▶ `ram_table.place`), leave of
+                         # what this process may hold, beside the spare: the system's own and the files it reads in place
+                         # (DeepSeek's n-gram tables, its layers mapped from their files). MEASURED node03 2026-10-21: with
+                         # none left, 38 of DeepSeek's 40 layers in RAM filled the swap
+                         # (measurements/2026-10-21_deepseek_chat_node03.md)
 
 
 def in_ram(need, held=None, video=0, own_bytes=None):

@@ -16,7 +16,8 @@
 /* ⛳ SIXTY-FOUR-BYTE ALIGNED, so a row the bodies load eight or thirty-two bytes at a time starts on a line.
  * ⭐ AND ON THE DEVICE'S NODE: on a socket device the memory is mapped fresh and bound to that node before
  *   anything touches it, so its pages land there whichever thread fills them — the expert loader's readers are
- *   not pinned. On the whole machine it is the process's memory, as it always was, unless it is large.
+ *   not pinned. On the whole machine it is the process's memory, as it always was, unless it is large. Where the
+ *   system binds nothing, the device's own threads write it (▶ `arm_base__zzprivate_unplaced`).
  * A header just before the address says which of the two it was, and how much was mapped. */
 typedef struct arm_base__held {
     uint64_t offset;                           /* a guarded allocation's: its mapping starts this far before the address */
@@ -29,6 +30,54 @@ typedef struct arm_base__held {
  *   mapping outright unless it is told nothing is reserved. Its pages are page-aligned, which the file needs. */
 #define ARM_BASE__ZZPRIVATE_LARGE (1ull << 30)
 #define ARM_BASE__ZZPRIVATE_GUARDED (1ull << 63)   /* in `mapped`: the allocation sits between two guard pages */
+/* ⭐ WHERE THE SYSTEM PLACES NO PAGE BY NODE — a container whose seccomp filter refuses `mbind`, a kernel without NUMA
+ *   (▶ `sys__os__memory_policy_refused`): each page is on the node of the thread that first touches it.
+ *   A socket device keeps its mapping unbound, and from the first such refusal the large writes and fills into any
+ *   device of this family run on that device's own pool, its threads pinned to its node's cores: a socket's memory is
+ *   still its node's, and the whole machine's is spread over its threads' nodes a block of the write each, where the
+ *   loader's thread alone puts every page on its own node (`MEASURED` with x86_avx2, whose allocator this one follows,
+ *   on a vast.ai 2x A40 whose container refuses `mbind`: GLM's 142 GB of experts written to the whole machine's device
+ *   all on node 0 — measurements/2026-11-10_nn140_2xa40.md ⑤; on an Arm machine `REASONED` from the same code). A file
+ *   read straight into it lands where the reading thread runs. Said once, on the standard error. A node that truly
+ *   lacks the memory still fails the allocation. */
+static int arm_base__zzprivate_unplaced = 0;
+static inline void arm_base__zzprivate_refused(const char* call) {
+    if (__atomic_exchange_n(&arm_base__zzprivate_unplaced, 1, __ATOMIC_ACQ_REL) == 0)
+        fprintf(stderr, "arm_base: the system refused %s (mbind: a container's seccomp filter, or a kernel without NUMA); "
+                        "memory is placed where it is first touched, a device's large writes by its own threads\n", call);
+}
+/* A write or a fill this large goes to the pool when nothing is bound; one smaller is placed by its caller's thread */
+#define ARM_BASE__ZZPRIVATE_PLACED_LEAST (1u << 20)
+#define ARM_BASE__ZZPRIVATE_PLACED_PIECE (64u * 1024u)
+typedef struct arm_base__placed_call {
+    uint8_t*       to;
+    const uint8_t* from;                       /* 0: a fill with zeros */
+    size_t         bytes;
+    size_t         piece;
+} arm_base__placed_call;
+static void arm_base__zzprivate_placed_block(void* a) {
+    const arm_base__placed_call* c = (const arm_base__placed_call*)a;
+    const size_t lo = (size_t)arm_base__zzpackage_block * c->piece;
+    if (lo >= c->bytes) return;
+    const size_t n = c->bytes - lo < c->piece ? c->bytes - lo : c->piece;
+    if (c->from != 0) memcpy(c->to + lo, c->from + lo, n);
+    else memset(c->to + lo, 0, n);
+}
+/* Whether the write (or the fill, `from` 0) ran on the calling thread's device's pool: only where nothing is bound, it is
+ * large, and its two ranges do not overlap — an overlapping move stays one `memmove` */
+static inline bool arm_base__zzprivate_placed_write(void* to, const void* from, size_t bytes) {
+    if (!__atomic_load_n(&arm_base__zzprivate_unplaced, __ATOMIC_ACQUIRE) || bytes < ARM_BASE__ZZPRIVATE_PLACED_LEAST) return false;
+    const uintptr_t t = (uintptr_t)to, f = (uintptr_t)from;
+    if (from != 0 && t < f + bytes && f < t + bytes) return false;
+    const uint32_t threads = arm_base__zzpackage_threads();
+    if (threads < 2u) return false;
+    const size_t pages = (bytes + ARM_BASE__ZZPRIVATE_PAGE - 1u) / ARM_BASE__ZZPRIVATE_PAGE;
+    size_t piece = (pages + threads - 1u) / threads * ARM_BASE__ZZPRIVATE_PAGE;
+    if (piece < ARM_BASE__ZZPRIVATE_PLACED_PIECE) piece = ARM_BASE__ZZPRIVATE_PLACED_PIECE;
+    arm_base__placed_call c = { (uint8_t*)to, (const uint8_t*)from, bytes, piece };
+    arm_base__zzpackage_run((uint32_t)((bytes + piece - 1u) / piece), arm_base__zzprivate_placed_block, &c);
+    return true;
+}
 static inline bool arm_base__memory_allocate(void** at, size_t bytes) {
     if (at == 0) return false;
     *at = 0;
@@ -61,8 +110,10 @@ static inline bool arm_base__memory_allocate(void** at, size_t bytes) {
             const int n = arm_base__zzpackage_node_of(k);
             all[n / (8 * sizeof(unsigned long))] |= 1ul << (n % (8 * sizeof(unsigned long)));
         }
-        if (interleave)
-            (void)sys__os__memory_interleave(base, mapped, all, (unsigned long)ARM_BASE__ZZPRIVATE_NODES + 1ul);
+        /* best effort: a refusal leaves the pages where they are first touched, and is said */
+        if (interleave && !sys__os__memory_interleave(base, mapped, all, (unsigned long)ARM_BASE__ZZPRIVATE_NODES + 1ul)
+            && sys__os__memory_policy_refused())
+            arm_base__zzprivate_refused("to interleave the whole machine's memory over its nodes");
     }
     arm_base__held* h = (arm_base__held*)((uint8_t*)base + ARM_BASE__ZZPRIVATE_PAGE - sizeof *h);
     if (node < 0) {
@@ -72,10 +123,14 @@ static inline bool arm_base__memory_allocate(void** at, size_t bytes) {
     }
     unsigned long mask[ARM_BASE__ZZPRIVATE_NODES / (8 * sizeof(unsigned long))] = {0};
     mask[node / (8 * sizeof(unsigned long))] = 1ul << (node % (8 * sizeof(unsigned long)));
-    /* bound: the node, and no other — a page that cannot be had there is a failed allocation, not a far one */
+    /* bound: the node, and no other — a page that cannot be had there is a failed allocation, not a far one. Where the
+     *   system refuses the call itself, the mapping is kept unbound, for the device's own threads to write */
     if (!sys__os__memory_bind(base, mapped, mask, (unsigned long)ARM_BASE__ZZPRIVATE_NODES + 1ul)) {
-        sys__os__memory_unmap(base, mapped);
-        return false;
+        if (!sys__os__memory_policy_refused()) {
+            sys__os__memory_unmap(base, mapped);
+            return false;
+        }
+        arm_base__zzprivate_refused("to bind a socket's memory to its node");
     }
     h->mapped = mapped; h->bytes = bytes;
     *at = (uint8_t*)base + ARM_BASE__ZZPRIVATE_PAGE;
@@ -90,7 +145,7 @@ static inline void arm_base__memory_free(void* at) {
 }
 static inline bool arm_base__memory_zerofill(void* at, size_t bytes) {
     if (at == 0) return false;
-    memset(at, 0, bytes);
+    if (!arm_base__zzprivate_placed_write(at, 0, bytes)) memset(at, 0, bytes);
     return true;
 }
 static inline bool arm_base__memory_read(void* to, const void* from, size_t bytes) {
@@ -100,7 +155,7 @@ static inline bool arm_base__memory_read(void* to, const void* from, size_t byte
 }
 static inline bool arm_base__memory_write(void* to, const void* from, size_t bytes) {
     if (to == 0 || from == 0) return false;
-    memmove(to, from, bytes);
+    if (!arm_base__zzprivate_placed_write(to, from, bytes)) memmove(to, from, bytes);
     return true;
 }
 /* Every launch has returned by the time anything can ask. */

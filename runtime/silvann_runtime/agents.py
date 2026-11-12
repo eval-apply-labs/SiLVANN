@@ -1,5 +1,5 @@
 """A MODEL'S SUBAGENT — a conversation of a SiLVANN server, driven through its HTTP API as silvann_cli drives one
-(▶ `src/docs/design/pending/agents.md`).
+(▶ `src/docs/design/agents.md`).
 
 ⚖ 2026-10-16: *"(agent 'model 'config_str(including the lora) 'task) and make it a repl, so it is a silvann_cli session
 and the sender can exit itself once it is completed"*. A `Link` creates the conversation on a server — the caller's own

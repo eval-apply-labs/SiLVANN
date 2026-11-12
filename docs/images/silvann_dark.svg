@@ -1,0 +1,107 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="790" viewBox="0 0 1200 790" role="img" aria-labelledby="t d">
+<title id="t">SiLVANN — what it is made of</title>
+<desc id="d">A model is a program in a small Lisp, carried with its weights. It is written against the model packages and nn, the Neural Network library, which stand on the Eval-Apply Generalized Interpreter: sys, the language's verbs, and engine, its evaluator on the CPU, over Linux or Windows. Each verb launches its arithmetic on the worker that holds the data, through a silicon family: AMD, NVIDIA, Intel, any OpenCL GPU, x86 or Arm.</desc>
+<style>.sans{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans',Helvetica,Arial,sans-serif}.mono{font-family:ui-monospace,SFMono-Regular,'SF Mono',Menlo,Consolas,'Liberation Mono',monospace}</style>
+<rect x="0.5" y="0.5" width="1199" height="789" rx="18" fill="#161b22" stroke="#3d444d" stroke-width="1"/>
+<svg x="32" y="26" width="56" height="56" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Si"><rect x="1" y="1" width="62" height="62" rx="7" fill="#1d4ed8"/><text x="7" y="17" fill="#fff" fill-opacity="0.85" font-size="13" font-weight="600" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif">14</text><text x="32" y="49" fill="#fff" font-size="33" font-weight="800" text-anchor="middle" letter-spacing="-1" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif">Si</text></svg>
+<text x="104" y="62" class="sans" font-size="34" font-weight="800"><tspan fill="#e6edf3">SiLVANN</tspan></text>
+<text x="104" y="86" class="sans" font-size="16"><tspan fill="#9198a1">Silicon Linked Virtualized Architecture for Neural Networks</tspan></text>
+<text x="1168" y="62" class="sans" font-size="18" text-anchor="end"><tspan fill="#e6edf3">a from-scratch inference engine for large language models</tspan></text>
+<rect x="32" y="112" width="616" height="396" rx="14" fill="#0d1117" stroke="#3d444d" stroke-width="1"/>
+<text x="56" y="146" class="sans" font-size="20"><tspan fill="#e6edf3" font-weight="700">A model is a program</tspan><tspan fill="#9198a1"> — a Lisp file it carries</tspan></text>
+<rect x="56" y="162" width="568" height="82" rx="10" fill="#151b23" stroke="#3d444d" stroke-width="1"/>
+<text x="72" y="186" class="mono" font-size="14" font-weight="700"><tspan fill="#e6edf3">models/silvann_tq_D8E4_qwen3.6_35b_a3b/</tspan></text>
+<text x="88" y="208" class="mono" font-size="14"><tspan fill="#e6edf3">weights</tspan></text>
+<text x="316" y="208" class="sans" font-size="14"><tspan fill="#9198a1">packed at 4 or 8 bits (TurboQuant)</tspan></text>
+<text x="88" y="230" class="mono" font-size="14"><tspan fill="#e6edf3">lisp/v0.27.0/qwen3_5.lisp</tspan></text>
+<text x="316" y="230" class="sans" font-size="14"><tspan fill="#9198a1">its family's program, written by hand</tspan></text>
+<rect x="56" y="254" width="568" height="238" rx="10" fill="#151b23" stroke="#3d444d" stroke-width="1"/>
+<text x="76" y="280" class="sans" font-size="13"><tspan fill="#9198a1" class="mono">lisp/qwen3_5.lisp</tspan><tspan fill="#9198a1"> — a layer whose experts run on the CPU, in outline</tspan></text>
+<text x="76" y="308" class="mono" font-size="12.5" xml:space="preserve"><tspan fill="#9198a1">(</tspan><tspan fill="#6c9cff" font-weight="600">defun</tspan><tspan fill="#e6edf3"> </tspan><tspan fill="#9198a1">(</tspan><tspan fill="#e6edf3">layer</tspan><tspan fill="#e6edf3"> </tspan><tspan fill="#e6edf3">i</tspan><tspan fill="#e6edf3"> </tspan><tspan fill="#e6edf3">position</tspan><tspan fill="#9198a1">)</tspan></text>
+<text x="76" y="328" class="mono" font-size="12.5" xml:space="preserve"><tspan fill="#e6edf3">  </tspan><tspan fill="#9198a1">(</tspan><tspan fill="#6c9cff" font-weight="600">begin</tspan></text>
+<text x="76" y="348" class="mono" font-size="12.5" xml:space="preserve"><tspan fill="#e6edf3">    </tspan><tspan fill="#9198a1">(</tspan><tspan fill="#e6edf3">mixer</tspan><tspan fill="#e6edf3"> </tspan><tspan fill="#e6edf3">i</tspan><tspan fill="#e6edf3"> </tspan><tspan fill="#e6edf3">position</tspan><tspan fill="#9198a1">)</tspan></text>
+<text x="468" y="348" class="mono" font-size="12"><tspan fill="#9198a1">; attention/DeltaNet</tspan></text>
+<text x="76" y="368" class="mono" font-size="12.5" xml:space="preserve"><tspan fill="#e6edf3">    </tspan><tspan fill="#9198a1">(</tspan><tspan fill="#e6edf3">route</tspan><tspan fill="#e6edf3"> </tspan><tspan fill="#e6edf3">i</tspan><tspan fill="#9198a1">)</tspan></text>
+<text x="468" y="368" class="mono" font-size="12"><tspan fill="#9198a1">; picks the experts</tspan></text>
+<text x="76" y="388" class="mono" font-size="12.5" xml:space="preserve"><tspan fill="#e6edf3">    </tspan><tspan fill="#9198a1">(</tspan><tspan fill="#6c9cff" font-weight="600">let</tspan><tspan fill="#e6edf3"> </tspan><tspan fill="#9198a1">(</tspan><tspan fill="#9198a1">(</tspan><tspan fill="#e6edf3">sum</tspan><tspan fill="#e6edf3"> </tspan><tspan fill="#9198a1">(</tspan><tspan fill="#d29922" font-weight="600">sys__scheduler__add</tspan><tspan fill="#e6edf3"> </tspan><tspan fill="#e6edf3">CPU</tspan><tspan fill="#e6edf3"> </tspan><tspan fill="#e6edf3">experts</tspan><tspan fill="#9198a1">)</tspan><tspan fill="#9198a1">)</tspan><tspan fill="#9198a1">)</tspan></text>
+<text x="468" y="388" class="mono" font-size="12"><tspan fill="#9198a1">; asks the CPU</tspan></text>
+<text x="76" y="408" class="mono" font-size="12.5" xml:space="preserve"><tspan fill="#e6edf3">      </tspan><tspan fill="#9198a1">(</tspan><tspan fill="#39c5bb" font-weight="600">nn__buffer__copy</tspan><tspan fill="#e6edf3"> </tspan><tspan fill="#9198a1">(</tspan><tspan fill="#d29922" font-weight="600">sys__wait_for_result</tspan><tspan fill="#e6edf3"> </tspan><tspan fill="#e6edf3">sum</tspan><tspan fill="#9198a1">)</tspan></text>
+<text x="468" y="408" class="mono" font-size="12"><tspan fill="#9198a1">; waits for the sum</tspan></text>
+<text x="76" y="428" class="mono" font-size="12.5" xml:space="preserve"><tspan fill="#e6edf3">                        </tspan><tspan fill="#e6edf3">routed</tspan><tspan fill="#9198a1">)</tspan><tspan fill="#9198a1">)</tspan></text>
+<text x="468" y="428" class="mono" font-size="12"><tspan fill="#9198a1">; and copies it back</tspan></text>
+<text x="76" y="448" class="mono" font-size="12.5" xml:space="preserve"><tspan fill="#e6edf3">    </tspan><tspan fill="#9198a1">(</tspan><tspan fill="#bc8cff" font-weight="600">ai_qwen_3__post_expert</tspan><tspan fill="#e6edf3"> </tspan><tspan fill="#e6edf3">routed</tspan><tspan fill="#9198a1">)</tspan><tspan fill="#9198a1">)</tspan><tspan fill="#9198a1">)</tspan></text>
+<text x="468" y="448" class="mono" font-size="12"><tspan fill="#9198a1">; into the residual</tspan></text>
+<text x="608" y="480" class="sans" font-size="12.5" text-anchor="end"><tspan fill="#9198a1">each word coloured by the layer it comes from →</tspan></text>
+<rect x="672" y="112" width="496" height="396" rx="14" fill="#0d1117" stroke="#3d444d" stroke-width="1"/>
+<text x="696" y="146" class="sans" font-size="20"><tspan fill="#e6edf3" font-weight="700">What it is made of</tspan></text>
+<rect x="696" y="162" width="448" height="50" rx="8" fill="#151b23" stroke="#3d444d" stroke-width="1"/>
+<rect x="704" y="170" width="5" height="34" rx="2.5" fill="#bc8cff"/>
+<text x="718" y="183" class="sans" font-size="14"><tspan fill="#bc8cff" font-weight="700" class="mono">ai_qwen_3 · ai_z__glm_5_3 · ai_deepseek_4 …</tspan></text>
+<text x="718" y="203" class="sans" font-size="13.5"><tspan fill="#9198a1">a model's verbs: the sites of its layer</tspan></text>
+<rect x="696" y="220" width="448" height="50" rx="8" fill="#151b23" stroke="#3d444d" stroke-width="1"/>
+<rect x="704" y="228" width="5" height="34" rx="2.5" fill="#39c5bb"/>
+<text x="718" y="241" class="sans" font-size="14"><tspan fill="#39c5bb" font-weight="700" class="mono">nn</tspan><tspan fill="#e6edf3"> — the Neural Network library</tspan></text>
+<text x="718" y="261" class="sans" font-size="13.5"><tspan fill="#9198a1">GEMVs · attention · DeltaNet · routed experts</tspan></text>
+<rect x="696" y="278" width="448" height="150" rx="12" fill="#111a2e" stroke="#6c9cff" stroke-width="1.5"/>
+<text x="712" y="301" class="sans" font-size="15"><tspan fill="#6c9cff" font-weight="700">the Eval-Apply Generalized Interpreter</tspan></text>
+<rect x="712" y="312" width="416" height="50" rx="8" fill="#151b23" stroke="#3d444d" stroke-width="1"/>
+<rect x="720" y="320" width="5" height="34" rx="2.5" fill="#d29922"/>
+<text x="734" y="333" class="sans" font-size="14"><tspan fill="#d29922" font-weight="700" class="mono">sys</tspan><tspan fill="#e6edf3"> — the language's verbs</tspan></text>
+<text x="734" y="353" class="sans" font-size="13.5"><tspan fill="#9198a1">objects · arrays · files · computations</tspan></text>
+<rect x="712" y="370" width="416" height="50" rx="8" fill="#151b23" stroke="#3d444d" stroke-width="1"/>
+<rect x="720" y="378" width="5" height="34" rx="2.5" fill="#6c9cff"/>
+<text x="734" y="391" class="sans" font-size="14"><tspan fill="#6c9cff" font-weight="700" class="mono">engine</tspan><tspan fill="#e6edf3"> — the evaluator, on the CPU</tspan></text>
+<text x="734" y="411" class="sans" font-size="13.5"><tspan fill="#9198a1">one heap · a run queue on every worker</tspan></text>
+<rect x="696" y="436" width="448" height="50" rx="8" fill="#151b23" stroke="#3d444d" stroke-width="1"/>
+<rect x="704" y="444" width="5" height="34" rx="2.5" fill="#9198a1"/>
+<text x="718" y="457" class="sans" font-size="14"><tspan fill="#9198a1" font-weight="700" class="mono">operating_systems</tspan><tspan fill="#e6edf3"> — Linux · Windows</tspan></text>
+<text x="718" y="477" class="sans" font-size="13.5"><tspan fill="#9198a1">threads, locks, a clock, memory, files, libraries</tspan></text>
+<path d="M62 516 L62 544" stroke="#6c9cff" stroke-width="2.5" stroke-linecap="round"/><path d="M55 542 L69 542 L62 552 Z" fill="#6c9cff"/>
+<text x="80" y="540" class="sans" font-size="15"><tspan fill="#e6edf3">each verb launches its arithmetic on the worker that holds the data</tspan></text>
+<path d="M700 552 L700 524" stroke="#39c5bb" stroke-width="2.5" stroke-linecap="round"/><path d="M693 526 L707 526 L700 516 Z" fill="#39c5bb"/>
+<text x="718" y="540" class="sans" font-size="15"><tspan fill="#e6edf3">the sampler runs there too: only tokens come back</tspan></text>
+<rect x="32" y="560" width="1136" height="176" rx="14" fill="#0d1117" stroke="#3d444d" stroke-width="1"/>
+<text x="56" y="590" class="sans" font-size="18"><tspan fill="#e6edf3" font-weight="700">Silicon families</tspan><tspan fill="#9198a1"> — a library each, answering nn's doors with its own kernels</tspan></text>
+<rect x="56" y="606" width="208" height="52" rx="8" fill="#151b23" stroke="#3d444d" stroke-width="1"/>
+<text x="70" y="628" class="mono" font-size="13.5"><tspan fill="#e6edf3" font-weight="600">amd_rocm6_wave64</tspan></text>
+<text x="252" y="627" class="sans" font-size="11.5" text-anchor="end"><tspan fill="#9198a1">GPU</tspan></text>
+<text x="70" y="647" class="sans" font-size="13"><tspan fill="#9198a1">the MI50 · ROCm 6</tspan></text>
+<rect x="276" y="606" width="208" height="52" rx="8" fill="#151b23" stroke="#3d444d" stroke-width="1"/>
+<text x="290" y="628" class="mono" font-size="13.5"><tspan fill="#e6edf3" font-weight="600">amd_rocm10</tspan></text>
+<text x="472" y="627" class="sans" font-size="11.5" text-anchor="end"><tspan fill="#9198a1">GPU</tspan></text>
+<text x="290" y="647" class="sans" font-size="13"><tspan fill="#9198a1">ROCm 7: MI100 on, RDNA4</tspan></text>
+<rect x="496" y="606" width="208" height="52" rx="8" fill="#151b23" stroke="#3d444d" stroke-width="1"/>
+<text x="510" y="628" class="mono" font-size="13.5"><tspan fill="#e6edf3" font-weight="600">nvidia_cuda12</tspan></text>
+<text x="692" y="627" class="sans" font-size="11.5" text-anchor="end"><tspan fill="#9198a1">GPU</tspan></text>
+<text x="510" y="647" class="sans" font-size="13"><tspan fill="#9198a1">NVIDIA · CUDA 12</tspan></text>
+<rect x="716" y="606" width="208" height="52" rx="8" fill="#151b23" stroke="#3d444d" stroke-width="1"/>
+<text x="730" y="628" class="mono" font-size="13.5"><tspan fill="#e6edf3" font-weight="600">nvidia_opencl1</tspan></text>
+<text x="912" y="627" class="sans" font-size="11.5" text-anchor="end"><tspan fill="#9198a1">GPU</tspan></text>
+<text x="730" y="647" class="sans" font-size="13"><tspan fill="#9198a1">NVIDIA · OpenCL 1.2</tspan></text>
+<rect x="936" y="606" width="208" height="52" rx="8" fill="#151b23" stroke="#3d444d" stroke-width="1"/>
+<text x="950" y="628" class="mono" font-size="13.5"><tspan fill="#e6edf3" font-weight="600">khronos_opencl2</tspan></text>
+<text x="1132" y="627" class="sans" font-size="11.5" text-anchor="end"><tspan fill="#9198a1">GPU</tspan></text>
+<text x="950" y="647" class="sans" font-size="13"><tspan fill="#9198a1">any GPU · OpenCL 2</tspan></text>
+<rect x="56" y="668" width="208" height="52" rx="8" fill="#151b23" stroke="#3d444d" stroke-width="1"/>
+<text x="70" y="690" class="mono" font-size="13.5"><tspan fill="#e6edf3" font-weight="600">intel_opencl2</tspan></text>
+<text x="252" y="689" class="sans" font-size="11.5" text-anchor="end"><tspan fill="#9198a1">GPU</tspan></text>
+<text x="70" y="709" class="sans" font-size="13"><tspan fill="#9198a1">Intel's, from Gen9</tspan></text>
+<rect x="276" y="668" width="208" height="52" rx="8" fill="#151b23" stroke="#3d444d" stroke-width="1"/>
+<text x="290" y="690" class="mono" font-size="13.5"><tspan fill="#e6edf3" font-weight="600">intel_opencl1_igpu</tspan></text>
+<text x="472" y="689" class="sans" font-size="11.5" text-anchor="end"><tspan fill="#9198a1">GPU</tspan></text>
+<text x="290" y="709" class="sans" font-size="13"><tspan fill="#9198a1">Intel's, before Gen9</tspan></text>
+<rect x="496" y="668" width="208" height="52" rx="8" fill="#151b23" stroke="#3d444d" stroke-width="1"/>
+<text x="510" y="690" class="mono" font-size="13.5"><tspan fill="#e6edf3" font-weight="600">x86_avx2</tspan></text>
+<text x="692" y="689" class="sans" font-size="11.5" text-anchor="end"><tspan fill="#9198a1">CPU</tspan></text>
+<text x="510" y="709" class="sans" font-size="13"><tspan fill="#9198a1">x86 · AVX2 or AVX-512</tspan></text>
+<rect x="716" y="668" width="208" height="52" rx="8" fill="#151b23" stroke="#3d444d" stroke-width="1"/>
+<text x="730" y="690" class="mono" font-size="13.5"><tspan fill="#e6edf3" font-weight="600">arm_neon</tspan></text>
+<text x="912" y="689" class="sans" font-size="11.5" text-anchor="end"><tspan fill="#9198a1">CPU</tspan></text>
+<text x="730" y="709" class="sans" font-size="13"><tspan fill="#9198a1">a phone's Arm cores</tspan></text>
+<rect x="936" y="668" width="208" height="52" rx="8" fill="#151b23" stroke="#3d444d" stroke-width="1"/>
+<text x="950" y="690" class="mono" font-size="13.5"><tspan fill="#e6edf3" font-weight="600">arm_gb10</tspan></text>
+<text x="1132" y="689" class="sans" font-size="11.5" text-anchor="end"><tspan fill="#9198a1">CPU</tspan></text>
+<text x="950" y="709" class="sans" font-size="13"><tspan fill="#9198a1">the DGX Spark's Grace</tspan></text>
+<text x="32" y="766" class="sans" font-size="15"><tspan fill="#e6edf3" font-weight="700">Models </tspan><tspan fill="#9198a1">Qwen 3.5 · 3.6 · 3.8 · GLM 5.3 Flash · DeepSeek-V4.1-Flash · Ministral 3 · Qwen-Image 2.1</tspan></text>
+<text x="1168" y="766" class="sans" font-size="15" text-anchor="end"><tspan fill="#9198a1">from a phone to two server cards</tspan></text>
+</svg>

@@ -27,9 +27,9 @@
  *   that name, so a second ROCm's HIP opened beside the first would be bound to the FIRST one's HSA runtime
  *   rather than its own. `ASSUMED`: that the next ROCm still names it `.so.1` — what would falsify it is a
  *   ROCm that ships it under another name, and even then two runtimes driving one kernel driver is
- *   unmeasured. ⇒ An MI50 on ROCm 6 and an MI350 on a later ROCm in one box is TWO PROCESSES, one per GPU
- *   (`docs/design/pending/evaluator_and_providers.md` §①): each loads only its own family. In one process, the card whose family would
- *   be the vendor's second is reported as needing a process of its own.
+ *   unmeasured. ⇒ An MI50 on ROCm 6 and an MI350 on a later ROCm in one box would be TWO PROCESSES, one per GPU,
+ *   each loading only its own family — a machine is one process, so that is not built. In one process, the card
+ *   whose family would be the vendor's second is reported as needing a process of its own.
  *
  * ⛳ WRITTEN OVER A LIST AND TWO CALLS, NOT OVER THE ROSTER AND `dlopen`, so it can be checked against a
  *   made-up roster — the case this box cannot show, two families that both include one card, is the case

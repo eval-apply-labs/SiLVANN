@@ -14,10 +14,12 @@ digits in Python are two roundings of one real number and are not obliged to agr
 number itself. ⇒ ★ THE ONE THING BOTH SIDES MUST AGREE ON IS THE ONE THING THAT CANNOT BE TRANSCRIBED
 WRONG, and `nn__primitives__zzpackage_half_to_float` — which already exists, and is exact — is the reader.
 
-── ⭐ THE CONSTRUCTION, AND WHAT MAKES IT "NF" ───────────────────────────────────────────────────────
-`2^D` quantiles of a unit Gaussian, normalised so the outermost lands on ±1. The two halves use
-DIFFERENT grids (`k+1` points above the median, `k` below), which is what buys an EXACT ZERO while
-still spending all `2^D` codes — the asymmetry is the feature, not a bug in the construction.
+── ⭐ THE CONSTRUCTION — SPECULAR LLOYD-MAX, AND THE NF TABLE BESIDE IT ──────────────────────────────
+What ships is the MSE-optimal (Lloyd-Max) quantiser of a unit Gaussian at each width (`lloyd_table`):
+`2^D` levels mirrored about zero — `2^(D-1)` magnitudes, each with both signs, and no zero level —
+normalised so the outermost lands on ±1. The NF construction (`nf_table`: bitsandbytes' NF4 generalised,
+`2^D` quantiles with `k+1` points above the median and `k` below, which buys an exact zero) is kept beside
+it as the machinery's external check, and does not ship.
 ⛔ AND THERE IS NO SIGN BIT IN THIS FAMILY. The table is signed and the code indexes it whole, which is
 the bit the architect went looking for: *"use all 4 bits for data instead of 3 bits for data and one
 for parity."* `MEASURED` on the shipping 35B: 98.7% of rows of the sign-bit format spend a code on a
@@ -27,8 +29,9 @@ second zero.
 S104 built an `nf(6)` that was silently wrong and reported NF6 as WORSE THAN NF4 — an impossible
 result that took an hour to attribute, because a bad codebook degrades gracefully instead of failing.
 ⇒ ★ A TABLE IS DATA, SO IT CANNOT CRASH; ITS ONLY SYMPTOM IS A NUMBER THAT LOOKS PLAUSIBLE.
-Hence: cardinality is exactly `2^D` · strictly ascending after fp16 rounding · spans exactly ±1 ·
-contains exactly one zero · and D=4 matches the VERBATIM bitsandbytes NF4 table, which is the only
+Hence: cardinality is exactly `2^D` · strictly ascending after fp16 rounding · normalised, its widest
+reach exactly 1 · no zero level · specular · every level the centroid of its cell (the Lloyd-Max
+condition) · and the NF construction at D=4 matches the VERBATIM bitsandbytes NF4 table, which is the only
 external check available and the reason that one width is transcribed below.
 """
 
@@ -83,9 +86,9 @@ def half(v):
 def nf_table(d):
     """The NF / equal-probability-quantile construction — bitsandbytes' NF4 generalised.
 
-    ⛳ KEPT, THOUGH IT IS NO LONGER WHAT SHIPS. It is the only construction with an external reference
-    (the verbatim NF4 table), so it is what `validate()` checks the machinery against, and it is the
-    provenance of the numbers this file used before 2026-09-20. ▶ `lloyd_table`.
+    ⛳ KEPT, THOUGH IT IS NOT WHAT SHIPS. It is the only construction with an external reference (the
+    verbatim NF4 table), so it is what `validate()` checks the machinery against. ▶ `lloyd_table`, what
+    ships.
     """
     k = 1 << (d - 1)
     pos = [ppf(p) for p in _linspace(OFFSET, 0.5, k + 1)]      # k+1 points, outermost first
@@ -106,7 +109,7 @@ def _cdf(x):
 
 @functools.lru_cache(maxsize=None)     # a pure function of its arguments: the 8-bit table costs ~55 s of pure Python
 def lloyd_levels(d, tol=1e-14, cap=50000):
-    """⭐⭐ ZERO-PINNED LLOYD-MAX FOR A UNIT GAUSSIAN, SOLVED ANALYTICALLY. Ascending, unnormalised.
+    """⭐⭐ SPECULAR LLOYD-MAX FOR A UNIT GAUSSIAN, SOLVED ANALYTICALLY. Ascending, unnormalised.
 
     The MSE-optimal reconstruction levels satisfy two conditions at once, and this alternates them:
     ```
@@ -125,21 +128,21 @@ def lloyd_levels(d, tol=1e-14, cap=50000):
     kurtosis 2.988 and σ 1.0008 over four real tensors. This uses the established model rather than a
     noisy draw from it, and it is DETERMINISTIC, which a build constant had better be.
 
-    ⭐⭐ AND THERE IS NO ZERO LEVEL, WHICH IS A REVERSAL — AN EARLIER VERSION OF THIS FUNCTION PINNED
-    ONE. ⚖ ARCHITECT, 2026-09-20: *"if it is gaussian the values would be specular."* He is right, and
+    ⭐⭐ AND THERE IS NO ZERO LEVEL. ⚖ ARCHITECT, 2026-09-20: *"if it is gaussian the values would be
+    specular."* He is right, and
     every `2^D` here is EVEN, so the unconstrained optimum for a symmetric density is perfectly
     mirrored: `2^(D-1)` magnitudes, each with both signs, nothing spent on a zero and no lopsidedness.
     Pinning a zero forces `2^D − 1` levels to split unevenly and costs ~1%.
-    ⇒ ⛔⛔ THE ZERO WAS BEING PAID FOR AND WAS NOT NEEDED, FOR TWO SEPARATE REASONS:
+    ⇒ ⛔⛔ A ZERO LEVEL IS PAID FOR AND NOT NEEDED, FOR TWO SEPARATE REASONS:
       ① A row that must reconstruct to zero gets `scale = 0`, and every level times zero is zero. The
         zero comes from the MULTIPLIER, not from a level.
       ② **The rotation destroys individual zeros before the quantiser ever sees one.** The FWHT mixes
         all `cols` columns, so a single zero weight in the source is not zero after the transform. The
         only exact zeros that survive `R` are WHOLE ROWS of zeros — which is exactly case ①.
-    ⇒ ★★ A CONSTRAINT INHERITED FROM THE UNROTATED FORMAT SURVIVED INTO THE ROTATED ONE, WHERE ITS
-    JUSTIFICATION NO LONGER EXISTED. `MEASURED`: 0.009535 pinned against 0.009442 free, on five real
-    rotated tensors — and 0.009847 for the NF table this replaces, so the two changes together are
-    −4.3% error at identical bits, identical lookup and identical kernel.
+    ⇒ ★★ A ZERO LEVEL IS A CONSTRAINT OF THE UNROTATED FORMAT, AND THE ROTATION REMOVES ITS
+    JUSTIFICATION. `MEASURED`: 0.009535 zero-pinned against 0.009442 specular, on five real rotated
+    tensors — and 0.009847 for the NF table, so the specular table is −4.3% error against NF at identical
+    bits, identical lookup and identical kernel.
     """
     n = 1 << d
     lev = sorted((i + 0.5) / n * 6.0 - 3.0 for i in range(n))  # a deterministic, symmetric start
@@ -188,14 +191,13 @@ def lloyd_table(d):
 
 
 def table(d):
-    """THE SHIPPED TABLE. ⚖ Changed 2026-09-20 from the NF construction to zero-pinned Lloyd-Max.
+    """THE SHIPPED TABLE — the specular Lloyd-Max (⚖ 2026-09-20).
 
-    ⛔⛔ CHANGING THIS CHANGES THE FORMAT'S CONSTANTS, so bytes packed against the old table decode
-    WRONG against the new one, silently and plausibly. Nothing has shipped family 2, so this is free
-    today and will not be free again. ⇒ ★ THE FORMAT ALREADY HAS THE RIGHT MECHANISM FOR A SECOND
-    TABLE AND IT COSTS NOTHING: `family` is three bits with five values spare, so a future table is
-    family 3, exactly as family 0 is "the codebook that shipped". A build constant that can change
-    without changing its tag is a compatibility hazard; a family tag is the version field.
+    ⛔⛔ CHANGING THIS CHANGES THE FORMAT'S CONSTANTS, so bytes packed against one table decode WRONG
+    against another, silently and plausibly — and every pack shipped holds family 2 against this one.
+    ⇒ ★ THE FORMAT HAS THE MECHANISM FOR A SECOND TABLE AND IT COSTS NOTHING: a record's `family` scalar
+    (▶ `src/docs/design/pack_container.md` §③), so a future table is family 3. A build constant that can
+    change without changing its tag is a compatibility hazard; a family tag is the version field.
     """
     return lloyd_table(d)
 
@@ -221,20 +223,16 @@ def validate():
             continue
         if any(vals[i] >= vals[i + 1] for i in range(len(vals) - 1)):
             bad.append("D=%d is not strictly ascending after fp16 rounding — two codes collide" % d)
-        # ⛔⛔ THIS RULE USED TO DEMAND BOTH ENDS BE EXACTLY ±1 AND THAT WAS A PROPERTY OF THE *NF*
-        #   CONSTRUCTION, NOT A LAW — NF divides both halves by one number, so its extremes match by
-        #   construction while its interior is asymmetric. A zero-pinned Lloyd-Max table is asymmetric
-        #   END TO END, because `2^D − 1` non-zero levels cannot split evenly about the zero, and the
-        #   optimum genuinely places one side further out. ⇒ ★ A VALIDATOR THAT ENCODES ONE
-        #   CONSTRUCTION'S INCIDENTAL SYMMETRY WILL REJECT A BETTER CONSTRUCTION AS BROKEN. What must
-        #   hold is that the table is NORMALISED — its widest reach is 1 — so the clip means the same
-        #   thing at every width.
+        # ⛔⛔ WHAT MUST HOLD IS THAT THE TABLE IS NORMALISED — its widest reach is 1 — so the clip means
+        #   the same thing at every width. Both ends at exactly ±1 is a property of a construction, not a
+        #   law: NF divides both halves by one number, and a zero-pinned Lloyd-Max table is asymmetric end
+        #   to end, `2^D − 1` non-zero levels splitting unevenly about the zero. ⇒ ★ A VALIDATOR THAT
+        #   ENCODES ONE CONSTRUCTION'S INCIDENTAL SYMMETRY WILL REJECT A BETTER CONSTRUCTION AS BROKEN.
         if abs(max(abs(vals[0]), abs(vals[-1])) - 1.0) > 1e-9:
             bad.append("D=%d reaches %r at its widest, wanted 1.0 — the table is not normalised"
                        % (d, max(abs(vals[0]), abs(vals[-1]))))
-        # ⛔⛔ THIS RULE ONCE DEMANDED EXACTLY ONE ZERO AND NOW FORBIDS ANY — ▶ `lloyd_levels`. The
-        #   zero came from the NF construction and was kept on an argument that the rotation had
-        #   already invalidated. What must hold now is SPECULARITY, which is a real property of the
+        # ⛔⛔ NO ZERO LEVEL, AND SPECULARITY — ▶ `lloyd_levels`: the rotation leaves no single zero to
+        #   reconstruct, so a zero level is a code spent on nothing. Specularity is a real property of the
         #   optimum for a symmetric density and a sharp check: a fit that drifts off-centre fails it.
         zeros = sum(1 for v in vals if v == 0.0)
         if zeros != 0:
@@ -246,8 +244,8 @@ def validate():
                 break
         if len(set(bits)) != len(bits):
             bad.append("D=%d has a duplicate bit pattern" % d)
-    # ⭐ THE EXTERNAL CHECK IS AGAINST THE *NF* CONSTRUCTION, WHICH IS NO LONGER WHAT SHIPS — and it
-    #   is kept for exactly that reason. It is the only table in this file with a reference outside
+    # ⭐ THE EXTERNAL CHECK IS AGAINST THE *NF* CONSTRUCTION, WHICH IS NOT WHAT SHIPS — and it is kept
+    #   for exactly that reason. It is the only table in this file with a reference outside
     #   this repository, so it proves the machinery (the quantile solve, the fp16 encoding, the
     #   normalisation) rather than the choice of construction. The shipped Lloyd-Max table has no
     #   external reference and cannot have one; it is checked by its own optimality conditions below.
@@ -258,7 +256,8 @@ def validate():
     # ⭐⭐ AND THE SHIPPED TABLE IS CHECKED AGAINST ITS OWN DEFINITION: at a Lloyd-Max optimum every
     #   level is the centroid of its cell. That is a property the answer must have, not a number to
     #   compare against — and it is what a non-converged or overfitted fit FAILS, which is the defect
-    #   that nearly shipped here. The zero level is exempt: it is pinned, so it is not a centroid.
+    #   that nearly shipped here. A zero level would be exempt — a pinned level is not a centroid — and
+    #   the specular table has none.
     for d in WIDTHS:
         lev = lloyd_levels(d)
         n = len(lev)
@@ -298,8 +297,9 @@ def emit():
     lines.append(" * Regenerate with `--emit`; `--check` fails the build if this block and the script")
     lines.append(" * disagree. ▶ that script for the construction, and for what it validates.")
     lines.append(" * %d fp16 entries: %s." % (total, " + ".join("%d@D%d" % (1 << d, d) for d in WIDTHS)))
-    lines.append(" * ⛳ AT D=4 THESE ARE THE VERBATIM bitsandbytes NF4 LEVELS, checked to fp16's own"
-                 " resolution. */")
+    lines.append(" * ⛳ THESE ARE THE SPECULAR LLOYD-MAX LEVELS (`lloyd_table`): `2^D` a width, mirrored about")
+    lines.append(" * zero, none on it. The verbatim bitsandbytes NF4 check is of the NF construction, which proves")
+    lines.append(" * the machinery and does not ship. */")
     lines.append("static __device__ const uint16_t nn__turboquant__zzprivate_gaussian[%d] = {" % total)
     for d in WIDTHS:
         bits, vals = table(d)

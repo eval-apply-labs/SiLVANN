@@ -10,7 +10,7 @@ a release; this file exists so the FORMAT has a producer that can be read agains
 
 ⛔⛔ AND NOTHING HERE IS TESTED ON SYNTHETIC DATA. ⚖ ARCHITECT: *"never test compression on synthetic
 data, use the 35b model directly as data source."* Every number this file's callers quote comes from
-`/mnt/data/bigdisk/qwen_36_35_a3b`, read as raw bf16.
+the Qwen 3.6 35B-A3B's raw checkpoint, read as bf16.
 
 ── ⭐⭐ THE THREE PIECES, AND ONLY THE MIDDLE ONE IS NEW ──────────────────────────────────────────────
 ```

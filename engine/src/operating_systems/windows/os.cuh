@@ -232,6 +232,8 @@ static inline bool sys__os__memory_bind(void* base, size_t bytes, const unsigned
     (void)base; (void)bytes; (void)nodes; (void)most;
     return false;
 }
+/* No policy call is made, so a false from either of the two above is always the system's own: it places no page by node */
+static inline bool sys__os__memory_policy_refused(void) { return true; }
 static inline void* sys__os__memory_aligned(size_t alignment, size_t bytes) { return _aligned_malloc(bytes, alignment); }
 static inline void sys__os__memory_aligned_free(void* at) { _aligned_free(at); }
 
@@ -321,6 +323,8 @@ static inline void sys__os__cpu_core(int cpu, int* package, int* core) {
 static inline void sys__os__cpu_ticks(unsigned long long* busy, unsigned long long* total, int most) {
     (void)busy; (void)total; (void)most;
 }
+/* Not read here: every CPU counts as fast as the others. */
+static inline int sys__os__cpu_capacity(int cpu) { (void)cpu; return -1; }
 static inline long sys__os__cpu_l2_bytes(void) {
     DWORD bytes = 0u;
     char* info = sys__os__windows_relations(RelationCache, &bytes);

@@ -14,9 +14,11 @@ where its toolchain is installed and skipped where it is not.
   python scripts/build.py --dry-run   the commands it would run, not run — on any system
 
 The toolchains are Visual Studio's (2022 or newer, the "Desktop development with C++" workload and its "C++ Clang tools
-for Windows") and CUDA's (12.x). Visual Studio's environment is taken from its `vcvars64.bat`, so a plain PowerShell
-can run this. ASSUMED until a Windows PC has built with it (NN-94): every command below is written from the tools'
-documentation, and the first build is the check.
+for Windows") and CUDA's (12 or 13). Visual Studio's environment is taken from its `vcvars64.bat`, so a plain PowerShell
+can run this. MEASURED on one PC (an RTX 5070 Ti beside a Ryzen 7 5800X), through install.ps1: 2026-10-19 the evaluator
+and x86_avx2 built with clang-cl and nvidia_cuda12 with nvcc 13.4; 2026-10-28 v0.21.2 served Qwen 3.6 35B-A3B at 48
+tokens/s (measurements/2026-10-28_nn94_windows_5070ti.md). A release's libraries are this file's on GitHub's Windows
+runners, every family (.github/workflows/windows-libraries.yml).
 """
 import glob
 import os

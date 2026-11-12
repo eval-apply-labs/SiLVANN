@@ -80,17 +80,14 @@ NOT_A_CARD = CPU_FAMILIES + ("host", "intel_opencl1_igpu")   # silicon whose poo
 TIER_MAX_GB = 128        # the binary search's ceiling, past any card's memory
 DISK_CHUNK = 1024        # GLM's prompt rows a step with its experts on the disk (Qwen's chunk is at most 256)
 FREED_GB = 1             # a card this much emptier than when a kept choice was made chooses again (`_freed`)
-RULES = 9                # the rules' version, in what a kept choice was made for: a change to them chooses again
+RULES = 10               # the rules' version, in what a kept choice was made for: a change to them chooses again
 REGISTER_TABLES = 512    # registered RAM over the card memory that maps it: an 8-byte page-table entry a 4 KiB page.
                          # MEASURED node03 2026-10-26: GLM's 142 GiB registered took 281 MiB more of the MI50 at its peak
                          # (measurements/2026-10-26_v0200_r730_rows_node03.md, vram_register.sh); held beside the margin,
                          # since a card filled to it then has no room for them — at 150 GB of RAM a 17.75 GB tier's load
                          # took 1,036 s against 251 s unregistered, and registered nothing in the end
 CARD_CONTEXT = 32768     # growing, the experts stay on the card where it holds this much context beside them (NN-93)
-FILES_SHARE = 0.10       # what DeepSeek's experts in RAM leave of what this process may hold, beside the spare: the system's
-                         # own and the files it reads in place (its n-gram tables, its layers mapped from their files).
-                         # MEASURED node03 2026-10-21: with none left, 38 of its 40 layers in RAM filled the swap
-                         # (measurements/2026-10-21_deepseek_chat_node03.md)
+FILES_SHARE = experts_file.FILES_SHARE   # what DeepSeek's experts in RAM leave of what this process may hold (▶ there)
 
 
 def _a_card(silicon, machine):
@@ -99,13 +96,41 @@ def _a_card(silicon, machine):
     return silicon not in NOT_A_CARD or (silicon == machine.silicon and own_memory(machine))
 
 
+REFUSED_WORKER = re.compile(r"— worker (\d+), (\w+) device (\d+)")
+
+
+def refused_worker(ex):
+    """The worker a boot's refusal names — (worker, silicon, device), from the engine's "— worker 2, x86_avx2 device 1" —
+    or None where it names none: the machine's own heap, or an engine that does not say."""
+    m = REFUSED_WORKER.search(str(ex))
+    return (int(m.group(1)), m.group(2), int(m.group(3))) if m else None
+
+
+def _pool_refused(ex):
+    return "would not allocate the pool" in str(ex) or "allocator refused the pool" in str(ex)
+
+
 def refused_by_card(ex):
-    """Whether a boot's error is the card's refusal of the pool's room."""
+    """Whether a boot's error is the card's refusal of the pool's room: a refusal of the pool that names no worker, or a
+    worker that is not the processor's — a CPU socket's refusal is its RAM's (▶ `refused_by_processor`)."""
     return _refused_by_card(ex)
 
 
 def _refused_by_card(ex):
-    return "would not allocate the pool" in str(ex) or "allocator refused the pool" in str(ex)
+    if not _pool_refused(ex):
+        return False
+    w = refused_worker(ex)
+    return w is None or w[1] not in CPU_FAMILIES + ("host",)
+
+
+def refused_by_processor(ex):
+    """What to say of a boot whose pool a processor's worker refused — its RAM, not a card's memory — or None where none
+    did. On a two-socket machine each socket is a worker of its own (`sockets`), its pool on its own node."""
+    w = refused_worker(ex)
+    if not _pool_refused(ex) or w is None or w[1] not in CPU_FAMILIES + ("host",):
+        return None
+    return ("the processor's memory refused worker %d's pool (%s device %d): the RAM free, or a container's memory "
+            "limit, is short of what the setup asks of it — not the card's room" % w)
 
 
 def _held(params, workers, mb, machine):
@@ -157,6 +182,9 @@ class _Prober:
         except Exception as ex:                                       # noqa: BLE001 — the engine's refusal is a plain error
             if _refused_by_card(ex):
                 return False
+            said = refused_by_processor(ex)
+            if said:
+                raise Refused("%s: %s" % (self.folder.path, said)) from ex
             raise
         finally:
             machine.shutdown()
@@ -377,11 +405,28 @@ def choose(path, max_context, options=None, silicon=None, fresh=False, log=print
         raise Refused("%s does not fit this card even at a %d-token context%s: a larger card, or a smaller pack"
                       % (folder.path, MIN_CONTEXT, " with its experts on the CPU" if moe else ""))
     chosen, ctx, why = found
+    chosen, why = _table(p, ctx, chosen, why)
     why += "; the context %d, %s" % (ctx, ("the model's whole length" if most else "as asked") if ctx == top else
                                      "as much as the card holds beside the model" + ("" if most else ", of %d asked" % top))
     why = "%s; %d MB of the card kept free (%d setups tested)" % (why, margin_mb, p.tried)
     _remember(folder, key, chosen, ctx, why, used)
     return chosen, ctx, why
+
+
+def _table(p, ctx, options, why):
+    """(options, why) with a model's n-gram table placed (NN-185): Flash-Next's `ngram_from`, DeepSeek's `engram_in` —
+    the model's own choice for these options (▶ `ram_table.place`: RAM where it fits beside the experts' memory chosen
+    here, the process's own and the system's share), kept with the setup and said in its line. A config's word stays."""
+    model = p.model(ctx, options)
+    table = getattr(model, "TABLE", None)
+    if table is None:
+        return options, why
+    option, where, need, beside, noun = table
+    from .ram_table import WHERE_SAID, said_where
+    if options.get(option, "auto") == "auto":
+        options = dict(options, **{option: where})
+        return options, why + "; %s %s" % (noun, said_where(where, need, beside))
+    return options, why + "; %s %s, as the config says" % (noun, WHERE_SAID[where])
 
 
 def model_length(folder):
@@ -467,8 +512,11 @@ def _setup(p, ctx, options, takes, grow=False):
         whole = p.model(MIN_CONTEXT, dict(options, experts_from="ram"))
         layers, held = len(whole.run_layers), experts_file.limit()
         a_layer = whole.cpu_arena // layers
+        # n-gram tables the config puts in RAM take their room before the experts (NN-185)
+        table = getattr(whole, "TABLE", None)
+        tables = table[2] if table is not None and options.get(table[0]) == "ram" else 0
         room = (held * (1 - FILES_SHARE) - max(experts_file.OWN, getattr(p.arch, "HOST_OWN", 0) or 0) - experts_file.SPARE
-                - video_ram(p.folder.config, p.video_tokens))
+                - video_ram(p.folder.config, p.video_tokens) - tables)
         n = int(max(0, min(layers, room // a_layer)))
         carded = float(options.get("card_experts_gb") or 0) or int(options.get("card_experts") or 0)
         if n == layers and "card_experts_gb" in takes and "card_experts_gb" not in options and "card_experts" not in options:

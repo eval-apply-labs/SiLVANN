@@ -5,13 +5,15 @@
 #
 #   pwsh scripts\portable\build_portable.ps1 -Lib lib -Out portable
 #
+# The release's job hands it a SiLVANN.exe built and signed with the libraries (`-Launcher`); without one it builds its own.
 # Python's embeddable build has no pip: the packages are installed for it with this machine's Python of the same minor
 # version (`pip install --target`), so their compiled parts are its ABI's. Its `python312._pth` names where it looks — the
 # folder's root (the entry points), the runtime and the packages — and `import site`.
 param(
     [string]$Lib = "lib",
     [string]$Out = "portable",
-    [string]$PythonVersion = "3.12.10"
+    [string]$PythonVersion = "3.12.10",
+    [string]$Launcher = ""
 )
 $ErrorActionPreference = "Stop"
 $Here = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -51,7 +53,7 @@ if ($have -ne $Minor) { throw "this machine's python is $have, the embeddable bu
 & python -m pip install --quiet --only-binary=:all: --target (Join-Path $Py "Lib\site-packages") -r (Join-Path $Tree "scripts\requirements.txt")
 if ($LASTEXITCODE -ne 0) { throw "pip could not install requirements.txt for the embeddable build" }
 
-# ⑤ from Visual Studio: SiLVANN.exe by its C compiler (its environment from vcvars64), and the C++ runtime
+# ⑤ from Visual Studio: the C++ runtime, and SiLVANN.exe by its C compiler (build_launcher.ps1) unless one is handed in
 $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
 $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
 if (-not $vs) { throw "no Visual Studio C compiler (vswhere found none)" }
@@ -72,10 +74,12 @@ if (-not ($runtime | Where-Object { $_.Name -eq "msvcp140.dll" })) { throw "no m
 $runtime | ForEach-Object { Copy-Item $_.FullName $Py -Force }
 "the C++ runtime from $($crt.FullName): $(($runtime | ForEach-Object { $_.Name }) -join ', ')"
 
-$src = Join-Path $Here "SiLVANN.c"
 $exe = Join-Path (Resolve-Path $Root) "SiLVANN.exe"
-cmd /c "`"$vcvars`" >nul && cl /nologo /O2 /W3 `"$src`" /Fe:`"$exe`" /Fo:`"$env:TEMP\\`" /link /SUBSYSTEM:WINDOWS user32.lib"
-if ($LASTEXITCODE -ne 0 -or -not (Test-Path $exe)) { throw "SiLVANN.exe was not built" }
+if ($Launcher) {
+    Copy-Item $Launcher $exe
+} else {
+    & (Join-Path $Here "build_launcher.ps1") -Exe $exe
+}
 
 # ⑥ the zip
 $archive = Join-Path $Out "silvann_portable_windows_x64.zip"

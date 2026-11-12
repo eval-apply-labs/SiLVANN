@@ -5,7 +5,7 @@ names another.
 """
 import re
 
-RELEASE = "0.26.1"
+RELEASE = "0.29.0"
 
 _VERSION = re.compile(r"v?(\d+)\.(\d+)\.(\d+)$")
 

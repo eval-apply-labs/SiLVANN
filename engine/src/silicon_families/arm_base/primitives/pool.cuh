@@ -24,6 +24,8 @@
  *     allowed   the CPUs this process may run on (`sys__os__cpus_of_thread` — `taskset`, a cgroup's cpuset)
  *     cores     one per physical core among them, a sibling hyperthread never counted twice
  *     free      a core whose every CPU was idle more than half of a 50 ms sample of its ticks (`/proc/stat`)
+ *     fast      first the cores at least `ARM_BASE__POOL_SPEED_FLOOR` percent of the fastest one's speed, then the slow,
+ *               whose threads take only the GEMVs' blocks (▶ THE SLOW CORES, below)
  *     minus     one: the caller's own core — it runs blocks too, and it is the evaluator's runner
  *     capped    by `SILVANN_CPU_THREADS` when it is set above zero
  * and the threads are pinned one to a core, alternating sockets so a small pool still spans both.
@@ -67,6 +69,10 @@ typedef struct arm_base__pool {
     int               node;                    /* the NUMA node it and its memory are on, or -1: every one */
     sys__os__cpus     own;                     /* the whole machine's: the CPUs of the caller's core, left free for it */
     sys__os__cpus     worked;                  /* ...and the CPUs of the cores the threads are on, siblings included */
+    sys__os__cpus     slow;                    /* ...and the CPUs of the slow cores (▶ THE SLOW CORES) */
+    uint8_t           slow_worker[ARM_BASE__THREADS_MAX];   /* thread i on a slow core */
+    uint32_t          fast_workers;            /* the threads on fast cores */
+    int               every;                   /* the launch in flight takes the slow threads too */
 } arm_base__pool;
 
 static arm_base__pool arm_base__zzprivate_pools[ARM_BASE__DEVICES_MAX];
@@ -83,7 +89,7 @@ static __thread uint32_t arm_base__zzpackage_blocks = 1u;
  *   counter being reset under it, and a block could run twice — which for an in-place door (a residual
  *   `add` into its own input) is a wrong answer, not wasted work. A claim is a compare-and-swap on
  *   (generation, block), so it succeeds only for the launch the worker woke for. */
-static inline void arm_base__zzprivate_take(arm_base__pool* p, uint32_t generation) {
+static inline void arm_base__zzprivate_take(arm_base__pool* p, uint32_t generation, bool slow) {
     /* ⭐ A RUN OF BLOCKS A CLAIM, NOT ONE: a small door launches hundreds of blocks of a few elements each, and a
      *   claim is a compare-and-swap on one line every thread wants. `MEASURED`: zeroing 8192 halves cost
      *   58-91 us that way, most of it the claims. Four runs a thread keep a slow thread from holding the rest. */
@@ -93,6 +99,8 @@ static inline void arm_base__zzprivate_take(arm_base__pool* p, uint32_t generati
         uint32_t b, blocks, run;
         do {
             if ((uint32_t)(v >> 32) != generation) return;
+            /* a slow core's thread leaves a launch for the fast ones (▶ THE SLOW CORES) */
+            if (slow && !__atomic_load_n(&p->every, __ATOMIC_ACQUIRE)) return;
             /* read only once the counter names this launch: the caller writes it before the launch's size */
             blocks = __atomic_load_n(&p->blocks, __ATOMIC_ACQUIRE);
             run = blocks / (4u * threads) > 1u ? blocks / (4u * threads) : 1u;
@@ -153,7 +161,7 @@ static void* arm_base__zzprivate_worker(void* a) {
             sys__os__lock_give(&p->lock);
         }
         seen = g;
-        arm_base__zzprivate_take(p, g);
+        arm_base__zzprivate_take(p, g, p->slow_worker[i] != 0u);
     }
     return 0;
 }
@@ -201,9 +209,30 @@ static inline void arm_base__zzprivate_core_of(int cpu, int* pkg, int* id) {
     sys__os__cpu_core(cpu, pkg, id);
     if (*pkg < 0 || *id < 0) { *pkg = 0; *id = ARM_BASE__ZZPRIVATE_CPUS + cpu; }
 }
-/* The pool's threads' CPUs into `cpus_out`, and their count. On the whole machine the caller's own core is left
- * out, as it always was — it runs blocks too; on a node every free core has a thread, and the caller runs none. */
-static inline uint32_t arm_base__zzprivate_size(int* cpus_out, int node, sys__os__cpus* own, sys__os__cpus* worked) {
+/* ⭐ THE SLOW CORES: on a processor whose cores differ (Arm's big and little) the pool's threads on the slow ones take only
+ *   the launches that ask for every thread — the GEMVs (`arm_base__zzpackage_run_every`), which stream a matrix's rows
+ *   and where a slow core adds its share of the memory's speed — and leave every other launch to the fast cores' threads.
+ *   A launch's blocks are taken by whichever thread is free and it ends with its last block: a core at a fraction `s` of
+ *   the fastest's arithmetic adds `s` to a launch's work while each block it takes last holds the launch `1/s` of a fast
+ *   core's block longer, so where a launch's work is arithmetic a core well under the fastest costs more than it gives
+ *   (`REASONED`). A core is slow under `ARM_BASE__POOL_SPEED_FLOOR` percent of the fastest, each core's speed the
+ *   system's (`sys__os__cpu_capacity`: Linux's `cpu_capacity`, else the highest clock). `MEASURED` the phone
+ *   (measurements/2026-11-11_nn175_arm_doors_razer_edge.md ⑦): its four Cortex-A55 are 30% of its X1 (`cpu_capacity` 308
+ *   of 1024), its three A78 77%. The 2B's prompt read 12.2 positions/s with every core, 18.2 with the A55 out of the pool
+ *   and 16.4 with them the GEMVs' alone; its exact decode 5.25, 4.46 and 5.35 tokens/s; the X1 alone 8.9 and 2.5. A floor,
+ *   not "the fastest cluster alone": a phone's one X1 alone is one thread, and a machine whose cores differ by a little
+ *   clock (one core's boost) keeps them all fast. Half (`REASONED`): the A55's 30% under it, the A78's 77% over it, and the
+ *   GB10's Cortex-A725 over it by their clocks (2.8 of 3.9 GHz, 72%; its `cpu_capacity` not read). Every core as fast as
+ *   the others — or a speed not read — leaves the pool and every launch as they were. */
+#ifndef ARM_BASE__POOL_SPEED_FLOOR
+#define ARM_BASE__POOL_SPEED_FLOOR 50    /* percent of the fastest core's speed under which a core is slow */
+#endif
+/* The pool's threads' CPUs into `cpus_out`, the fast cores' first, whether each is slow into `slow_out`, and their count.
+ * On the whole machine the caller's own core is left out, as it always was — it runs blocks too; on a node every free core
+ * has a thread, and the caller runs none. A caller on a slow core is given the fastest free core of its own instead
+ * (`own`), which a launch moves it to (▶ caller_to_own). */
+static inline uint32_t arm_base__zzprivate_size(int* cpus_out, uint8_t* slow_out, int node, sys__os__cpus* own,
+                                                sys__os__cpus* worked, sys__os__cpus* slow) {
     enum { MOST = ARM_BASE__ZZPRIVATE_CPUS };
     static unsigned long long b0[MOST], t0[MOST], b1[MOST], t1[MOST];
     memset(b0, 0, sizeof b0); memset(t0, 0, sizeof t0); memset(b1, 0, sizeof b1); memset(t1, 0, sizeof t1);
@@ -212,7 +241,7 @@ static inline uint32_t arm_base__zzprivate_size(int* cpus_out, int node, sys__os
     sys__os__sleep(&nap);
     sys__os__cpu_ticks(b1, t1, MOST);
     /* per physical core (package, core id): its first allowed CPU, and whether every CPU of it is idle */
-    int core_cpu[MOST], core_pkg[MOST], core_id[MOST], core_busy[MOST], core_of[MOST], cores = 0;
+    int core_cpu[MOST], core_pkg[MOST], core_id[MOST], core_busy[MOST], core_speed[MOST], core_slow[MOST], core_of[MOST], cores = 0;
     for (int cpu = 0; cpu < MOST; ++cpu) core_of[cpu] = -1;
     for (int cpu = 0; cpu < MOST && cpu < SYS__OS__CPUS_MOST; ++cpu) {
         if (!sys__os__cpus_has(&arm_base__zzprivate_allowed, cpu)) continue;
@@ -223,19 +252,27 @@ static inline uint32_t arm_base__zzprivate_size(int* cpus_out, int node, sys__os
         const int busy = dt > 0ull && db * 2ull > dt;
         int k = 0;
         while (k < cores && !(core_pkg[k] == pkg && core_id[k] == id)) ++k;
-        if (k == cores) { core_cpu[k] = cpu; core_pkg[k] = pkg; core_id[k] = id; core_busy[k] = 0; ++cores; }
+        if (k == cores) { core_cpu[k] = cpu; core_pkg[k] = pkg; core_id[k] = id; core_busy[k] = 0; core_speed[k] = -1; ++cores; }
         core_busy[k] |= busy;
+        const int speed = sys__os__cpu_capacity(cpu);
+        if (speed > core_speed[k]) core_speed[k] = speed;
         core_of[cpu] = k;
     }
+    /* the slow cores: under the floor's share of the fastest, where every core's speed was read */
+    int fastest = 0, unread = 0;
+    for (int k = 0; k < cores; ++k) { if (core_speed[k] > fastest) fastest = core_speed[k]; if (core_speed[k] <= 0) unread = 1; }
+    for (int k = 0; k < cores; ++k)
+        core_slow[k] = !unread && fastest > 0 && (long long)core_speed[k] * 100 < (long long)fastest * ARM_BASE__POOL_SPEED_FLOOR;
     /* the free cores, alternating packages: first core of package 0, of package 1, second of 0, … */
     int order[MOST], n = 0, max_pkg = 0;
     for (int k = 0; k < cores; ++k) if (core_pkg[k] > max_pkg) max_pkg = core_pkg[k];
-    for (int round = 0; n < cores && round < cores; ++round)
-        for (int pkg = 0; pkg <= max_pkg; ++pkg) {
-            int seen = 0;
-            for (int k = 0; k < cores; ++k)
-                if (core_pkg[k] == pkg && !core_busy[k] && seen++ == round) order[n++] = core_cpu[k];
-        }
+    for (int pass = 0; pass < 2; ++pass)                     /* the fast cores, then the slow */
+        for (int round = 0; n < cores && round < cores; ++round)
+            for (int pkg = 0; pkg <= max_pkg; ++pkg) {
+                int seen = 0;
+                for (int k = 0; k < cores; ++k)
+                    if (core_pkg[k] == pkg && !core_busy[k] && core_slow[k] == pass && seen++ == round) order[n++] = core_cpu[k];
+            }
     /* on the whole machine, minus the caller's own core; capped by the setting */
     const int self = node >= 0 ? -1 : sys__os__cpu_now();
     const uint32_t caller = node >= 0 ? 0u : 1u;             /* whether the caller is one of the threads */
@@ -248,20 +285,32 @@ static inline uint32_t arm_base__zzprivate_size(int* cpus_out, int node, sys__os
      *   caller's CPU each run): with the pool on CPUs 0 1 2 and the caller on CPU 4 — core 0's other half — 7.60 tokens/s;
      *   with the caller's core left out, the same caller CPU, 8.98, as every other run. */
     const int self_core = self >= 0 && self < MOST ? core_of[self] : -1;
+    /* a caller on a slow core: the fastest free core is its own, and no thread's */
+    int kept = -1;
+    if (caller == 1u && self_core >= 0 && core_slow[self_core])
+        for (int k = 0; k < n; ++k)
+            if (!core_slow[core_of[order[k]]] && (kept < 0 || core_speed[core_of[order[k]]] > core_speed[core_of[order[kept]]])) kept = k;
+    const int kept_core = kept >= 0 ? core_of[order[kept]] : -1;
     for (int k = 0; k < n && workers < ARM_BASE__THREADS_MAX; ++k) {
         if (self_core >= 0 && core_of[order[k]] == self_core) continue;
+        if (kept_core >= 0 && core_of[order[k]] == kept_core) continue;
         if (cap > 0 && (long)(workers + caller) >= cap) break;
+        slow_out[workers] = (uint8_t)core_slow[core_of[order[k]]];
         cpus_out[workers++] = order[k];
     }
     if (caller == 1u && n > 0 && workers + 1u > (uint32_t)n) workers = (uint32_t)n - 1u;
-    /* the CPUs of the threads' cores, and on the whole machine those of the caller's own core when it is free */
-    sys__os__cpus_clear(own); sys__os__cpus_clear(worked);
+    /* the CPUs of the threads' cores, and on the whole machine those of the caller's own core when it is free — or of
+     *   the fast core kept for a caller on a slow one; and the slow cores' */
+    sys__os__cpus_clear(own); sys__os__cpus_clear(worked); sys__os__cpus_clear(slow);
     for (uint32_t w = 0u; w < workers; ++w)
         for (int cpu = 0; cpu < MOST && cpu < SYS__OS__CPUS_MOST; ++cpu)
             if (core_of[cpu] >= 0 && core_of[cpu] == core_of[cpus_out[w]]) sys__os__cpus_add(worked, cpu);
-    if (self >= 0 && self < MOST && core_of[self] >= 0 && !core_busy[core_of[self]] && !sys__os__cpus_has(worked, self))
+    const int own_core = kept_core >= 0 ? kept_core : self >= 0 && self < MOST ? core_of[self] : -1;
+    if (own_core >= 0 && !core_busy[own_core] && !sys__os__cpus_has(worked, core_cpu[own_core]))
         for (int cpu = 0; cpu < MOST && cpu < SYS__OS__CPUS_MOST; ++cpu)
-            if (core_of[cpu] == core_of[self]) sys__os__cpus_add(own, cpu);
+            if (core_of[cpu] == own_core) sys__os__cpus_add(own, cpu);
+    for (int cpu = 0; cpu < MOST && cpu < SYS__OS__CPUS_MOST; ++cpu)
+        if (core_of[cpu] >= 0 && core_slow[core_of[cpu]]) sys__os__cpus_add(slow, cpu);
     return workers;
 }
 
@@ -277,7 +326,9 @@ static inline arm_base__pool* arm_base__zzpackage_start(void) {
         sys__os__lock_init(&p->caller);
         sys__os__condition_init(&p->wake);
         p->node = arm_base__zzpackage_node_of(device);
-        p->workers = arm_base__zzprivate_size(p->cpu, p->node, &p->own, &p->worked);
+        p->workers = arm_base__zzprivate_size(p->cpu, p->slow_worker, p->node, &p->own, &p->worked, &p->slow);
+        p->fast_workers = 0u;
+        for (uint32_t i = 0u; i < p->workers; ++i) p->fast_workers += p->slow_worker[i] == 0u;
         for (uint32_t i = 0u; i < p->workers; ++i)
             if (!sys__os__thread_start(&p->thread[i], arm_base__zzprivate_worker, (void*)(uintptr_t)((device << 16) | i))) { p->workers = i; break; }
         /* ⛳ `SILVANN_CPU_POOL_REPORT=1` says what was chosen: the size is decided from the machine's load at
@@ -286,6 +337,10 @@ static inline arm_base__pool* arm_base__zzpackage_start(void) {
             fprintf(stderr, "arm_base: device %u (node %d), a pool of %u thread(s) %s, on CPUs", device, p->node, p->workers,
                     p->node >= 0 ? "and the caller waiting" : "beside the caller");
             for (uint32_t i = 0u; i < p->workers; ++i) fprintf(stderr, " %d", p->cpu[i]);
+            if (p->fast_workers < p->workers) {
+                fprintf(stderr, " · of them slow, the GEMVs' alone (under %d%% of the fastest):", ARM_BASE__POOL_SPEED_FLOOR);
+                for (uint32_t i = 0u; i < p->workers; ++i) if (p->slow_worker[i]) fprintf(stderr, " %d", p->cpu[i]);
+            }
             fprintf(stderr, "\n");
         }
         __atomic_store_n(&p->started, 1, __ATOMIC_RELEASE);
@@ -309,11 +364,16 @@ static inline void arm_base__zzpackage_bind(uint32_t device) {
 /* ⭐ ONE LAUNCH: `blocks` runs of `fn(arg)`, spread over the pool and the caller, returning when all are done.
  * ⛳ One launch at a time a pool: the caller is the worker that bound its device, and nn's doors are called from
  * it in order. Two workers on two devices launch at once, each on its own pool. */
-static inline void arm_base__zzprivate_run_body(uint32_t blocks, void (*fn)(void*), void* arg);
-static inline void arm_base__zzprivate_launch(arm_base__pool* p, uint32_t blocks, void (*fn)(void*), void* arg);
-static inline void arm_base__zzpackage_run(uint32_t blocks, void (*fn)(void*), void* arg) {
-    arm_base__zzprivate_run_body(blocks, fn, arg);
+static inline void arm_base__zzprivate_run_body(uint32_t blocks, void (*fn)(void*), void* arg, int every);
+static inline void arm_base__zzprivate_launch(arm_base__pool* p, uint32_t blocks, void (*fn)(void*), void* arg, int every);
+/* `every`: the slow cores' threads take blocks too (▶ THE SLOW CORES) — `arm_base__zzpackage_run_every`, the GEMVs' */
+static inline void arm_base__zzprivate_run(uint32_t blocks, void (*fn)(void*), void* arg, int every) {
+    arm_base__zzprivate_run_body(blocks, fn, arg, every);
 }
+/* A launch on the fast cores' threads and the caller: every door's but the GEMVs'. */
+static inline void arm_base__zzpackage_run(uint32_t blocks, void (*fn)(void*), void* arg) { arm_base__zzprivate_run(blocks, fn, arg, 0); }
+/* A launch on every thread, the slow cores' too: the GEMVs', a matrix's rows streamed. */
+static inline void arm_base__zzpackage_run_every(uint32_t blocks, void (*fn)(void*), void* arg) { arm_base__zzprivate_run(blocks, fn, arg, 1); }
 
 /* ⭐ ON THE WHOLE MACHINE THE CALLER RUNS ITS SHARE ON ITS OWN CORE. The pool leaves the caller's core free for it (▶ the
  *   sizing), but the caller is never pinned — a thread is where the scheduler puts it — and the scheduler is free to move it
@@ -325,7 +385,7 @@ static inline void arm_base__zzpackage_run(uint32_t blocks, void (*fn)(void*), v
 static inline bool arm_base__zzprivate_caller_to_own(const arm_base__pool* p, sys__os__cpus* saved) {
     if (p->node >= 0 || sys__os__cpus_count(&p->own) == 0) return false;
     const int cpu = sys__os__cpu_now();
-    if (cpu < 0 || cpu >= SYS__OS__CPUS_MOST || !sys__os__cpus_has(&p->worked, cpu)) return false;
+    if (cpu < 0 || cpu >= SYS__OS__CPUS_MOST || !(sys__os__cpus_has(&p->worked, cpu) || sys__os__cpus_has(&p->slow, cpu))) return false;
     return sys__os__cpus_of_thread(saved) && sys__os__cpus_to_thread(&p->own);
 }
 /* ⛔⛔ ONE CALLER A POOL AT A TIME. A launch writes the pool's job and counters and waits for its blocks; two threads that
@@ -336,18 +396,18 @@ static inline bool arm_base__zzprivate_caller_to_own(const arm_base__pool* p, sy
  *   grouped products' (measurements/2026-10-27_nn133_deepseek_disk_node03.md). So a launch holds its pool's `caller`
  *   from its job written to its last block done, and a second caller waits its turn; a launch run on the caller's thread
  *   alone (no workers, one block) shares nothing and takes none. */
-static inline void arm_base__zzprivate_run_body(uint32_t blocks, void (*fn)(void*), void* arg) {
+static inline void arm_base__zzprivate_run_body(uint32_t blocks, void (*fn)(void*), void* arg, int every) {
     arm_base__pool* p = arm_base__zzpackage_start();
     if (blocks == 0u) return;
     const bool shared = p->workers != 0u && blocks > 1u;
     if (shared) sys__os__lock_take(&p->caller);
     sys__os__cpus saved;
     const bool moved = shared && arm_base__zzprivate_caller_to_own(p, &saved);
-    arm_base__zzprivate_launch(p, blocks, fn, arg);
+    arm_base__zzprivate_launch(p, blocks, fn, arg, every);
     if (moved) (void)sys__os__cpus_to_thread(&saved);
     if (shared) sys__os__lock_give(&p->caller);
 }
-static inline void arm_base__zzprivate_launch(arm_base__pool* p, uint32_t blocks, void (*fn)(void*), void* arg) {
+static inline void arm_base__zzprivate_launch(arm_base__pool* p, uint32_t blocks, void (*fn)(void*), void* arg, int every) {
     if (p->workers == 0u || blocks == 1u) {
         for (uint32_t b = 0u; b < blocks; ++b) { arm_base__zzpackage_block = b; arm_base__zzpackage_blocks = blocks; fn(arg); }
         arm_base__zzpackage_block = 0u; arm_base__zzpackage_blocks = 1u;
@@ -374,13 +434,15 @@ static inline void arm_base__zzprivate_launch(arm_base__pool* p, uint32_t blocks
     __atomic_store_n(&p->next, (uint64_t)g << 32, __ATOMIC_RELEASE);
     __atomic_thread_fence(__ATOMIC_RELEASE);
     p->fn = fn; p->arg = arg;
+    /* a pool with no fast core's thread lets its slow ones take every launch, so none is the caller's alone */
+    __atomic_store_n(&p->every, every || p->fast_workers == 0u, __ATOMIC_RELAXED);
     __atomic_store_n(&p->blocks, blocks, __ATOMIC_RELAXED);
     __atomic_store_n(&p->done, 0u, __ATOMIC_RELAXED);
     sys__os__lock_take(&p->lock);
     __atomic_store_n(&p->generation, g, __ATOMIC_RELEASE);
     sys__os__condition_wake_all(&p->wake);
     sys__os__lock_give(&p->lock);
-    if (p->node < 0) arm_base__zzprivate_take(p, g);         /* on a node the caller only waits */
+    if (p->node < 0) arm_base__zzprivate_take(p, g, false);  /* on a node the caller only waits */
     while (__atomic_load_n(&p->done, __ATOMIC_ACQUIRE) < blocks) ARM_BASE__ZZPRIVATE_PAUSE();
     arm_base__zzpackage_block = 0u; arm_base__zzpackage_blocks = 1u;
 }

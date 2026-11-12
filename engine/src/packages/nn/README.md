@@ -2,7 +2,7 @@
 
 `nn` is what a model is built with: the arithmetic its layers are made of, the structures that keep its
 weights, activations and KV cache within reach of a card, and the verbs a model program is written in.
-It is the second half of SiLVANN. The first half is the Eval-Apply GPU Interpreter — the language
+It is the second half of SiLVANN. The first half is the Eval-Apply Generalized Interpreter — the language
 (`sys`, next door) and the evaluator that walks a program (`engine/`). `nn` is written against `sys` and
 never the other way about: it adds kinds, objects and verbs to the language through the same three lists
 `sys` uses, and a program calls `nn__vector__add` exactly as it calls `add`.
@@ -62,7 +62,8 @@ The package's own device-wide state sits in its rows of the system register, `nn
 ```
 standing up         nn__package__init
 buffers             nn__buffer__getnew  nn__buffer__getnew_ram  nn__vector__range  nn__vector__zero
-                    nn__buffer__copy — a buffer from another worker, through RAM
+                    nn__buffer__copy — a buffer from another worker, through RAM: `(nn__buffer__copy from to bytes)`,
+                      read where its bytes are, the memory the buffer records
                     nn__vector__widen — halves into floats, each exactly (a residual kept as floats)
 vector arithmetic   nn__vector__add  nn__vector__pointwise_mul  nn__vector__scale  nn__vector__scale_at
                     nn__vector__exp  nn__vector__softplus  nn__vector__dot_product
@@ -146,7 +147,7 @@ A few things worth knowing before reading them:
 - **The codec's verbs are rows of their own.** `nn__turboquant__gemv` multiplies by a quantised matrix
   without expanding it; `nn__turboquant__decode` expands it to fp16. `nn__hadamard__rotate` is the
   rotation the Gaussian family depends on, with the sign flip fused in so half a transform cannot be
-  applied. ▶ `src/docs/design/pending/quant_families.md`.
+  applied. ▶ `src/docs/design/quant_families.md`.
 - **Two gemvs, and the program picks.** `nn__turboquant__gemv` is exact in fp32; `nn__turboquant__gemv_int8`
   quantises `x` to int8 in blocks of 32 and multiplies against the levels in int8 (a generated table beside the
   fp16 one), ~0.5–0.7% of the rows' rms away from it. They are two verbs so a boot program writes its layer
@@ -315,16 +316,18 @@ numpy by the oracles in `test/` — `src_weights_oracle.py`, `src_mlp_oracle.py`
 `src_deltanet_oracle.py`, `src_deltanet_layer_oracle.py`, `src_attention_program.py`,
 `src_gaussian_oracle.py`, and the whole of Qwen2.5-7B by `src_qwen25_7b_decode.py`.
 
-Not built:
+The settings `nn` boots with — its buffer classes, the expert collections, the layer table — are written
+from a model's `config.json` by that model family's runtime (`device_params` in
+`python/silvann_runtime/qwen3_5.py`, `glm5.py`, `mistral3.py` …).
 
-- **the cartridge's KV tiers in use**: a model's cache in tiers — the first and the newest positions in fp16,
-  older ones in `tq8` and then `tq4` — is its attention table's (`ai_qwen_3__attention_tiered`), not the
-  cartridge's; evicting the cold tail is not built
-- the conversion from a model's `config.json` to a silvann config
+Not built: **the cartridge's KV tiers in use**. A model's cache in tiers — the first and the newest
+positions in fp16, older ones in `tq8` and then `tq4` — is its attention table's
+(`ai_qwen_3__attention_tiered`), not the cartridge's, and the runtimes size the cartridge's tiers at one
+token; evicting the cold tail is not built.
 
-⚠ The evaluator's runners are real threads, so the pool's list lock and the expert index's single writer
-can meet real concurrency; whether any test drives two runners into one free list at once is unchecked.
-The board, and why each open row is open: `src/docs/design/pending/nn_port.md`.
+⚠ The evaluator's runners are real threads. A worker's free lists take no lock, on the premise that only
+threads running as that worker reach them, and each worker writes its own expert index; whether any test drives
+two threads into one free list at once is unchecked.
 
 ## Layout
 
@@ -393,9 +396,8 @@ python3 scripts/src_claim_gate.py          every claim this tree writes down hol
 
 The design notes are in the development repository's `src/docs/`:
 
-- `src/docs/design/pending/nn_port.md` — what is built, what is open, and why
 - `src/docs/design/activation_buffer_pool.md` — the buffer pool
 - `src/docs/design/nn_span_layout.md` — the span, and the config keys that size it
 - `src/docs/design/expert_lru_node_array.md` and `weight_load.md` — the expert index and how weights get in
-- `src/docs/design/pack_container.md` and `pending/quant_families.md` — the packed bundle and the codec
+- `src/docs/design/pack_container.md` and `quant_families.md` — the packed bundle and the codec
 - `src/silicon_families/add_a_family.md` — the seam from the family's side

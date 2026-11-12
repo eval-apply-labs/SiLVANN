@@ -13,15 +13,18 @@ because they were written from each other.
 ⇒ ★ THE ORACLE FOR THIS FILE IS `nn_unpack_model.decode_record`, WHICH SHARES NO CODE WITH IT and
 reads the same bytes by its own arithmetic. ▶ `test/src_weights_oracle.py`.
 
-── ⛔⛔ AN EXPERT IS NOT A RECORD IN v3, AND THAT IS THE FACT THE WHOLE FILE IS SHAPED BY ─────────────
-`MEASURED` by reading `layers/000/index.pkl` of `/mnt/data/bigdisk/qwen36_35b_v3`:
+── ⛔⛔ AN EXPERT IS A SLICE OF ITS LAYER'S STACKED RECORD, OR A RECORD OF ITS OWN ─────────────────────
+`MEASURED` by reading `layers/000/index.pkl` of the Qwen 3.6 35B-A3B's v3 pack:
 ```
   mlp.experts.gate_up_proj   shape [256, 1024, 2048]   rows 262144  cols 2048  row_bytes 2048
   mlp.experts.down_proj      shape [256, 2048,  512]   rows 524288  cols  512  row_bytes  512
 ```
 ⇒ the packer stores **the whole stacked tensor as ONE record a layer** — 537 MB and 269 MB — so expert
-`i` is not a key to look up, it is **four contiguous slices computed by arithmetic**. The deployed-122B
-shape (`…_Down_ID<i>` as separate records) is superseded and nothing here looks for it.
+`i` is not a key to look up, it is **four contiguous slices computed by arithmetic**. A pack laid out by
+`scripts/pack_expert_order.py` keeps each expert as a record of its own (`PER_EXPERT`, `FUSED`), and
+`Bundle.record` answers the stacked name with a view of them (`StackedRecord`, `RowView`), so a caller asks
+for the stacked record either way. The deployed-122B shape (`…_Down_ID<i>` as separate records) is
+another naming, and nothing here looks for it.
 ⛳ AND THE ARITHMETIC IS ONLY VALID BECAUSE THE ROWS OF ONE EXPERT ARE CONTIGUOUS, which is a claim
 about the packer's flattening order and not about the format: `[E, R, C] -> rows = E*R` puts expert
 `i`'s `R` rows together, in order, at `i*R`. ⛔ `ASSUMED` until `expert_rows()` checks it — which it
@@ -41,10 +44,11 @@ own scales. Interleaving all four would make the down half's address depend on t
 count, which is exactly the coupling the one-collection-per-matrix-type ruling removed.
 
 ── ⭐ WHAT A DENSE TENSOR IS ────────────────────────────────────────────────────────────────────────
-⚖ RULED: *"a dense tensor is a collection with 40 slots, one per layer."* So it is the
-SAME object with the second half empty: one slice, `[data | lut]`, and `down_bytes` of zero.
-⛔ HOW A PROGRAM *NAMES* ONE IS NOT RULED and this file takes no position — it writes bytes to an
-address the card chose. ▶ `RESUME.md`, the open question.
+⚖ RULED: *"a dense tensor is a collection with 40 slots, one per layer."* So it is the SAME object: a
+record's codes in the slot's up half and its scales in the down half, both halves non-zero (▶ `dense_plan`,
+which says why one half and a `down_bytes` of zero does not work).
+⚖ A program names one at `[layer][type][0]` (`NN-5`): the type in the path keeps it off expert 0
+(▶ `Loader.load_dense`).
 """
 
 import hashlib
@@ -103,6 +107,19 @@ def is_norm(short_name):
     Flash-Next's n-gram layer names its three `norm_key`, `norm_query`, `norm_conv`."""
     return (short_name.endswith("norm.weight") or "_norm.weight" in short_name
             or re.search(r"(^|\.)norm_(key|query|conv)\.weight$", short_name) is not None)
+
+
+# ⭐ A LAYER'S EXPERTS READ AHEAD IN LONG RUNS (NN-182), where the system does not read ahead of a mapped file's faults
+#   itself: Windows. Spans nearer than WARM_GAP are read as one run, WARM_RUN bytes a read. `SILVANN_READ_AHEAD` 1 or 0
+#   asks for it or not on any system.
+#   ⛳ NOT ON LINUX, which reads ahead of the faults while the copy runs: `MEASURED` 2026-11-11 on node03, a cold boot
+#   with the experts copied into RAM, the read-ahead on against off — Qwen 3.6 35B-A3B from a spinning RAID 96.4 and
+#   98.1 s against 92.5 and 93.7, Qwen 3.8 Flash-Next from NVMe 133.2 and 133.9 s against 115.4 and 117.9
+#   (measurements/2026-11-11_nn182_read_ahead_node03.md): the read made first and the copy after, where the system
+#   overlaps them.
+WARM_RUN = 16 << 20
+WARM_GAP = 1 << 20
+READ_AHEAD = os.environ.get("SILVANN_READ_AHEAD", "1" if os.name == "nt" else "0") == "1"
 
 
 class Refused(Exception):
@@ -251,6 +268,39 @@ class Bundle:
             f = open(p, "rb")
             self._blob[layer] = (f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ))
         return self._blob[layer][1]
+
+    def warm(self, layer, spans):
+        """⭐ `spans` of the layer's file — (offset, bytes) each — read ahead in long sequential runs, so the slices a load
+        takes of them after come from the system's file cache, which the mmap shares, on Windows as on Linux. Answers the
+        bytes read.
+        ⛳ WHY: an expert is four slices of two records, gate_up's codes and scales and down's, four regions far apart in
+        the file. Taken through the mmap, each page untouched is a fault and a small read, the four streams interleaved.
+        Linux reads ahead on its own; Windows reads little ahead of a mapped file's fault, `REASONED`, and a disk capped
+        on operations a second then gives ~1 MB/s: Flash-Next's experts copied into RAM sat for minutes on a rented
+        Windows PC, its CPU idle and its disk 100% busy at ~1 MB/s (NN-182) — 57 GB in ~16 hours at that rate."""
+        layer = self._store(layer)
+        runs = []
+        for at, n in sorted(spans):
+            if runs and at <= runs[-1][0] + runs[-1][1] + WARM_GAP:
+                start = runs[-1][0]
+                runs[-1] = (start, max(runs[-1][0] + runs[-1][1], at + n) - start)
+            else:
+                runs.append((at, n))
+        if not runs:
+            return 0
+        p = os.path.join(self.layer_dir(layer), self.manifest["layout"]["weights_bin"])
+        buf = memoryview(bytearray(min(WARM_RUN, max(n for _, n in runs))))
+        read = 0
+        with open(p, "rb", buffering=0) as f:
+            for at, n in runs:
+                f.seek(at)
+                while n > 0:
+                    got = f.readinto(buf[:min(n, len(buf))])
+                    if not got:
+                        break
+                    n -= got
+                    read += got
+        return read
 
     def record(self, layer, short_name):
         """One record, by the name it carries after the layer prefix is stripped — the overlay's when it has one. A
@@ -513,6 +563,16 @@ def align_up(n, to=4096):
     return ((n + to - 1) // to) * to
 
 
+def warm(records):
+    """The byte ranges `records` read in their layers' files, read ahead in long runs (▶ `Bundle.warm`) — each record's
+    own bundle and layer, an overlay's from the overlay. Answers the bytes read."""
+    spans = {}
+    for r in records:
+        each = r.each if isinstance(r, StackedRecord) else [r]
+        spans.setdefault((id(r.bundle), r.layer), (r.bundle, r.layer, []))[2].extend((e.offset, e.nbytes) for e in each)
+    return sum(bundle.warm(layer, s) for bundle, layer, s in spans.values())
+
+
 class SlotPlan:
     """Where each slice lands inside one slot, and how big the slot has to be.
 
@@ -616,7 +676,7 @@ def dense_plan(bundle, short_name, layer=0):
     collection is an ordinary one — both halves non-zero, both aligned, nothing optional.
     ⛔ THE OBVIOUS READING — one slice and `down_bytes: 0` — IS THE ONE THAT DOES NOT WORK, because
     `sys__settings__size` refuses a zero and the device cannot tell an absent key from a typo'd one.
-    ▶ `expert__header.cuh`, which records the attempt and why it came out."""
+    ▶ `src/packages/nn/contracts/objects/expert.cuh`, which records the attempt and why it came out."""
     r = bundle.record(layer, short_name)
     # ⛔⛔ THE FIELD SIZES ARE READ OFF THE RECORD AND NOT RECOMPUTED, WHICH IS NOT PEDANTRY: at
     #   `d == 16` a row carries NO scale, so the lut field is **2 bytes for the whole tensor** and not
@@ -705,6 +765,8 @@ class Loader:
         EXACTLY THE WINDOW IN WHICH THE SLOT IS OBSERVABLY OUTSTANDING."""
         gu = bundle.record(layer, GATE_UP)
         dn = bundle.record(layer, DOWN)
+        if which == 0 and READ_AHEAD:              # a layer's first expert: the layer's experts read ahead (NN-182)
+            warm((gu, dn))
         gd, gl = gu.expert_slices(which, experts)
         dd, dl = dn.expert_slices(which, experts)
         for got, want, what in ((len(gd), plan.up_data, "gate_up codes"),
@@ -726,6 +788,8 @@ class Loader:
         down rows — each worker loads only its own, into its own memory."""
         gu = bundle.record(layer, GATE_UP)
         dn = bundle.record(layer, DOWN)
+        if which == 0 and part == 0 and READ_AHEAD:   # read ahead once a layer, for every part (NN-182)
+            warm((gu, dn))
         gu_rows, dn_rows = gu.expert_rows(experts), dn.expert_rows(experts)
         inter, n, m = gu_rows // 2, gu_rows // 2 // parts, dn_rows // parts
         g0, d0 = which * gu_rows, which * dn_rows
@@ -761,11 +825,11 @@ class Loader:
         choose: the tensor's NAME decides, so no site can forget it.
 
         ⚖ **`NN-5` IS RULED AND THIS IS THE SHAPE:** a dense tensor is `[layer][type][0]`,
-        because the TYPE in the path is what keeps it off expert 0. So `at_layer` now defaults to the
+        because the TYPE in the path is what keeps it off expert 0. So `at_layer` defaults to the
         record's own layer and a caller normally passes neither it nor `which` — the band does the
-        separating that a spare index position used to have to do.
-        ⛳ `at_layer` SURVIVES for the one case that still wants it: filing a tensor under a layer that
-        is not its own, which the oracles do to keep a fixture small."""
+        separating.
+        ⛳ `at_layer` IS FOR the one case that wants it: filing a tensor under a layer that is not its
+        own, which the oracles do to keep a fixture small."""
         r = bundle.record(layer, short_name)
         d_at, d_n = r.data_span()
         l_at, l_n = r.lut_span()

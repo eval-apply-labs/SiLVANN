@@ -65,7 +65,7 @@ from silvann_core import default_config                                   # noqa
 sys.path.insert(0, str(RUNTIME))
 import silvann_runtime as SR                                              # noqa: E402
 from silvann_runtime import autotune, experts_file, registry, skills, tools, tools_config     # noqa: E402
-from silvann_runtime import users                                         # noqa: E402
+from silvann_runtime import sso, users                                    # noqa: E402
 from silvann_runtime.chat import Chat, ToolMarkup                         # noqa: E402
 from silvann_runtime.fetch import ensure_model                            # noqa: E402
 from silvann_runtime.machine import CPU_FAMILIES                         # noqa: E402
@@ -121,16 +121,25 @@ def _cards(m):
 def _loading():
     """`progress(done, total)` for a model's load: a dot every 2.5% and the tens, the whole line so far each time it grows
     (`loading: ...10...20...30.`) — the UI shows it as one line growing — so a long load (GLM's experts copied into RAM,
-    minutes) is seen to move."""
-    said = [0]
+    minutes) is seen to move. A load in passes — the dense part, then the experts copied into RAM — climbs again after
+    the pass before, on the same line (`loading: ...10...100 · ...10.`): a pass begins where `done` falls back."""
+    said, last, before = [0], [0], [""]
 
     def tick(done, total):
+        if done < last[0]:                                # a new pass: the line so far kept, this one after it
+            before[0] += _dots(said[0]) + " · "
+            said[0] = 0
+        last[0] = done
         step = done * 40 // max(1, total)                 # 40 steps of 2.5%
         if step > said[0]:
             said[0] = step
-            print("[silvann_server] loading: " + "".join(str(i * 10 // 4) if i % 4 == 0 else "."
-                                                          for i in range(1, step + 1)), flush=True)
+            print("[silvann_server] loading: " + before[0] + _dots(step), flush=True)
     return tick
+
+
+def _dots(step):
+    """A pass's share of the loading line: a dot every 2.5%, the tens written."""
+    return "".join(str(i * 10 // 4) if i % 4 == 0 else "." for i in range(1, step + 1))
 
 
 _hash_password, _verify_password = users.hash_password, users.verify_password   # a conversation's, as a user's
@@ -179,6 +188,7 @@ S = State()
 #   and the sign-in carries a token (`Authorization: Bearer …`, ▶ `_UsersGate`), and a user's conversations are the ones
 #   in their folder — another user's answers 404, as one that is not there.
 USERS = users.Users(DATA)
+SSO = sso.SignOn(USERS, DATA)                       # a provider to sign on with (NN-157), where sso.json names one
 _ME = contextvars.ContextVar("silvann_user", default=None)    # who the request in hand is from, set by the gate
 CID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")                     # a conversation's id: a name, never a path
 
@@ -233,9 +243,18 @@ def _sidecar(cid):
         return {}
 
 
+def _write_json(path, obj):
+    """`obj` to `path` whole or not at all: written beside it, then put in its place — a process killed mid-write
+    leaves the last one."""
+    part = str(path) + ".part"
+    with open(part, "w") as fh:
+        json.dump(obj, fh, indent=2)
+    os.replace(part, path)
+
+
 def _write_sidecar(cid, meta):
     _cdir(cid).mkdir(parents=True, exist_ok=True)
-    json.dump(meta, open(_cdir(cid) / "server_meta.json", "w"), indent=2)
+    _write_json(_cdir(cid) / "server_meta.json", meta)
 
 
 def _user_system():
@@ -280,8 +299,8 @@ def _persist(c, with_state=True):
     d = _cdir(c.id)
     d.mkdir(parents=True, exist_ok=True)
     S.runtime.save(c, str(d / "cartridge.npz"), with_state=with_state)
-    json.dump({"model_id": S.model_id, "identity": c.identity, "lora": c.lora, "current_pos": c.length,
-               "used": len(c.tokens)}, open(d / "meta.json", "w"), indent=2)
+    _write_json(d / "meta.json", {"model_id": S.model_id, "identity": c.identity, "lora": c.lora,
+                                  "current_pos": c.length, "used": len(c.tokens)})
 
 
 async def _idle():
@@ -792,7 +811,7 @@ def _picture_from(p, cid, text, answering):
 
 def _tool_agent(cid, model, config, task):
     """⭐ THE REPL'S (agent 'model "config" "task") — a subagent's session (▶ silvann_runtime/agents.py, the design in
-    src/docs/design/pending/agents.md): a conversation of the server that serves `model` — this one, or a worker of the
+    src/docs/design/agents.md): a conversation of the server that serves `model` — this one, or a worker of the
     config's `workers` — under the config's LoRA and its allowed commands; the caller is then inside it until (exit)."""
     from silvann_runtime import agents
     model = S.model_id if model in ("self", "") else model
@@ -1243,8 +1262,9 @@ class _UsersGate:
     set for the request (`_me`); with users on, one without a sign-in refused 401 but /health and the sign-in itself, and
     a conversation that is not the signer's answered 404, as one that is not there. One door rather than a check in each
     endpoint, so an endpoint added later is behind it too."""
-    OPEN = ("/health", "/users/sign_in", "/admin/save-all")   # the last saves what is open and reads nothing: a UI
-                                                              #   stopping the server it started calls it unsigned
+    OPEN = ("/health", "/users/sign_in", "/admin/save-all",  # the last saves what is open and reads nothing: a UI
+            "/users/sso", "/users/sso/start", "/users/sso/finish",   # stopping the server it started calls it unsigned;
+            "/users/sso/device", "/users/sso/device/poll")           # the sign-on's steps, a sign-in's (▶ sso.py)
     NOT_A_CONVERSATION = ("estimate", "import")           # /cartridges/estimate and /cartridges/import
 
     def __init__(self, app):
@@ -1297,6 +1317,60 @@ def users_sign_in(req: SignInReq):
     if token is None:
         raise HTTPException(401, "wrong name or password")
     return {"token": token, "name": name}
+
+
+# ── single sign-on (NN-157, ▶ silvann_runtime/sso.py): the provider says who, this server checks it, then a token as above
+class SsoFinishReq(BaseModel):
+    code: str
+    state: str
+
+
+class SsoPollReq(BaseModel):
+    handle: str
+
+
+def _sso(step, *args):
+    """A sign-on's step: refused 403 with the reason, the provider not answering 502."""
+    try:
+        return step(*args)
+    except users.Refused as ex:
+        raise HTTPException(403, str(ex))
+    except sso.Unreachable as ex:
+        raise HTTPException(502, "the provider: %s" % ex)
+
+
+@app.get("/users/sso")
+def users_sso():
+    """Whether this server signs on through a provider: the UI's button's label, and whether a terminal can by a code."""
+    return SSO.public()
+
+
+@app.post("/users/sso/start")
+def users_sso_start():
+    """The provider's page to send the browser to, and the state the UI keeps to know the browser coming back."""
+    return _sso(SSO.start)
+
+
+@app.post("/users/sso/finish")
+def users_sso_finish(req: SsoFinishReq):
+    """The browser back from the provider with its code: the account checked here, then a token as a password's."""
+    name = _sso(SSO.finish, req.code, req.state)
+    return {"token": USERS.issue(name), "name": name}
+
+
+@app.post("/users/sso/device")
+def users_sso_device():
+    """A terminal's sign-on: a code the user types at the provider's page, and the handle to ask after it with."""
+    return _sso(SSO.device)
+
+
+@app.post("/users/sso/device/poll")
+def users_sso_device_poll(req: SsoPollReq):
+    """`{"pending": true}` until the user has finished at the provider's page; then a token as a password's."""
+    name = _sso(SSO.device_poll, req.handle)
+    if name is None:
+        return {"pending": True}
+    return {"token": USERS.issue(name), "name": name}
 
 
 @app.post("/users/sign_out")
@@ -1392,7 +1466,7 @@ async def create_cartridge(req: CreateConvReq, x_web_user_id: Optional[str] = He
                                         "enable_thinking": S.config.get("thinking", True),
                                         "tools_allowed": req.tools_allowed, "agent": req.agent}})
         if _user_system() and req.system:
-            json.dump({"system": req.system}, open(_cdir(c.id) / "conversation_config.json", "w"), indent=2)
+            _write_json(_cdir(c.id) / "conversation_config.json", {"system": req.system})
         await asyncio.to_thread(_persist, c, False)
         if x_web_user_id:
             S.owner[c.id] = x_web_user_id
@@ -1550,8 +1624,8 @@ async def import_cartridge(file: UploadFile = File(...)):
         raise HTTPException(400, "invalid cartridge archive: %s" % ex)
     c.id = new_id
     c.save(str(d / "cartridge.npz"))
-    json.dump({"model_id": S.model_id, "identity": c.identity, "lora": c.lora, "current_pos": c.length,
-               "used": len(c.tokens)}, open(d / "meta.json", "w"), indent=2)
+    _write_json(d / "meta.json", {"model_id": S.model_id, "identity": c.identity, "lora": c.lora,
+                                  "current_pos": c.length, "used": len(c.tokens)})
     side = _sidecar(new_id)
     side["id"] = new_id
     _write_sidecar(new_id, side)
@@ -2159,6 +2233,9 @@ def main():
     except (SR.Refused, SR.Panic) as ex:                      # a model not here, a config not found, a card too small;
         raise SystemExit("[silvann_server] ⛔ not started: %s" % ex)   # the evaluator stopped while the model loaded
     except Exception as ex:                                   # noqa: BLE001 — the engine's refusal is a plain error
+        if autotune.refused_by_processor(ex):
+            raise SystemExit("[silvann_server] ⛔ not started: %s (%s)" % (autotune.refused_by_processor(ex),
+                                                                        getattr(S, "why", "")))
         if not autotune.refused_by_card(ex):
             raise
         raise SystemExit("[silvann_server] ⛔ not started: the card has no room for this setup (%s) — in the config, set "

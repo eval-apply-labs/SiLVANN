@@ -1,10 +1,10 @@
 # `src` — the engine
 
-This tree is the Eval-Apply GPU Interpreter and the neural network library written in it — the two
+This tree is the Eval-Apply Generalized Interpreter and the neural network library written in it — the two
 halves of SiLVANN:
 
 ```
-the Eval-Apply GPU Interpreter   a small lisp: its evaluator (engine/) and its language (packages/sys)
+the Eval-Apply Generalized Interpreter   a small lisp: its evaluator (engine/) and its language (packages/sys)
 the Neural Network library       what a model is built with: buffers, experts, and the arithmetic of a
                                  layer, published as verbs of that lisp (packages/nn)
 ```

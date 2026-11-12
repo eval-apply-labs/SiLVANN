@@ -5,20 +5,23 @@
 #include "../../sys/contracts/objects/kind.cuh"              /* what a thing IS — the first word of every node */
 #include "../../sys/cpu/heap_node__header.cuh" /* the node a form's arguments arrive in */
 #include "../contracts/objects/turboquant.cuh" /* its constants and fault words */
-/* ══ nn — THE VBR CODEC, IMPORTED AS IT STANDS ═══════════════════════════════════════════════════════
+/* ══ nn — THE GAUSSIAN CODEC: A ROTATED ROW, ONE WIDTH A TENSOR, ONE SCALE A ROW ═════════════════════
  *
- * ⚖ ARCHITECT: *"do the vbr codec it should be pretty straightforward … let's import it as
- * is for now."* It is, and this is the whole format:
+ * ⚖ ARCHITECT, 2026-09-20: *"build that quant format with the global nf table, fwht row scaler and no
+ * block scaler."* · 2026-09-21: *"the old vbr is dead, lets move to the new format fully."* This is the
+ * whole format (▶ `src/docs/design/quant_families.md` ①–④, the codec as built):
  * ```
- *   per row r:  D = bitrates[r]            the row's BIT WIDTH — and rows of different D sit in one
- *                                          matrix, which is why an expert has no single quant level
- *               N = 32 / D                 codes to a 32-bit word
- *               column c lives in word (c/N) at bit position D*(c%N)
- *               code = (word >> D*slot) & (2^D - 1)
- *               bit 0 is the SIGN; the high D-1 bits index the row's own codebook
- *               value = ±vbr_lut[vbr_lut_offsets[r] + (code >> 1)]
- *   D == 16:    raw fp16, key-as-value, NO codebook at all
+ *   per tensor:  D = the record's `d`         the BIT WIDTH, D ∈ {1,2,3,4,5,8,16}, one for every row
+ *   per row r:   N = 16 / D                   codes to a uint16 container
+ *                column c lives in container (c/N) at bit position D*(c%N)
+ *                code = (container >> D*slot) & (2^D - 1)
+ *                value = scale[r] × level_D[code]   the code indexes the SIGNED Gaussian table whole —
+ *                                                   2^D levels, no sign bit; scale[r] the row's one fp16,
+ *                                                   the `vbr_lut` plane
+ *   D == 16:     the code is the weight's own fp16 — no scale, no table, nothing rotated
  * ```
+ * The table is a build constant, one block a width (▶ `nn__turboquant__zzpackage_level`), and every row
+ * of a quantised tensor is stored rotated, `R(w)` (▶ `hadamard__header.cuh`).
  * ── ⭐⭐ WHAT A "ROW" IS, BECAUSE THE WORD IS THE WHOLE POINT OF THE LAYOUT ───────────────────────────
  * ⚖ ARCHITECT: *"i do have an activation that i mentally see as a row … i want to do the
  * compression on each column so it is contained within one dot product. is that what i am doing?"*
@@ -29,22 +32,21 @@
  *   vbr_planar.cuh:906   `row_id < output_dim`, and ONE WARP OWNS ONE ROW
  *   the gemv below       out[r] = Σ_c W[r][c]·x[c], with x exactly `cols` long
  * ```
- * ⇒ ⭐ **ONE COMPRESSION UNIT = ONE OUTPUT ELEMENT = ONE COMPLETE DOT PRODUCT.** The bit width, the
- * codebook and the contiguous byte run are all per-unit and self-describing.
+ * ⇒ ⭐ **ONE COMPRESSION UNIT = ONE OUTPUT ELEMENT = ONE COMPLETE DOT PRODUCT.** The scale and the
+ * contiguous byte run are per row; the width is the tensor's.
  * ⛳ THE "COLUMN" READING IS THE SAME THING: HF stores the transpose, so column j of a K×N matrix is
  * row j of the N×K one on disk. Same mechanism, different name — and nothing in this file changes if
  * you say column, so long as you mean *the thing that consumes the whole activation to produce one
  * number*.
- * ⇒ ★★ AND THAT IS WHY A KERNEL FOR ONE DOT PRODUCT CAN BE LEAN: it needs ONE `D`, ONE codebook
- * (512 B of smem, loaded once) and ONE contiguous run. **Every branch on bit width sits at the row
- * boundary, never inside the loop** — which is the register pressure a per-term opcode is trying to
- * get out from under.
+ * ⇒ ★★ AND THAT IS WHY A KERNEL FOR ONE DOT PRODUCT CAN BE LEAN: it needs ONE `D`, ONE scale and ONE
+ * contiguous run, and the table is a build constant — no memory read, the same for every lane. **Every
+ * branch on bit width sits at the row boundary, never inside the loop** — which is the register pressure
+ * a per-term opcode is trying to get out from under.
  *
- * ⛔ **THIS FORMAT HAS NO SCALE AND NO ZERO-POINT.** `REASONED` from the format above, which has no field
- * for either: the row's codebook holds real magnitudes, the scale multiplied into it when the row was
- * packed, so the decode is one indexed read. ⇒ ★ A SEPARATE SCALE IS A SECOND NUMBER OBLIGED TO AGREE WITH
- * A FIRST; MULTIPLYING IT IN DELETES IT. The family `python/nn_compressor.py` packs carries a per-row fp16
- * scale beside a global table instead.
+ * ⛔ **THIS FORMAT HAS ONE SCALE A ROW AND NO ZERO-POINT.** The table is normalised to ±1 and shared by
+ * every row, so a row carries one fp16: `k_D · rms(row)`, the rms taken after the rotation and `k_D` the
+ * table's outermost level in units of σ (▶ `quant_families.md` ③). The table has no zero level, and a row
+ * that must be zero takes a scale of 0. There is no block scale.
  *
  * ── ⭐ THE fp16 READ IS ARITHMETIC, NOT A SEAM VERB, AND THAT IS A RULING NOT A SHORTCUT ─────────────
  * Every fp16 is exactly representable in fp32, so the conversion is a BIT REARRANGEMENT with no
@@ -59,15 +61,16 @@
  * did not want to break the noinline in a monolithic kernel that was computing different things in
  * different blocks, since now each block is autonomous it makes sense to re-separate it. keep it as is
  * for now tho, this is a performance improvement for after the oracle is minted."*
- * ⇒ ⭐⭐ **THE REASON THE FOLD EXISTED HAS ALREADY GONE, AND THE FOLD HAS NOT.** `D == 16` rides the same
- * dispatch as the codebook path because the old tree ran ONE kernel over blocks doing different work, so
- * a separate function was a register-union cost paid by every block. Here a verb is a verb. The
- * re-separation is a PERFORMANCE change with the oracle as its gate — ▶ `nn_port.md` §⑭.
+ * ⇒ ⭐⭐ **THE REASON FOR THE FOLD IS GONE, AND THE FOLD STAYS.** `D == 16` rides the same dispatch as the
+ * table path, a fold made when ONE kernel ran over blocks doing different work, so a separate function was
+ * a register-union cost paid by every block. Here a verb is a verb. The re-separation is a PERFORMANCE
+ * change with the oracle as its gate — `test/src_gaussian_oracle.py`.
  * ⚖ AND THE LARGER SHAPE IT SERVES: *"ideally experts should declare their compression type in their id
  * card so we could mix and match and/or have multiple strategies without costing us performance …
- * maybe even per row."* ⛳ ⚖ SETTLED IT PER TENSOR: one width per tensor, one family (the
- * Gaussian), and the family named by the bundle's per-tensor tag — ▶ `pending/quant_families.md` §④. ⚖ *"i keep my version for non tensor core cards and the turboquant
- * one for those who have the tensor cores."*
+ * maybe even per row."* ⛳ ⚖ SETTLED IT PER TENSOR: one width per tensor, one family (the Gaussian), and
+ * the family named by each record's `family` scalar — ▶ `src/docs/design/quant_families.md` §⑤ (the width)
+ * and §① (the family). ⚖ *"i keep my version for non tensor core cards and the turboquant one for those
+ * who have the tensor cores."*
  * ══════════════════════════════════════════════════════════════════════════════════════════════════ */
 
 static __device__ inline uint64_t nn__turboquant__width(uint64_t rate);
@@ -103,12 +106,11 @@ static __device__ inline uint64_t nn__turboquant__values_per_container(uint64_t 
  * whole of a row's geometry. */
 static __device__ inline uint64_t nn__turboquant__row_bytes(uint64_t d, uint64_t cols);
 
-/* `(nn__turboquant__decode weights lut out rows cols d)` — the TWO planes of a VBR matrix to a dense fp16
- * `[rows*cols]`, answering OUT. ⭐ It was five planes; with one width for the tensor
- * the other three are arithmetic. ▶ the impl, which carries what that was worth.
- * ⛳ IT IS THE WHOLE MATRIX AND NOT ONE ROW, because that is the shape the old tree's standalone decoder
- * has and ⚖ *"import it as is"*. A per-row verb would be the better primitive the day a caller wants one
- * row; nothing wants one yet. */
+/* `(nn__turboquant__decode weights lut out rows cols d)` — the TWO planes of a packed matrix, its codes and its
+ * scales, to a dense fp16 `[rows*cols]`, answering OUT. ⭐ Two planes because with one width for the tensor
+ * every other per-row field is arithmetic. ▶ the impl, which carries what that was worth.
+ * ⛳ IT IS THE WHOLE MATRIX AND NOT ONE ROW. A per-row verb would be the better primitive the day a caller
+ * wants one row; nothing wants one yet. */
 
 /* `(nn__turboquant__gemv weights lut x out rows cols d)` — `out[r] = Σ W[r][c]·x[c]`
  * with the matrix never expanded. ⭐ THIS IS WHAT THE COMPRESSION IS FOR: `decode` costs `rows × cols`

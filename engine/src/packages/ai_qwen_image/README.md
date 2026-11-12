@@ -26,4 +26,4 @@ The arithmetic is diffusers' (`QwenImage21TransformerBlock`, `QwenImage21Transfo
 runtime (`python/silvann_runtime/qwen_image.py`) loads the pack, reorders q and k a head for nn's rotary pairing, lays
 out the sequence, the rotary table, the key limits and the schedule, and the program (`lisp/qwen_image.lisp`) runs the
 steps: `(denoise steps)`. Checked against diffusers by `test/src_qwen_image_block.py` and `test/src_qwen_image_dit.py`.
-▶ `src/docs/design/pending/tool_calling.md` (NN-89).
+▶ `src/docs/design/tool_calling.md` (NN-89).

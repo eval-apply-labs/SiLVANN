@@ -1,4 +1,5 @@
-"""The runtime on the Eval-Apply GPU Interpreter: a model folder booted onto a machine, and the conversations it serves.
+"""The runtime on the Eval-Apply Generalized Interpreter: a model folder booted onto a machine, and the conversations it
+serves.
 
   model_folder   a packed bundle, the model's own files, its LoRAs, and the identity a conversation records
   machine        the engine, booted once, and the conveniences every model needs
@@ -45,7 +46,7 @@ def _routed(path):
 
 def with_cards(path, num_cards, options, multi_user=None):
     """A config's `num_cards` and `multi_user` as its family's options. ⭐ `multi_user` says what several cards are
-    (⚖ 2026-11-04, seats.md ⑥): "no" (the default) one conversation's model split over the machine's first `num_cards`
+    (⚖ 2026-11-04, seats.md): "no" (the default) one conversation's model split over the machine's first `num_cards`
     cards — `tensor_parallel` for the Qwen models and GLM, the `cards` list for DeepSeek, every layer over the group;
     "yes" a conversation a card, for a family that seats one on each (`CARDS_ARE_SEATS`: Flash-Next's `cards`), the
     session answering them at once. With "yes" the routed experts are the inclusive set (⚖ 2026-11-04): every expert in

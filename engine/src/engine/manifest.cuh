@@ -1,6 +1,6 @@
 #ifndef SILVANN__ENGINE_MANIFEST_CUH
 #define SILVANN__ENGINE_MANIFEST_CUH
-/* ══ THE EVAL-APPLY GPU INTERPRETER — INCLUDE ORDER IS THE DEPENDENCY DIRECTION ═══════════════════════
+/* ══ THE EVAL-APPLY GENERALIZED INTERPRETER — INCLUDE ORDER IS THE DEPENDENCY DIRECTION ═══════════════
  * ⭐⭐ THREE TIERS, AND ONE AXIS DECIDES WHICH A THING BELONGS TO:
  *       *"the separation is between a lisp interpreter and a library to compute neural networks."*
  *       `sys__`        the LANGUAGE you write IN   — list ADT, symbols, opcodes, types, silicon

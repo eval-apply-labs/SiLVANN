@@ -1,7 +1,7 @@
 # `ai_z__glm_5_3` — GLM 5.3 Flash as verbs
 
-The layers of GLM 5.3 Flash as verbs of the Eval-Apply GPU Interpreter. The model has four residual streams mixed
-by a hyper-connection at every site, 34 layers of Kimi Delta Attention and 11 of multi-head latent attention with
+The layers of GLM 5.3 Flash as verbs of the Eval-Apply Generalized Interpreter. The model has four residual streams
+mixed by a hyper-connection at every site, 34 layers of Kimi Delta Attention and 11 of multi-head latent attention with
 a sparse indexer (DSA), and 288 routed experts of which 8 run for a token. The package depends only on `sys` and
 `nn`; its arithmetic is `nn`'s doors.
 
@@ -40,6 +40,7 @@ A picture through the vision tower:
 
 ## Where to start reading
 
+- `src/docs/design/glm5.md` — the model, which words are nn's and which this package's, how it runs and is checked
 - `cpu/opcodes/layer__abi.cuh` — every layer verb
 - `cpu/opcodes/vision__abi.cuh` — the vision tower's verbs
 - `cpu/table.cuh` — how a table is read

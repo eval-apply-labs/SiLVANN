@@ -10,7 +10,7 @@
 /* ⛔⛔ 4 KiB, AND THIS COMMENT CLAIMED A REQUIREMENT THE SHIPPING BUNDLE REFUTES — CORRECTED.
  * It read *"IT IS THE DISK PATH'S REQUIREMENT RATHER THAN A PREFERENCE — the O_DIRECT / pinned-DMA read
  * path needs every sub-slot aligned to it."*
- * `MEASURED` on `/mnt/data/bigdisk/qwen36_35b_v3`, the per-expert SOURCE strides:
+ * `MEASURED` on the Qwen 3.6 35B-A3B's v3 pack, the per-expert SOURCE strides:
  * ```
  *     up_data   2,097,152  aligned      down_data  1,048,576  aligned
  *     up_lut        2,048  NOT          down_lut       4,096  aligned
@@ -54,7 +54,7 @@
  * different sizes. what we could do is save the offset somewhere else and then we can gather the up from
  * the base until the offset and the down from the page start plus offset to the end"* — and, asked where
  * *"somewhere else"* is: *"i mean the page list descriptor, not the single page."*
- * ⇒ `MEASURED` on `/mnt/data/bigdisk/qwen36_35b_v3`, all 40 layers: ONE geometry — gate_up
+ * ⇒ `MEASURED` on the Qwen 3.6 35B-A3B's v3 pack, all 40 layers: ONE geometry — gate_up
  * 1024 rows x 2048 B + 2 B/row of lut, down 2048 x 512 + 2 B/row — so the offset is a SINGLE distinct
  * value that a per-page field would have written 10,240 times. A fact stored once cannot disagree with
  * itself. ⛳ The per-half quants are independent BY CONSTRUCTION: the offset IS up's size, and the
@@ -84,8 +84,11 @@
  * that is THE ONLY COPY OF SOMETHING NO RE-READ CAN RECOVER. Under this polarity every one of those
  * failures lands on *"anchored"*: the card fills and `place` REFUSES, loudly, at the moment of the mistake.
  * ⇒ ★★ WHERE A READER CANNOT TELL ABSENT FROM WRONG, POINT THE DEFAULT AT THE FAILURE YOU CAN SURVIVE.
- * ⛳ It costs nothing today — no eviction policy stands yet (▶ `place`) — so nothing in the tree changes
- * behaviour; what it buys is that the dangerous direction can never be reached by an edit that went wrong.
+ * ⛳ NOTHING READS IT YET: the loader evicts within the collection a read or a promotion names and reads no
+ * column (`nn__loader__zzprivate_room`), and `nn__expert__type_anchored` has no caller — a model's dense
+ * collections are filled once at the load and never asked a slot of again, so they are kept by not being
+ * read into rather than by this word (▶ `expert_lru_node_array.md` §⑥). What it buys is that the dangerous
+ * direction cannot be reached by an edit that went wrong, the day an eviction reads it.
  * ⭐⭐ AND THE WORD IS STORED AS `EVICTABLE` WHILE THE ACCESSOR IS CALLED `anchored`, WHICH IS THE WHOLE
  * TRICK AND NOT A NAMING SLIP. Every way the reader can fail — no table stood, a type past the end, a row
  * of the wrong dtype, a word never written — answers **zero**, and zero means *not evictable*. So the safe
@@ -125,12 +128,11 @@
  * would have meant *one half* and malformed must mean *refuse*. Nothing needs the capability, so the
  * guard stays and `NN__EXPERT__FAULT_TYPES` goes on meaning what it meant.
  *
- * ⛔⛔ HOW A PROGRAM *NAMES* A DENSE TENSOR IS **NOT** RULED, AND NOTHING HERE DECIDES IT. `plane` reaches
- * an expert through the index as `[layer][expert]`, and a dense tensor at `[layer][0]` would collide with
- * expert 0 of that layer. The three candidates — a per-collection index, a reserved band above the expert
- * count, or pure `(type, layer)` arithmetic with no index at all — differ in what they cost and in what
- * they let the LRU do. ⛳ THE LOADER AND THE COLLECTION DO NOT DEPEND ON THE ANSWER, which is why this
- * piece ships without it. ▶ `RESUME.md`, the open question.
+ * ⚖ A PROGRAM NAMES A DENSE TENSOR BY ITS COLLECTION, RULED 2026-09-22 (▶ `expert_lru_node_array.md` §⓪):
+ * the index is `[layer][type][which]`, a band per (layer, type), and `plane` takes all three —
+ * `(nn__expert__plane layer type which offset bytes)` — so a dense tensor at `[layer][type][0]` cannot
+ * collide with expert 0 of the same layer, because the type separates them first. The LRU is one chain per
+ * band (▶ `cpu/expert__impl.cuh`, the index's stand-up).
  *
  * ── HOW MANY COLLECTIONS, AND WHY THE CAP IS A LIST RATHER THAN A NUMBER ────────────────────────────
  * A type's keys must be COMPILE-TIME strings, because a settings key is looked up by its bytes and this
@@ -234,8 +236,8 @@ enum { NN__EXPERT__MAX_TYPES = 0u NN__EXPERT_TYPE_SLOT_LIST(NN__EXPERT__ZZPRIVAT
  * `src/docs/design/the_heap.md` ⑧ — and the only one that can say an expert is in TWO memories at once, which
  * is the normal state of a warm cache. ══════════════════════════════════════════════════════════════ */
 
-/* A slot's six words, FIVE OF THEM SPOKEN FOR. ⛳ The page design filled all six on purpose while a page
- * was shared; one expert to a slot gives a word back. ▶ `expert_lru_node_array.md` §⓪. */
+/* A slot's six words: five named here, and word 5 the expert's last two call times (below).
+ * ▶ `expert_lru_node_array.md` §⓪. */
 #define NN__EXPERT__SLOT_AT     0u   /* the L1 address. 0 MEANS NOT IN VRAM, and that is the whole test */
 #define NN__EXPERT__SLOT_PREV   1u   /* the LRU, as expert+1 — ▶ the sentinel note below               */
 #define NN__EXPERT__SLOT_NEXT   2u

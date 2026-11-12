@@ -3,7 +3,7 @@
 ⚖ 2026-10-14: *"every tool call is itself a REPL that allows the model to interact with external tools... this way we
 just need to implement a list of commands and the agent by invoking the repl can then ask for the command list and it
 will know what he can do"* · *"i am actually fine doing it in python … python can lower it back into the original lisp
-if we so choose and it can therefore call c methods"*. ▶ `src/docs/design/pending/tool_calling.md`.
+if we so choose and it can therefore call c methods"*. ▶ `src/docs/design/tool_calling.md`.
 
 A model calls one tool, `lisp`, whose one argument is a form; the server hands the form's text to its conversation's
 session and the answer back (`Session.run`):

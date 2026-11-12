@@ -3,7 +3,8 @@
 At a position, the 2-, 3- … `max_ngram`-grams ending there are hashed — over a compressed vocabulary in which tokens that
 normalise alike are one (NFKC, accents stripped, lower case, whitespace folded) — each into `heads` prime-sized ranges
 of the layer's table, the primes drawn in order and never reused. The rows are FP8 E4M3 with an E8M0 scale a 32, read
-in place from the tables' files and dequantised. The card does the rest (▶ ai_deepseek_4's `engram` verb).
+in place from the tables' files — or, held in RAM (`hold`, deepseek4's `engram_in`), from there — and dequantised. The card
+does the rest (▶ ai_deepseek_4's `engram` verb).
 The model's own is `inference/engram.py` (`build_compressed_token_map`, `EngramLayout`, `NgramHashState`).
 """
 import json
@@ -11,6 +12,9 @@ import os
 import struct
 
 import numpy as np
+
+from .ram_table import RamTable, steps, warm
+from .system import Positional
 
 
 def _is_prime(n):
@@ -60,11 +64,14 @@ def token_map(tokenizer_json):
 
 class Engram:
     """The n-gram memory of a DeepSeek-V4.1 model: `ids(tokens, pos)` a position's row ids a layer, `rows(layer, ids)` the
-    rows. `tables` is the folder whose safetensors hold `layers.L.engram.embed.weight` and `.scale` (the checkpoint's)."""
+    rows. `tables` is the folder whose safetensors hold `layers.L.engram.embed.weight` and `.scale` (the checkpoint's).
+    `used`: the layers whose rows `chunk_rows` and `all_rows` read and `hold` copies — a machine's run of the layers' —
+    every engram layer by default; the ids are every layer's whichever."""
 
-    def __init__(self, config, tokenizer_json, tables):
+    def __init__(self, config, tokenizer_json, tables, used=None):
         c = config
         self.layers = list(c["engram_layer_ids"])
+        self.used = set(self.layers if used is None else used) & set(self.layers)
         self.N, self.heads, self.dim = int(c["engram_max_ngram_size"]), int(c["engram_n_heads"]), int(c["engram_head_dim"])
         self.map, size = token_map(tokenizer_json)
         if size != int(c["engram_compressed_vocab_size"]):
@@ -96,7 +103,7 @@ class Engram:
 
     def _tables(self, raw):
         wm = json.load(open(os.path.join(raw, "model.safetensors.index.json")))["weight_map"]
-        self.table, self.fds, self.at = {}, {}, {}
+        self.table, self.fds, self.at, self.spans, self.ram = {}, {}, {}, {}, {}
         # ⭐ A POSITION'S ROWS READ ALL AT ONCE: each is a random place in a table of 384 million (98 GB a layer), so read one
         #   after another through the map a position was one page fault after another — MEASURED 2026-10-19 node-01, the
         #   tables on the RAID: 1,057 ms a position (median, 40 positions of fresh tokens), the whole of a token's time.
@@ -115,11 +122,48 @@ class Engram:
                 mm = np.memmap(path, dtype=np.uint8, mode="r", offset=8 + n + a, shape=(b - a,))
                 got.append(mm.reshape(head[name]["shape"]))
                 # where a row is, for the reads `all_rows` makes at once: the file, its first row, a row's bytes
-                fd = self.fds.setdefault(path, os.open(path, os.O_RDONLY))
-                self.at[(l, what)] = (fd, 8 + n + a, int(np.prod(head[name]["shape"][1:])))
+                if path not in self.fds:
+                    self.fds[path] = Positional(path)    # read at offsets by the pool's threads (▶ `system.Positional`)
+                self.at[(l, what)] = (self.fds[path], 8 + n + a, int(np.prod(head[name]["shape"][1:])))
+                self.spans[(l, what)] = (path, 8 + n + a, b - a, list(head[name]["shape"]))
             self.table[l] = tuple(got)
+        self.bytes = sum(n for (l, _), (_, _, n, _) in self.spans.items() if l in self.used)   # the used layers' tables
         from nn_compressor import E4M3
         self.e4m3 = E4M3
+
+    def hold(self, progress=None, say=None):
+        """⭐ THE TABLES COPIED INTO RAM (deepseek4's `engram_in` "ram", NN-185): each used layer's rows and their scales
+        read from the files into memory this process holds — the progress one pass over them all — and every row read from
+        there after (`chunk_rows`, `all_rows`, `rows`)."""
+        whole, before = steps(progress, self.bytes), [0]
+        for (l, what), (path, at, n, shape) in sorted(self.spans.items(), key=lambda kv: kv[1][:2]):   # in the files' order
+            if (l, what) in self.ram or l not in self.used:
+                continue
+            tick = None if whole is None else (lambda done, base=before[0]: whole(base + done))
+            self.ram[(l, what)] = RamTable(path, at, n, "the n-gram memory's layer %d %ss" % (l, what), tick, say)
+            self.table[l] = tuple(self.ram[(l, w)].bytes.reshape(self.spans[(l, w)][3]) if (l, w) in self.ram else t
+                                  for w, t in zip(("weight", "scale"), self.table[l]))
+            before[0] += n
+        return self.ram
+
+    def warm(self, progress=None, say=None):
+        """⭐ THE TABLES INTO THE SYSTEM'S FILE CACHE (deepseek4's `engram_in` "cache"): each used layer's rows and scales
+        read through once, in the files' order, and every row read from the files after, as "disk" reads them."""
+        whole, before = steps(progress, self.bytes), [0]
+        for (l, what), (path, at, n, shape) in sorted(self.spans.items(), key=lambda kv: kv[1][:2]):
+            if l not in self.used:
+                continue
+            tick = None if whole is None else (lambda done, base=before[0]: whole(base + done))
+            warm(path, at, n, "the n-gram memory's layer %d %ss" % (l, what), tick, say)
+            before[0] += n
+
+    @staticmethod
+    def _joined(job):
+        """A table's rows as `chunk_rows` and `all_rows` asked for them, end to end: gathered from RAM already, or the
+        reads' answers joined once they are in."""
+        if isinstance(job, np.ndarray):
+            return job
+        return np.frombuffer(b"".join(f.result() for f in job), dtype=np.uint8)
 
     def ids(self, tokens, pos):
         """Position `pos`'s row ids in each engram layer, `[layer][cols]`: the n-grams ending there, over `tokens` (the
@@ -162,7 +206,7 @@ class Engram:
         return out
 
     def chunk_rows(self, tokens, first, n):
-        """Every engram layer's rows for positions `first` .. `first + n - 1`, position after position — {layer: floats},
+        """Every used engram layer's rows for positions `first` .. `first + n - 1`, position after position — {layer: floats},
         `all_rows` of each position's `ids` end to end. ⭐ A CHUNK'S READS ALL AT ONCE, a slice of them a thread: a
         position at a time a chunk of 128 waited on 128 rounds of reads, each with its own threads' start and join —
         `MEASURED` node03 2026-10-21 (measurements/2026-10-21_deepseek_host_node03.md), 0.38-0.47 s a chunk of 128,
@@ -171,34 +215,48 @@ class Engram:
         slices = 64
         jobs = {}
         for i, l in enumerate(self.layers):
+            if l not in self.used:
+                continue
             for what in ("weight", "scale"):
-                fd, base, rb = self.at[(l, what)]
+                f, base, rb = self.at[(l, what)]
+                if (l, what) in self.ram:                       # held in RAM: the rows gathered there (▶ `hold`)
+                    jobs[(l, what)] = self.ram[(l, what)].rows(ids[i].reshape(-1), rb)
+                    continue
                 offsets = (base + ids[i].reshape(-1) * rb).tolist()
                 step = -(-len(offsets) // slices)
-                jobs[(l, what)] = [self.pool.submit(lambda o, fd=fd, rb=rb: b"".join(os.pread(fd, rb, x) for x in o),
+                jobs[(l, what)] = [self.pool.submit(lambda o, f=f, rb=rb: b"".join(f.read(rb, x) for x in o),
                                                     offsets[a:a + step]) for a in range(0, len(offsets), step)]
         out = {}
         for i, l in enumerate(self.layers):
+            if l not in self.used:
+                continue
             rows = n * self.cols
-            w = np.frombuffer(b"".join(f.result() for f in jobs[(l, "weight")]), dtype=np.uint8).reshape(rows, -1)
-            sb = np.frombuffer(b"".join(f.result() for f in jobs[(l, "scale")]), dtype=np.uint8).reshape(rows, -1)
+            w = self._joined(jobs[(l, "weight")]).reshape(rows, -1)
+            sb = self._joined(jobs[(l, "scale")]).reshape(rows, -1)
             v = self.e4m3[w].astype(np.float32)
             sc = np.ldexp(np.float32(1), sb.astype(np.int32) - 127).astype(np.float32)
             out[l] = (v.reshape(rows, -1, 32) * sc[:, :, None]).reshape(-1)
         return out
 
     def all_rows(self, ids):
-        """Every engram layer's rows for `ids` (`[layer][cols]`, as `ids` answers them), dequantised — {layer: floats} —
-        every read issued at once."""
+        """Every used engram layer's rows for `ids` (`[layer][cols]`, as `ids` answers them), dequantised — {layer: floats} —
+        every read issued at once, or gathered from RAM where the tables are held."""
         jobs = {}
         for i, l in enumerate(self.layers):
+            if l not in self.used:
+                continue
             for what in ("weight", "scale"):
-                fd, base, rb = self.at[(l, what)]
-                jobs[(l, what)] = [self.pool.submit(os.pread, fd, rb, base + int(r) * rb) for r in ids[i]]
+                f, base, rb = self.at[(l, what)]
+                if (l, what) in self.ram:                       # held in RAM: the rows gathered there (▶ `hold`)
+                    jobs[(l, what)] = self.ram[(l, what)].rows(np.asarray(ids[i]).reshape(-1), rb)
+                    continue
+                jobs[(l, what)] = [self.pool.submit(f.read, rb, base + int(r) * rb) for r in ids[i]]
         out = {}
         for i, l in enumerate(self.layers):
-            w = np.frombuffer(b"".join(f.result() for f in jobs[(l, "weight")]), dtype=np.uint8).reshape(len(ids[i]), -1)
-            sb = np.frombuffer(b"".join(f.result() for f in jobs[(l, "scale")]), dtype=np.uint8).reshape(len(ids[i]), -1)
+            if l not in self.used:
+                continue
+            w = self._joined(jobs[(l, "weight")]).reshape(len(ids[i]), -1)
+            sb = self._joined(jobs[(l, "scale")]).reshape(len(ids[i]), -1)
             v = self.e4m3[w].astype(np.float32)
             sc = np.ldexp(np.float32(1), sb.astype(np.int32) - 127).astype(np.float32)
             out[l] = (v.reshape(len(ids[i]), -1, 32) * sc[:, :, None]).reshape(-1)

@@ -281,42 +281,9 @@
  * is how the C-subset gate knows which definitions escape on purpose. */
 #define NN__GPU__ZZPRIVATE_ROW(PKG, RET, NAME, FN, PARAMS)   NN__GPU__ZZPRIVATE_SPREAD(FN, PARAMS, FN##__RUNS)
 #define NN__GPU__ZZPRIVATE_SPREAD(FN, PARAMS, ...)          NN__GPU__ZZPRIVATE_EMIT(FN, PARAMS, __VA_ARGS__)
-/* ⛳ A FAMILY THAT FINDS KERNELS BY NAME (`SYS__SILICON_FAMILY__KERNELS_BY_NAME`, OpenCL) compiles its
- * kernels from these same rows in its own language, so none is emitted here and the door passes no address. */
-#ifndef SYS__SILICON_FAMILY__KERNELS_BY_NAME
-/* ⛔⛔ EVERY KERNEL DECLARES THE MOST LANES IT CAN BE STARTED WITH, AND IT IS NOT A HINT. A kernel that
- *   declares nothing is compiled for 1,024 lanes a block, and a card that must hold 1,024 lanes' registers
- *   gives each one a quarter of what 256 would get. `MEASURED` on gfx906: the wide fp16 matvec
- *   compiled to exactly 64 VGPRs — the undeclared ceiling — with 16 spilled to scratch. No door here
- *   starts more than `NN__SILICON__LANES_MAX`, and the compiler refuses one that tries, so the
- *   declaration is the truth and not a promise. */
-#define NN__GPU__ZZPRIVATE_BOUNDS  __launch_bounds__(NN__SILICON__LANES_MAX)
-#define NN__GPU__ZZPRIVATE_KERNEL(FN, PARAMS, FORM, BODY, NAMES)                                            \
-    static __global__ NN__GPU__ZZPRIVATE_BOUNDS void FN##__kernel PARAMS {                                  \
-        FORM(BODY, NAMES)                                                                                   \
-    }
-#define NN__GPU__ZZPRIVATE_ADDRESS(FN)  ((const void*)FN##__kernel)
-#else
-#define NN__GPU__ZZPRIVATE_KERNEL(FN, PARAMS, FORM, BODY, NAMES)
-#define NN__GPU__ZZPRIVATE_ADDRESS(FN)  ((const void*)0)
-#endif
-#ifndef SYS__SILICON_FAMILY__RUNS_ON_HOST_THREADS
-#define NN__GPU__ZZPRIVATE_LAUNCHED(FN, PARAMS, FORM, BODY, BLOCKS, THREADS, NAMES)                        \
-    static_assert((THREADS) >= 1u && (THREADS) <= NN__SILICON__LANES_MAX,                                   \
-                  #FN " starts more lanes in a block than every family can run");                          \
-    NN__GPU__ZZPRIVATE_KERNEL(FN, PARAMS, FORM, BODY, NAMES)                                                \
-    void FN PARAMS {                                                                                        \
-        void* args[] = { NN__GPU__ZZPRIVATE_ADDRESSES NAMES };                                              \
-        const size_t sizes[] = { NN__GPU__ZZPRIVATE_SIZES NAMES };                                          \
-        nn__silicon__launch(NN__GPU__ZZPRIVATE_ADDRESS(FN), #FN "__kernel", BLOCKS, THREADS, args, sizes,   \
-                            NN__GPU__ZZPRIVATE_COUNT NAMES);                                                \
-    }
-#else
-/* ⭐ A FAMILY WHOSE BLOCKS ARE THREADS OF THIS PROCESS (`SYS__SILICON_FAMILY__RUNS_ON_HOST_THREADS`, the CPU)
- *   has no kernel to launch by pointer, so each door's arguments travel as one struct: the door fills it,
- *   and the block function — what the family's launch runs once for every block — takes each argument
- *   back out under its own name and runs the row's form exactly as a kernel would. The launch is handed
- *   the block function as the kernel and the struct as its one argument. */
+/* A row's arguments as a struct and as locals of the same names: `FIELDS` the struct's members from the row's
+ * parameters, `LOCALS` each taken back out of `zz` under its own name — for a body run where the door's own
+ * arguments are not in scope (the host's threads, and a by-name family's host body, below). */
 #define NN__GPU__ZZPRIVATE_F1(p)       p;
 #define NN__GPU__ZZPRIVATE_F2(p, ...)  p; NN__GPU__ZZPRIVATE_F1(__VA_ARGS__)
 #define NN__GPU__ZZPRIVATE_F3(p, ...)  p; NN__GPU__ZZPRIVATE_F2(__VA_ARGS__)
@@ -360,6 +327,55 @@
                            NN__GPU__ZZPRIVATE_L4, NN__GPU__ZZPRIVATE_L3, NN__GPU__ZZPRIVATE_L2,             \
                            NN__GPU__ZZPRIVATE_L1)(__VA_ARGS__)
 #define NN__GPU__ZZPRIVATE_UNPAREN(...)  __VA_ARGS__
+/* ⛳ A FAMILY THAT FINDS KERNELS BY NAME (`SYS__SILICON_FAMILY__KERNELS_BY_NAME`, OpenCL) compiles its
+ * kernels from these same rows in its own language, so no kernel is emitted here; the door passes instead the row's
+ * host body and its arguments (`nn__silicon__host_body`), which the family runs where its device's compiler did not
+ * build the kernel — the body on one lane of one block, the serial loop it is on any host. */
+#ifndef SYS__SILICON_FAMILY__KERNELS_BY_NAME
+/* ⛔⛔ EVERY KERNEL DECLARES THE MOST LANES IT CAN BE STARTED WITH, AND IT IS NOT A HINT. A kernel that
+ *   declares nothing is compiled for 1,024 lanes a block, and a card that must hold 1,024 lanes' registers
+ *   gives each one a quarter of what 256 would get. `MEASURED` on gfx906: the wide fp16 matvec
+ *   compiled to exactly 64 VGPRs — the undeclared ceiling — with 16 spilled to scratch. No door here
+ *   starts more than `NN__SILICON__LANES_MAX`, and the compiler refuses one that tries, so the
+ *   declaration is the truth and not a promise. */
+#define NN__GPU__ZZPRIVATE_BOUNDS  __launch_bounds__(NN__SILICON__LANES_MAX)
+#define NN__GPU__ZZPRIVATE_KERNEL(FN, PARAMS, FORM, BODY, NAMES)                                            \
+    static __global__ NN__GPU__ZZPRIVATE_BOUNDS void FN##__kernel PARAMS {                                  \
+        FORM(BODY, NAMES)                                                                                   \
+    }
+#define NN__GPU__ZZPRIVATE_ADDRESS(FN)  ((const void*)FN##__kernel)
+#define NN__GPU__ZZPRIVATE_HOST_BODY(FN, NAMES)
+#else
+#define NN__GPU__ZZPRIVATE_KERNEL(FN, PARAMS, FORM, BODY, NAMES)                                            \
+    struct FN##__args { NN__GPU__ZZPRIVATE_FIELDS PARAMS };                                                 \
+    static void FN##__host(void* zzargs) {                                                                  \
+        const struct FN##__args* zz = (const struct FN##__args*)zzargs;                                     \
+        NN__GPU__ZZPRIVATE_LOCALS NAMES                                                                     \
+        FORM(BODY, NAMES)                                                                                   \
+    }
+#define NN__GPU__ZZPRIVATE_HOST_BODY(FN, NAMES)                                                             \
+    struct FN##__args zzhost_args = { NN__GPU__ZZPRIVATE_UNPAREN NAMES };                                   \
+    const nn__silicon__host_body zzhost = { FN##__host, &zzhost_args };
+#define NN__GPU__ZZPRIVATE_ADDRESS(FN)  ((const void*)&zzhost)
+#endif
+#ifndef SYS__SILICON_FAMILY__RUNS_ON_HOST_THREADS
+#define NN__GPU__ZZPRIVATE_LAUNCHED(FN, PARAMS, FORM, BODY, BLOCKS, THREADS, NAMES)                        \
+    static_assert((THREADS) >= 1u && (THREADS) <= NN__SILICON__LANES_MAX,                                   \
+                  #FN " starts more lanes in a block than every family can run");                          \
+    NN__GPU__ZZPRIVATE_KERNEL(FN, PARAMS, FORM, BODY, NAMES)                                                \
+    void FN PARAMS {                                                                                        \
+        void* args[] = { NN__GPU__ZZPRIVATE_ADDRESSES NAMES };                                              \
+        const size_t sizes[] = { NN__GPU__ZZPRIVATE_SIZES NAMES };                                          \
+        NN__GPU__ZZPRIVATE_HOST_BODY(FN, NAMES)                                                             \
+        nn__silicon__launch(NN__GPU__ZZPRIVATE_ADDRESS(FN), #FN "__kernel", BLOCKS, THREADS, args, sizes,   \
+                            NN__GPU__ZZPRIVATE_COUNT NAMES);                                                \
+    }
+#else
+/* ⭐ A FAMILY WHOSE BLOCKS ARE THREADS OF THIS PROCESS (`SYS__SILICON_FAMILY__RUNS_ON_HOST_THREADS`, the CPU)
+ *   has no kernel to launch by pointer, so each door's arguments travel as one struct: the door fills it,
+ *   and the block function — what the family's launch runs once for every block — takes each argument
+ *   back out under its own name and runs the row's form exactly as a kernel would. The launch is handed
+ *   the block function as the kernel and the struct as its one argument. */
 #define NN__GPU__ZZPRIVATE_LAUNCHED(FN, PARAMS, FORM, BODY, BLOCKS, THREADS, NAMES)                        \
     static_assert((THREADS) >= 1u && (THREADS) <= NN__SILICON__LANES_MAX,                                   \
                   #FN " starts more lanes in a block than every family can run");                          \

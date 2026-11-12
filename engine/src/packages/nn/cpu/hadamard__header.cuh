@@ -66,8 +66,9 @@
  * vector", and a seed that cannot be searched forecloses the better option.
  *
  * ── ⛔ WHAT IS NOT CLAIMED ───────────────────────────────────────────────────────────────────────────
- * Nothing about speed. The door runs this as one block of one thread (`gpu/doors.cuh`) and the loop is serial; the `n log n` is a property
- * of the ALGORITHM and not of anything observed on this tree. ▶ `nn_port.md` §⑧.
+ * Nothing about speed from nn's body: it gives each output a lane and sums its row of the Hadamard matrix
+ * directly, and runs the `n log n` butterfly on one lane only when rotating in place (`gpu/kernels/kernels.cuh`).
+ * A family's own butterfly is what runs fast, checked against that body by the door bench.
  * ══════════════════════════════════════════════════════════════════════════════════════════════════ */
 
 /* `(nn__hadamard__rotate x signs out n)` — `out = H·(S⊙x)`, answering OUT.

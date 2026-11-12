@@ -3,9 +3,9 @@
 
 /* ══ RUNNING A PROGRAM ════════════════════════════════════════════════════════════════════════════════
  * ⚖ 2026-11-04 the resident machine: every door that runs a program queues it on a block — the block of the
- * worker the caller acts as (`execute`, `eval`, `run_grid`), or the one named (`dispatch`) — into an answer the host
- * makes for it, and reads the value out of that answer. The block runs it as it runs any request: it takes it off its
- * queue, claims its own base, thaws its own copy of the picture, evaluates it and files the value
+ * worker the caller acts as (`execute`, `eval`), block 0 (`run_grid`), or the one named (`dispatch`) — into an answer
+ * the host makes for it, and reads the value out of that answer. The block runs it as it runs any request: it takes it
+ * off its queue, claims its own base, thaws its own copy of the picture, evaluates it and files the value
  * (▶ `engine/opcodes.cuh`, `sys`'s `scheduler__header.cuh` and `answer.cuh`). */
 
 /* ── WAITING FOR AN ANSWER ───────────────────────────────────────────────────────────────────────────

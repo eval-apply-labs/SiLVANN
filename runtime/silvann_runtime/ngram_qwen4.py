@@ -12,6 +12,9 @@ import os
 
 import numpy as np
 
+from .ram_table import RamTable, steps, warm
+from .system import Positional
+
 SLICES = 64                  # the reads a call keeps in flight
 
 
@@ -29,10 +32,12 @@ class NGram:
         self.offsets = np.array(t["offsets"], dtype=np.int64).reshape(self.N - 1, self.per)
         self.cols = (self.N - 1) * self.per
         self.rows_n = int(t["rows"])
-        path = os.path.join(folder, "ngram", "rows.e4m3")
-        if os.path.getsize(path) != self.rows_n * self.width:
+        self.path = path = os.path.join(folder, "ngram", "rows.e4m3")
+        self.bytes = self.rows_n * self.width
+        if os.path.getsize(path) != self.bytes:
             raise ValueError("%s is %d bytes, not %d rows of %d" % (path, os.path.getsize(path), self.rows_n, self.width))
-        self.fd = os.open(path, os.O_RDONLY)
+        self.file = Positional(path)                 # read at offsets by the pool's threads (▶ `system.Positional`)
+        self.ram = None                              # the table copied into RAM, once `hold` has (▶ `ram_table`)
         # ⭐ A POSITION'S ROWS READ ALL AT ONCE, as DeepSeek's engram learned: each is a random place in 51 GB, and read
         #   one after another each waits on the drive. MEASURED node03 2026-10-31, the table on the SATA SSD, cold
         #   (posix_fadvise DONTNEED): 16 rows through a map 8.0 ms a position (median), as 16 preads at once 0.86 ms
@@ -71,13 +76,28 @@ class NGram:
         """Position `pos`'s row ids, over `tokens` (the conversation's ids from position 0)."""
         return self.chunk_ids(tokens[:pos + 1], pos, 1)[0]
 
+    def hold(self, progress=None, say=None):
+        """⭐ THE TABLE COPIED INTO RAM (`ngram_from` "ram", NN-185): its file read whole into memory this process holds,
+        and every row read from there after — here and by the program's `nn__ngram__rows` (▶ qwen4_exp's `_ngram_table`)."""
+        if self.ram is None:
+            self.ram = RamTable(self.path, 0, self.bytes, "the n-gram table", steps(progress, self.bytes), say)
+        return self.ram
+
+    def warm(self, progress=None, say=None):
+        """⭐ THE TABLE INTO THE SYSTEM'S FILE CACHE (`ngram_from` "cache"): its file read through once, and every row read
+        from the file after, as "disk" reads it — from the cache wherever the system still holds the page."""
+        return warm(self.path, 0, self.bytes, "the n-gram table", steps(progress, self.bytes), say)
+
     def rows(self, ids):
-        """The rows `ids` names, dequantised, end to end: `len(ids) · width` floats — every read in flight at once, a
-        slice of them a thread."""
+        """The rows `ids` names, dequantised, end to end: `len(ids) · width` floats — from RAM where the table is held
+        there, else from its file, every read in flight at once, a slice of them a thread."""
+        if self.ram is not None:
+            b = self.ram.rows(np.asarray(ids, dtype=np.int64).reshape(-1), self.width).reshape(-1)
+            return (self.e4m3[b] * self.scale).astype(np.float32)
         offsets = (np.asarray(ids, dtype=np.int64).reshape(-1) * self.width).tolist()
         step = max(1, -(-len(offsets) // SLICES))
-        w, fd = self.width, self.fd
-        parts = [self.pool.submit(lambda o: b"".join(os.pread(fd, w, x) for x in o), offsets[a:a + step])
+        w, read = self.width, self.file.read
+        parts = [self.pool.submit(lambda o: b"".join(read(w, x) for x in o), offsets[a:a + step])
                  for a in range(0, len(offsets), step)]
         b = np.frombuffer(b"".join(f.result() for f in parts), dtype=np.uint8)
         return (self.e4m3[b] * self.scale).astype(np.float32)

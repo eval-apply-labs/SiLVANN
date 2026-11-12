@@ -44,7 +44,7 @@
 /* ── WHAT EVERY ONE OF THEM DOES TO FINISH ───────────────────────────────────────────────────────────
  * Leave the form holding exactly one thing. Two helpers rather than a copy of the same three lines in
  * every verb, because the three lines are where an off-by-one would be invisible. ⛳ ONE VERB MAY LEAVE ITS FORM AS IT
- * STOOD, AND ONLY HANDING ITS COMPUTATION ON: `sys__wait` parked on an answer (`sys__scheduler__zzpackage_park_on`) —
+ * STOOD, AND ONLY HANDING ITS COMPUTATION ON: `sys__wait_for_result` parked on an answer (`sys__scheduler__zzpackage_park_on`) —
  * the evaluator reads the hand-off after every verb and stops, and the form is applied again on the block that takes it,
  * once the answer is there; a park that finds no room waits where it stands the next time, and writes the form.
  * ────────────────────────────────────────────────────────────────────────────────────────────────── */

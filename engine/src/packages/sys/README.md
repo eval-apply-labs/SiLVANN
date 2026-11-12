@@ -1,6 +1,6 @@
 # `sys` — the language, and the operating system it runs in
 
-`sys` is the language of the Eval-Apply GPU Interpreter — what a value is, the objects values are built
+`sys` is the language of the Eval-Apply Generalized Interpreter — what a value is, the objects values are built
 into, and the verbs a program calls — and the small operating system those programs run in, virtualized
 over the host's. The evaluator that walks a program lives in `engine/`; the neural network library, `nn`,
 is a second package written on top of this one.
@@ -32,7 +32,7 @@ slice of 1 µs gave the block up 1,846 times mid-step and one answered another s
 inline, both answered their own (measurements/2026-11-06_kill_node03.md). ⛔ **A verb never waits on another
 computation** (⚖ 2026-11-07 *"c opcodes do not wait but return and let the wait be done in lisp"*): it returns, and the
 program waits — `sys__result` in a `while`, or a step that ends continued on the answer (`sys__scheduler__continue …
-'(r)`), its block free meanwhile. ⭐ **`sys__wait` parks** (NN-158): on an answer not there yet, a computation that may
+'(r)`), its block free meanwhile. ⭐ **`sys__wait_for_result` parks** (NN-158): on an answer not there yet, a computation that may
 move is handed to its own block's queue with the answer its gate, its form left to be applied again, and the block runs
 what else waits until the answer fills; one that may not move — the host's, one inside `compute_inline` — waits where it
 stands, up to fifteen seconds by the clock, and a wait that runs out answers `ANSR`, an error, never nothing.
@@ -145,10 +145,12 @@ puts a program on block `cu`'s queue, which any number of blocks append to at on
 value will go into — or `(sys__scheduler__add cu names program answer)` into an answer the program already holds. The
 block runs its queue in the order it arrived whenever its base is free, and files each value into its answer.
 `(sys__result answer)` says `#t` once the value is there and `#f` while it is on its way, reading one word;
-`(sys__wait answer)` hands over the value, waiting for it, bounded. Reading takes nothing away, so any number of readers
-share one answer, and an answer lives as long as somebody holds it — the asker, a reader, a request on its way. A
-program that asks a block one thing at a time can name the block instead: `(sys__result cu)` and `(sys__wait cu)` read
-what this computation last asked of `cu`. A step may go on: `(sys__scheduler__continue cu names program)` queues its
+`(sys__wait_for_result answer)` hands over the value, waiting for it, bounded. Reading takes nothing away, so any number
+of readers share one answer, and an answer lives as long as somebody holds it — the asker, a reader, a request on its
+way. ⭐ **What a computation came to is read from its answer, never from the block that ran it** (⚖ 2026-11-11 *"no one
+names a worker to read a computing variable, they just name the return variable"*): a block may hold several askers'
+work, so the data's end and the block's are two verbs — `(sys__wait_for_device cu)` waits until block `cu` is idle, its queue
+empty and its base free, a probe of the device that hands no value over. A step may go on: `(sys__scheduler__continue cu names program)` queues its
 next step on block `cu`, this one among them, in `names` (0: the names it runs in), into the same answer, and only the
 step that does not continue fills it. Asked with the names of answers — `(let ((ra (sys__scheduler__add …)) (rb
 (sys__scheduler__add …))) (sys__scheduler__continue CARD names second_half '(ra rb)))` — the next step runs once every

@@ -7,7 +7,9 @@ the GPL: ATTRIBUTION.md). install.ps1 leaves it out; this adds it, once, from Py
 
   SILVANN_DIR   the installed SiLVANN    default the folder whose scripts\ this file is in
 
-Run it again after an update that changes the environment's Python. ASSUMED until a Windows PC has run it (NN-94).
+Run it again after an update that changes the environment's Python. ASSUMED: no run of it on a Windows PC is recorded,
+though install.ps1 and the server have run natively on one (measurements/2026-10-28_nn94_windows_5070ti.md); a pip that
+cannot install PyAV's Windows wheels into the environment stops below with what it said.
 This file is ASCII on purpose: Windows PowerShell 5.1 reads a script without a byte-order mark in the PC's code page.
 #>
 $ErrorActionPreference = "Continue"

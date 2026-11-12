@@ -26,6 +26,27 @@ negotiation. A service can promise not to keep what it is sent, and the promise 
 machine enforces the secrecy by construction, because the material never leaves. When an NDA demands that nothing goes
 out, only local AI can meet that demand on its own.
 
+## The dipl-o-matic
+
+In a high-stakes negotiation, in a climate of conflict, giving your adversary a capable model of their own does you more
+good than harm. Each side's advisors are also its partisans, and in a crisis the people at the table hear each other
+through anger, fear and what their own public expects. A model on the other side's own machine is none of those things.
+It can spell out for them what a realistic outcome looks like, which concessions are within reach and which demands are
+not, what escalation would cost and which way out lets everyone keep face, and it stays level-headed when the room does
+not. Most of the work of a mediation is that: getting both sides to see the same ground. The dipl-o-matic does much of
+it on your behalf without adding diplomatic tension, because it is not you saying it.
+
+It only works if they trust it, and that is why it has to be local. Advice from a service their adversary runs, or from
+a foreign company's servers, is advice they cannot trust and should not: whoever runs it could read their side of the
+conversation or steer the answers. A model on their own machine, from published weights and software they can inspect
+and build themselves, answers to nobody else. It keeps their deliberations in their room, and keeps working when the
+networks are cut. Let them choose the weights too: a model carries the views of its training, and an advisor they picked
+is one they will listen to.
+
+It is an advisor, not a negotiator. It reasons from what it is told and from what it was trained on, and it can be
+wrong. The decisions, and the responsibility for them, stay with the people at the table. What it supplies is what
+mediation most often lacks on the other side: a voice that is calm, informed and not the enemy.
+
 ## The elephant in the room: bad actors
 
 Anything that helps people helps bad actors too, and a model anyone can run is no exception. The question is where the

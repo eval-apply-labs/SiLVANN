@@ -388,7 +388,7 @@ class Machine:
 
     def grid(self, text):
         """A program run with every block standing, so it can hand work to the others (`sys__scheduler__add`) and collect it
-        (`sys__wait`). Block 0 runs it, as the host's worker."""
+        (`sys__wait_for_result`). Block 0 runs it, as the host's worker."""
         with self._evaluating():
             cell = self.comp.compose(text)
             try:

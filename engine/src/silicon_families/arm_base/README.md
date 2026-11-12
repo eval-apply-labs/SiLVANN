@@ -19,7 +19,10 @@ Raspberry Pi 3) has no Arm family: the host family runs the language and answers
 
 - `primitives/` — what every package asks of a family, answered on the host's threads: `x86_avx2`'s primitives with
   `__fp16` for F16C's conversions and `yield` for `pause` (`sys.cuh`, `pool.cuh`, `nn.cuh`). The pool, its sizing and
-  its NUMA placement are x86_avx2's.
+  its NUMA placement are x86_avx2's, but for the kinds of core: on a processor whose cores differ, a core under half the
+  fastest one's speed (`ARM_BASE__POOL_SPEED_FLOOR`, each core's speed the system's `cpu_capacity`, else its highest clock)
+  is slow, and its thread takes only the GEMVs' launches (`arm_base__zzpackage_run_every`) — every other launch is the fast
+  cores' and the caller's. A machine whose cores are alike is as it was.
 - `overrides/nn.cuh` — the doors that run faster than nn's generic body, every one falling back to it for what it does
   not cover:
   - the exact GEMVs (`turboquant_gemv`, `_groups`, `_groups_n`, `_groups_sum`) — at 4 bits a byte's two codes split and
@@ -33,7 +36,19 @@ Raspberry Pi 3) has no Arm family: the host family runs the language and answers
   - the GEMVs in integers (`turboquant_gemv_int8`, `_groups_int8`, `_groups_sum_int8`), the same way: nn's bytes;
   - the rotations (`hadamard_rotate`, `hadamard_ladder_rows`, `hadamard_blocks`) — `x86_avx2`'s butterfly in floats where
     nn's body sums each output over its whole block;
-  - the hyper-connections' logits (`hyper_logits_fp32`) summed in double, as `x86_avx2`'s.
+  - the hyper-connections' logits (`hyper_logits_fp32`) summed in double, as `x86_avx2`'s;
+  - and, a file a verb group as nn files them, included before the door table:
+    - `attention.cuh` — the decode's weights and mix over the cache (`attention_weights`, `attention_residual_mix`, and
+      their TurboQuant tiers' `_tq`) and the prompt's (`attention_causal_scores_grouped`, `attention_causal_mix`,
+      `attention_mix`): the scores a block a (kv head, run of positions), each key row widened or decoded once for the
+      group's queries; every mix one body, a block a (row, kv head, 16 elements), each element's sum the positions in
+      nn's order — nn's bytes;
+    - `deltanet.cuh` — the step, its rows and its gate named (`deltanet_step`, `_steps`, `_steps_gate`), a block a value
+      head, its state 32 columns at a time and read from memory once a step; the conv (`deltanet_conv_step`, `_steps`),
+      a block 64 channels — nn's arithmetic in nn's order, so nn's bytes;
+    - `primitives.cuh` — the norms (`rmsnorm`, `_rows`, `_fp32`, `_fp32_rows`), the squares summed in nn's order and the
+      outputs eight at a time, one body a row: nn's bytes;
+    - `vector.cuh` — the zero and the add (`vector_zero`, `vector_add`) as the memory's, `x86_avx2`'s: nn's bytes.
 - `../arm_gb10/overrides/nn.cuh` — the GB10's own: the int8 GEMM two rows by two pairs through i8mm's `smmla`, the same
   integer sums, so the same bytes.
 
@@ -49,11 +64,15 @@ between the setups as long as each run is reproducible"*): the two may part, as 
 `-march` as it inlines — the 35B the same through both, the 4B apart from its first generated token. The pool's launch
 fences the counter before the job (`primitives/pool.cuh`): Arm, unlike x86, may show a later store before an earlier one.
 
-`MEASURED` on the DGX Spark: measurements/2026-11-09_arm_base_gb10.md, measurements/2026-11-10_arm_pool_order_gb10.md.
+`MEASURED` on the DGX Spark: measurements/2026-11-09_arm_base_gb10.md, measurements/2026-11-10_arm_pool_order_gb10.md;
+on a phone (the Razer Edge, Android under Termux): measurements/2026-11-10_nn171_razer_edge.md,
+measurements/2026-11-11_nn175_arm_doors_razer_edge.md.
 
 ## Not yet
 
-The attention, DeltaNet and norm doors (nn's generic body here); SVE's wider vectors (the GB10's are 128 bits, as
-NEON's); the two kinds of core told apart — the pool cuts a call into four blocks a thread, each taken by the next thread
-free, so a big core takes more of them, but places nothing by kind; Android (bionic has `getauxval`; nothing here has
-been built against it).
+The MLP's activations (`swiglu_combine`, `swiglu_pairs`), gated attention's gate (`attention_gate_rows`) and the
+argmax (nn's generic body here); SVE's wider vectors (the GB10's are 128 bits, as NEON's); the GB10's two kinds of core
+read and measured — its Cortex-A725 are fast by the floor where its `cpu_capacity` or clocks put them above half its
+X925's (`ASSUMED`, its clocks 2.8 against 3.9 GHz; not read there); a phone's cores the system takes out of use while it
+is idle — the Razer Edge's process saw CPUs 0-3, 5 and 6 (`taskset -p`: `6f`) while its cpuset held 0-7, `ASSUMED`
+Qualcomm's `core_ctl` — which the pool, sized once at bind, does not get back.

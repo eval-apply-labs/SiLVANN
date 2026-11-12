@@ -339,7 +339,16 @@ PYBIND11_MODULE(SILVANN_MODULE_NAME, m) {
             if (st == 0) eng_abi_geometry(&b, &c, &n);
             return st;
         });
-        if (st != 0) throw std::runtime_error(std::string("boot refused: ") + eng_abi_status_text(st));
+        /* ⛳ A WORKER'S REFUSAL NAMES THE WORKER — "— worker 2, x86_avx2 device 1" — so a caller tells a card's pool from
+         *   a processor's (▶ the runtime's `autotune.refused_worker`). */
+        if (st != 0) {
+            int w = -1; unsigned int device = 0u;
+            const char* family = eng_abi_refused_worker(&w, &device);
+            std::string why = std::string("boot refused: ") + eng_abi_status_text(st);
+            if (family != 0)
+                why += " — worker " + std::to_string(w) + ", " + family + " device " + std::to_string(device);
+            throw std::runtime_error(why);
+        }
         std::map<std::string, unsigned> got;
         got["blocks"] = b; got["chunks"] = c; got["chunk_nodes"] = n;
         return got;
@@ -588,7 +597,7 @@ PYBIND11_MODULE(SILVANN_MODULE_NAME, m) {
     }, py::arg("bindings"), py::arg("program"),
        "Run a program with every booted block available to it. -> (kind, value, ran).");
 
-    /* Scheduling from out here, as a program's `sys__scheduler__add`, `sys__result` and `sys__wait` do, from the host's own
+    /* Scheduling from out here, as a program's `sys__scheduler__add`, `sys__result` and `sys__wait_for_result` do, from the host's own
      * slot (▶ `engine/abi/residency.cuh`). The blocks are resident, so they work whatever another thread is running,
      * and a block runs what they queue when it parks. */
     m.def("place", [](unsigned block, unsigned long long bindings, unsigned long long program) {

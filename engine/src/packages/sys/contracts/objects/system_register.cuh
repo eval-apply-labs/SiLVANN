@@ -47,14 +47,16 @@
      * block id, and it is a plain indexed array rather than a list — one slot per block, sized       \
      * once, never resized, so every reason a list exists is absent and the lookup is an addition. */ \
     X(SYS__SYSTEM_REGISTER__COMPUTING_BASE_ARRAY)                                                     \
-    /* WHERE EVERY OTHER PACKAGE KEEPS ITS OWN. A REFERENCE to one entry per package, indexed by the  \
-     * package id — so a package reaches its own entry point by knowing who it is, which it always    \
-     * does. ⚖ ARCHITECT: *"add a system register called extension_hatch which can be either an array \
-     * or a list ... the package can find its index and have an entry point without polluting the     \
-     * register."*                                                                                    \
+    /* WHERE EVERY OTHER PACKAGE KEEPS ITS OWN. A REFERENCE to an array of hatches, one a worker,     \
+     * indexed by the worker id; each hatch is one entry per package, indexed by the package id — so  \
+     * a package reaches its own entry point by knowing who it is and which worker runs it, which it  \
+     * always does (▶ `cpu/package__impl.cuh`). ⚖ ARCHITECT: *"add a system register called           \
+     * extension_hatch which can be either an array or a list ... the package can find its index and  \
+     * have an entry point without polluting the register."*                                          \
      * ⛳ AND IT IS ONE ROW WHATEVER ARRIVES, which is the whole of what it buys: a package needing    \
      * device-wide state of its own puts it behind its own entry and this list never learns about it. \
-     * The boot stands it up, `package_count` entries long, before any package's init runs. */         \
+     * The boot stands it up, a hatch a worker and each `package_count` entries long, before any      \
+     * package's init runs. */                                                                        \
     X(SYS__SYSTEM_REGISTER__EXTENSION_HATCH)                                                          \
     /* THE THREE TABLES A NAME IS REGISTERED IN, each a REFERENCE to a dictionary. ⚖ ARCHITECT: the   \
      * symbol table gets a row, *"also the hash2string and the string2symbol should have their own     \
@@ -67,7 +69,9 @@
     X(SYS__SYSTEM_REGISTER__HASH_TO_STRING)                                                           \
     X(SYS__SYSTEM_REGISTER__STRING_TO_SYMBOL)                                                         \
     X(SYS__SYSTEM_REGISTER__SYMBOL_TO_STRING)                                                         \
-    /* THE BOOT'S OWN PARAMETERS, a REFERENCE to a SEALED dictionary of key-hash → value string.      \
+    /* THE BOOT'S OWN PARAMETERS, a REFERENCE to an array of SEALED dictionaries of key-hash → value  \
+     * string, one a worker, indexed by the worker id: a worker's settings are the sizes of its own   \
+     * device's rooms, and a reader is handed its own worker's (▶ `cpu/settings.cuh`).                \
      * ⚖ ARCHITECT: *"the boot process can create the string object, pass it to the config2dict,      \
      * obtain the address and i think it is correct to set it in the system register … it is read by  \
      * the init setups as those are the boot parameters."*                                            \
@@ -90,7 +94,14 @@
      * slot a list every block may append a request to and the block itself takes from, oldest first   \
      * (▶ `cpu/scheduler__header.cuh`). ⚖ ARCHITECT 2026-11-03: *"we can add another system register    \
      * voice with the scheduler pipeline which feeds directly to it"*. */                               \
-    X(SYS__SYSTEM_REGISTER__SCHEDULER_QUEUE_ARRAY)
+    X(SYS__SYSTEM_REGISTER__SCHEDULER_QUEUE_ARRAY)                                                    \
+    /* WHAT EVERY BLOCK LETS GO OF ON ITS OWN THREAD. An OFFSET to an array a slot a block, the queues'  \
+     * shape, each slot a list of holds another block handed over: an object whose memory is a worker's \
+     * — a buffer of its pool — whose last hold went on another worker's thread is let go of again by   \
+     * the block that is its worker, between its computations, so its own release files it home        \
+     * (▶ `sys__scheduler__decommission_on`). ⚖ ARCHITECT 2026-11-11 *"the deallocation just executes   \
+     * the deallocation code, which by itself will ask a decommission on the rightful owner"*. */        \
+    X(SYS__SYSTEM_REGISTER__SCHEDULER_DECOMMISSION_ARRAY)
 
 /* The seats, dealt in the order the list is read. */
 enum {

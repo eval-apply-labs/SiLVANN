@@ -17,6 +17,10 @@ rows, and writes it as a C string the family's binary is linked with:
      its bytes and never needs to know which were pointers.
   3. CHECK it with ROCm's OpenCL compiler for gfx906 when one is installed, so a body OpenCL C cannot take
      fails the build here rather than the first launch on somebody's card.
+  4. WRITE IT AS THE BODIES AND A TEXT A KERNEL: the flattened bodies once, and each kernel's own text — nn's
+     `__kernel` for a row, or a family override with its section's helpers and guard — so the family builds a
+     program a kernel, the bodies and that one text, and a kernel the device's compiler refuses costs its door
+     alone (▶ `khronos_opencl2_base/nn.cuh`).
 
 The spellings OpenCL C lacks are mapped in the prelude: `constexpr` -> `const`, `static_assert`,
 `alignas`/`alignof` to their C11 forms, and the `<stdint.h>` names to OpenCL's own types.
@@ -47,8 +51,7 @@ SPELLINGS = ('#define constexpr const\n#define static_assert _Static_assert\n'
 # ⛳ nn's arithmetic dial is read here the way a family reads it: its defaults file first, then one
 #   definition per function with the choice inside it. `SILVANN_NN_ARITHMETIC_FAST` overrides it, as it
 #   does for the other families' compilers.
-ARITHMETIC = ('#pragma OPENCL EXTENSION cl_khr_fp64 : enable\n'
-              '#include "%s"\n' % os.path.join(PK, 'nn', 'contracts', 'defaults.cuh') +
+ARITHMETIC = ('#include "%s"\n' % os.path.join(PK, 'nn', 'contracts', 'defaults.cuh') +
               'static inline float nn__silicon__expf(float x) {\n'
               '#if NN__ARITHMETIC__FAST\n    return native_exp(x);\n#else\n    return exp(x);\n#endif\n}\n'
               'static inline float nn__silicon__sqrtf(float x) { return sqrt(x); }\n'
@@ -71,6 +74,15 @@ ARITHMETIC = ('#pragma OPENCL EXTENSION cl_khr_fp64 : enable\n'
               # ⛳ the tile names nn's own type, so the contract that defines it comes first
               '#include "%s"\n' % os.path.join(PK, 'nn', 'contracts', 'abi', 'gpu.cuh') +
               'static inline nn__gemm__tile nn__silicon__gemm_tile(void) { nn__gemm__tile t = {1u, 4u}; return t; }\n')
+
+
+# ⭐ DOUBLE WHERE THE DEVICE HAS IT, AS TEXT FOR THE DEVICE'S OWN COMPILER — put before the flattened source, not run
+#   through this host's preprocessor, which would decide `cl_khr_fp64` for every device. No kernel computes in double: the
+#   heap's real-bits helpers alone name the type. A device without the extension refuses its pragma and the type
+#   (`MEASURED` Qualcomm's Adreno 660, OpenCL 2.0: "unsupported OpenCL extension 'cl_khr_fp64'", "use of type 'double'
+#   requires cl_khr_fp64", measurements/2026-11-11_nn184_adreno_razer_edge.md), and there the helpers take a long, which
+#   nothing on the card calls.
+DEVICE_PRELUDE = ('#ifdef cl_khr_fp64\n#pragma OPENCL EXTENSION cl_khr_fp64 : enable\n#else\n#define double long\n#endif\n')
 
 
 def packages():
@@ -148,39 +160,79 @@ def kernel(fn, params, run):
             % (fn, ', '.join(kparams), '\n'.join(unpack), guard, call))
 
 
+def override_texts():
+    """Each of the family's override kernels as a text of its own: its section's guard, the section's helpers (every
+    line of it but its kernels) and the kernel — so it builds alone after the bodies. In the file's order."""
+    lines = open(OVERRIDES, encoding='utf-8').read().split('\n')
+    out, i = [], 0
+    while i < len(lines):
+        if lines[i].startswith('#if defined(__OPENCL_C_VERSION__'):
+            j = i + 1
+            while not lines[j].startswith('#endif /* __OPENCL_C_VERSION__'): j += 1
+            body = '\n'.join(lines[i + 1:j]); spans = []
+            for m in re.finditer(r'^__kernel void (\w+)\(', body, re.M):
+                k = body.index('{', m.start()) + 1; depth = 1
+                while depth: depth += {'{': 1, '}': -1}.get(body[k], 0); k += 1
+                spans.append((m.start(), k, m.group(1)))
+            helpers = body
+            for st, en, _ in reversed(spans): helpers = helpers[:st] + helpers[en:]
+            out += [(name, '%s\n%s\n%s\n#endif\n' % (lines[i], helpers, body[st:en])) for st, en, name in spans]
+            i = j
+        i += 1
+    return out
+
+
+def c_string(text):
+    return ''.join('    "%s\\n"\n' % l.replace('\\', '\\\\').replace('"', '\\"') for l in text.split('\n'))
+
+
 def main():
     if len(sys.argv) != 2: sys.exit(__doc__)
     with_doors = [p for p in packages() if os.path.isfile(os.path.join(PK, p, 'gpu', 'doors.cuh'))]
-    source = flatten(with_doors)
+    source = DEVICE_PRELUDE + flatten(with_doors)
     # ⭐ AND THE FAMILY'S OWN OVERRIDE KERNELS, after nn's bodies so they may use them (▶ `khronos_opencl2_base/overrides/`).
     # ⛔ AS TEXT, NOT PREPROCESSED HERE: their guard is `cl_khr_subgroups`, which only the device's own compiler defines —
     #   run through this host's preprocessor they would be dropped for every device, the MI50 included.
     source += '\n' + open(OVERRIDES, encoding='utf-8').read()
+    bodies = source[:len(source) - len(open(OVERRIDES, encoding='utf-8').read()) - 1]
     made = 0
+    texts = []                                                        # (the kernel's name, its own text)
     for p in with_doors:
         r = runs(p)
         for fn, params in rows(p):
             if fn not in r: sys.exit('⛔ %s has a door row and no __RUNS line' % fn)
             if r[fn][0] == 'NN__GPU__ZZPRIVATE_BY_ROW': continue      # a host door: it calls other doors, no kernel of its own
-            source += kernel(fn, params, r[fn]); made += 1
+            text = kernel(fn, params, r[fn])
+            source += text; made += 1
+            texts.append((fn + '__kernel', text))
     # the override kernels are in the source already; counted, so the family's table has room for them — every one, even
     # where a driver without sub-groups leaves them out
     own = re.findall(r'^__kernel void (\w+)\(', open(OVERRIDES, encoding='utf-8').read(), re.M)
     made += len(own)
+    texts += override_texts()
+    if len(texts) != made or sorted(n for n, _ in texts if not n.endswith('__kernel')) != sorted(own):
+        sys.exit('⛔ the overrides cut into %d texts, and the program holds %d kernels' % (len(texts), made))
     if os.path.exists(CLANG):
         tmp = tempfile.mkdtemp(); cl = os.path.join(tmp, 'k.cl'); open(cl, 'w').write(source)
         c = subprocess.run([CLANG, '-x', 'cl', '-cl-std=CL2.0', '-target', 'amdgcn-amd-amdhsa', '-mcpu=gfx906',
                             '-fsyntax-only', '-w', cl], capture_output=True, text=True)
         if c.returncode != 0:
             sys.exit('⛔ the kernels are not valid OpenCL C:\n' + c.stderr[:3000])
-    lit = ''.join('    "%s\\n"\n' % l.replace('\\', '\\\\').replace('"', '\\"') for l in source.split('\n'))
     with open(sys.argv[1], 'w') as f:
         f.write('/* GENERATED by scripts/opencl_kernel_source.py — do not edit, and do not check in. */\n'
-                'extern "C" const char khronos_opencl2_base__kernel_source[];\n'
-                'extern "C" const char khronos_opencl2_base__kernel_source[] =\n%s;\n'
-                '/* how many kernels it holds: the family sizes its table of made kernels from this */\n'
+                '/* the device prelude and nn\'s flattened bodies, which every kernel\'s program begins with */\n'
+                'extern "C" const char khronos_opencl2_base__kernel_bodies[];\n'
+                'extern "C" const char khronos_opencl2_base__kernel_bodies[] =\n%s;\n' % c_string(bodies))
+        f.write('/* each kernel: its name, and its own text, built after the bodies */\n'
+                'extern "C" const char* const khronos_opencl2_base__kernel_names[];\n'
+                'extern "C" const char* const khronos_opencl2_base__kernel_names[] = {\n%s};\n'
+                % ''.join('    "%s",\n' % n for n, _ in texts))
+        f.write('extern "C" const char* const khronos_opencl2_base__kernel_texts[];\n'
+                'extern "C" const char* const khronos_opencl2_base__kernel_texts[] = {\n%s};\n'
+                % ',\n'.join(c_string(t) for _, t in texts))
+        f.write('/* how many kernels: the family sizes its table of them from this */\n'
                 'extern "C" const unsigned khronos_opencl2_base__kernel_count;\n'
-                'extern "C" const unsigned khronos_opencl2_base__kernel_count = %du;\n' % (lit, made))
+                'extern "C" const unsigned khronos_opencl2_base__kernel_count = %du;\n' % made)
     print('✅ %d kernels from %s and %d of the family\'s overrides, %d lines of OpenCL C%s' % (made - len(own), ', '.join(with_doors), len(own), source.count('\n'),
           ', checked for gfx906' if os.path.exists(CLANG) else ''))
 

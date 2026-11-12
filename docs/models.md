@@ -8,6 +8,7 @@ columns [`results.md`](results.md)'s are in, its card linking that kind of machi
 
 | Model | Pack | Weights | Download |
 |---|---|---|---|
+| Qwen 3.5 2B (dense, text only) | `D4`, for a phone ([`android.md`](android.md)) | 1.7 GB — 4 bits | [eval-apply/silvann_tq_D4_qwen3.5_2b](https://huggingface.co/eval-apply/silvann_tq_D4_qwen3.5_2b) |
 | Qwen 3.5 4B (dense) | `D4`, for the CPU alone and small cards | 3.5 GB — 4 bits | [eval-apply/silvann_tq_D4_qwen3.5_4b](https://huggingface.co/eval-apply/silvann_tq_D4_qwen3.5_4b) |
 | Qwen 3.5 4B | `D8` | 5.3 GB — 8 bits | [eval-apply/silvann_tq_D8_qwen3.5_4b](https://huggingface.co/eval-apply/silvann_tq_D8_qwen3.5_4b) |
 | Ministral 3 14B (dense, Mistral AI) | `D4`, for 8 GB cards | 7.4 GB — 4 bits | [eval-apply/silvann_tq_D4_ministral_3_14b](https://huggingface.co/eval-apply/silvann_tq_D4_ministral_3_14b) |
@@ -38,6 +39,24 @@ business uses it commercially (its own internal use excepted), and for its name 
 100,000,000 monthly users or US$20,000,000 monthly revenue: read its `LICENSE` before serving it to others.
 ⚠ Qwen-Image 2.1's is the Qwen Research License Agreement: research and other non-commercial use only. A picture model
 runs as a server's model of its own: [`users.md`](users.md#a-picture-model-qwen-image-21).
+
+## Qwen 3.5 2B
+
+The 4B's family at half its size: 24 layers, hidden 2,048, the same vocabulary and its head the embedding. Its pack is
+text only — the vision tower and the multi-token prediction layer left out — so that it loads within what a phone leaves
+free: about 1.9 GB held once loaded, 2.5 GB at the load's peak.
+
+<!-- rates:model Qwen 3.5 2B -->
+| GPU | RAM | CPU | Disk | Setup | Prefill | Decode | Max context | Version |
+|---|---|---|---|---|---|---|---|---|
+| [none](results.md#a-phone) | 5.4 GB | Snapdragon G3x Gen 1 (8 Arm cores) | — | `D4` · Android (Termux), `SILVANN_ARM_INT8=1` | 15.2-15.9 positions/s | 8.02-9.60 tokens/s after 163 | — | main |
+| [none](results.md#a-phone) | 5.4 GB | Snapdragon G3x Gen 1 (8 Arm cores) | — | `D4` · Android (Termux), exact | 14.7-18.0 positions/s | 4.21-5.36 tokens/s after 163 | — | main |
+| [none](results.md#no-graphics-card) | 125 GB | Xeon E5-2680 v4, 4 threads | — | `D4` · the CPU alone | 26.4 positions/s | 7.55-7.64 tokens/s after 163 | — | main |
+<!-- /rates -->
+
+It answers Hugging Face's greedy continuation token for token, its top five logits 0.36 off on average on the phone, the
+same through its int8 arithmetic (`measurements/2026-11-10_nn171_razer_edge.md`). On the phone, `SILVANN_ARM_INT8=1`
+multiplies its weights in integers (`sdot`): 1.7× the exact route's rate there.
 
 ## Qwen 3.5 4B
 
@@ -197,11 +216,11 @@ answer; to 2.5 GB/s it slowed its prompt by 25%. Through OpenCL 2.0 a card alloc
 <!-- rates:model Qwen 3.8 Flash-Next -->
 | GPU | RAM | CPU | Disk | Setup | Prefill | Decode | Max context | Version |
 |---|---|---|---|---|---|---|---|---|
-| [16 GB · RTX 5060 Ti](results.md#a-16-gb-card) | 32 GB | Xeon W-2123 (4 cores) | NVMe array, 5.7 GB/s | `D8E4` · the experts from the disk (`auto`) | 29.2-29.4 positions/s | 10.61-10.64 tokens/s after 2k | — | v0.26.0 |
-| [16 GB · RTX 5060 Ti](results.md#a-16-gb-card) | 32 GB | Xeon W-2123 (4 cores) | NVMe array, 5.7 GB/s | `D8E4` · the experts from the disk, a 9.5 GB tier | 28.6 positions/s | 12.66-12.73 tokens/s after 2k | — | v0.26.0 |
-| [16 GB · RTX 5060 Ti](results.md#a-16-gb-card) | 62 GB | Xeon W-2123 (4 cores) | — | `D8E4` · the experts in RAM, a 9.5 GB tier (`auto`) | 83.8 positions/s | 18.22-18.25 tokens/s after 2k | — | v0.26.0 |
-| [16 GB · MI50](results.md#a-16-gb-card) | 32 GB | 2× Xeon E5-2680 v4 (28 cores) | NVMe array | `D8E4` · the experts from the disk (`auto`) | 37.3-38.0 positions/s | 11.82-11.84 tokens/s after 2k | — | v0.26.0 |
-| [16 GB · MI50](results.md#a-16-gb-card) | 62 GB | 2× Xeon E5-2680 v4 (28 cores) | — | `D8E4` · the experts in RAM, a 10 GB tier (`auto`) | 81.0-82.2 positions/s | 21.37-21.55 tokens/s after 2k | — | v0.26.0 |
+| [16 GB · RTX 5060 Ti](results.md#a-16-gb-card) | 32 GB | Xeon W-2123 (4 cores) | NVMe array, 5.7 GB/s | `D8E4` · the experts from the disk (`auto`) | 29.2-29.4 positions/s | 10.61-10.64 tokens/s after 2k | — | main |
+| [16 GB · RTX 5060 Ti](results.md#a-16-gb-card) | 32 GB | Xeon W-2123 (4 cores) | NVMe array, 5.7 GB/s | `D8E4` · the experts from the disk, a 9.5 GB tier | 28.6 positions/s | 12.66-12.73 tokens/s after 2k | — | main |
+| [16 GB · RTX 5060 Ti](results.md#a-16-gb-card) | 62 GB | Xeon W-2123 (4 cores) | — | `D8E4` · the experts in RAM, a 9.5 GB tier (`auto`) | 83.8 positions/s | 18.22-18.25 tokens/s after 2k | — | main |
+| [16 GB · MI50](results.md#a-16-gb-card) | 32 GB | 2× Xeon E5-2680 v4 (28 cores) | NVMe array | `D8E4` · the experts from the disk (`auto`) | 37.3-38.0 positions/s | 11.82-11.84 tokens/s after 2k | — | main |
+| [16 GB · MI50](results.md#a-16-gb-card) | 62 GB | 2× Xeon E5-2680 v4 (28 cores) | — | `D8E4` · the experts in RAM, a 10 GB tier (`auto`) | 81.0-82.2 positions/s | 21.37-21.55 tokens/s after 2k | — | main |
 <!-- /rates -->
 
 The lineup's middle model — a 16 GB card, 32 GB of RAM and a fast NVMe drive. A mixture of 512 experts, 10 of them a

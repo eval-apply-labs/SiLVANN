@@ -1,6 +1,7 @@
 """What the runtime asks of the operating system, answered for the one it runs on — the Python side of the engine's OS
-layer (`operating_systems/`, ▶ `docs/design/pending/windows_native.md`): Linux reads `/proc`, Windows asks Win32 through
-`ctypes`. The Windows answers are `ASSUMED` until a Windows PC has run them (NN-94)."""
+layer (`operating_systems/`, ▶ `docs/design/windows_native.md`): Linux reads `/proc`, Windows asks Win32 through
+`ctypes`. The Windows answers serve a model natively: `REASONED` from the architect's Windows run (the server's own
+setup, so its boot read the RAM here — measurements/2026-10-28_nn94_windows_5070ti.md)."""
 import ctypes
 import os
 import sys
@@ -35,6 +36,45 @@ def read_at(fd, size, offset):
     with _SEEK:
         os.lseek(fd, offset, os.SEEK_SET)
         return os.read(fd, size)
+
+
+class Positional:
+    """A file read at offsets by many threads at once: `read(size, offset)`. One descriptor and `os.pread` where the system
+    has it; on Windows, which has none, a descriptor a thread, each with its own position, so no thread moves another's
+    and none waits on a lock while the reads are in flight together. Opened binary (▶ `BINARY`)."""
+
+    def __init__(self, path):
+        self.path = path
+        self.fd = os.open(path, os.O_RDONLY | BINARY)
+        self._own = threading.local()
+        self._opened, self._lock = [self.fd], threading.Lock()
+
+    def read(self, size, offset):
+        if hasattr(os, "pread"):
+            return os.pread(self.fd, size, offset)
+        fd = getattr(self._own, "fd", None)
+        if fd is None:
+            fd = os.open(self.path, os.O_RDONLY | BINARY)
+            with self._lock:
+                self._opened.append(fd)
+            self._own.fd = fd
+        os.lseek(fd, offset, os.SEEK_SET)
+        got = os.read(fd, size)
+        while len(got) < size:                       # a short read short of the file's end: the rest
+            more = os.read(fd, size - len(got))
+            if not more:
+                break
+            got += more
+        return got
+
+    def close(self):
+        with self._lock:
+            opened, self._opened = self._opened, []
+        for fd in opened:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
 
 
 def resident():

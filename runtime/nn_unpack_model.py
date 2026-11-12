@@ -290,8 +290,8 @@ def verify(path, raw, layers=None, per_layer=3, verbose=True):
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--bundle", required=True)
-    ap.add_argument("--raw", default=os.environ.get("SILVANN_RAW_MODEL",
-                                                    "/mnt/data/bigdisk/qwen_36_35_a3b"))
+    ap.add_argument("--raw", default=os.environ.get("SILVANN_RAW_MODEL"), required="SILVANN_RAW_MODEL" not in os.environ,
+                    help="the raw checkpoint the bundle was packed from (or SILVANN_RAW_MODEL)")
     ap.add_argument("--layers", type=int, default=1)
     ap.add_argument("--per-layer", type=int, default=3)
     a = ap.parse_args()

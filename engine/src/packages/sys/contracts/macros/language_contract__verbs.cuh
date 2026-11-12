@@ -144,7 +144,6 @@
     /* the other reads.                                                                                      */ \
     X(PKG, 18, "sys__bindings__viewonly", sys__opcodes__zzabi_adapter_viewonly,  SYS__BINDINGS__VIEWONLY)  \
     X(PKG, 20, "sys__result",         sys__opcodes__zzabi_adapter_result,   SYS__COMPUTING_BASE__RESULT) \
-    X(PKG, 21, "sys__wait",           sys__opcodes__zzpackage_apply_wait,   SYS__COMPUTING_BASE__WAIT) \
     /* Standing this package up, which is a call in a list the boot evaluates rather than a C entry     */ \
     /* point the boot knows the name of. It is published like any other word because that is how a      */ \
     /* package hands one over, and because a package that wants to run another's init has no other      */ \
@@ -209,7 +208,11 @@
     X(PKG, 57, "sys__scheduler__preemptive",  sys__opcodes__zzabi_adapter_scheduler_preemptive,  SYS__SCHEDULER__PREEMPTIVE) \
     /* a process asked to stop at the token it is on, and whether the running one has been (▶ `cpu/scheduler__header.cuh`) */ \
     X(PKG, 58, "sys__scheduler__stop",        sys__opcodes__zzabi_adapter_scheduler_stop,        SYS__SCHEDULER__STOP)        \
-    X(PKG, 59, "sys__scheduler__stopped",     sys__opcodes__zzabi_adapter_scheduler_stopped,     SYS__SCHEDULER__STOPPED)
+    X(PKG, 59, "sys__scheduler__stopped",     sys__opcodes__zzabi_adapter_scheduler_stopped,     SYS__SCHEDULER__STOPPED)     \
+    /* the value an answer came to, waited for — the data's end; and a block waited for until it is idle — the device's,  */ \
+    /* which hands no value over (▶ `cpu/opcodes/opcodes_abi.cuh`)                                                     */ \
+    X(PKG, 60, "sys__wait_for_result",        sys__opcodes__zzpackage_apply_wait_for_result,     SYS__COMPUTING_BASE__WAIT_FOR_RESULT) \
+    X(PKG, 61, "sys__wait_for_device",        sys__opcodes__zzpackage_apply_wait_for_device,     SYS__COMPUTING_BASE__WAIT_FOR_DEVICE)
 
 /* ── AND THE OPCODES, NAMED ──────────────────────────────────────────────────────────────────────────
  * ⚖ ARCHITECT: *"the enum addition on the opcodes."* A published verb had a number and no name, so every

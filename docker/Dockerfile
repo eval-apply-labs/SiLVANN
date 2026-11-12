@@ -97,7 +97,7 @@ WORKDIR /opt/silvann
 VOLUME /data
 EXPOSE 8080
 LABEL org.opencontainers.image.title="SiLVANN" \
-      org.opencontainers.image.description="The Eval-Apply GPU Interpreter and its Neural Network library, with the chat UI" \
+      org.opencontainers.image.description="The Eval-Apply Generalized Interpreter and its Neural Network library, with the chat UI" \
       org.opencontainers.image.source="https://github.com/eval-apply-labs/SiLVANN" \
       org.opencontainers.image.licenses="AGPL-3.0-only"
 # tini passes `docker stop`'s SIGTERM to the UI, which saves the conversations and stops the server before it exits

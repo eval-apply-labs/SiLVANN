@@ -802,7 +802,10 @@ def write(prog, roots, ext_skip, raw_typedefs, definitions):
             constant_top(e)
         out.append(gen.visit(e) + (';\n' if not isinstance(e, (c_ast.FuncDef, c_ast.Pragma)) else '\n'))
     text = ''.join(out)
-    return text.replace('_Noreturn ', '__attribute__((noinline)) ')
+    # ⛳ `_Alignof` IS WRITTEN `__alignof__`, as the 2.0 generator spells it: C11's keyword is the parser's, and
+    #   Qualcomm's compiler refuses it in OpenCL C 1.2 (`MEASURED` on the Adreno 660, an implicit function there:
+    #   measurements/2026-11-12_nn187_opencl1_adreno_razer_edge.md)
+    return text.replace('_Noreturn ', '__attribute__((noinline)) ').replace('_Alignof(', '__alignof__(')
 
 
 def main():

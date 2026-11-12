@@ -45,6 +45,12 @@ static unsigned int            eng__abi__zzpackage_worker_count = 0u;           
 static sys__silicon_family__id eng__abi__zzpackage_wanted_family[SYS__SILICON__WORKERS_MAX];
 static uint32_t                eng__abi__zzpackage_wanted_device[SYS__SILICON__WORKERS_MAX];
 static unsigned int            eng__abi__zzpackage_wanted_count = 0u;              /* 0: one worker, chosen as before */
+/* ⛳ THE WORKER THAT REFUSED THE LAST BOOT — its packages' host inits or its fault word, the room on its own device — with
+ *   its family and device, or -1 when none did: the heap and the channel are the machine's, and a refusal there names no
+ *   worker. A caller says from it whose memory refused the pool: a card's, or a processor's (▶ `eng_abi_refused_worker`). */
+static int                     eng__abi__zzprivate_refused_worker = -1;
+static sys__silicon_family__id eng__abi__zzprivate_refused_family = SYS__SILICON_FAMILY__NONE;
+static uint32_t                eng__abi__zzprivate_refused_device = 0u;
 static sys__heap_node*  eng__abi__zzpackage_answer  = 0;
 
 /* ── THE WAY IN WHILE SOMETHING IS ALREADY RUNNING ───────────────────────────────────────────────────
@@ -461,6 +467,7 @@ void eng_abi_shutdown(void);
 int eng_abi_boot_with(unsigned int blocks, unsigned int chunks, unsigned int chunk_nodes,
                       const char* config, unsigned long long config_bytes) {
     if (eng__abi__zzpackage_up()) return ENG__BOOT__OK;   /* already up: asking twice is not an error */
+    eng__abi__zzprivate_refused_worker = -1;
 
     const uint64_t config_length = (config == 0) ? 0ull : (uint64_t)config_bytes;
 
@@ -517,6 +524,11 @@ int eng_abi_boot_with(unsigned int blocks, unsigned int chunks, unsigned int chu
         /* The worker's fault word, on its own device: what every door accumulates an overflow into. */
         if (ok && (!sys__gpu__memory_allocate(me->family, (void**)&me->fault_word, sizeof(uint32_t))
                 || !sys__gpu__memory_zerofill(me->family, me->fault_word, sizeof(uint32_t)))) ok = false;
+        if (!ok) {
+            eng__abi__zzprivate_refused_worker = (int)w;
+            eng__abi__zzprivate_refused_family = me->family;
+            eng__abi__zzprivate_refused_device = me->device;
+        }
 #ifndef SYS__ENGINE__ABI__CTX_PROVIDED
         if (ok) sys__engine__ctx_bind(w, me->family, me->device, me->fault_word);
 #endif
@@ -750,6 +762,15 @@ void eng_abi_shutdown(void) {
 }
 
 const char* eng_abi_status_text(int status) { return eng__boot__why(status); }
+
+/* The worker that refused the last boot: its family's spelling, with its number and device — or 0 when no worker did (the
+ * boot was not refused, or the machine's own heap or channel was). */
+const char* eng_abi_refused_worker(int* worker, unsigned int* device) {
+    if (eng__abi__zzprivate_refused_worker < 0) return 0;
+    if (worker) *worker = eng__abi__zzprivate_refused_worker;
+    if (device) *device = eng__abi__zzprivate_refused_device;
+    return sys__silicon_family__spelling(eng__abi__zzprivate_refused_family);
+}
 
 /* The four-letter word the machine panicked with — an evaluator stop (▶ `eng__eval`'s "A STOP IS A PANIC") — or 0.
  * ⛳ NOT GATED, AND THAT IS ITS POINT: it is what a caller reads when every other door refuses, and the answer to

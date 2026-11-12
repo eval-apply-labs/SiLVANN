@@ -492,11 +492,27 @@ static __device__ inline void nn__vector__zzabi_body_penalize(uint16_t* x, uint6
     }
 }
 
+#if defined(__OPENCL_C_VERSION__)
+/* ⛳ AN OPENCL CARD'S 64-BIT PRODUCT FROM ITS 32-BIT HALVES — `a * b` mod 2^64, the same number. Qualcomm's OpenCL
+ *   compiler gets a 64-bit product by a constant wrong above its 48th bit, whatever the optimisation — 0x123456789ABCDEF1
+ *   times 12345 came back 0xE14BAB71DDDAD3A9 for 0xDDDDDDDDDDDAD3A9 — and the same product by a factor it cannot see,
+ *   and this one, right (`MEASURED` the Adreno 660, measurements/2026-11-11_nn187_adreno_family_razer_edge.md). The other
+ *   compilers keep the plain product: these lines in GCC's unit moved its inlining elsewhere (x86_avx2's DeltaNet gates
+ *   called the half's rounding they had inlined). */
+static __device__ inline uint64_t nn__vector__zzprivate_times(uint64_t a, uint64_t b) {
+    const uint64_t al = a & 0xFFFFFFFFull, ah = a >> 32, bl = b & 0xFFFFFFFFull, bh = b >> 32;
+    return al * bl + ((ah * bl + al * bh) << 32);
+}
+#define NN__VECTOR__ZZPRIVATE_TIMES(a, b)  nn__vector__zzprivate_times((a), (b))
+#else
+#define NN__VECTOR__ZZPRIVATE_TIMES(a, b)  ((a) * (b))
+#endif
+
 /* splitmix64's finaliser: 64 bits from 64, every input bit reaching every output bit. */
 static __device__ inline uint64_t nn__vector__zzprivate_mix(uint64_t z) {
     z += 0x9E3779B97F4A7C15ull;
-    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
-    z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+    z = NN__VECTOR__ZZPRIVATE_TIMES(z ^ (z >> 30), 0xBF58476D1CE4E5B9ull);
+    z = NN__VECTOR__ZZPRIVATE_TIMES(z ^ (z >> 27), 0x94D049BB133111EBull);
     return z ^ (z >> 31);
 }
 
@@ -1531,7 +1547,17 @@ static __device__ inline void nn__expert__zzprivate_rows(uint16_t* out, float* a
      *   8 bits, every matrix of the models shipped — so a pair never straddles a container or a row's end, and `x`'s
      *   pair is one aligned word. `nn__silicon__dot2`; the codes' levels are the table's halves, as they are. */
     const bool pairs = d != 16ull && per % 2ull == 0ull && cols % 2ull == 0ull;
+    /* ⛳ AN OPENCL CARD'S TEXT NAMES A TABLE EVEN AT 16 BITS, WHICH READS NONE (`pairs` is false there): a pointer chosen
+     *   between the table and null is a join of the table's address space and a generic null, which Qualcomm's OpenCL
+     *   compiler refuses whole — "PHI node operands are not the same type as the result", the process aborted (`MEASURED`
+     *   the Adreno 660, measurements/2026-11-11_nn184_adreno_razer_edge.md). The other compilers keep the null: the table
+     *   named there too rescheduled fifteen of amd_rocm6_wave64's kernels, and the 2B decoded 1.1% slower on the MI50
+     *   (`MEASURED` node03, measurements/2026-11-11_nn187_adreno_family_razer_edge.md). */
+#if defined(__OPENCL_C_VERSION__)
+    const uint16_t* levels = nn__turboquant__zzabi_levels(d == 16ull ? 8ull : d);
+#else
     const uint16_t* levels = d == 16ull ? 0 : nn__turboquant__zzabi_levels(d);
+#endif
     for (uint64_t r0 = (uint64_t)nn__silicon__block() * WR; r0 < out_rows; r0 += (uint64_t)nn__silicon__blocks() * WR) {
         const uint8_t* base[NN__GEMM__W_ROWS_MAX];
         for (uint32_t a = 0u; a < WR; ++a)
@@ -2232,7 +2258,9 @@ static __device__ inline void nn__hadamard__zzabi_body_rotate(uint16_t* out, con
  * Regenerate with `--emit`; `--check` fails the build if this block and the script
  * disagree. ▶ that script for the construction, and for what it validates.
  * 318 fp16 entries: 2@D1 + 4@D2 + 8@D3 + 16@D4 + 32@D5 + 256@D8.
- * ⛳ AT D=4 THESE ARE THE VERBATIM bitsandbytes NF4 LEVELS, checked to fp16's own resolution. */
+ * ⛳ THESE ARE THE SPECULAR LLOYD-MAX LEVELS (`lloyd_table`): `2^D` a width, mirrored about
+ * zero, none on it. The verbatim bitsandbytes NF4 check is of the NF construction, which proves
+ * the machinery and does not ship. */
 static __device__ const uint16_t nn__turboquant__zzprivate_gaussian[318] = {
     /* D=1 — 2 levels, -1.0000 … +1.0000 */
     0xBC00, 0x3C00,
@@ -2615,12 +2643,10 @@ static __device__ inline void nn__hadamard__zzpackage_one_block(uint16_t* out, c
     }
 }
 
-/* ⭐⭐ THE TWO FAMILIES DIFFER IN ONE EXPRESSION, AND THAT IS THE WHOLE REASON THIS WAS CHEAP. The bit
- * extraction, the word shape, the sign-in-bit-0 convention and the parameter-block addressing are
- * IDENTICAL; only what the magnitude index MEANS changes — an entry of a table, or a count of steps.
- * ⇒ ★ A SECOND FAMILY THAT REUSES THE BIT LAYOUT COSTS A BRANCH, NOT A CODEC. ⛳ And the branch is on
- * a value that is constant for the whole row, so it hoists out of the loop the way every other
- * per-row decision in this file already does. */
+/* What a code means before the row's scale: an entry of width `d`'s block of the Gaussian table, the code
+ * indexing the signed table whole (no sign bit), or at `d == 16` the half the code is. ⛳ The branch is on a
+ * value constant for the whole row, so it hoists out of the loop the way every other per-row decision in
+ * this file does. */
 static __device__ inline float nn__turboquant__zzpackage_level(uint64_t d, uint32_t code) {
     if (d == 16ull) return nn__silicon__half_to_float((uint16_t)code);
     return nn__silicon__half_to_float(nn__turboquant__zzprivate_gaussian[nn__turboquant__zzprivate_gaussian_at(d) + code]);
@@ -2643,8 +2669,8 @@ static __device__ inline float nn__turboquant__zzpackage_weight(const uint8_t* r
      * family's entire reason for existing: `2^D` levels out of `D` bits where the retired codebook
      * family spent bit 0 on a sign and indexed `2^(D-1)` magnitudes.
      * ⛳ The table is a build constant — no VRAM read, and the same value for every lane of a wave —
-     * and the row's parameter block is ONE fp16, its scale. ▶ `turboquant__header.cuh` for the measurement
-     * that says dropping the per-row codebook is where the format's bits actually came from. */
+     * and the row's parameter block is ONE fp16, its scale. ▶ `contracts/objects/turboquant.cuh` for what a
+     * sign bit and a per-row codebook cost, measured. */
     const uint16_t entry = nn__turboquant__zzprivate_gaussian[nn__turboquant__zzprivate_gaussian_at(d) + code];
     const float scale = nn__silicon__half_to_float(
                             (uint16_t)((uint32_t)lut_base[0] | ((uint32_t)lut_base[1] << 8)));

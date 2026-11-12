@@ -9,7 +9,7 @@ from this folder's engine and scripts\build.py, else built here as scripts\build
 It installs nothing system-wide and asks for no administrator: a tool it needs and does not find is named, with the line
 that installs it, and the installer stops. Run it again to update; models, user_sessions, the venv and the folder
 `silvann data` named stay. What it needs:
-  Python 3.10 to 3.14       python.org, or: winget install -e --id Python.Python.3.12
+  Python 3.11 to 3.14       python.org, or: winget install -e --id Python.Python.3.12
   Git                       winget install -e --id Git.Git
   a card's own driver       NVIDIA's for an NVIDIA card; AMD's or Intel's, whose OpenCL.dll the OpenCL families use
 and, only to build the libraries here (scripts\build.ps1, or a release whose libraries do not match):
@@ -28,9 +28,10 @@ and, only to build the libraries here (scripts\build.ps1, or a release whose lib
   install.ps1 -Build        the build alone, the cards and compilers looked for again (`silvann build`, scripts\build.ps1 -Build)
 
 scripts\requirements-nonfree.txt (PyAV, for video files) is scripts\install_nonfree.ps1's.
-MEASURED 2026-10-19 on one PC (an RTX 5070 Ti, CUDA 13.4): the build from source; the prebuilt libraries ASSUMED until
-a release's are taken (NN-94). This file is ASCII on purpose: Windows PowerShell 5.1 reads a script without a
-byte-order mark in the PC's code page.
+MEASURED on one PC (an RTX 5070 Ti beside a Ryzen 7 5800X): 2026-10-19 the build from source (CUDA 13.4); 2026-10-28
+v0.21.2's install.ps1 and its libraries, Qwen 3.6 35B-A3B served at 48 tokens/s
+(measurements/2026-10-28_nn94_windows_5070ti.md). This file is ASCII on purpose: Windows PowerShell 5.1 reads a script
+without a byte-order mark in the PC's code page.
 #>
 param([switch]$FromSource, [switch]$Build, [switch]$Fetched)
 # a native command's stderr is not an error here: every call checks its exit code
@@ -74,10 +75,10 @@ function Check-Machine {
     $script:Python = Find-Python
     $missing = @()
     if (-not $script:Python) {
-        $missing += "Python 3.10 or newer: winget install -e --id Python.Python.3.12  (or python.org)"
+        $missing += "Python 3.11 or newer: winget install -e --id Python.Python.3.12  (or python.org)"
     } else {
-        & $script:Python -c "import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)"
-        if ($LASTEXITCODE -ne 0) { Fail "Python 3.10 or newer is needed; $script:Python is older." }
+        & $script:Python -c "import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)"
+        if ($LASTEXITCODE -ne 0) { Fail "Python 3.11 or newer is needed; $script:Python is older." }
     }
     if (-not (Get-Command git -ErrorAction SilentlyContinue)) { $missing += "Git: winget install -e --id Git.Git" }
     Stop-If-Missing $missing
@@ -238,13 +239,24 @@ function Get-Libraries {
     }
     $version = $m.Matches[0].Groups[1].Value
     Say "the libraries, prebuilt for $version"
+    # a release's libraries are on its `rel` tag where it is signed (rel0.0.0), else on its `n` tag (n0.0.0) or, before
+    # those, its `v` tag (v0.0.0), unsigned
     $tmp = Join-Path ([IO.Path]::GetTempPath()) ("silvann-lib-" + [Guid]::NewGuid().ToString("N"))
     New-Item -ItemType Directory -Force -Path $tmp | Out-Null
     $zip = Join-Path $tmp "silvann_windows_x64.zip"
     $ProgressPreference = "SilentlyContinue"   # Windows PowerShell's progress bar slows a download many times over
     try {
         [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-        Invoke-WebRequest -UseBasicParsing -Uri "$Releases/download/$version/silvann_windows_x64.zip" -OutFile $zip
+        $got = $null
+        foreach ($tag in @(("rel" + $version.Substring(1)), ("n" + $version.Substring(1)), $version)) {
+            try {
+                Invoke-WebRequest -UseBasicParsing -Uri "$Releases/download/$tag/silvann_windows_x64.zip" -OutFile $zip
+                $got = $tag
+                break
+            } catch { $last = $_ }
+        }
+        if (-not $got) { throw $last }
+        Note "   the release's $got"
         Expand-Archive -Path $zip -DestinationPath $tmp -Force
     } catch {
         Note "   none to fetch ($($_.Exception.Message)): the libraries are built here"

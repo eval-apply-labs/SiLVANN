@@ -3,7 +3,7 @@
 ## The shape of it
 
 ```
-engine/src/engine/                the Eval-Apply GPU Interpreter's evaluator
+engine/src/engine/                the Eval-Apply Generalized Interpreter's evaluator
 engine/src/packages/sys/          the language: lists, symbols, bindings, if, while, defun, compute and result
 engine/src/packages/nn/           the Neural Network library: buffers, the expert collections, the arithmetic
 engine/src/packages/ai_qwen_3/    the Qwen 3.5 family's layers as verbs
@@ -20,8 +20,9 @@ the model package's verbs, or nn's, over tables of its weights that the runtime 
 program on the host, and each verb launches its arithmetic on the silicon that holds the data — a card, or the CPU's
 cores. The machine is a set of **workers**, one a device: the card is worker 0, a CPU socket a worker of the
 `x86_avx2` family, and a program hands work to another worker with `sys__scheduler__add` and reads it with
-`sys__wait`: the work waits on that worker's queue, which several workers can hand work to at once, and its value goes
-into the answer `sys__scheduler__add` handed back (▶ `sys`'s README). A computation can also move itself:
+`sys__wait_for_result`: the work waits on that worker's queue, which several workers can hand work to at once, and its
+value goes into the answer `sys__scheduler__add` handed back, which the program keeps and reads — never the worker
+(▶ `sys`'s README). A computation can also move itself:
 `(sys__scheduler__continue_on cu)` sends it — its bindings and the rest of its program — to block `cu`, where it goes on
 from its next form; onto its own block it goes to the back of the queue. And a machine preempts: a
 computation that has run 50 ms since it began, or since it went on, gives its block up to what waits there, at the end

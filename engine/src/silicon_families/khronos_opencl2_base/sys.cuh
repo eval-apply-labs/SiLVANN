@@ -29,6 +29,7 @@
 #include "../../operating_systems/os.cuh"   /* threads, locks and conditions: the system's */
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 /* ⭐ ONE SOURCE, TWO FAMILIES (▶ manifest.cuh): the family built from it names its cards and itself —
@@ -282,9 +283,26 @@ static inline uint32_t khronos_opencl2_base__device_count(void) {
     return s ? (uint32_t)s->count : 0u;
 }
 
+/* ⭐ A CARD WHOSE COMPILER BUILDS NONE OF nn's DOORS IS REFUSED, the first time a thread binds it — at the boot — rather than
+ *   taken for a card that answers nothing (`nn.cuh` asks it to build its cheapest door). Asked once a card; a card the
+ *   boot never binds is never built for. */
+static bool khronos_opencl2_base__zzpackage_card_builds(khronos_opencl2_base__state* s, uint32_t card);   /* nn.cuh */
+static uint8_t khronos_opencl2_base__zzprivate_checked[KHRONOS_OPENCL2_BASE__DEVICES_MAX];
+static uint8_t khronos_opencl2_base__zzprivate_refused[KHRONOS_OPENCL2_BASE__DEVICES_MAX];
 static inline uint32_t khronos_opencl2_base__bind_device(uint32_t index) {
     khronos_opencl2_base__state* s = khronos_opencl2_base__zzpackage_up();
     if (s == 0 || index >= s->count) return 0u;
+    if (!__atomic_load_n(&khronos_opencl2_base__zzprivate_checked[index], __ATOMIC_ACQUIRE)) {
+        sys__os__lock_take(&s->lock);
+        if (!khronos_opencl2_base__zzprivate_checked[index]) {
+            khronos_opencl2_base__zzprivate_refused[index] = !khronos_opencl2_base__zzpackage_card_builds(s, index);
+            if (khronos_opencl2_base__zzprivate_refused[index])
+                fprintf(stderr, KHRONOS_OPENCL2_BASE__NAME ": card %u refused — its compiler builds none of nn's doors\n", index);
+            __atomic_store_n(&khronos_opencl2_base__zzprivate_checked[index], 1u, __ATOMIC_RELEASE);
+        }
+        sys__os__lock_give(&s->lock);
+    }
+    if (khronos_opencl2_base__zzprivate_refused[index]) return 0u;
     khronos_opencl2_base__zzprivate_bound = index;
     return 1u;
 }

@@ -101,7 +101,8 @@ static __device__ inline uint64_t nn__expert__type_free(uint64_t type);
  * free slot. Only the head is stored, in the row above.
  * ⛳ `take` IS A POP WITH NO SECOND PATH: one free list is the only source of slots, so there is no bump
  * pointer to branch against. A collection with none left answers false, which is an ORDINARY answer —
- * ⚖ `place` refuses on a full card by design and no eviction policy stands behind it yet.
+ * ⚖ `place` refuses on a full card by design; a read or a promotion evicts before it takes, by the loader's
+ * own rule (`nn__loader__zzprivate_room`).
  * ⛔⛔ `give` TRUSTS THAT THE SLOT IS NOT ALREADY FREE. Giving one twice links it to itself and then two
  * experts are handed one slot, silently. What makes that unreachable is UPSTREAM — `evict` refuses an
  * expert that is not resident — so ⇒ ★ THE TEST THAT HOLDS THIS INVARIANT IS THE ONE ABOUT A SECOND
@@ -183,9 +184,10 @@ static __device__ inline uint64_t nn__expert__layer_resident(uint64_t layer, uin
  * a class's partial chain, then an empty page re-typed, then the arena minted — existed to find a page
  * with ROOM FOR THIS SIZE IN IT, and a slot either is free or is not.
  *
- * ⛔ IT DOES NOT EVICT. A collection with no free slot answers false, and WHAT TO THROW AWAY is a policy
- * that has not been ruled — so the refusal is the honest answer rather than a placeholder eviction that
- * would quietly become the policy by being there first. */
+ * ⛔ IT DOES NOT EVICT. A collection with no free slot answers false: a load fills each collection once,
+ * so the refusal is the honest answer rather than a placeholder eviction that would quietly become the
+ * policy by being there first. The loader's reads and promotions take a slot by their own rule, which does
+ * evict (`nn__loader__zzprivate_room`, ▶ `expert_lru_node_array.md` §⑥). */
 static __device__ inline bool nn__expert__place(uint64_t type, uint64_t* address, uint64_t* slot);
 
 /* ══ ⭐⭐ AN EXPERT IN MEMORY, FROM DISK IF IT IS NOT — THE LOADER ═════════════════════════════════════════

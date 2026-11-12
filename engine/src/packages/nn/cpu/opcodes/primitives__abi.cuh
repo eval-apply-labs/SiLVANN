@@ -59,10 +59,9 @@ static sys__heap_node nn__rmsnorm__zzabi_apply_fp32(const sys__heap_node* argv, 
 
 /* ══ ⭐⭐ SOFTMAX — a reduction, then a second reduction, then a broadcast ═══════════════════════════
  * ⛳ THREE PASSES AND NOT TWO, deliberately. The one-pass "online" form that rescales a running sum as
- * a new maximum arrives is a real algorithm and it is a PERFORMANCE choice; here the door runs one
- * block of one thread and nothing is parallel, so the fused form would buy nothing and cost a reader the
- * argument for why it is correct. ▶ `nn_port.md` §⑧ — no throughput claim in this package is
- * observed, so none may be optimised for. */
+ * a new maximum arrives is a real algorithm and it is a PERFORMANCE choice; the door runs one block over
+ * the vector, its lanes combined between the passes, and the three passes keep the argument for why it is
+ * correct where a reader can follow it. */
 /* `(nn__softmax__apply x out n)` — refuses a length of zero, as rmsnorm does. */
 static sys__heap_node nn__softmax__zzabi_apply(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx) {
     if (argc != 3u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
@@ -103,8 +102,8 @@ static sys__heap_node nn__sigmoid__zzabi_apply(const sys__heap_node* argv, unsig
  * ⚖ *"a transpose method in nn where you pass a table and it gives you its transposed one."*
  * ⛳ THE WALK IS OVER THE *DESTINATION* IN ORDER, not over the source: writes are sequential and the
  * reads are strided. On a serial one-thread loop the two are the same work, and it is written this
- * way because the parallel version will want contiguous writes per lane. ⛔ NO SPEED IS CLAIMED —
- * ▶ `nn_port.md` §⑧, nothing in this package has been observed. */
+ * way because the parallel version will want contiguous writes per lane. ⛔ NO SPEED IS CLAIMED: the
+ * door is serial (`gpu/doors.cuh`), and nothing has timed it. */
 /* `(nn__matrix__transpose src dst rows cols)` — src and dst must differ: a transpose in place would read
  * cells it has already overwritten. Nothing here can overflow, so the door takes no fault word. */
 static sys__heap_node nn__matrix__zzabi_apply_transpose(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx) {

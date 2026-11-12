@@ -341,9 +341,9 @@ static inline int nn__package__zzprivate_cartridge(const char* config, uint64_t 
  * ⛳ SAME SHAPE AS A BUFFER CLASS — a per-thing size and a count of the things — and it is a pair for the
  * same reason: taking one of the two would size a region from a figure whose other half somebody deleted,
  * which allocates fine and is wrong by a factor. ⇒ ★ THE TWO ARE ONE TERM BECAUSE THEY ARE ONE DECISION.
- * ⛔ AND THIS IS THE FIFTH TENANT THE FOOT OF THIS FILE COSTED AND DELIBERATELY DID NOT SUM, because no
- * ruling named it. ⚖ names it. The note stays where it is: it is the arithmetic, and this is
- * the act of paying it. */
+ * ⛔ AND THIS IS THE SPAN'S FIFTH TENANT, WHICH THE FOOT OF THIS FILE COSTS: a ruling names it (⚖ *"use the max
+ * deltanet state for the context window so we have no oom"*), and the span sums it. The note at the foot is the
+ * arithmetic; this is the act of paying it. */
 static inline int nn__package__zzprivate_deltanet(const char* config, uint64_t length, uint64_t* answer,
                                                   uint64_t* counted) {
     if (counted != 0) *counted = 0ull;
@@ -563,12 +563,12 @@ static inline void nn__package__host_teardown(sys__package_room* room) {
     room->ram_at = 0; room->ram_card_at = 0; room->ram_bytes = 0ull;
 }
 
-/* ══ ⚠ A FIFTH TENANT NOBODY HAS COSTED — RAISED HERE BECAUSE THIS IS WHERE IT WOULD BE PAID ═══════════
+/* ══ THE DELTANET STATE — THE SPAN'S FIFTH TENANT, AND WHAT IT COSTS ══════════════════════════════════
  *
- * `nn_span_layout.md` §⓪ names THREE tenants of the span and §①ⓐ excludes deltanet layers from the
- * cartridge arithmetic BY NAME — *"a `deltanet` layer's state is constant in the sequence length, so it
- * does not enter §④'s arithmetic at all."* That sentence is true about the PER-TOKEN product and does not
- * follow to zero: a deltanet layer's state is constant in the sequence length, not absent.
+ * `nn_span_layout.md` §①ⓐ excludes deltanet layers from the cartridge arithmetic BY NAME — *"a `deltanet`
+ * layer's state is constant in the sequence length, so it does not enter §④'s arithmetic at all."* That
+ * sentence is true about the PER-TOKEN product and does not follow to zero: a deltanet layer's state is
+ * constant in the sequence length, not absent.
  *
  * `MEASURED` from the old tree, which allocates one per linear layer (`session/alloc.py:476`, and
  * `types.py:113` says the argument is ELEMENTS — the error message spells `num_elements * 4`):
@@ -577,15 +577,12 @@ static inline void nn__package__host_teardown(sys__package_room* room) {
  *     × 36 deltanet layers (Qwen3.5-MoE: 48 total, 12 full-attention)   ≈ 153 MiB / conversation
  *
  * ⇒ ~7.7% ON TOP OF A ~1.98 GiB CARTRIDGE, and it is per-conversation state that travels with it — so it
- * belongs in the cartridge term or beside it, not nowhere. ⛔ IT IS NOT SUMMED ABOVE, deliberately: no key
- * names it, and inventing one would be sizing a span against a figure no ruling stands behind.
- * ⛳ WHAT IT WOULD COST TO CLOSE: one more paired term of exactly the shape already here — the deltanet
- * layer count, which the config file already carries for the layer-total sum of `nn_span_layout.md` §①ⓐ,
- * multiplied by a per-layer state size the converter states the same way it states a quantised token's.
- * `NN__PACKAGE__SPAN_TERMS` becomes 5 and nothing else moves.
- * ⇒ ★ THE EXCLUSION READS AS SETTLED BECAUSE IT IS WRITTEN AS A REASON, and the reason is sound about the
- * thing it was reasoning about. This is the third figure in this arc to be short for that shape of cause —
- * after the layer count and the quantisation scales — and all three were found by asking what a correct
- * sentence did NOT say. ══════════════════════════════════════════════════════════════════════════════ */
+ * belongs beside the cartridge term, not nowhere. ⛳ SO IT IS A TERM OF THE SPAN: the pair
+ * `nn__package__zzprivate_deltanet` reads — a per-layer state size and the deltanet layer count, the count
+ * the config file carries for the layer-total sum of `nn_span_layout.md` §①ⓐ — multiplied and added to the
+ * span beside the cartridge, one of the `NN__PACKAGE__SPAN_TERMS`.
+ * ⇒ ★ AN EXCLUSION WRITTEN AS A REASON READS AS SETTLED, and the reason can be sound about the thing it
+ * reasons about while a figure stays short. The layer count, the quantisation scales and this state were
+ * each found by asking what a correct sentence did NOT say. ═════════════════════════════════════════ */
 
 #endif /* SILVANN__PACKAGES_NN_CPU_PACKAGE__IMPL_CUH */

@@ -51,7 +51,7 @@
  * a real provider slot. */
 #define SYS__COMPUTING_BASE__UNREGISTERED 0xFFFFFFFEu
 
-/* How long `sys__wait` waits where it stands before answering ANSR — a computation that may not move: the host's, or
+/* How long `sys__wait_for_result` waits where it stands before answering ANSR — a computation that may not move: the host's, or
  * one inside `compute_inline` (one that may move is parked, ▶ "A WAIT PARKED" in `cpu/scheduler__impl.cuh`).
  *
  * ⛳ IT IS A BOUND AND NOT A TIMEOUT POLICY. What it buys is that a computation which never finishes

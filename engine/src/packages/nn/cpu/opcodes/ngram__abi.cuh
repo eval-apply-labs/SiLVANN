@@ -39,7 +39,8 @@ static inline float nn__ngram__zzprivate_e8m0(uint8_t s) {
     return v;
 }
 
-/* One reader's share of a position's rows: every row whose index is `first` modulo the readers, values and scales. */
+/* One reader's share of a position's rows: every row whose index is `first` modulo the readers, values and scales. A
+ * descriptor of -1 is a source in memory, `data_at` (or `scale_at`) its address (▶ the contract's TABLE IN RAM). */
 typedef struct nn__ngram__share {
     int data_fd, scale_fd;
     uint64_t data_at, scale_at, row_bytes, scale_bytes, rows, first;
@@ -48,7 +49,19 @@ typedef struct nn__ngram__share {
     bool ok;
 } nn__ngram__share;
 
+/* A row of a table in RAM: `host_at` is the runtime's copy of the file in this process's memory (▶ the contract's TABLE
+ * IN RAM) — the host's memory by construction, never a card's, so it is read here as a buffer's RAM view is. */
+static inline void nn__ngram__zzprivate_copy(void* to, uint64_t host_at, uint64_t bytes) {
+    memcpy(to, (const void*)(uintptr_t)host_at, (size_t)bytes);
+}
+
+/* `bytes` of the table at `offset` into `to`: read from the file at `fd`, or — `fd` -1, the table in RAM — copied from
+ * the address `offset`. */
 static bool nn__ngram__zzprivate_read(int fd, void* to, uint64_t bytes, uint64_t offset) {
+    if (fd < 0) {
+        nn__ngram__zzprivate_copy(to, offset, bytes);
+        return true;
+    }
     uint64_t done = 0ull;
     while (done < bytes) {
         const int64_t got = sys__os__file_read_at(fd, (char*)to + done, (size_t)(bytes - done), offset + done);
@@ -92,8 +105,12 @@ static sys__heap_node nn__ngram__zzabi_apply_rows(const sys__heap_node* argv, un
     const int64_t row_bytes = nn__ngram__zzprivate_int(table, NN__NGRAM__ROW_BYTES, &ok);
     const uint64_t file = (uint64_t)nn__ngram__zzprivate_int(table, NN__NGRAM__FILE, &ok);
     const uint64_t scale_file = (uint64_t)nn__ngram__zzprivate_int(table, NN__NGRAM__SCALE_FILE, &ok);
+    const uint64_t data_at = (uint64_t)nn__ngram__zzprivate_int(table, NN__NGRAM__DATA_AT, &ok);
+    const uint64_t scale_at = (uint64_t)nn__ngram__zzprivate_int(table, NN__NGRAM__SCALE_AT, &ok);
+    /* each row's own scales: from their file, or — the file 0 and an address — from memory */
+    const bool scaled = scale_file != 0ull || scale_at != 0ull;
     if (!ok || N < 2 || N > (int64_t)NN__NGRAM__N_MAX || H < 1 || H > (int64_t)NN__NGRAM__HEADS_MAX || row_bytes < 1
-     || row_bytes > (int64_t)NN__NGRAM__ROW_MAX || (scale_file != 0ull && row_bytes % 32 != 0) || file == 0ull
+     || row_bytes > (int64_t)NN__NGRAM__ROW_MAX || (scaled && row_bytes % 32 != 0) || (file == 0ull && data_at == 0ull)
      || sys__node_array__length(table) < NN__NGRAM__MULT + (uint64_t)(N + 2 * (N - 1) * H))
         return sys__engine__abi__error(NN__NGRAM__FAULT_TABLE);
     const uint64_t rows = (uint64_t)((N - 1) * H), values = rows * (uint64_t)row_bytes;
@@ -104,7 +121,7 @@ static sys__heap_node nn__ngram__zzabi_apply_rows(const sys__heap_node* argv, un
     const bool mapped = sys__heap_node__carries_reference(map.dtype) && sys__node_array__is(map.args[0]);
     if (!mapped && !(map.dtype == SYS__KIND__VALUE_INT && map.args[0] == 0ull)) return sys__engine__abi__error(NN__NGRAM__FAULT_TABLE);
     float scale = 1.0f;
-    if (scale_file == 0ull) {
+    if (!scaled) {
         const sys__heap_node s = sys__node_array__borrow(table, NN__NGRAM__SCALE);
         if (s.dtype != SYS__KIND__VALUE_FLOAT) return sys__engine__abi__error(NN__NGRAM__FAULT_TABLE);
         scale = (float)sys__heap_node__real(s.args[0]);
@@ -144,24 +161,24 @@ static sys__heap_node nn__ngram__zzabi_apply_rows(const sys__heap_node* argv, un
         }
     }
     if (!ok) return sys__engine__abi__error(NN__NGRAM__FAULT_TABLE);
-    /* ⭐ THE ROWS, every read in flight at once: NN__NGRAM__READERS threads, each a row in that many */
-    const uint64_t scale_bytes = scale_file != 0ull ? (uint64_t)row_bytes / 32u : 0ull;
+    /* ⭐ THE ROWS, every read in flight at once: NN__NGRAM__READERS threads, each a row in that many — or, the table in
+     *   memory, copied here by this thread alone */
+    const uint64_t scale_bytes = scaled ? (uint64_t)row_bytes / 32u : 0ull;
     uint8_t* raw = (uint8_t*)malloc((size_t)(values + rows * scale_bytes));
     uint16_t* halves = (uint16_t*)malloc((size_t)(2u * values));
     if (raw == 0 || halves == 0) { free(raw); free(halves); return sys__engine__abi__error(NN__NGRAM__FAULT_READ); }
     nn__ngram__share share[NN__NGRAM__READERS];
     sys__os__thread th[NN__NGRAM__READERS];
     bool started[NN__NGRAM__READERS];
-    const uint64_t data_at = (uint64_t)nn__ngram__zzprivate_int(table, NN__NGRAM__DATA_AT, &ok);
-    const uint64_t scale_at = (uint64_t)nn__ngram__zzprivate_int(table, NN__NGRAM__SCALE_AT, &ok);
+    const bool threads = file != 0ull || scale_file != 0ull;       /* a file to wait on: its reads all in flight */
     for (unsigned r = 0u; r < NN__NGRAM__READERS; ++r) {
         nn__ngram__share* s = &share[r];
-        s->data_fd = sys__file__zzabi_descriptor(file);
+        s->data_fd = file != 0ull ? sys__file__zzabi_descriptor(file) : -1;
         s->scale_fd = scale_file != 0ull ? sys__file__zzabi_descriptor(scale_file) : -1;
         s->data_at = data_at; s->scale_at = scale_at; s->row_bytes = (uint64_t)row_bytes; s->scale_bytes = scale_bytes;
         s->rows = rows; s->first = r; s->ids = ids; s->values = raw; s->scales = raw + values; s->ok = false;
         /* the first share is this thread's own, read while the others are */
-        started[r] = r > 0u && (uint64_t)r < rows && sys__os__thread_start(&th[r], nn__ngram__zzprivate_reader, s);
+        started[r] = threads && r > 0u && (uint64_t)r < rows && sys__os__thread_start(&th[r], nn__ngram__zzprivate_reader, s);
     }
     for (unsigned r = 0u; r < NN__NGRAM__READERS; ++r)            /* a share no thread took is read here */
         if (!started[r] && (uint64_t)r < rows) (void)nn__ngram__zzprivate_reader(&share[r]);

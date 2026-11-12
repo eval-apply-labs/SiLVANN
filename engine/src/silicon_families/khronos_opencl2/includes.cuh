@@ -24,8 +24,10 @@
  *   `silicon_families__opencl1_only`: every NVIDIA card, Intel before Gen9, AMD's TeraScale and GCN 1) is never this
  *   family's: NVIDIA's go to `nvidia_opencl1`, Intel's to `intel_opencl1_igpu`, AMD's to none yet.
  * ⭐ BUILT FROM `khronos_opencl2_base` (▶ its manifest), as `intel_opencl2` is — which Intel's GPUs from Gen9 are offered
- *   to first, its number the higher; this family is theirs where that one's binary will not open. */
-#define KHRONOS_OPENCL2__TARGETS(X)  X(gfx906)
+ *   to first, its number the higher; this family is theirs where that one's binary will not open.
+ * The verb suite has passed through this family on node03's MI50 (`gfx906`) and on the Razer Edge's Adreno 660
+ *   (`Adreno660v2`, as Qualcomm's driver names it: measurements/2026-11-11_nn187_adreno_family_razer_edge.md). */
+#define KHRONOS_OPENCL2__TARGETS(X)  X(gfx906) X(Adreno660v2)
 
 static inline bool khronos_opencl2__includes(const char* card) {
 #define KHRONOS_OPENCL2__ZZPRIVATE_IS(T)  if (silicon_families__card_is(card, #T)) return true;
