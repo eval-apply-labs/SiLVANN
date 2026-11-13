@@ -13,7 +13,7 @@
   runs it.">
 </picture>
 
-This is a **developer preview**: what it is tested on is in the [README](../README.md#platforms). If something does not
+This is a **public beta**: what it is tested on is in the [README](../README.md#platforms). If something does not
 build or run on your machine, you are expected to be able to read the error and the source. On Linux the recommended way
 to run it is a container ([below](#on-linux-a-container-recommended)); installed, it runs the same, and installing is the
 way on Windows.

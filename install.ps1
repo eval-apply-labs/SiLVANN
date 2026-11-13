@@ -230,7 +230,7 @@ $SmartAppControl = ("Windows' Smart App Control refuses SiLVANN's libraries, whi
 # the release's own libraries, when they were built from this folder's engine and scripts\build.py (git's hashes, which the
 # zip's windows_libraries.txt carries): true when they are in lib\ and the evaluator loads them
 function Get-Libraries {
-    $m = Select-String -Path (Join-Path $Dir "README.md") -Pattern "Developer preview, (v[0-9]+\.[0-9]+\.[0-9]+)" `
+    $m = Select-String -Path (Join-Path $Dir "README.md") -Pattern "(?:Public beta|Developer preview), (v[0-9]+\.[0-9]+\.[0-9]+)" `
                        -ErrorAction SilentlyContinue | Select-Object -First 1
     $want = @(& git -C $Dir rev-parse HEAD:engine HEAD:scripts/build.py 2>$null)
     if (-not $m -or $LASTEXITCODE -ne 0 -or $want.Count -ne 2) {

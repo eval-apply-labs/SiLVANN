@@ -97,7 +97,7 @@ take (rented)
 **AMD**
 - the MI100, the MI200s and the MI300s — gfx908, gfx90a, gfx942 — which `amd_rocm10` is built for with ROCm 7 or later
   (the MI50 stays on ROCm 6, which builds it), its prompt's GEMM tiles on their matrix cores; it has run on an MI355X
-  (above)
+  (above), and none of the three was found to rent for a test
 - a Radeon on Linux outside WSL2; RDNA4's matrix instructions (WMMA) are not used yet, the prompt's GEMM taking the plain
   tiles there. Any other Radeon goes to OpenCL 2.0 — RDNA3 too: built in wave64, an RX 7900 XTX answered wrongly (a
   shuffle reaches half its wave there); through OpenCL 2.0 the same card ran the 4B correctly

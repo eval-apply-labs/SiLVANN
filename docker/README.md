@@ -105,14 +105,14 @@ An AMD card:
 
 ```bash
 podman run -d --name silvann --userns=keep-id --group-add keep-groups --device /dev/kfd --device /dev/dri \
-       -p 127.0.0.1:8080:8080 -v ~/SiLVANN:/data ghcr.io/eval-apply-labs/silvann:0-amd
+       -p 127.0.0.1:8080:8080 -v ~/SiLVANN:/data ghcr.io/eval-apply-labs/silvann:1-amd
 ```
 
 An NVIDIA card:
 
 ```bash
 podman run -d --name silvann --userns=keep-id --device nvidia.com/gpu=all \
-       -p 127.0.0.1:8080:8080 -v ~/SiLVANN:/data ghcr.io/eval-apply-labs/silvann:0-nvidia
+       -p 127.0.0.1:8080:8080 -v ~/SiLVANN:/data ghcr.io/eval-apply-labs/silvann:1-nvidia
 ```
 
 No card: either command without its `--device` and `--group-add` flags. To update: `podman pull` the image,
@@ -166,10 +166,11 @@ server imports what is there as it starts.
 
 | image | for |
 |---|---|
-| `ghcr.io/eval-apply-labs/silvann:0-amd` | AMD cards of the gfx906 generation (Instinct MI50 and MI60), with ROCm 6.1.3's runtime; and the CPU |
-| `ghcr.io/eval-apply-labs/silvann:0-nvidia` | NVIDIA cards CUDA 12.9 builds for (the GeForce RTX 20 to 50 series among them); and the CPU |
+| `ghcr.io/eval-apply-labs/silvann:1-amd` | AMD cards of the gfx906 generation (Instinct MI50 and MI60), with ROCm 6.1.3's runtime; and the CPU |
+| `ghcr.io/eval-apply-labs/silvann:1-nvidia` | NVIDIA cards CUDA 12.9 builds for (the GeForce RTX 20 to 50 series among them); and the CPU |
 
-`:0-amd` and `:0-nvidia` are the newest release of major version 0; `:0.21.0-amd` and the like stay that release.
+`:1-amd` and `:1-nvidia` are the newest release of major version 1; `:1.0.0-amd` and the like stay that release.
+`:0-amd` and `:0-nvidia` stay 0.29.1, the last of major version 0.
 `/opt/silvann/IMAGE_NOTICES.md` in each lists what it holds, each part's licence, and the commit it was built from.
 On Windows, install SiLVANN instead (the README's quick start): under Docker Desktop the models run well below what
 the PC gives.

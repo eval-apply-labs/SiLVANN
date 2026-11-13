@@ -436,7 +436,8 @@ static void khronos_opencl1_base__override_attention_scores_grouped(float* p, co
 
 /* ⭐ THE PROMPT'S GEMM — `expert_rows` through the runs of 32 (▶ kernels.cuh), 4- and 8-bit codes two at a time as nn's
  *   pairs are — a width of whole containers, `x` on four bytes, the codes on two — and `expert_groups` the same a group at
- *   a time, which is nn's body's order; a group or a call outside that is nn's. */
+ *   a time, which is nn's body's order, and `expert_rows_sum` the same tile onto the running sum; a group or a call outside
+ *   that is nn's. */
 static inline bool khronos_opencl1_base__zzprivate_gemm_fits(const uint8_t* weights, uint64_t w_room, uint64_t l_room, const uint16_t* x,
                                                              uint64_t d, uint64_t cols, uint64_t count, uint64_t out_rows) {
     return (d == 4u || d == 8u) && cols != 0u && cols % (16u / d) == 0u && ((uint64_t)(uintptr_t)x) % 4u == 0u
@@ -466,6 +467,21 @@ static void khronos_opencl1_base__override_expert_rows(uint16_t* out, const uint
         return;
     }
     khronos_opencl1_base__zzprivate_gemm_launch(out, weights, w_room, luts, l_room, x, rows, count, d, out_rows, cols, over);
+}
+static void khronos_opencl1_base__override_expert_rows_sum(float* acc, const uint8_t* weights, uint64_t w_room, const uint8_t* luts,
+                                                           uint64_t l_room, const uint16_t* x, const uint32_t* rows, const uint16_t* w,
+                                                           uint64_t count, uint64_t d, uint64_t out_rows, uint64_t cols) {
+    const float* table = khronos_opencl1_base__zzprivate_gemv_levels();
+    if (table == 0 || !khronos_opencl1_base__zzprivate_gemm_fits(weights, w_room, l_room, x, d, cols, count, out_rows)) {
+        nn__expert__zzabi_launch_rows_sum(acc, weights, w_room, luts, l_room, x, rows, w, count, d, out_rows, cols);
+        return;
+    }
+    const uint64_t items = ((out_rows + 1u) / 2u) * ((count + 3u) / 4u);   /* tiles of 2 rows by 4 pairs (▶ kernels.cuh) */
+    void* args[] = { &acc, &weights, &w_room, &luts, &l_room, &x, &rows, &w, &count, &out_rows, &cols, &table };
+    const size_t sizes[] = { sizeof acc, sizeof weights, sizeof w_room, sizeof luts, sizeof l_room, sizeof x, sizeof rows, sizeof w,
+                             sizeof count, sizeof out_rows, sizeof cols, sizeof table };
+    nn__silicon__launch(0, d == 4u ? "khronos_opencl1_base__zzprivate_gemm_sum4__kernel" : "khronos_opencl1_base__zzprivate_gemm_sum8__kernel",
+                        khronos_opencl1_base__zzprivate_blocks((items + 7u) / 8u), 256u, args, sizes, 12u);
 }
 static void khronos_opencl1_base__override_expert_groups(uint16_t* out, nn__expert__groups g, const uint16_t* x, const uint32_t* rows,
                                                          uint64_t cols, unsigned int* over) {
@@ -592,6 +608,7 @@ static inline void khronos_opencl1_base__override_doors(nn__doors* doors) {
     doors->attention_scores         = khronos_opencl1_base__override_attention_scores;
     doors->attention_mix            = khronos_opencl1_base__override_attention_mix;
     doors->expert_rows              = khronos_opencl1_base__override_expert_rows;
+    doors->expert_rows_sum          = khronos_opencl1_base__override_expert_rows_sum;
     doors->expert_groups            = khronos_opencl1_base__override_expert_groups;
     doors->attention_weights         = khronos_opencl1_base__override_attention_weights;
     doors->attention_weights_tq      = khronos_opencl1_base__override_attention_weights_tq;

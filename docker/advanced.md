@@ -35,7 +35,7 @@ podman pod create --name silvann --userns=keep-id -p 127.0.0.1:8080:8080
 podman run -d --pod silvann --name searxng -e SEARXNG_PORT=8888 -v ~/.config/silvann/searxng:/etc/searxng \
        docker.io/searxng/searxng
 podman run -d --pod silvann --name silvann --group-add keep-groups --device /dev/kfd --device /dev/dri \
-       -v ~/SiLVANN:/data ghcr.io/eval-apply-labs/silvann:0-amd
+       -v ~/SiLVANN:/data ghcr.io/eval-apply-labs/silvann:1-amd
 ```
 
 In a pod, `--userns=keep-id` and the port go on the pod; an NVIDIA card's container takes `--device nvidia.com/gpu=all`
@@ -81,7 +81,7 @@ podman pod create --name silvann --userns=keep-id -p 127.0.0.1:8000:8000
 podman run -d --pod silvann --name searxng -e SEARXNG_PORT=8888 -v ~/.config/silvann/searxng:/etc/searxng \
        docker.io/searxng/searxng
 podman run -d --pod silvann --name silvann --group-add keep-groups --device /dev/kfd --device /dev/dri \
-       -v ~/SiLVANN:/data ghcr.io/eval-apply-labs/silvann:0-amd
+       -v ~/SiLVANN:/data ghcr.io/eval-apply-labs/silvann:1-amd
 podman run -d --pod silvann --name caddy -v ~/.config/silvann/caddy/Caddyfile:/etc/caddy/Caddyfile:ro \
        docker.io/library/caddy:2.8.4
 ```
@@ -128,11 +128,11 @@ serves the conversations; each runs the server itself:
 ```bash
 podman pod create --name ring --userns=keep-id -p 127.0.0.1:8765:8765
 podman run -d --pod ring --name ring-cpu -v ~/SiLVANN-cpu:/data \
-       ghcr.io/eval-apply-labs/silvann:0-amd /opt/silvann/venv/bin/python /opt/silvann/start_silvann_server.py \
+       ghcr.io/eval-apply-labs/silvann:1-amd /opt/silvann/venv/bin/python /opt/silvann/start_silvann_server.py \
        --model /data/models/<model> /data/ring.json --host 127.0.0.1 --port 8081
 podman run -d --pod ring --name ring-card -v ~/SiLVANN:/data --group-add keep-groups \
        --device /dev/kfd --device /dev/dri -e ROCR_VISIBLE_DEVICES=0 \
-       ghcr.io/eval-apply-labs/silvann:0-amd /opt/silvann/venv/bin/python /opt/silvann/start_silvann_server.py \
+       ghcr.io/eval-apply-labs/silvann:1-amd /opt/silvann/venv/bin/python /opt/silvann/start_silvann_server.py \
        --model /data/models/<model> /data/ring.json --host 0.0.0.0 --port 8765
 ```
 
@@ -161,7 +161,7 @@ On the machine that keeps it:
 mkdir -p ~/SiLVANN-registry
 podman pod create --name silvann-registry --userns=keep-id -p 8770:8770
 podman run -d --pod silvann-registry --name registry -v ~/SiLVANN-registry:/data \
-       ghcr.io/eval-apply-labs/silvann:0-amd silvann registry
+       ghcr.io/eval-apply-labs/silvann:1-amd silvann registry
 ```
 
 It writes its key into `~/SiLVANN-registry/registry/key` when it first starts; copy that file to each machine as `key`.
@@ -174,7 +174,7 @@ podman run -d --pod silvann-server --name server -v ~/SiLVANN:/data --group-add 
        --device /dev/kfd --device /dev/dri \
        -e SILVANN_TOOL_AGENT_REGISTRY=http://192.0.2.10:8770 -e SILVANN_TOOL_AGENT_KEY="$(cat key)" \
        -e SILVANN_TOOL_AGENT_ADDRESS=http://192.0.2.20:8765 \
-       ghcr.io/eval-apply-labs/silvann:0-amd silvann serve <model> --host 0.0.0.0
+       ghcr.io/eval-apply-labs/silvann:1-amd silvann serve <model> --host 0.0.0.0
 ```
 
 `SILVANN_TOOL_AGENT_ADDRESS` is the machine's address and published port: inside a container the server's own address
@@ -193,7 +193,7 @@ PyAV into the folder, under `python/`, where it stays through a new image —
 
 ```bash
 podman run --rm --userns=keep-id -v ~/SiLVANN:/data --entrypoint /opt/silvann/venv/bin/python \
-       ghcr.io/eval-apply-labs/silvann:0-amd -c "import subprocess, sys; \
+       ghcr.io/eval-apply-labs/silvann:1-amd -c "import subprocess, sys; \
   sys.exit(subprocess.call([sys.executable, '-m', 'pip', 'install', '--upgrade', '--target', '/data/python/%d.%d' % sys.version_info[:2], \
   '-r', '/opt/silvann/scripts/requirements-nonfree.txt']))"
 ```

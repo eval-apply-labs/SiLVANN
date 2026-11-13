@@ -28,6 +28,7 @@ set -euo pipefail
 
 ACTION=setup; CARD=""; DATA="$HOME/SiLVANN"; PORT=""; NAME=silvann; ENGINE=""; DRY=0; SEARCH=1; OWN_IMAGE=""; PRIVATE=0
 IMAGE_BASE=ghcr.io/eval-apply-labs/silvann
+MAJOR=1                 # the major version whose newest release the images follow (:1-amd, :1-nvidia)
 while [ $# -gt 0 ]; do
     case "$1" in
         setup|update|stop|start) ACTION=$1 ;;
@@ -187,7 +188,7 @@ if [ "$CARD" = amd ]; then
         for g in video render; do gid=$(getent group "$g" | cut -d: -f3); [ -n "$gid" ] && FLAGS+=(--group-add "$gid"); done
     fi
     FLAGS+=(--device /dev/kfd --device /dev/dri)
-    IMAGE=$IMAGE_BASE:0-amd
+    IMAGE=$IMAGE_BASE:$MAJOR-amd
 elif [ "$CARD" = nvidia ]; then
     if [ "$ENGINE" = podman ]; then
         pv=$(podman version --format '{{.Client.Version}}' 2>/dev/null || echo 0)
@@ -207,9 +208,9 @@ elif [ "$CARD" = nvidia ]; then
     # a card older than CUDA's family takes (compute capability 7.5 on) — Pascal's GTX 10x0 — runs through OpenCL 1.2
     old=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | awk -F. '$1 * 10 + $2 < 75' | sort -u | paste -sd ',' || true)
     [ -n "$old" ] && note "compute capability $old: older than CUDA's family takes (7.5 and newer) — that card runs through OpenCL 1.2"
-    IMAGE=$IMAGE_BASE:0-nvidia
+    IMAGE=$IMAGE_BASE:$MAJOR-nvidia
 else
-    IMAGE=$IMAGE_BASE:0-amd           # either image runs on the CPU alone
+    IMAGE=$IMAGE_BASE:$MAJOR-amd      # either image runs on the CPU alone
 fi
 
 [ -z "$OWN_IMAGE" ] || IMAGE=$OWN_IMAGE

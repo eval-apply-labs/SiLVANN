@@ -1,11 +1,11 @@
-"""THIS RELEASE'S VERSION — the one `release/README.md` declares ("Developer preview, vX.Y.Z"), and so which of a pack's
+"""THIS RELEASE'S VERSION — the one `release/README.md` declares ("Public beta, vX.Y.Z"), and so which of a pack's
 programs a boot reads: `lisp/v<X.Y.Z>/` of the highest release at or below this one (▶ `model_folder.program_dir`).
 On main, the nightly, it is the release being prepared; `scripts/assemble_release.py` refuses a release whose README
 names another.
 """
 import re
 
-RELEASE = "0.29.1"
+RELEASE = "1.0.0"
 
 _VERSION = re.compile(r"v?(\d+)\.(\d+)\.(\d+)$")
 

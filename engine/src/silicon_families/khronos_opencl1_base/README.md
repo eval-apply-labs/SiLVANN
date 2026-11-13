@@ -127,6 +127,12 @@ over 248,320 logits 7.2 ms → 143 us (top 64: 86 ms → 197 us), MLA's scores a
 sum the one-row kernel's bytes; four from 2,048 rows, two from 768. `MEASURED` on the RTX 5060 Ti: GLM's attention
 output 150 → 87 us, the 27B D4 14.6 → 17.3 tokens/s (▶ `measurements/2026-10-28_opencl1_gemv_rows_precision.md`).
 
+**The MoE's down over a prompt (NN-176, 2026-11-12).** `expert_rows_sum` — an expert's down matrix over the positions
+routed to it, each sum weighted onto the running fp32 sum — is the prompt GEMM's tile (`gemm_sum4`, `gemm_sum8`), its sums
+nn's to the bit and added in nn's own expression, so the floats are nn's body's. It was nn's body, a block a matrix row,
+and held the 35B's prompt on a V100. `MEASURED` there: the 35B's routed down 280 → 71-77 µs, the 35B D8E4's prompt
+75.5 → 160.1 positions/s, as HF 6/0 and the same 257 tokens (▶ `measurements/2026-11-12_nn176_opencl1_rows_sum_v100.md`).
+
 **The read-only arenas (Pascal, 2026-11-09).** An NVIDIA card before Volta keeps a read of its memory in the lanes'
 cache only through the read-only path, and its compiler takes that path only for a `const restrict` kernel argument —
 never for a pointer taken from the arenas by an index, which every read here was. So each 4-bit door on a GTX 1080 Ti

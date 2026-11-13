@@ -163,9 +163,10 @@ program.
 ## Adding a model
 
 1. **Pack it.** The weights become a TurboQuant bundle: every matrix a record, rotated along its input and
-   quantised to 4 or 8 bits, with a per-row scale. The packer's command line is not in this preview — the
-   runtime carries only the decoder it needs (`runtime/nn_unpack_model.py`, `nn_compressor.py`) — so for now a
-   new model means the published bundles' format, read from `runtime/nn_load_bundle.py`.
+   quantised to 4 or 8 bits, with a per-row scale. The packer is not published
+   ([`local_ai.md`](local_ai.md#how-silvann-positions-itself)) — the runtime carries only the decoder it needs
+   (`runtime/nn_unpack_model.py`, `nn_compressor.py`) — so a new model means a packer of your own, written to the
+   published bundles' format (`runtime/nn_load_bundle.py`) and kept for yourself.
 2. **Write its package** (`engine/src/packages/ai_<name>/`) if its layers are not ones nn or an existing package has:
    the tables' cells in `contracts/objects/`, the verbs in `cpu/opcodes/`, each a site of a layer written
    against `nn`'s doors. `engine/scripts/src_enroll.py` enrols a new package and `engine/scripts/src_assemble.sh`

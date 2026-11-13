@@ -1,7 +1,7 @@
 # Where it could go
 
 Suggestions from the author for whoever picks this software up. They are directions, not features: each says what
-exists in this preview and what does not.
+exists in this release and what does not.
 
 ## A model is a program, so a model can change how it runs
 
@@ -16,7 +16,7 @@ adapter is loaded, the sampling settings — and a model that emits programs ove
 nothing else. Letting generated programs rewrite the weights themselves is a different thing, with its own
 questions (what signal it learns from, what keeps it stable), and is open research.
 
-*Today:* the language, the evaluator, `if` and `while` are there, and every model in this preview already runs as
+*Today:* the language, the evaluator, `if` and `while` are there, and every model in this release already runs as
 programs over its tables. A model emitting programs, and the operations it would be allowed, are not built.
 
 The paths below are the ones this makes concrete.

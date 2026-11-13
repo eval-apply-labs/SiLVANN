@@ -90,4 +90,5 @@ A layer's routed experts are one record — the whole stacked tensor — and an 
 which is what lets the runtime copy one expert into a slot, or map a file of them, without an index of its own.
 
 The reader is `runtime/nn_load_bundle.py`, and `runtime/nn_unpack_model.py` decodes a record back to numbers. The
-packer that writes bundles from a model's original weights is not part of this preview.
+packer that writes bundles from a model's original weights is not published
+([`local_ai.md`](local_ai.md#how-silvann-positions-itself)).

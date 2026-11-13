@@ -1,8 +1,10 @@
 # SiLVANN
 
-> **Developer preview, v0.29.1.** It runs the models below well on the hardware it was tested on, and it is shared
-> for people who can find their way around a build and a stack trace. NVIDIA cards are tested on five, a GeForce
-> RTX 5060 Ti and an RTX 5070 Ti, an A100, an H100 and a B200; Windows natively on one PC; macOS is not supported.
+> **Public beta, v1.0.0.** The worst bugs have been handled, but system stability is not guaranteed. It is shared for
+> enthusiasts with patience, who can follow a guide and do some troubleshooting. Some testing has been done — NVIDIA
+> cards from a GTX 1080 Ti to a B200, AMD's MI50, MI355X and RDNA4 Radeons, Windows natively on one PC
+> ([`docs/platforms.md`](docs/platforms.md)) — but less common setups may not behave as expected, and a bug-free
+> experience is not guaranteed. macOS is not supported.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/silvann_dark.svg">
@@ -68,7 +70,8 @@ every machine one model was measured on, its packs and its notes: [`docs/models.
 names no setup chooses its own when the server starts, by trying it on the card: where its experts go, how much of the
 card holds the ones used most, the context the card has room for ([`docs/config.md`](docs/config.md)).
 
-**New in v0.29.1**, and in every release before it: [`docs/release_logs/v0.md`](docs/release_logs/v0.md).
+**New in v1.0.0**: [`docs/release_logs/v1.md`](docs/release_logs/v1.md); every 0.x release before it:
+[`docs/release_logs/v0.md`](docs/release_logs/v0.md).
 
 ## Platforms
 
@@ -176,8 +179,10 @@ uname -a; cat /etc/os-release; podman --version; docker --version; nvidia-smi -L
 - The experts read from the disk, and a model split over several machines: [`docs/users.md`](docs/users.md).
 - Every measurement: [`docs/results.md`](docs/results.md).
 - How it is built, and how a model or a silicon is added: [`docs/developers.md`](docs/developers.md).
-- The ideas behind the design, the Lisp lineage and the model as a collapse of meaning:
-  [`docs/concepts.md`](docs/concepts.md); how the weights are packed: [`docs/compression.md`](docs/compression.md).
+- The concepts it is built on, the interpreter and the library and the Lisp lineage:
+  [`docs/concepts.md`](docs/concepts.md); what inspired the design, meaning as a negotiation and the weights as a
+  frozen map: [`docs/inspiration.md`](docs/inspiration.md); how the weights are packed:
+  [`docs/compression.md`](docs/compression.md).
 - Where the design could go next: [`docs/directions.md`](docs/directions.md).
 - Why a model on your own machine matters: [`docs/local_ai.md`](docs/local_ai.md).
 
@@ -202,9 +207,10 @@ skills/             commands for the model's tool, a folder each — docs/tools.
 docs/               users.md — running it; ui.md — the chat in the browser; config.md — a model's settings; tools.md — the model's tool and your own
                     commands; models.md — every model and what it needs; results.md — every measurement;
                     developers.md — how it is built, adding a model or a silicon;
-                    concepts.md — the ideas behind it; compression.md — how the weights are packed;
+                    concepts.md — the concepts it is built on; inspiration.md — what inspired it;
+                    compression.md — how the weights are packed;
                     directions.md — where it could go; local_ai.md — why AI on your own machine;
-                    release_logs/v0.md — what each 0.x release brought, newest first
+                    release_logs/v1.md and v0.md — what each 1.x and 0.x release brought, newest first
 ```
 
 ## Contact

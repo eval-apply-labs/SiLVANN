@@ -12,8 +12,8 @@ Sending them to a service on someone else's servers is a disclosure. Their rules
 never agreed to it.
 
 A model on their own machine lets them draft, summarise and search their own material without that disclosure, and
-nothing leaves the room. It is not a guarantee of compliance on its own: what their rules allow is still theirs to judge.
-It does remove the part that no rule can make safe, which is a copy of the client's words somewhere else.
+nothing leaves the room. It is not a guarantee of compliance on its own: what their rules allow is still theirs to
+judge. It does remove the part that no rule can make safe, which is a copy of the client's words somewhere else.
 
 ## Beside the big models, not instead of them
 
@@ -26,26 +26,64 @@ negotiation. A service can promise not to keep what it is sent, and the promise 
 machine enforces the secrecy by construction, because the material never leaves. When an NDA demands that nothing goes
 out, only local AI can meet that demand on its own.
 
-## The dipl-o-matic
+## As a Dipl-O-Mat
 
-In a high-stakes negotiation, in a climate of conflict, giving your adversary a capable model of their own does you more
-good than harm. Each side's advisors are also its partisans, and in a crisis the people at the table hear each other
-through anger, fear and what their own public expects. A model on the other side's own machine is none of those things.
-It can spell out for them what a realistic outcome looks like, which concessions are within reach and which demands are
-not, what escalation would cost and which way out lets everyone keep face, and it stays level-headed when the room does
-not. Most of the work of a mediation is that: getting both sides to see the same ground. The dipl-o-matic does much of
-it on your behalf without adding diplomatic tension, because it is not you saying it.
+"If I were in a high-stakes negotiation with a hostile counterpart, I would hope they had a local model advising them."
 
-It only works if they trust it, and that is why it has to be local. Advice from a service their adversary runs, or from
-a foreign company's servers, is advice they cannot trust and should not: whoever runs it could read their side of the
-conversation or steer the answers. A model on their own machine, from published weights and software they can inspect
-and build themselves, answers to nobody else. It keeps their deliberations in their room, and keeps working when the
-networks are cut. Let them choose the weights too: a model carries the views of its training, and an advisor they picked
-is one they will listen to.
+Their side of the table is already a bubble of partisan, emotional people under pressure from every direction — from
+their public, from their own camp, from the room. A model in that bubble acts as an emotional dampener: it can talk
+volatile people back to reason, spell out realistic outcomes and ways to de-escalate, and, when it cannot win the
+argument, be the lightning rod for their anger in place of your diplomat, keeping the channel alive when it is most
+fragile.
+
+Most of the work of a mediation is getting both sides to see the same ground. What keeps them off it is usually not a
+disagreement about interests, which can be traded, but one about what is true: what the other side can bear, what
+escalation would cost, what is actually achievable. That kind of disagreement cannot be negotiated until someone tests
+it.
+
+Mediators already keep a room for that testing: the caucus, where a party can say what it would never say at the table
+and be talked down from it. A model on their own machine extends that room. It is always available, does not charge by
+the hour, and does not hold the outburst against them afterwards.
+
+It is not only a place to be corrected. A counterpart who wants a settlement but cannot be seen to want one has a second
+problem: their own team. A model they chose and run themselves gives them something to cite. They can take its
+assessment back to their hardliners and say that their own advisor, not the other side's, finds the demand unreachable
+and the concession affordable — the argument they already wanted to make, with an authority that is not yours. That is
+much of what a mediator supplies: not a change of mind, but a reason a party can give its own people, which quiets
+the most volatile part of a team and lets the reasonable part lead.
+
+None of this works unless the model is theirs. Advice from a service their adversary runs, or from a foreign company's
+servers, is advice they cannot trust and should not: whoever runs it could read their side of the conversation or steer
+the answers. A caucus with an audience is not a caucus but a performance, and the audience may use what it hears. Nor
+can a party cite an advisor its adversary provided: its hardliners will hear your voice in it, however it is dressed. A
+model on their own machine keeps their deliberations in their room, keeps working when the networks are cut, and carries
+an authority their own side cannot dismiss.
+
+A model carries the views of its training, and this one is no exception. What makes it usable is not that it has no
+disposition but that the disposition can be seen. They choose the weights, they can inspect the software and build it
+themselves, and when the model pushes they can watch it push and decide whether to be moved. An advisor they picked is
+one they will listen to; one whose leanings are legible is one they can argue with and keep using, where one whose
+leanings are hidden can only be obeyed or distrusted.
+
+The hard objection is that a clearer-headed counterpart is also a more capable one. It is, and the trade is still worth
+taking, because what clarity removes first is misjudgement, and misjudgement is what blocks a settlement. A side that
+overrates its alternatives turns down deals it should take; a side that underrates the cost of escalation escalates.
+Wars, the historian Geoffrey Blainey argued, usually begin when the two sides disagree about their relative strength and
+end when they come to agree on it (*The Causes of War*, 1973). Clarity does not hand the advantage to either side. It
+gives both the same map, and a settlement can only be drawn on a shared one.
+
+It also cuts both ways. If each side has an advisor, each side is being examined, and plenty of positions are held by
+force rather than by argument, lasting only as long as nobody at the table can afford to say so. A model on your own
+machine is the one place that can say it at no cost: it finds the holes in your case before the room does, and it is the
+only critic that corrects you in private. If your position is hollow, better to learn it at your own desk than when the
+other side leans on it. The wager is that a position which survives examination is worth more than one which is merely
+held.
 
 It is an advisor, not a negotiator. It reasons from what it is told and from what it was trained on, and it can be
-wrong. The decisions, and the responsibility for them, stay with the people at the table. What it supplies is what
-mediation most often lacks on the other side: a voice that is calm, informed and not the enemy.
+wrong. Its resistance is worth having only while there is room to think: past the point where a person has no patience
+left, more argument feeds the temper rather than drawing it off, and a tool that cannot tell the difference gets closed
+and not reopened. The decisions, and the responsibility for them, stay with the people at the table. What it supplies is
+what mediation most often lacks on the other side: a voice that is calm, informed, and not the person they are angry at.
 
 ## The elephant in the room: bad actors
 
@@ -54,9 +92,9 @@ harm comes from, and what actually stops it.
 
 ### Weak systems, and the people who defend them
 
-Much of what bad actors attack was built for a different threat model. Those systems assumed an attacker's time and skill
-were scarce: a phone line that trusts a caller's voice, a website nobody had the time to audit, a process that checks a
-document by looking at it. AI makes the attacker's time cheap, and those systems were not designed for that.
+Much of what bad actors attack was built for a different threat model. Those systems assumed an attacker's time and
+skill were scarce: a phone line that trusts a caller's voice, a website nobody had the time to audit, a process that
+checks a document by looking at it. AI makes the attacker's time cheap, and those systems were not designed for that.
 
 Keeping the tools from everyone does not fix this. Attackers do not ask permission, so it leaves them with the tools and
 the defenders without. A model on the defender's own machine can read the code, the configurations and the procedures
@@ -133,8 +171,8 @@ nothing that leads back to you. Your full identity stays for the few things that
 Keys need somewhere to be looked up, and a way to be replaced when one is lost. A general ledger, kept by many parties
 rather than one company, can hold that register: which public key belongs to which account, which keys were withdrawn,
 which name points where. [go-ledger](https://github.com/eval-apply-labs/go-ledger), another Eval Apply Labs project, is
-a small ledger of this kind. It binds names to accounts in a registry its validators agree on, and every entry is signed,
-so a name can be checked without trusting a single company's database.
+a small ledger of this kind. It binds names to accounts in a registry its validators agree on, and every entry is
+signed, so a name can be checked without trusting a single company's database.
 
 ## Container first
 
@@ -159,8 +197,8 @@ and does not take the whole machine with it.
 
 The browser can keep apps apart too. Put each app's container behind one small proxy that gives it a name under
 localhost, such as `silvann.localhost` or `searxng.localhost`, instead of a port each. The ports stop colliding, the
-address says what you are opening, and the browser keeps each app's cookies and stored data to its own name, which
-ports never did ([`docker/advanced.md`](../docker/advanced.md#each-app-a-name-under-localhost)). The same suits most desktop
+address says what you are opening, and the browser keeps each app's cookies and stored data to its own name, which ports
+never did ([`docker/advanced.md`](../docker/advanced.md#each-app-a-name-under-localhost)). The same suits most desktop
 apps built on Electron, which are a web page and a backend: the backend in a container with only the folders it is
 given, the page a name in the browser you already have.
 
@@ -170,6 +208,27 @@ own images run this way ([`docker/README.md`](../docker/README.md)): rootless un
 conversations in one folder of yours, the chat on this machine's address alone — and inside the container, the model's
 own commands closed off from its tools file, where the keys are, and from the server's process
 ([`tools.md`](tools.md#where-the-models-commands-reach)).
+
+## How SiLVANN positions itself
+
+Eval Apply Labs publishes high-quality packs. A mixture of experts is packed `D8E4` — its dense part at 8 bits, its
+routed experts at 4 — which puts the 35B's perplexity 0.8% above its original weights'
+([`compression.md`](compression.md#why-the-dense-part-gets-more-bits-than-the-experts)); a dense model at 8 bits, and at
+4 where a small card or a phone needs it. The aim is the model as its authors released it, its abilities and its safety
+training both, on hardware an individual can afford.
+
+The program that packs a model from its original weights is not published, and that is more of a statement of intent
+than a guardrail: a competent developer can recreate it from the engine in a day or two. An open format cannot stop
+anyone from writing to it, and SiLVANN does not pretend otherwise.
+
+What withholding it does is narrower. Abliterated models — copies of a model with the direction that makes it refuse
+taken out of its weights, so that it declines nothing — reach people through conversions anyone can run: a published
+packer becomes a script that turns each new one into a download. Eval Apply Labs publishes no abliterated packs, and
+does not hand out the tool that would make converting them routine. One person can still pack one model; nobody gets a
+ready-made pipeline for all of them.
+
+If you write a compatible packer, keep it for yourself: pack what you need on your own machine, and do not distribute
+the packer.
 
 ## A change of habits, not for the worse
 

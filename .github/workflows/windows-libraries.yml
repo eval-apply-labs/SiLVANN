@@ -129,7 +129,8 @@ jobs:
   # Eval-Apply's certificate, on a release's tag alone and after every build above passed. Only what changed is signed:
   #   scripts/sign_plan.py keys each file by what it is built from, and a file whose key is the last signed release's is
   #   taken from that release's zips, its bytes checked against that release's manifest. The rest go through SSL.com's
-  #   CodeSignTool — its release's zip, checked by its hash — in one batch on one TOTP. CodeSignTool takes a DLL by its
+  #   CodeSignTool — its release's zip, checked by its hash — in one batch on one TOTP, each scanned for malware first
+  #   where the account's malware blocker is on (get_scan_settings). CodeSignTool takes a DLL by its
   #   name, so an evaluator (a .pyd, which is a DLL) is signed as .dll and named back: Authenticode's signature covers the
   #   file's bytes, not its name. The files keep the layout they were built in, as one artifact, `signed`, with the
   #   release's own `signed_manifest.json`.
@@ -177,7 +178,10 @@ jobs:
           echo "$CODESIGNTOOL_SHA256  $RUNNER_TEMP/cst.zip" | sha256sum -c -
           unzip -q "$RUNNER_TEMP/cst.zip" -d "$RUNNER_TEMP/cst"
           ls "$RUNNER_TEMP"/cst/jar/code_sign_tool-*.jar
-      - name: Signed
+      # the account answers for its credential before anything is signed: a wrong username, password or credential id
+      #   stops the run here, where no signature is spent (credential_info signs nothing). The TOTP secret is only read by
+      #   the signing itself.
+      - name: The signing account answers
         if: env.TO_SIGN != '0'
         env:
           ES_USERNAME: ${{ secrets.ES_USERNAME }}
@@ -188,6 +192,23 @@ jobs:
           for v in ES_USERNAME ES_PASSWORD ES_CREDENTIAL_ID ES_TOTP_SECRET; do
             [ -n "${!v}" ] || { echo "::error::$v is not among the signing environment's secrets"; exit 1; }
           done
+          java="${JAVA_HOME_17_X64:-$JAVA_HOME}/bin/java"
+          info=$(cd "$RUNNER_TEMP/cst" && CODE_SIGN_TOOL_PATH="$RUNNER_TEMP/cst" "$java" -jar jar/code_sign_tool-*.jar \
+            credential_info -credential_id="$ES_CREDENTIAL_ID" -username="$ES_USERNAME" -password="$ES_PASSWORD" 2>&1) || true
+          if ! grep -q "Certificate Expiry" <<< "$info"; then
+            echo "::error::the signing account did not answer for its credential:"
+            head -5 <<< "$info"   # Actions masks the secrets' values in its log
+            exit 1
+          fi
+          grep -E "Subject DN|Certificate Expiry" <<< "$info"
+      - name: Signed
+        if: env.TO_SIGN != '0'
+        env:
+          ES_USERNAME: ${{ secrets.ES_USERNAME }}
+          ES_PASSWORD: ${{ secrets.ES_PASSWORD }}
+          ES_CREDENTIAL_ID: ${{ secrets.ES_CREDENTIAL_ID }}
+          ES_TOTP_SECRET: ${{ secrets.ES_TOTP_SECRET }}
+        run: |
           in="$RUNNER_TEMP/unsigned"; out="$RUNNER_TEMP/signed"
           mkdir -p "$in" "$out"
           # each file the plan signs, under a name of its own, and where it came from
@@ -203,6 +224,22 @@ jobs:
           echo "${#from[@]} files to sign"
           export CODE_SIGN_TOOL_PATH="$RUNNER_TEMP/cst"
           java="${JAVA_HOME_17_X64:-$JAVA_HOME}/bin/java"
+          cst() { (cd "$CODE_SIGN_TOOL_PATH" && "$java" -jar jar/code_sign_tool-*.jar "$@" -username="$ES_USERNAME" \
+            -password="$ES_PASSWORD" -credential_id="$ES_CREDENTIAL_ID" 2>&1) || true; }
+          # the account's malware blocker: where it is on, eSigner signs a batch only of files scan_code has passed —
+          #   each scanned first, and one it calls malware, or a scan that does not answer, stops the run unsigned
+          scan=$(cst get_scan_settings)
+          if grep -qiE "malware scan settings enabled: *true" <<< "$scan"; then
+            for n in "${!from[@]}"; do
+              said=$(cst scan_code -input_file_path="$in/$n")
+              if grep -q "is not a malware" <<< "$said"; then echo "scanned: $n"
+              else echo "::error::$n did not pass eSigner's malware scan:"; head -3 <<< "$said"; exit 1; fi
+            done
+          elif grep -qiE "malware scan settings enabled: *false" <<< "$scan"; then
+            echo "the account's malware blocker is off: nothing to scan"
+          else
+            echo "::error::the account did not say whether its malware blocker is on:"; head -3 <<< "$scan"; exit 1
+          fi
           (cd "$CODE_SIGN_TOOL_PATH" && "$java" -jar jar/code_sign_tool-*.jar batch_sign -username="$ES_USERNAME" \
             -password="$ES_PASSWORD" -credential_id="$ES_CREDENTIAL_ID" -totp_secret="$ES_TOTP_SECRET" \
             -input_dir_path="$in" -output_dir_path="$out")

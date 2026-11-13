@@ -847,7 +847,8 @@ static __device__ inline void khronos_opencl1_base__zzprivate_scores4(float* p, 
     khronos_opencl1_base__zzprivate_scores_tile(p, q, k, q_heads, kv_heads, head_dim, length, 4u);
 }
 
-/* ⭐⭐ THE EXPERT-MAJOR GEMM — nn's `expert_rows` (and so `expert_groups`, a launch a group), every sum nn's to the bit,
+/* ⭐⭐ THE EXPERT-MAJOR GEMM — nn's `expert_rows` (and so `expert_groups`, a launch a group) and `expert_rows_sum`, every sum
+ *   nn's to the bit,
  *   without nn's fold a (row, pair). nn gives a matrix row a block of 256 lanes and folds each of its sums over the block,
  *   four pairs a fold of nine waits, and at a 5,120-wide row a lane's share is five containers, so the block waits more
  *   than it multiplies: `MEASURED` Ministral D4's prompt, 82 of its 85 s in these two doors
@@ -857,7 +858,13 @@ static __device__ inline void khronos_opencl1_base__zzprivate_scores4(float* p, 
  *   then `+ 64`, then `+ 32`); the run's fold (`lanes_sum_each`) is the fold's last five. A block's eight runs take
  *   neighbouring tiles of the same rows, so they read the rows' codes together; a container is one 16-bit read, and the
  *   code's width a constant of its own kernel (`gemm4`, `gemm8`). `MEASURED` on the RTX 5060 Ti: wider tiles (2 × 8, or
- *   four of nn's lanes in one pass) spill and lose; one fold for a tile's eight sums gains nothing.  */
+ *   four of nn's lanes in one pass) spill and lose; one fold for a tile's eight sums gains nothing.
+ *   ⭐ THE WEIGHTED SUM (`gemm_sum4`, `gemm_sum8`) is the same tile, each sum added onto the running fp32 sum in nn's own
+ *   expression — `acc += sum · scale · w`, a pick's weight at the pick's own row — where `expert_rows` rounds it to a half.
+ *   The MoE's down over a prompt is one such launch an expert: on nn's body, a block a matrix row, it held the 35B's
+ *   prompt on a V100 (`MEASURED` 3.32 s of 6.08 in kernels, measurements/2026-11-10_nn140_v100_volta.md ④). nn's contract
+ *   has a call's pairs name distinct out rows, and a sum here is written by the one lane holding it, so no two lanes of a
+ *   launch add onto one element.  */
 #define KHRONOS_OPENCL1_BASE__GEMM_W 2u
 #define KHRONOS_OPENCL1_BASE__GEMM_X 4u
 #define KHRONOS_OPENCL1_BASE__GEMM_WX 8u    /* GEMM_W × GEMM_X */
@@ -887,10 +894,11 @@ static __device__ inline void khronos_opencl1_base__zzprivate_gemm_lane(float* o
         }
     }
 }
-static __device__ inline void khronos_opencl1_base__zzprivate_gemm_tile(uint16_t* out, const uint8_t* weights, uint64_t w_room, const uint8_t* luts,
-                                                                        uint64_t l_room, const uint16_t* x, const uint32_t* rows, uint64_t count,
-                                                                        uint64_t out_rows, uint64_t cols, const float* table, unsigned int* over,
-                                                                        const uint32_t D) {
+/* `SUM` a constant: 0 writes `out`'s halves (`over` its overflow), 1 adds onto `acc` with the picks' weights `w`. */
+static __device__ inline void khronos_opencl1_base__zzprivate_gemm_tile(uint16_t* out, float* acc, const uint8_t* weights, uint64_t w_room,
+                                                                        const uint8_t* luts, uint64_t l_room, const uint16_t* x, const uint32_t* rows,
+                                                                        const uint16_t* w, uint64_t count, uint64_t out_rows, uint64_t cols,
+                                                                        const float* table, unsigned int* over, const uint32_t D, const uint32_t SUM) {
     const uint64_t row_bytes = nn__turboquant__row_bytes(D, cols), units = cols / (16u / D), rows_held = w_room / row_bytes;
     const uint64_t held = rows_held < l_room / 2u ? rows_held : l_room / 2u;
     const float* levels = table + (D == 8u ? 0u : 256u);       /* nn's levels as floats: the 8 bits' 256, then the 4 bits' 16 */
@@ -927,21 +935,32 @@ static __device__ inline void khronos_opencl1_base__zzprivate_gemm_tile(uint16_t
             const float sum = khronos_opencl1_base__zzpackage_lanes_sum_each(lo[i] + hi[i], 32u);
             const uint32_t a = i / KHRONOS_OPENCL1_BASE__GEMM_X, b = i % KHRONOS_OPENCL1_BASE__GEMM_X;
             if (m != 0u || !(a == 0u ? v0 : v1) || !real || j0 + b >= count) continue;
-            const uint64_t r = r0 + a;
+            const uint64_t r = r0 + a, at = (uint64_t)rows[2u * (j0 + b) + 1u] * out_rows + r;
             const float scale = nn__silicon__half_to_float((uint16_t)((uint32_t)luts[r * 2u] | ((uint32_t)luts[r * 2u + 1u] << 8)));
-            out[(uint64_t)rows[2u * (j0 + b) + 1u] * out_rows + r] = nn__kernels__zzabi_to_half(sum * scale, over);
+            if (SUM) acc[at] += sum * scale * nn__silicon__half_to_float(w[rows[2u * (j0 + b)]]);
+            else out[at] = nn__kernels__zzabi_to_half(sum * scale, over);
         }
     }
 }
 static __device__ inline void khronos_opencl1_base__zzprivate_gemm4(uint16_t* out, const uint8_t* weights, uint64_t w_room, const uint8_t* luts,
                                                                     uint64_t l_room, const uint16_t* x, const uint32_t* rows, uint64_t count,
                                                                     uint64_t out_rows, uint64_t cols, const float* table, unsigned int* over) {
-    khronos_opencl1_base__zzprivate_gemm_tile(out, weights, w_room, luts, l_room, x, rows, count, out_rows, cols, table, over, 4u);
+    khronos_opencl1_base__zzprivate_gemm_tile(out, 0, weights, w_room, luts, l_room, x, rows, 0, count, out_rows, cols, table, over, 4u, 0u);
 }
 static __device__ inline void khronos_opencl1_base__zzprivate_gemm8(uint16_t* out, const uint8_t* weights, uint64_t w_room, const uint8_t* luts,
                                                                     uint64_t l_room, const uint16_t* x, const uint32_t* rows, uint64_t count,
                                                                     uint64_t out_rows, uint64_t cols, const float* table, unsigned int* over) {
-    khronos_opencl1_base__zzprivate_gemm_tile(out, weights, w_room, luts, l_room, x, rows, count, out_rows, cols, table, over, 8u);
+    khronos_opencl1_base__zzprivate_gemm_tile(out, 0, weights, w_room, luts, l_room, x, rows, 0, count, out_rows, cols, table, over, 8u, 0u);
+}
+static __device__ inline void khronos_opencl1_base__zzprivate_gemm_sum4(float* acc, const uint8_t* weights, uint64_t w_room, const uint8_t* luts,
+                                                                        uint64_t l_room, const uint16_t* x, const uint32_t* rows, const uint16_t* w,
+                                                                        uint64_t count, uint64_t out_rows, uint64_t cols, const float* table) {
+    khronos_opencl1_base__zzprivate_gemm_tile(0, acc, weights, w_room, luts, l_room, x, rows, w, count, out_rows, cols, table, 0, 4u, 1u);
+}
+static __device__ inline void khronos_opencl1_base__zzprivate_gemm_sum8(float* acc, const uint8_t* weights, uint64_t w_room, const uint8_t* luts,
+                                                                        uint64_t l_room, const uint16_t* x, const uint32_t* rows, const uint16_t* w,
+                                                                        uint64_t count, uint64_t out_rows, uint64_t cols, const float* table) {
+    khronos_opencl1_base__zzprivate_gemm_tile(0, acc, weights, w_room, luts, l_room, x, rows, w, count, out_rows, cols, table, 0, 8u, 1u);
 }
 
 /* ⭐ A RANGE'S RESIDUAL, ONE QUERY — the tiered cache's decode and a prompt's rows over it (`attention_weights`,
@@ -1169,6 +1188,8 @@ static __device__ inline void khronos_opencl1_base__zzprivate_top_k(uint64_t* va
     X(khronos_opencl1_base__zzprivate_scores4, (float* p, const uint16_t* q, const uint16_t* k, uint64_t q_heads, uint64_t kv_heads, uint64_t head_dim, uint64_t length)) \
     X(khronos_opencl1_base__zzprivate_gemm4, (uint16_t* out, const uint8_t* weights, uint64_t w_room, const uint8_t* luts, uint64_t l_room, const uint16_t* x, const uint32_t* rows, uint64_t count, uint64_t out_rows, uint64_t cols, const float* table, unsigned int* over)) \
     X(khronos_opencl1_base__zzprivate_gemm8, (uint16_t* out, const uint8_t* weights, uint64_t w_room, const uint8_t* luts, uint64_t l_room, const uint16_t* x, const uint32_t* rows, uint64_t count, uint64_t out_rows, uint64_t cols, const float* table, unsigned int* over)) \
+    X(khronos_opencl1_base__zzprivate_gemm_sum4, (float* acc, const uint8_t* weights, uint64_t w_room, const uint8_t* luts, uint64_t l_room, const uint16_t* x, const uint32_t* rows, const uint16_t* w, uint64_t count, uint64_t out_rows, uint64_t cols, const float* table)) \
+    X(khronos_opencl1_base__zzprivate_gemm_sum8, (float* acc, const uint8_t* weights, uint64_t w_room, const uint8_t* luts, uint64_t l_room, const uint16_t* x, const uint32_t* rows, const uint16_t* w, uint64_t count, uint64_t out_rows, uint64_t cols, const float* table)) \
     X(khronos_opencl1_base__zzprivate_scores_tq, (float* p, const uint16_t* q, const uint8_t* codes, const uint16_t* scales, uint64_t q_heads, uint64_t kv_heads, uint64_t head_dim, uint64_t length, uint64_t d, const float* table)) \
     X(khronos_opencl1_base__zzprivate_residual_weights, (float* p, float* res, uint64_t q_heads, uint64_t head_dim, uint64_t length)) \
     X(khronos_opencl1_base__zzprivate_residual_mix16, (float* res, const float* p, const uint16_t* v, uint64_t q_heads, uint64_t kv_heads, uint64_t head_dim, uint64_t length)) \
@@ -1198,7 +1219,7 @@ static __device__ inline void khronos_opencl1_base__zzprivate_top_k(uint64_t* va
 
 /* ⭐ THE KERNELS THAT READ THROUGH THE READ-ONLY ARENAS — each one whose pointers to `const` reach only memory no lane
  *   writes while it runs: the GEMVs' and the GEMMs' codes, row scales, levels, `x`, weights and rows. `residual` may be
- *   `out`, so its row above makes it a plain pointer. The generator reads them from the arenas handed a second time,
+ *   `out`, so its row above makes it a plain pointer, as the weighted GEMM's running sum `acc` is. The generator reads them from the arenas handed a second time,
  *   `const restrict`, on a card built with `KHRONOS_OPENCL1_BASE__READ_ONLY` (▶ nn.cuh, `scripts/opencl1_kernel_source.py`):
  *   NVIDIA's compiler then reads them through the lanes' read-only cache, the one a Pascal card keeps a read of its
  *   memory in. `MEASURED` on a rented GTX 1080 Ti (vast.ai, NVIDIA's OpenCL, driver 580.178.04): the 4-bit
@@ -1207,6 +1228,7 @@ static __device__ inline void khronos_opencl1_base__zzprivate_top_k(uint64_t* va
 #define KHRONOS_OPENCL1_BASE__READ_ONLY_ROWS(X) \
     X(khronos_opencl1_base__zzprivate_gemv) X(khronos_opencl1_base__zzprivate_gemv2) X(khronos_opencl1_base__zzprivate_gemv4) \
     X(khronos_opencl1_base__zzprivate_gemv_sum) X(khronos_opencl1_base__zzprivate_gemv_sum2) X(khronos_opencl1_base__zzprivate_gemv_sum4) \
-    X(khronos_opencl1_base__zzprivate_gemm4) X(khronos_opencl1_base__zzprivate_gemm8)
+    X(khronos_opencl1_base__zzprivate_gemm4) X(khronos_opencl1_base__zzprivate_gemm8) \
+    X(khronos_opencl1_base__zzprivate_gemm_sum4) X(khronos_opencl1_base__zzprivate_gemm_sum8)
 
 #endif /* SILVANN__SILICON_FAMILIES_KHRONOS_OPENCL1_BASE_OVERRIDES_KERNELS_CUH */
