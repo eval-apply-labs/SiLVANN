@@ -74,11 +74,12 @@ from silvann_runtime import image_session                                 # noqa
 from silvann_runtime.qwen_image import Stopped, image_pack                 # noqa: E402
 from silvann_runtime.vision import MAX_VIDEO_TOKENS                       # noqa: E402
 
-IDLE_EVICTION_SECONDS = 120.0
+IDLE_EVICTION_SECONDS = 120.0         # a page that stopped asking after its conversation without saying it went
+GONE_PARK_SECONDS = 20.0              # seats: a conversation whose page went, put away this long after its last answer
 PANIC_GRACE_SECONDS = 2.0             # a panic's error on its way to the UI before the server ends (▶ `_stopped`)
 PANIC_END_SECONDS = 15.0              # and the HTTP server's own shutdown, before the process is ended without it
 PICTURE_WAIT_SECONDS = 600.0          # how long (image …) waits on a picture server drawing another's picture
-EVICTION_TICK_SECONDS = 30.0
+EVICTION_TICK_SECONDS = 5.0
 
 
 # ── requests ────────────────────────────────────────────────────────────────────────────────────────────────
@@ -156,6 +157,9 @@ class State:
         self.where = {}                     # cartridge id -> (its folder, its user or None), as found (▶ `_locate`)
         self.user_boxes = {}                # a user -> their tools over the machine's (▶ users.UserToolbox)
         self.last_ping = {}
+        self.gone = {}                      # web user -> when its page went (▶ `/sessions/gone`)
+        self.answering = set()              # cartridge ids whose answer is being made
+        self.answered = {}                  # cartridge id -> when its last answer ended
         self.turns = {}                     # cartridge id -> its turn in flight
         self.busy_cart = None
         self.images = {}                    # cartridge id -> {image id: a picture read, waiting for its message}
@@ -1213,14 +1217,42 @@ def _sampler():
     return sampler(**s)
 
 
+def _seen(user):
+    """The web user's page is there: it asked after its conversations now."""
+    if user:
+        S.last_ping[user] = time.time()
+        S.gone.pop(user, None)
+
+
+def _parked_now(cid, owner, now):
+    """Whether the idle eviction puts the conversation `cid` away now (⚖ 2026-11-13 *"i would start the timer of eviction
+    after the response has completed... and then give it 20 seconds before it gets parked in a multi seat setup or until
+    the user changes conversation if it is single seat"*). Never while its answer is being made: the time counts from
+    the end of its last answer. With seats, `GONE_PARK_SECONDS` after its page went (the UI says so: `/sessions/gone`).
+    With one seat, the conversation on the card stays until its user opens another (`/bind` puts the one before away);
+    one read off into RAM when another took the card goes as before. Either way, a page that stopped asking after it
+    without a word (`/sessions/ping`) leaves it `IDLE_EVICTION_SECONDS` after that or its answer, whichever is later."""
+    if owner is None or cid in S.answering:
+        return False
+    ended = S.answered.get(cid, 0.0)
+    if hasattr(S.runtime, "held"):                            # seats
+        gone = S.gone.get(owner)
+        if gone is not None and now - max(gone, ended) >= GONE_PARK_SECONDS:
+            return True
+    elif getattr(S.runtime, "active", None) is not None and S.runtime.active is S.runtime.cartridges.get(cid):
+        return False
+    return now - max(S.last_ping.get(owner, 0.0), ended) >= IDLE_EVICTION_SECONDS
+
+
 async def _eviction_loop():
     while True:
         try:
             now = time.time()
-            stale = [cid for cid, owner in list(S.owner.items())
-                     if now - S.last_ping.get(owner, 0) >= IDLE_EVICTION_SECONDS]
+            stale = [cid for cid, owner in list(S.owner.items()) if _parked_now(cid, owner, now)]
             for cid in stale:
                 async with S.lock:
+                    if not _parked_now(cid, S.owner.get(cid), time.time()):   # bound again, or answering, meanwhile
+                        continue
                     print("[evict] %s" % cid, flush=True)
                     await _put_away(cid)
         except Exception as ex:
@@ -1470,7 +1502,7 @@ async def create_cartridge(req: CreateConvReq, x_web_user_id: Optional[str] = He
         await asyncio.to_thread(_persist, c, False)
         if x_web_user_id:
             S.owner[c.id] = x_web_user_id
-            S.last_ping[x_web_user_id] = time.time()
+            _seen(x_web_user_id)
     return {"id": c.id, "name": name, "enable_thinking": S.config.get("thinking", True)}
 
 
@@ -1509,12 +1541,13 @@ async def bind_cartridge(cid: str, x_cart_password: Optional[str] = Header(defau
             await _put_away(other)
         owner = S.owner.get(cid)
         if owner and owner != x_web_user_id:
-            if time.time() - S.last_ping.get(owner, 0) < IDLE_EVICTION_SECONDS:
+            if owner not in S.gone and time.time() - S.last_ping.get(owner, 0) < IDLE_EVICTION_SECONDS:
                 raise HTTPException(423, "in use by another session")
-            await _put_away(cid)
+            # a page that went: the conversation handed to the one that came back as it is — on the card or in RAM,
+            #   its answer still being made — rather than put away and read again
         _load(cid)
         S.owner[cid] = x_web_user_id
-        S.last_ping[x_web_user_id] = time.time()
+        _seen(x_web_user_id)
     return _describe(cid, x_web_user_id)
 
 
@@ -1534,9 +1567,20 @@ async def unbind_cartridge(cid: str, x_web_user_id: Optional[str] = Header(defau
 async def session_ping(x_web_user_id: Optional[str] = Header(default=None)):
     if not x_web_user_id:
         raise HTTPException(400, "missing X-Web-User-Id header")
-    S.last_ping[x_web_user_id] = time.time()
+    _seen(x_web_user_id)
     return {"session": x_web_user_id, "owned": [c for c, o in S.owner.items() if o == x_web_user_id],
             "idle_eviction_seconds": IDLE_EVICTION_SECONDS}
+
+
+@app.post("/sessions/gone")
+async def session_gone(x_web_user_id: Optional[str] = Header(default=None)):
+    """The web user's page has gone — its browser left and did not come back within the UI's reconnect window. With
+    seats, its conversation is put away `GONE_PARK_SECONDS` after its last answer (▶ `_parked_now`); its next ping, bind
+    or message says it is back."""
+    if not x_web_user_id:
+        raise HTTPException(400, "missing X-Web-User-Id header")
+    S.gone[x_web_user_id] = time.time()
+    return {"session": x_web_user_id, "gone": True, "gone_park_seconds": GONE_PARK_SECONDS}
 
 
 @app.delete("/cartridges/{cid}")
@@ -1736,8 +1780,7 @@ async def post_message(cid: str, req: MessageReq, x_cart_password: Optional[str]
     owner = S.owner.get(cid)
     if owner and owner != x_web_user_id:
         raise HTTPException(423, "in use by another session")
-    if x_web_user_id:
-        S.last_ping[x_web_user_id] = time.time()
+    _seen(x_web_user_id)
     if S.image:
         return _picture_message(cid, req)
     side = _sidecar(cid)
@@ -1829,6 +1872,8 @@ def _picture_message(cid, req):
             return
         finally:
             S.busy_cart = None
+            S.answering.discard(cid)
+            S.answered[cid] = time.time()
         side = _sidecar(cid)
         history = side.setdefault("extra", {}).setdefault("history", [])
         history += [{"role": "user", "content": req.text},
@@ -1837,6 +1882,7 @@ def _picture_message(cid, req):
         emit("done", {})
 
     S.busy_cart = cid
+    S.answering.add(cid)
     job = threading.Thread(target=make, daemon=True)
     job.start()
     S.turns[cid] = _PictureTurn()
@@ -2027,12 +2073,14 @@ class _Answer:
         """The first stretch on the card now (`Busy` where another turn has it); the rest in a thread of its own."""
         self.queue, self.loop = asyncio.Queue(), asyncio.get_running_loop()
         t = self._turn(new, placed)
+        S.answering.add(self.cid)
         threading.Thread(target=self._go, args=(t,), daemon=True).start()
 
     def resume(self, choice, value):
         """The user's answer to the ask: its value is the waiting call's, and the answer goes on."""
         self.queue, self.loop = asyncio.Queue(), asyncio.get_running_loop()
         self._show("tool", "<tool_answer>%s</tool_answer>" % choice, choice=choice)
+        S.answering.add(self.cid)
         threading.Thread(target=self._go, args=(None, value), daemon=True).start()
 
     def _go(self, t, value=None):
@@ -2070,6 +2118,8 @@ class _Answer:
             self._emit("error", {"error": str(ex), "stopped": S.panic is not None})
         finally:
             S.busy_cart = None
+            S.answering.discard(self.cid)      # an answer that waits on an ask has ended too, until it is answered
+            S.answered[self.cid] = time.time()
 
     def _calls(self):
         """Run the stretch's calls not yet answered; the ask, where one stops — the answer then waits for the user."""

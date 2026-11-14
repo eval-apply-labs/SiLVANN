@@ -217,6 +217,12 @@ class Client:
         r.raise_for_status()
         return r.json()
 
+    async def gone(self) -> dict:
+        """This page has gone: with seats, the server puts its conversation away soon after its last answer."""
+        r = await self.http.post(f"{self.endpoint}/sessions/gone", headers=self._hdr(None))
+        r.raise_for_status()
+        return r.json()
+
     async def busy(self) -> dict:
         """{"busy": bool, "cart": <generating cart id or None>}. The engine serializes turns,
         so this tells a waiting client whether another conversation is mid-turn."""
@@ -1191,21 +1197,66 @@ PAGE_HEAD = """
   new MutationObserver(() => document.querySelectorAll('.silvann-chat pre').forEach(equip))
     .observe(document.documentElement, { childList: true, subtree: true });
 })();
+/* ⭐ THE CHAT FOLLOWS A STREAMING ANSWER ONLY WHILE ITS VIEW IS AT THE BOTTOM (⚖ 2026-11-13 "if you are not seeing the
+   bottom it should stay where the cursor is"): the view's own scrolling — the reader's, or a follow's — says whether it
+   is at the bottom, and an answer growing below does not scroll it, so a reader scrolled up stays where they are.
+   `force`: to the bottom whatever the view, as a message sent or a conversation opened goes. */
+window.silvannChatFollow = (id, force) => {
+  const area = getHtmlElement(id);
+  const view = area && area.querySelector('.q-scrollarea__container');
+  if (!view) return;
+  if (!view.silvannWatched) {
+    view.silvannWatched = true;
+    view.silvannAtBottom = true;
+    view.addEventListener('scroll', () => {
+      view.silvannAtBottom = view.scrollHeight - view.clientHeight - view.scrollTop <= 48;
+    }, { passive: true });
+  }
+  if (force || view.silvannAtBottom) view.scrollTop = view.scrollHeight;
+};
 </script>
 """
 
 
 # ---------- UI ----------
 
+# ⭐ THE ANSWERS THIS UI IS STREAMING, A BROWSER'S AT A TIME: browser id -> {"task": the stream's, "cart": its
+#   conversation, "before": the conversation before the turn, "turn": the turn's messages — the answer last —, "ask":
+#   the model's ask it ended on, "seen": bumped as it grows}. The answer is written there, in this process's memory, and
+#   never into a page's saved state: an answer goes on when its page goes, and NiceGUI then closes the browser's storage
+#   and reads it again from its file for the next page — an answer written into the closed copy is lost to that page,
+#   and writes the file over behind it (⚖ 2026-11-13: "if the user leaves the page ... the resume gets messy"). Each page
+#   of the browser copies the answer into its own state as it grows, and a page opened while it streams — the user back,
+#   on the same tab or a new one — follows it. The last answer's record stays until the next, for a page that followed it.
+LIVE: dict = {}
+# the pages open for each web user (a browser tab's id): one gone tells the server only when it was the last — a reload
+#   opens the new page before NiceGUI deletes the old one
+PAGES: dict = {}
+
+
+def _streaming(browser_id: str) -> Optional[dict]:
+    """The answer this browser's pages are streaming, while it is; else None."""
+    live = LIVE.get(browser_id)
+    return live if live is not None and not live["task"].done() else None
+
+
+def _with_turn(live: dict) -> list:
+    """The conversation as the streaming answer's record has it: before the turn, then the turn so far — copies."""
+    return [dict(m) for m in live["before"]] + [dict(m) for m in live["turn"]]
+
+
 @ui.page("/")
 async def page():
     state = app.storage.user.setdefault("silvann", _session_default())
     for k, v in _session_default().items():
         state.setdefault(k, v)
-    # Reset transient flags that must NOT survive a page reload. Without this, a session that
-    # crashed mid-stream leaves "streaming": True in localStorage forever, which makes the send
-    # button forever route to stop().
-    state["streaming"] = False
+    browser_id = app.storage.browser["id"]
+    # "streaming" true only while this UI streams the browser's answer: a UI that crashed mid-stream leaves it set in the
+    # browser's storage, which would make the send button stop() forever
+    live = _streaming(browser_id)
+    state["streaming"] = live is not None
+    if live is not None and live["cart"] == state.get("active_id"):
+        state["history"] = _with_turn(live)                # the turn so far, rather than what the file last kept of it
     state["active_bound"] = False
     if LOCAL_APP:
         # the app over this machine's models: its local panel, and the options view until a server is up
@@ -2153,7 +2204,14 @@ async def page():
                 drawn.append(draw_part(parts[i], (index, i)))
             if not drawn and not live:
                 drawn.append({"kind": "empty", "el": ui.markdown("_(empty)_"), "md": None})
-        chat_scroll.scroll_to(percent=1.0)
+        follow_chat()
+
+    def follow_chat(force: bool = False):
+        """The chat's view to its bottom where it is at the bottom already, or `force`d: a reader scrolled up stays put."""
+        try:
+            page_client.run_javascript("silvannChatFollow(%d, %s)" % (chat_scroll.id, "true" if force else "false"))
+        except Exception:                                  # a page gone, its answer finishing
+            pass
 
     def refresh_live(live: bool = True):
         """The streaming answer brought up to its text; `live` False settles it as the answer it ended as."""
@@ -2165,8 +2223,43 @@ async def page():
         refresh_answer(index, live)
 
     def mark_live():
-        """The streaming answer's text has grown: drawn by the next tick of the live timer."""
+        """The streaming answer's text has grown: drawn by the next tick of the live timer — this page's, and any other
+        page of this browser's following it."""
         live_answer["dirty"] = True
+        live = LIVE.get(browser_id)
+        if live is not None:
+            live["seen"] += 1
+
+    def follow_answer(live: dict):
+        """This page's copy of the streaming answer brought up to its record's (▶ `LIVE`), where the page shows that
+        conversation with the turn."""
+        h = state["history"]
+        if live["cart"] != state["active_id"] or len(h) != len(live["before"]) + len(live["turn"]):
+            return
+        text = live["turn"][-1]["content"]
+        if h[-1]["content"] != text:
+            h[-1]["content"] = text
+
+    def live_tick():
+        """Ten times a second: the streaming answer copied and drawn where it grew; on a page that followed an answer
+        another page asked for, the answer settled once it ends."""
+        live = _streaming(browser_id)
+        if live is not None:
+            if live_answer.get("dirty") or live["seen"] != live_answer.get("seen"):
+                live_answer["seen"] = live["seen"]
+                follow_answer(live)
+                refresh_live()
+        elif live_answer.get("dirty"):
+            refresh_live()
+        elif live_answer.get("index") is not None and state["streaming"]:
+            last = LIVE.get(browser_id)                     # ended on another page's stream: its last text, its ask
+            if last is not None:
+                follow_answer(last)
+                if last.get("ask") and last["cart"] == state["active_id"]:
+                    state["ask"] = last["ask"]
+            state["streaming"] = False
+            set_send_btn(False)
+            finish_live()
 
     def finish_live():
         """A turn over: its answer settled in place and the tail drawn — nothing above it drawn again."""
@@ -2210,7 +2303,7 @@ async def page():
                 ui.timer(0.2, lambda: (chat_scroll.scroll_to(percent=1.0),
                                        ui.run_javascript("getHtmlElement(%d).scrollIntoView({block: 'end'})" % ask_card.id)),
                          once=True)
-        chat_scroll.scroll_to(percent=1.0)
+        follow_chat()
 
     def add_messages(start: int):
         """The conversation's messages from `start` on added below the others — a turn's, as it is sent."""
@@ -2282,7 +2375,10 @@ async def page():
                     raise
             state["active_id"] = cart_id
             state["active_name"] = resp.get("name") or cart_id[:8]
-            state["history"] = resp.get("history", [])
+            live = _streaming(browser_id)
+            # the conversation whose answer this browser is streaming: with its turn so far — the server's history has
+            #   the turn once it ends
+            state["history"] = _with_turn(live) if live is not None and live["cart"] == cart_id else resp.get("history", [])
             show_context(used=resp.get("used", resp.get("next_pos", 0)), context=resp.get("context"))
             new_thinking = bool(resp.get("enable_thinking", True))
             state["active_thinking_mode"] = new_thinking
@@ -2308,6 +2404,7 @@ async def page():
             else:
                 bind_banner_label.text = "Conversation loaded. Type a message, or click Activate, to bring the session online (~3s, allocates VRAM)."
             render_chat()
+            follow_chat(force=True)
             await render_convs()
             # the model that made it, as the server's list says — the chat is emptied when another serves (ping)
             state["active_model"] = next((c.get("model_id") for c in state.get("_last_carts") or []
@@ -2720,7 +2817,26 @@ async def page():
         else:
             send_btn.props("icon=send color=primary")
 
-    set_send_btn(False)
+    set_send_btn(state["streaming"])                     # a page opened while this browser's answer streams: its stop
+
+    def drop_message(m: dict):
+        """The message `m` out of the conversation, wherever it is in it."""
+        for i, x in enumerate(state["history"]):
+            if x is m:
+                del state["history"][i]
+                return
+
+    def streams(before: list, turn: list) -> dict:
+        """This page's answer recorded as the browser's (▶ `LIVE`): the conversation `before` it, its `turn`, the answer
+        last — the stream writes the answer there."""
+        record = {"task": asyncio.current_task(), "cart": state["active_id"], "before": before, "turn": turn,
+                  "ask": None, "seen": 0}
+        LIVE[browser_id] = record
+        return record
+
+    def page_here() -> bool:
+        """Whether this page is still open: a page gone leaves the browser's state to the pages after it."""
+        return not page_client.is_deleted
 
     async def send():
         if state["streaming"]:
@@ -2750,9 +2866,14 @@ async def page():
         if attached:
             display_user = "📎 " + ", ".join(a["filename"] for a in attached) + (
                 f"\n\n{txt}" if txt else "")
+        before = [dict(m) for m in state["history"]]
         state["history"].append({"role": "user", "content": display_user})
         state["history"].append({"role": "assistant", "content": ""})
+        asked, msg = state["history"][-2], state["history"][-1]      # this page's copies of the turn
+        answer = {"role": "assistant", "content": ""}                 # the stream's own (▶ `LIVE`)
+        record = streams(before, [dict(asked), answer])
         add_messages(len(state["history"]) - 2)
+        follow_chat(force=True)
         # The engine serializes turns, so if another conversation is mid-turn the server holds our
         # request until it frees up. Surface that as "waiting my turn" rather than a dead UI; the
         # first received event clears the placeholder. Cheap single poll — no busy-loop.
@@ -2761,7 +2882,7 @@ async def page():
             b = await client.busy()
             other = b.get("cart")
             if b.get("busy") and other and other != state["active_id"]:
-                state["history"][-1]["content"] = "_⏳ waiting my turn…_"
+                answer["content"] = "_⏳ waiting my turn…_"
                 waiting = True
                 mark_live()
         except Exception:
@@ -2776,18 +2897,18 @@ async def page():
                 if kind == "waiting":                      # the card is serving another turn; asked again in 5 s
                     if not waiting:
                         waiting = True
-                        state["history"][-1]["content"] = "_⏳ waiting my turn…_"
+                        answer["content"] = "_⏳ waiting my turn…_"
                         speed_label.text = "queued…"
                         mark_live()
                     continue
                 if waiting:
                     waiting = False
-                    state["history"][-1]["content"] = ""   # drop the "waiting my turn" placeholder
+                    answer["content"] = ""   # drop the "waiting my turn" placeholder
                 if kind == "token":
                     if first_token_at is None:
                         first_token_at = time.monotonic()
                     n_tokens += 1
-                    state["history"][-1]["content"] += payload.get("text", "")
+                    answer["content"] += payload.get("text", "")
                     if "used" in payload:
                         show_context(used=payload["used"])
                     elapsed = time.monotonic() - first_token_at
@@ -2795,14 +2916,16 @@ async def page():
                         rate = (n_tokens - 1) / elapsed   # exclude the first token from the divisor
                         speed_label.text = f"{rate:.1f} tok/s"
                     mark_live()
-                elif not on_tool_event(kind, payload):
+                elif not on_tool_event(kind, payload, record):
                     break
         except httpx.HTTPStatusError as ex:
-            if ex.response.status_code == 409 and (state.get("ask") or "waits on an answer" in ex.response.text):
+            if not page_here():
+                pass                                   # the page that went: the pages after it read the conversation anew
+            elif ex.response.status_code == 409 and (state.get("ask") or "waits on an answer" in ex.response.text):
                 # the model's ask is still open — a page that was put away and back may not have known it: its buttons
                 # again, and the typed message kept for after the answer
-                state["history"].pop()  # the empty assistant message
-                state["history"].pop()  # the user message they typed
+                drop_message(msg)          # the empty assistant message
+                drop_message(asked)        # the user message they typed
                 input_box.set_value(txt)
                 try:
                     state["ask"] = (await client.activate(state["active_id"])).get("ask") or state.get("ask")
@@ -2813,18 +2936,18 @@ async def page():
                 # Server says cart isn't bound anymore — almost certainly evicted (we went idle
                 # past the heartbeat window). Drop the assistant placeholder, flip back to
                 # banner-mode, and let the user re-Activate.
-                state["history"].pop()  # the empty assistant message
-                state["history"].pop()  # the user message they typed
+                drop_message(msg)          # the empty assistant message
+                drop_message(asked)        # the user message they typed
                 state["active_bound"] = False
                 bind_banner_label.text = "Session evicted (idle). Send again, or click Activate, to bring it back online."
                 input_box.set_value(txt)  # restore the typed message so it's not lost
                 safe_notify("Session was evicted while idle — send again, or click Activate.", type="warning")
             elif ex.response.status_code == 423:
-                state["history"][-1]["content"] += "\n\n_[server: in use by another session]_"
+                answer["content"] += "\n\n_[server: in use by another session]_"
             else:
-                state["history"][-1]["content"] += f"\n\n_[stream error: HTTP {ex.response.status_code}]_"
+                answer["content"] += f"\n\n_[stream error: HTTP {ex.response.status_code}]_"
         except Exception as e:
-            state["history"][-1]["content"] += f"\n\n_[stream error: {e}]_"
+            answer["content"] += f"\n\n_[stream error: {e}]_"
         finally:
             if first_token_at is not None and n_tokens > 1:
                 elapsed = time.monotonic() - first_token_at
@@ -2832,32 +2955,38 @@ async def page():
                 speed_label.text = f"{n_tokens} tok · {elapsed:.1f}s · {rate:.1f} tok/s"
             else:
                 speed_label.text = "—"
-            state["streaming"] = False
             set_send_btn(False)
-            # Clear any consumed images from the chip row. Server has either consumed
-            # them (success) or rejected the request (error); either way the IDs are
-            # one-shot and re-using them would 404.
-            if attached:
-                cart_id = state.get("active_id")
-                if cart_id:
-                    state["pending_images"][cart_id] = []
-                render_pending_images()
-            finish_live()
+            if page_here():
+                follow_answer(record)
+                state["streaming"] = False
+                # Clear any consumed images from the chip row. Server has either consumed
+                # them (success) or rejected the request (error); either way the IDs are
+                # one-shot and re-using them would 404.
+                if attached:
+                    cart_id = state.get("active_id")
+                    if cart_id:
+                        state["pending_images"][cart_id] = []
+                    render_pending_images()
+                finish_live()
 
-    def on_tool_event(kind, payload):
-        """An answer's event other than a token, into the conversation's last message: a call to the model's tool and
+    def on_tool_event(kind, payload, record: dict):
+        """An answer's event other than a token, into its `record`'s answer (▶ `LIVE`): a call to the model's tool and
         its value, the ask that stops it, or the server's error. False where the stream is over."""
+        answer = record["turn"][-1]
         if kind == "tool":
-            state["history"][-1]["content"] += payload.get("text", "")
+            answer["content"] += payload.get("text", "")
             mark_live()
         elif kind == "progress":                          # a picture model's, as the picture is made: said beside the box
             speed_label.text = payload.get("text", "")
         elif kind == "ask":
-            state["ask"] = payload
+            record["ask"] = payload
+            if page_here():
+                state["ask"] = payload
         elif kind == "done" and "used" in payload:
             show_context(used=payload["used"], context=payload.get("context"))
         elif kind == "error":
-            state["history"][-1]["content"] += f"\n\n_[server error: {payload.get('error')}]_"
+            answer["content"] += f"\n\n_[server error: {payload.get('error')}]_"
+            mark_live()
             return False
         return True
 
@@ -2876,26 +3005,30 @@ async def page():
         set_send_btn(True)
         if not state["history"] or state["history"][-1]["role"] != "assistant":
             state["history"].append({"role": "assistant", "content": ""})
+        answer = dict(state["history"][-1])        # the answer goes on from where the ask stopped it
+        record = streams([dict(m) for m in state["history"][:-1]], [answer])
         render_chat()
         try:
             async for kind, payload in client.stream_answer(state["active_id"], choice):
                 if kind == "token":
-                    state["history"][-1]["content"] += payload.get("text", "")
+                    answer["content"] += payload.get("text", "")
                     if "used" in payload:
                         show_context(used=payload["used"])
                     mark_live()
-                elif not on_tool_event(kind, payload):
+                elif not on_tool_event(kind, payload, record):
                     break
         except httpx.HTTPStatusError as ex:
-            state["history"][-1]["content"] += f"\n\n_[stream error: HTTP {ex.response.status_code}]_"
-            if ex.response.status_code in (409, 423):
+            answer["content"] += f"\n\n_[stream error: HTTP {ex.response.status_code}]_"
+            if ex.response.status_code in (409, 423) and page_here():
                 state["ask"] = asked                  # not answered: its buttons stay
         except Exception as e:
-            state["history"][-1]["content"] += f"\n\n_[stream error: {e}]_"
+            answer["content"] += f"\n\n_[stream error: {e}]_"
         finally:
-            state["streaming"] = False
             set_send_btn(False)
-            finish_live()
+            if page_here():
+                follow_answer(record)
+                state["streaming"] = False
+                finish_live()
 
     async def stop():
         if not state["streaming"] or not state["active_id"]:
@@ -3228,10 +3361,15 @@ async def page():
     update_view()
     render_chat()
     await ping()
+    live = _streaming(browser_id)
+    if live is not None and live["cart"] == state["active_id"]:
+        # back on another tab while this browser's answer streams: the conversation claimed for this one, so the server
+        #   does not put it away as the tab that went's
+        await bind_active()
     if not (h_users.get("users") and not h_users.get("user")):
         await render_convs()
     # a streaming answer drawn at most ten times a second, whatever the tokens' rate
-    ui.timer(0.1, lambda: refresh_live() if live_answer.get("dirty") else None)
+    ui.timer(0.1, live_tick)
 
     # Keep the status dot live — re-ping every 5s.
     def _periodic_ping():
@@ -3255,6 +3393,24 @@ async def page():
     def _periodic_heartbeat():
         asyncio.create_task(_heartbeat())
     ui.timer(30.0, _periodic_heartbeat)
+    _periodic_heartbeat()                                  # a page back: the server told now, not in 30 s
+
+    PAGES.setdefault(web_user_id, set()).add(page_client.id)
+
+    async def _page_gone():
+        """The browser left and did not come back within NiceGUI's reconnect window: the server told, so that with seats
+        it puts the conversation away soon after its last answer, rather than two minutes after the last heartbeat."""
+        here = PAGES.get(web_user_id, set())
+        here.discard(page_client.id)
+        if here:                                           # this tab's page reloaded: the new one is there
+            return
+        PAGES.pop(web_user_id, None)
+        try:
+            await client.gone()
+        except Exception:
+            pass
+    page_client.on_delete(_page_gone)
+    ui.timer(0.5, lambda: follow_chat(force=True), once=True)   # the conversation opened at its bottom, once drawn
 
 
 # ---------- CLI ----------

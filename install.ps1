@@ -7,7 +7,8 @@ from this folder's engine and scripts\build.py, else built here as scripts\build
   powershell -ExecutionPolicy Bypass -File install.ps1
 
 It installs nothing system-wide and asks for no administrator: a tool it needs and does not find is named, with the line
-that installs it, and the installer stops. Run it again to update; models, user_sessions, the venv and the folder
+that installs it, and the installer stops. It will not install inside Windows' own folder, where an administrator's
+PowerShell starts. Run it again to update; models, user_sessions, the venv and the folder
 `silvann data` named stay. What it needs:
   Python 3.11 to 3.14       python.org, or: winget install -e --id Python.Python.3.12
   Git                       winget install -e --id Git.Git
@@ -217,15 +218,17 @@ function Make-Environment {
     if ($LASTEXITCODE -ne 0) { Fail "pip could not install requirements.txt (the lines above)" }
 }
 
-# Windows 11's Smart App Control, on: it loads unsigned code only where Microsoft's reputation service knows it, and
-# SiLVANN's libraries - the release's and those built here - are not signed yet
+# Windows 11's Smart App Control, on: it loads code that is signed, or that Microsoft's reputation service knows - a
+# release's libraries are signed from rel1.0.0 on, those built here are not
 function Smart-App-Control-On {
     $policy = Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\CI\Policy" -ErrorAction SilentlyContinue
     return ($policy -and $policy.VerifiedAndReputablePolicyState -eq 1)
 }
-$SmartAppControl = ("Windows' Smart App Control refuses SiLVANN's libraries, which are not signed yet: turn it off " +
-                    "(Windows Security > App & browser control > Smart App Control settings > Off; on most PCs it cannot " +
-                    "be turned on again without resetting Windows), or run SiLVANN on Linux (docs\users.md)")
+$SmartAppControl = ("Windows' Smart App Control refuses SiLVANN's libraries (the lines above). A release's are signed " +
+                    "from 1.0.0 on; a release's before it, and those built on this PC, are not: install a signed " +
+                    "release, turn Smart App Control off (Windows Security > App & browser control > Smart App Control " +
+                    "settings > Off; on most PCs it cannot be turned on again without resetting Windows), or run SiLVANN " +
+                    "on Linux (docs\users.md)")
 
 # the release's own libraries, when they were built from this folder's engine and scripts\build.py (git's hashes, which the
 # zip's windows_libraries.txt carries): true when they are in lib\ and the evaluator loads them
@@ -429,6 +432,13 @@ Check-Machine
 $Dir = if ($env:SILVANN_DIR) { $env:SILVANN_DIR } `
        elseif ($PSScriptRoot -and (Test-Path (Join-Path $PSScriptRoot "scripts\build.py"))) { $PSScriptRoot } `
        else { Join-Path (Get-Location) "silvann" }
+# never inside Windows' own folder, where an administrator's PowerShell starts (C:\Windows\System32)
+$full = try { $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Dir) } catch { "$Dir" }
+if ($env:SystemRoot -and ("$full".TrimEnd("\") + "\").StartsWith($env:SystemRoot.TrimEnd("\") + "\", [StringComparison]::OrdinalIgnoreCase)) {
+    Fail ("SiLVANN would be in $full, inside Windows' own folder, where an administrator's PowerShell starts. Open " +
+          "PowerShell as yourself, not as administrator - it starts in your own folder - and run install.ps1 there " +
+          "(an install already in $full keeps its models and user_sessions folders, to move into the new one)")
+}
 New-Item -ItemType Directory -Force -Path $Dir | Out-Null
 $Dir = (Resolve-Path $Dir).Path
 $env:SILVANN_DIR = $Dir
@@ -449,11 +459,25 @@ if (-not $prebuilt) {
 }
 Command-Files
 if (-not $Build) {
-    # the models here: each one's program for this release, from its pack (a boot fetches it otherwise)
-    $data = if ($env:SILVANN_DATA) { $env:SILVANN_DATA } `
-            elseif (Test-Path (Join-Path $Dir "data_folder")) { (Get-Content (Join-Path $Dir "data_folder") -Raw).Trim() } `
-            else { $Dir }
-    if (Test-Path (Join-Path $data "models")) {
+    # the models here: each one's program for this release, from its pack (a boot fetches it otherwise). They are in the
+    # data folder - SILVANN_DATA's, else the one `silvann data` named, else this one; a folder on a disk since removed or
+    # wiped is said, not looked into (Windows PowerShell's Join-Path stops at a drive that is not there)
+    $named = Join-Path $Dir "data_folder"
+    $data, $from = $Dir, ""
+    if ($env:SILVANN_DATA) {
+        $data, $from = $env:SILVANN_DATA, "SILVANN_DATA"
+    } elseif (Test-Path $named) {
+        $data, $from = "$(Get-Content $named -Raw)".Trim(), "silvann data"
+    }
+    if (-not $data -or -not (Test-Path -LiteralPath $data)) {
+        if ($from -eq "SILVANN_DATA") {
+            Note ("SILVANN_DATA names $data, which is not there (a disk removed or wiped?): the models are looked for " +
+                  "there - set it to a folder that is, or clear it: [Environment]::SetEnvironmentVariable('SILVANN_DATA', `$null, 'User')")
+        } else {
+            Note ("the data folder, $data, is not there (a disk removed or wiped?): the models are looked for there - " +
+                  "'silvann data <folder>' names another, 'silvann data $Dir' this one")
+        }
+    } elseif (Test-Path -LiteralPath ([IO.Path]::Combine($data, "models"))) {
         Say "The models here: each one's program for this release"
         $env:SILVANN_DATA = $data
         & (Join-Path $Dir "venv\Scripts\python.exe") (Join-Path $Dir "silvann_core.py") update-programs

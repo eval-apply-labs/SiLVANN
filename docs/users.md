@@ -91,7 +91,8 @@ from then on — SiLVANN on a USB drive, say, and its models on the machine's ow
   and the definitions it kept (`tools.json`, `tools_library.json`);
 - the Hugging Face token (`.huggingface_token`) and the UI's last start (`ui_last_start.json`).
 
-What the old folder holds stays there, and the command names what to move across. A server or a UI started by hand,
+What the old folder holds stays there, and the command names what to move across. Where the folder is gone — its disk
+removed or wiped — `silvann data <folder>` names another, and the installer, run again, says so. A server or a UI started by hand,
 not through `silvann`, reads the folder from `SILVANN_DATA` — which, when it is set, also wins over `silvann data`.
 
 **By hand:** you need Python 3.10 or newer with its headers (`python3-dev` on Debian and Ubuntu), `g++`, for AMD cards ROCm's `hipcc` (`/opt/rocm/bin/hipcc`), and for NVIDIA cards CUDA
@@ -129,14 +130,14 @@ runtime, and the release's tree. Unzip it anywhere you can write to and double-c
   without saving; the conversations' files stay readable either way.
 - **Updating:** unzip the new release's folder and move the old one's `data\` into it.
 
-Smart App Control refuses the folder's libraries as it refuses `install.ps1`'s, below. The model's shell starts switched
-off, as on any Windows install ([`tools.md`](tools.md#where-the-models-commands-reach)).
+`SiLVANN.exe`, the evaluator and the families are signed by Eval Apply Consulting LTD, and Windows 11's Smart App Control
+lets them run ([below](#on-windows)). The model's shell starts switched off, as on any Windows install ([`tools.md`](tools.md#where-the-models-commands-reach)).
 
 ### On Windows
 
 SiLVANN runs natively on Windows 10 and 11 (64-bit x86) from v0.12.0. It needs Python 3.11 to 3.14 (`winget install -e
---id Python.Python.3.12`), Git (`winget install -e --id Git.Git`) and the card's own driver. In PowerShell, in the
-folder you want SiLVANN under:
+--id Python.Python.3.12`), Git (`winget install -e --id Git.Git`) and the card's own driver. In PowerShell — your own,
+not an administrator's — in the folder you want SiLVANN under:
 
 ```powershell
 curl.exe -fsSLO https://raw.githubusercontent.com/eval-apply-labs/SiLVANN/HEAD/install.ps1
@@ -149,7 +150,8 @@ it was built from are the folder's — then writes `silvann.cmd` and `silvann_cl
 on your PATH, from the next PowerShell you open (in the one it ran in, `.\silvann\silvann`). The `silvann` command is
 Linux's: `list`, `download`, `serve`, `ui`, `models <folder>`, `update`, `build`, `help`. Where the libraries are not the
 folder's — a branch, a change of your own — it builds them, as `scripts\build.ps1` does. It installs nothing system-wide and
-asks for no administrator. The prebuilt evaluator uses Microsoft's Visual C++ runtime, which most PCs have; the
+asks for no administrator, and it will not install inside Windows' own folder — `C:\Windows\System32`, where an
+administrator's PowerShell starts. The prebuilt evaluator uses Microsoft's Visual C++ runtime, which most PCs have; the
 installer names the `winget` line that installs it if it is missing. Run from a clone's own folder, `install.ps1` and
 `scripts\build.ps1` install into that folder.
 
@@ -162,12 +164,12 @@ with clang-cl, NVIDIA's family with nvcc over MSVC for the compute capability `n
 GPU's OpenCL families against its driver's `OpenCL.dll`; the build's output goes to `build.log`, each library's to its
 `.log` under `lib\`.
 
-**Smart App Control.** SiLVANN's libraries are not signed yet; a proper code signature is underway. Where Windows 11's
-Smart App Control is on, Windows refuses to load the ones GitHub built, downloaded with the release (*"An Application
-Control policy has blocked this file"*), and the installer says so. Libraries built on the PC are subject to Smart App
-Control's lottery: some PCs let them load — one did — and others may not. Anyone who wants to play it meanwhile can:
-`.\install.ps1 -FromSource` (or `scripts\build.ps1` in a clone) builds them on the PC. Where they are refused too: turn Smart
-App Control off — Windows Security → App & browser control → Smart App Control settings → Off; on most PCs it cannot be
+**Smart App Control.** The libraries GitHub builds for a release are signed by Eval Apply Consulting LTD from v1.0.0,
+the portable app's too, and Windows 11's Smart App Control lets them load: on a PC with it on, both the portable app and
+`install.ps1`'s libraries served a model. Libraries built on the PC are not signed — those of `.\install.ps1
+-FromSource`, of `scripts\build.ps1` in a clone, and of a branch or a change of your own, which the installer builds.
+Smart App Control lets them load on some PCs (one did) and not on others (*"An Application Control policy has blocked
+this file"*). Where they are refused: install a release's own libraries, turn Smart App Control off — Windows Security → App & browser control → Smart App Control settings → Off; on most PCs it cannot be
 turned on again without resetting Windows — or run SiLVANN on Linux ([below](#on-windows-linux-on-a-usb-ssd)). A PC
 upgraded from Windows 10, or one where it is off, is not affected.
 
@@ -340,8 +342,11 @@ The UI is a web page on port 8090 (`silvann ui`; `silvann_ui.py` alone takes 808
 can be exported and imported. One conversation runs at a time; a second request while one is running is
 answered `503` with `Retry-After: 5`, and the UI retries. The card holds one conversation's cache: when another takes
 the card, the one on it is kept in RAM — or, when RAM has no room for two conversations at the full context beside 500
-MB, put away to its folder, as one is when the UI or client that opened it has been gone for two minutes, and
-**Activate** brings it back.
+MB, put away to its folder — and **Activate** brings it back. A conversation is never put away while its answer is being
+written. With one on the card at a time, the one you left stays there until you open another, which puts it away. With
+seats — several conversations on the card at once ([`config.md`](config.md)) — one whose page has gone is put away 20
+seconds after its last answer, which frees its seat; a page or client that stops asking after it without saying it
+went leaves it two minutes after its last answer or ping (`POST /sessions/ping`, `POST /sessions/gone`).
 
 If the engine's evaluator stops — a word like `EVAV`, `EVNR` or `EVAD` in front of the answer's error (`EVNR` and
 `EVAD`: its heap had no room) — the model's machine is shut down and the server ends with it, its last line

@@ -1,6 +1,6 @@
 # SiLVANN
 
-> **Public beta, v1.0.0.** The worst bugs have been handled, but system stability is not guaranteed. It is shared for
+> **Public beta, v1.0.1.** The worst bugs have been handled, but system stability is not guaranteed. It is shared for
 > enthusiasts with patience, who can follow a guide and do some troubleshooting. Some testing has been done — NVIDIA
 > cards from a GTX 1080 Ti to a B200, AMD's MI50, MI355X and RDNA4 Radeons, Windows natively on one PC
 > ([`docs/platforms.md`](docs/platforms.md)) — but less common setups may not behave as expected, and a bug-free
@@ -70,7 +70,7 @@ every machine one model was measured on, its packs and its notes: [`docs/models.
 names no setup chooses its own when the server starts, by trying it on the card: where its experts go, how much of the
 card holds the ones used most, the context the card has room for ([`docs/config.md`](docs/config.md)).
 
-**New in v1.0.0**: [`docs/release_logs/v1.md`](docs/release_logs/v1.md); every 0.x release before it:
+**New in v1.0.1**: [`docs/release_logs/v1.md`](docs/release_logs/v1.md); every 0.x release before it:
 [`docs/release_logs/v0.md`](docs/release_logs/v0.md).
 
 ## Platforms
@@ -120,14 +120,14 @@ download `silvann_portable_windows_x64.zip`, unzip it anywhere — a folder of y
 **start** runs it. The folder carries its own Python and the libraries for every card the families list, so a card
 needs only its driver, and without one the CPU runs the models. Its models and conversations stay in its `data\` folder;
 closing the window saves them and ends everything it started
-([`docs/users.md`](docs/users.md#on-windows-the-portable-app)). Smart App Control refuses it as it refuses the
-installer's libraries (below).
+([`docs/users.md`](docs/users.md#on-windows-the-portable-app)). `SiLVANN.exe` and its libraries are signed by Eval Apply
+Consulting LTD, and Windows 11's Smart App Control lets them run.
 
 ### Windows: the installer
 
 You need Python 3.11 to 3.14, Git and your card's driver; if Python or Git is missing, `winget install -e --id
-Python.Python.3.12` and `winget install -e --id Git.Git`, then open a new PowerShell. In PowerShell, in the folder
-SiLVANN should go under:
+Python.Python.3.12` and `winget install -e --id Git.Git`, then open a new PowerShell. In PowerShell — your own, not an
+administrator's, which starts in Windows' own folder — in the folder SiLVANN should go under:
 
 ```powershell
 curl.exe -fsSLO https://raw.githubusercontent.com/eval-apply-labs/SiLVANN/HEAD/install.ps1
@@ -138,11 +138,11 @@ Then, in a new PowerShell (the `silvann` command is on the path from there), `si
 http://localhost:8090, and in **Options**, **Download models** fetches a model and **start** runs it. To update,
 `silvann update`; the models and the conversations stay.
 
-Where Windows 11's Smart App Control is on, it refuses the libraries GitHub built, which are not signed yet; a proper
-code signature is underway. Libraries built on the PC are subject to Smart App Control's lottery — some PCs let them
-load, others do not — and anyone who wants to play it meanwhile can: `.\install.ps1 -FromSource` builds them on the
-PC, with Visual Studio's Build Tools and their Clang tools, and CUDA's toolkit for an NVIDIA card
-([`docs/users.md`](docs/users.md#on-windows), which has the line that installs them).
+The libraries GitHub built for the release are signed by Eval Apply Consulting LTD from v1.0.0, and Windows 11's Smart
+App Control lets them load. Libraries built on the PC are not signed: where Smart App Control is on, some PCs let them
+load and others do not. `.\install.ps1 -FromSource` builds them on the PC, with Visual Studio's Build Tools and their
+Clang tools, and CUDA's toolkit for an NVIDIA card ([`docs/users.md`](docs/users.md#on-windows), which has the line that
+installs them).
 On Windows the model's shell starts switched off ([`docs/tools.md`](docs/tools.md#where-the-models-commands-reach)).
 
 ### Linux, from source

@@ -68,6 +68,11 @@ When a call needs your answer, a card below the messages says what the model ask
 **refuse**; for a read also **allow the folder**, after which every conversation reads there without asking. The chat
 scrolls to the card when it appears.
 
+While an answer is being written the chat follows it as long as you are at the bottom; scrolled up — to read the
+thinking, say — the view stays where you put it, and scrolling back to the bottom follows the answer again. Leaving the
+page does not stop the answer: back on the page, or in a new tab of the same browser, it is still being written there,
+and the conversation is yours to go on with.
+
 Below the messages:
 
 - **📎** attaches a file to the next message. A document (PDF, Word, text, Markdown, CSV, JSON) is read as text by any

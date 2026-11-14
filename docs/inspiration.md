@@ -104,6 +104,32 @@ finite-state machine; universality is the statement as the tape grows without bo
 append-only — a past cell is never overwritten — so it is most precisely an unbounded log with random read;
 overwriting is simulated by appending tokens that supersede earlier ones.
 
+## Why the angles have to stay many
+
+A CT scanner reconstructs nothing from one angle. However sharp a single projection is, it flattens the body along
+the line it was taken from: it is the difference between projections, taken from many places, that pins the object
+down. The same holds for the maps a model is trained on. Nick Land, the CCRU's best-known voice, imagines the
+opposite: "Meltdown" (1994) begins its story with the Earth "captured by a technocapital singularity", one process
+that takes every other into itself. Through this lens a singularity is a scanner that keeps a single angle.
+
+Many angles is not the same as every angle weighing the same. The margins are often the first to feel what the
+centre has not yet registered — the first alarm — but a viewpoint earns its weight by what it predicts, and by
+whether the people who hold it can make it work: an island that stays afloat, not only a refusal of the mainland.
+Given what has happened, which frame accounts for it best is Bayes' question, P(frame | fact) ∝ P(fact | frame) ·
+P(frame): each fact the territory delivers raises the frames that expected it and sinks the ones it bit. A CT
+scanner's statistical reconstruction does the same with its rays, weighing each by how reliable its measurement is,
+and training does it with its loss. The angles have to stay many so that there is something to weigh; the weighing
+is what turns them into an object.
+
+Machine learning has measured what a single angle does. Models trained on what earlier models generated lose the
+tails of the distribution first — the rare, the improbable — and generation by generation narrow towards a blander
+copy of what they began with (Shumailov et al., "AI models collapse when trained on recursively generated data",
+*Nature*, 2024). A reconstruction fed its own projections does not converge on the real; it forgets it. What keeps
+it honest is a steady supply of independent angles: people in their own places, under their own frictions, writing
+from where they stand — and the models they run themselves, answering to them rather than to one centre. That is
+the case for AI on your own machine in this page's terms ([`local_ai.md`](local_ai.md)): not a preference, but the
+condition for the reconstruction to stay alive.
+
 ## A speculative aside
 
 Strip away the metaphors and one bet remains: that intelligence may be less biological magic and more a matter of
