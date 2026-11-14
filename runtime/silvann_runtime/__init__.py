@@ -137,7 +137,7 @@ def with_cards(path, num_cards, options, multi_user=None):
 
 
 def open_model(path, lora=None, max_context=4096, silicon=None, progress=None, **options):
-    """A model folder booted onto a card, loaded and ready for a conversation; `progress(done, total)` called as its
+    """A model folder booted onto a card, loaded and ready for a conversation; `progress(done, total, what)` called as its
     load goes, a layer at a time."""
     folder = ModelFolder(path, lora=lora)
     arch = ARCHITECTURES.get(folder.architecture)

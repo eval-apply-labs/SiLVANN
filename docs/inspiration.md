@@ -110,25 +110,39 @@ A CT scanner reconstructs nothing from one angle. However sharp a single project
 the line it was taken from: it is the difference between projections, taken from many places, that pins the object
 down. The same holds for the maps a model is trained on. Nick Land, the CCRU's best-known voice, imagines the
 opposite: "Meltdown" (1994) begins its story with the Earth "captured by a technocapital singularity", one process
-that takes every other into itself. Through this lens a singularity is a scanner that keeps a single angle.
+that takes every other into itself. Through this lens a singularity is a scanner that keeps a single angle. His own
+later politics, *The Dark Enlightenment* (2012), split where "Meltdown" merges: sovereign corporations competing for
+residents who may leave but not speak — exit without voice — and the residents who leave, in the sociologist Roger
+Burrows's reading, "quickly form themselves into, often racially based, microstates" ("On Neoreaction", *The
+Sociological Review*, 2018). It is the same lens turned inside out: many projections, each kept in a room of its own,
+and nothing that reconstructs across them. Rooms need not stay sealed. A negotiation is where the projections are put
+back together, each side's map tested against the other's until both stand on the same ground — the work a model each
+side runs for itself can do ([`local_ai.md`](local_ai.md#as-a-dipl-o-mat)).
 
 Many angles is not the same as every angle weighing the same. The margins are often the first to feel what the
 centre has not yet registered — the first alarm — but a viewpoint earns its weight by what it predicts, and by
 whether the people who hold it can make it work: an island that stays afloat, not only a refusal of the mainland.
-Given what has happened, which frame accounts for it best is Bayes' question, P(frame | fact) ∝ P(fact | frame) ·
-P(frame): each fact the territory delivers raises the frames that expected it and sinks the ones it bit. A CT
-scanner's statistical reconstruction does the same with its rays, weighing each by how reliable its measurement is,
-and training does it with its loss. The angles have to stay many so that there is something to weigh; the weighing
+Given what has happened, which frame accounts for it best is Bayes' question, P(frame | fact) = P(fact | frame) ·
+P(frame) / P(fact), where P(fact) is how expected the fact was over all the frames together: each fact the territory
+delivers raises the frames that expected it more than the rest did and sinks the ones it bit. A CT scanner's
+statistical reconstruction does the same with its rays, weighing each by how reliable its measurement is, and training
+does it with its loss. The angles have to stay many so that there is something to weigh; the weighing
 is what turns them into an object.
+
+A bubble's frame is weighed by the same facts. The elites of each are tasked with crafting a cohesive narrative for
+their own public while keeping it in touch with the real, and they can lose in two ways. They can offer a bad system,
+and lose their members to bubbles that work better. Or they can read the real badly and become a colony of lemmings:
+inwardly, in behaviour that destroys it; outwardly, in a stance its neighbours cannot live beside, until the conflict
+is real — with the risk of being conquered and destroyed — or in any mix of the two. The territory delivers the fact
+that sinks the frame either way; what a bubble chooses is whether it learns it at its own desk or on the field.
 
 Machine learning has measured what a single angle does. Models trained on what earlier models generated lose the
 tails of the distribution first — the rare, the improbable — and generation by generation narrow towards a blander
 copy of what they began with (Shumailov et al., "AI models collapse when trained on recursively generated data",
 *Nature*, 2024). A reconstruction fed its own projections does not converge on the real; it forgets it. What keeps
 it honest is a steady supply of independent angles: people in their own places, under their own frictions, writing
-from where they stand — and the models they run themselves, answering to them rather than to one centre. That is
-the case for AI on your own machine in this page's terms ([`local_ai.md`](local_ai.md)): not a preference, but the
-condition for the reconstruction to stay alive.
+from where they stand — and the models they run themselves, answering to them rather than to one centre. Those are
+not a preference but the condition for the reconstruction to stay alive.
 
 ## A speculative aside
 

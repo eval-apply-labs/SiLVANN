@@ -628,7 +628,7 @@ def help_link(current: Path, href: str) -> Optional[Path]:
     return path if path in HELP_SHIPPED else None
 
 
-PROGRESS = "[silvann_server] loading: "      # the server's progress line, the whole of it so far each time it grows
+PROGRESS = "[silvann_server] loading "       # the server's progress lines, each the whole of it so far each time it grows
 
 
 class ServerProcess:
@@ -736,10 +736,11 @@ class ServerProcess:
             self.setup = None
 
     def _log(self, line: str, progress: bool = False):
-        """A line of the server's output kept for the panes — a load's progress line in place of the one before it, so
-        the pane shows one line growing (`loading: ...10...20..`)."""
+        """A line of the server's output kept for the panes — a load's progress line in place of the one before it of
+        the same thing loading, so the pane shows a line growing for each (`loading weights: ...10...20..`)."""
         with self.lock:
-            if progress and self.lines and PROGRESS in self.lines[-1]:
+            if progress and self.lines and PROGRESS in self.lines[-1] and \
+                    self.lines[-1].partition(":")[0] == line.partition(":")[0]:
                 self.lines[-1] = line
                 self.rewrites += 1
             else:
@@ -1198,9 +1199,12 @@ PAGE_HEAD = """
     .observe(document.documentElement, { childList: true, subtree: true });
 })();
 /* ⭐ THE CHAT FOLLOWS A STREAMING ANSWER ONLY WHILE ITS VIEW IS AT THE BOTTOM (⚖ 2026-11-13 "if you are not seeing the
-   bottom it should stay where the cursor is"): the view's own scrolling — the reader's, or a follow's — says whether it
-   is at the bottom, and an answer growing below does not scroll it, so a reader scrolled up stays where they are.
-   `force`: to the bottom whatever the view, as a message sent or a conversation opened goes. */
+   bottom it should stay where the cursor is"): a scroll up leaves the bottom, and a scroll that reaches it follows
+   again. Only a scroll up stops the following: a scroll's event comes after the answer has grown below it, so the
+   distance to the bottom it finds says nothing of where the reader is — the follow's own scroll down found the answer
+   grown past it and stopped following. While it follows, the view goes to the bottom each time the messages grow,
+   after the browser has drawn them. `force`: to the bottom whatever the view, as a message sent or a conversation
+   opened goes, and following from there. */
 window.silvannChatFollow = (id, force) => {
   const area = getHtmlElement(id);
   const view = area && area.querySelector('.q-scrollarea__container');
@@ -1208,14 +1212,29 @@ window.silvannChatFollow = (id, force) => {
   if (!view.silvannWatched) {
     view.silvannWatched = true;
     view.silvannAtBottom = true;
+    let last = view.scrollTop;
     view.addEventListener('scroll', () => {
-      view.silvannAtBottom = view.scrollHeight - view.clientHeight - view.scrollTop <= 48;
+      const top = view.scrollTop, gap = view.scrollHeight - view.clientHeight - top;
+      if (top < last - 1) view.silvannAtBottom = gap <= 48;      // up: following only if still at the bottom
+      else if (gap <= 48) view.silvannAtBottom = true;           // down to the bottom: following again
+      last = top;
     }, { passive: true });
+    // a wheel turned up leaves the bottom at once, before a growth's follow can take the view back down
+    view.addEventListener('wheel', (e) => { if (e.deltaY < 0 && view.scrollTop > 0) view.silvannAtBottom = false; },
+                          { passive: true });
+    const content = view.querySelector('.q-scrollarea__content') || view.firstElementChild;
+    if (content && window.ResizeObserver) {
+      new ResizeObserver(() => { if (view.silvannAtBottom) view.scrollTop = view.scrollHeight; }).observe(content);
+    }
   }
-  if (force || view.silvannAtBottom) view.scrollTop = view.scrollHeight;
+  if (force) view.silvannAtBottom = true;
+  if (view.silvannAtBottom) view.scrollTop = view.scrollHeight;
 };
 </script>
 """
+# ⛳ IN EVERY PAGE'S FIRST HTML: a head a page adds once it has awaited its client's connection is inserted into the page
+#   already drawn, where its styles apply but its scripts do not run — the chat's follow, the code blocks' copy button
+ui.add_head_html(PAGE_HEAD, shared=True)
 
 
 # ---------- UI ----------
@@ -1301,7 +1320,6 @@ async def page():
     # Layout: no top header. Left drawer defaults to mini (icons only); hovering expands it to
     # 280px as an overlay so it doesn't push the main area around. Main area is a flex column
     # holding a thin hamburger bar and three view columns (only one visible at a time).
-    ui.add_head_html(PAGE_HEAD)
 
     # ============================================================
     # LEFT DRAWER (always-on, mini by default, hover-expands to full width)
@@ -3448,7 +3466,6 @@ async def sso_back(code: str = "", state: str = "", error: str = "", error_descr
             said = _said(r)
         except httpx.HTTPError as ex:
             said = "the server does not answer: %s" % ex
-    ui.add_head_html(PAGE_HEAD)
     with ui.card().classes("absolute-center w-96 gap-2"):
         ui.label("Sign in").classes("text-lg")
         ui.label(said).classes("text-sm text-red-700").mark("sign-on-said")

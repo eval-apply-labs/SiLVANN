@@ -35,12 +35,13 @@ from .system import BINARY, WINDOWS
 RUN = 16 << 20                # a read's bytes, as the experts' read-ahead's (`nn_load_bundle.WARM_RUN`)
 READERS = 4                   # the threads a copy reads with, each every READERS-th run (▶ `RamTable._copy`)
 WHERE = ("auto", "ram", "cache", "disk")
-STEPS = 100                   # a copy's progress, said as a load's `progress(done, total)` is: this many steps
+STEPS = 100                   # a copy's progress, said as a load's `progress(done, total, what)` is: this many steps
 
 
-def steps(progress, total):
-    """A copy's `tick(bytes done)` for a load's `progress(done, total)`, called a step at a time of STEPS — not a read at a
-    time — so a caller that prints each call prints a hundred lines, not thousands; None where there is no `progress`."""
+def steps(progress, total, what="engrams"):
+    """A copy's `tick(bytes done)` for a load's `progress(done, total, what)`, called a step at a time of STEPS — not a
+    read at a time — so a caller that prints each call prints a hundred lines, not thousands; None where there is no
+    `progress`. `what` is what the load says is loading: the tables copied here are an n-gram memory's, the engrams."""
     if progress is None:
         return None
     said = [0]
@@ -49,7 +50,7 @@ def steps(progress, total):
         step = done * STEPS // max(1, total)
         if step > said[0]:
             said[0] = step
-            progress(step, STEPS)
+            progress(step, STEPS, what)
     return tick
 
 

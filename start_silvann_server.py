@@ -120,21 +120,25 @@ def _cards(m):
 
 
 def _loading():
-    """`progress(done, total)` for a model's load: a dot every 2.5% and the tens, the whole line so far each time it grows
-    (`loading: ...10...20...30.`) — the UI shows it as one line growing — so a long load (GLM's experts copied into RAM,
-    minutes) is seen to move. A load in passes — the dense part, then the experts copied into RAM — climbs again after
-    the pass before, on the same line (`loading: ...10...100 · ...10.`): a pass begins where `done` falls back."""
-    said, last, before = [0], [0], [""]
+    """`progress(done, total, what)` for a model's load: a dot every 2.5% and the tens, the whole line so far each time it
+    grows (`loading weights: ...10...20...30.`) — the UI shows it as one line growing — so a long load (GLM's experts
+    copied into RAM, minutes) is seen to move. `what` names what is loading: the weights, unless the load says the
+    engrams (an n-gram memory's tables, ▶ ram_table.steps), and each has a line of its own. A load of the weights in
+    passes — the dense part, then the experts copied into RAM — climbs again after the pass before, on the same line
+    (`loading weights: ...10...100 · ...10.`): a pass begins where `done` falls back."""
+    said, last, before, named = [0], [0], [""], [None]
 
-    def tick(done, total):
-        if done < last[0]:                                # a new pass: the line so far kept, this one after it
+    def tick(done, total, what="weights"):
+        if what != named[0]:                              # another thing loading: a line of its own
+            named[0], before[0], said[0] = what, "", 0
+        elif done < last[0]:                              # a new pass: the line so far kept, this one after it
             before[0] += _dots(said[0]) + " · "
             said[0] = 0
         last[0] = done
         step = done * 40 // max(1, total)                 # 40 steps of 2.5%
         if step > said[0]:
             said[0] = step
-            print("[silvann_server] loading: " + before[0] + _dots(step), flush=True)
+            print("[silvann_server] loading %s: %s%s" % (what, before[0], _dots(step)), flush=True)
     return tick
 
 
