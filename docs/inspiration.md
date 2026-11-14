@@ -3,8 +3,8 @@
 SiLVANN's design did not fall out of a spec. Several of its choices started as intuitions about what a transformer
 is "really doing", and those intuitions still explain why the engine looks the way it does. One of them comes
 first, and the others follow from it: that meaning is not stored in words but negotiated between them. Read the
-physics and the philosophy here as lenses, not mechanism: the engine runs ordinary linear algebra on ordinary
-silicon. The concepts it is built on are in [`concepts.md`](concepts.md).
+philosophy here as lenses, not mechanism: the engine runs ordinary linear algebra on ordinary silicon. The concepts
+it is built on are in [`concepts.md`](concepts.md).
 
 ## Meaning as a negotiation
 
@@ -17,9 +17,13 @@ neighbours, and between a text and whoever reads it.
 The rest of this page comes from that lens. If meaning lives in relations, the operation that matters is the one
 that relates tokens to each other: attention. Before a word is generated its meaning is not yet one thing — the
 up-projection inside an MLP or an expert spreads a token across a wide hidden space, many senses active at once.
-"Bank" is, for the moment, river *and* institution *and* tilt. Attention, conditioned on the context, collapses it:
-context selects one meaning, and a single token is emitted, like a measurement narrowing a wide front of candidates
-to a point.
+"Bank" can be, for the moment, river *and* institution *and* tilt. Attention, conditioned on the context, collapses it:
+the context selects, from the many meanings the token can represent, the distribution conditioned on it; and in a
+mixture-of-experts model the router uses that distribution to choose among the experts, running the handful out of
+hundreds that the meaning map calls for. This indicates that meaning lies near a low-dimensional surface of the space
+it is written in — the manifold hypothesis this page comes back to — and the engine centres the computation near it: an
+expert the token does not target is never run. A single token is emitted, like a measurement narrowing a wide front of
+candidates to a point, and goes on to take part in the chain's continuation.
 
 The collapse is never final. A later token can reach back and re-collapse an earlier one: "…along the river" three
 words on, and "bank" resolves. That is Derrida's deferral, computed, and it lives in the keys and values the model
@@ -103,6 +107,13 @@ Two honest caveats. A real deployment has a finite context and finite precision,
 finite-state machine; universality is the statement as the tape grows without bound. And attention's cache is
 append-only — a past cell is never overwritten — so it is most precisely an unbounded log with random read;
 overwriting is simulated by appending tokens that supersede earlier ones.
+
+Read with the rest of this page, what runs on that tape is a conversation. Two attentions steer it: the person's,
+choosing what to say and what to take from each answer, and the machine's, reading back over the cache. The person
+brings their subjective experience of the real, written into the context as their projection of it, and the machine
+maps it onto the hyperstition frozen in its weights; the KV cache is where the two meet, a cell at a time. The
+computation is that act, and its goal is meaning: reached through a conversation both participants steer, not
+retrieved from either of them.
 
 ## Why the angles have to stay many
 

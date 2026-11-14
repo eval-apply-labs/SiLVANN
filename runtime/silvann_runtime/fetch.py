@@ -16,6 +16,7 @@ import glob
 import json
 import os
 import re
+import shutil
 import sys
 
 from .model_folder import DEV, Refused, choose, newer, program_dir
@@ -81,13 +82,18 @@ def ensure_model(path, repo=None, ask=input, yes=False):
         if repo is None:
             return path
         if yes:
-            d = differences(path, repo)
-            update(path, repo, [f for f, _ in d["files"]])
+            report = _Report(os.environ.get("SILVANN_DOWNLOAD_PROGRESS"))
+            d = differences(path, repo, tick=_checking(report))
+            free = shutil.disk_usage(path).free
+            if d["files"] and d["bytes"] + (1 << 30) > free:
+                raise Refused("%s needs %s more, and %s has %s free" % (name, size(d["bytes"]), path, size(free)))
+            report.set(force=True, phase="downloading", total=d["bytes"])
+            update(path, repo, [f for f, _ in d["files"]], report=report)
             print(said(d, fetched=True), flush=True)
         else:
             update_program(path, repo)
         return path
-    repo, size = (repo, "several GB") if repo else KNOWN.get(name, (None, None))[:2]
+    repo, weighs = (repo, "several GB") if repo else KNOWN.get(name, (None, None))[:2]
     if repo is None:
         raise Refused("%s is not a model folder, and %r is not a model this release knows how to fetch — known: %s"
                       % (path, name, ", ".join(sorted(KNOWN))))
@@ -95,9 +101,9 @@ def ensure_model(path, repo=None, ask=input, yes=False):
     if yes:
         return _download(repo, path)
     if not sys.stdin.isatty():
-        raise Refused("%s is not here. Fetch it (%s, from huggingface.co/%s) with:\n    %s" % (name, size, repo, command))
+        raise Refused("%s is not here. Fetch it (%s, from huggingface.co/%s) with:\n    %s" % (name, weighs, repo, command))
     print("The model %s is not in %s." % (name, os.path.dirname(path)))
-    if ask("Download it now from huggingface.co/%s (%s)? [y/N] " % (repo, size)).strip().lower() not in ("y", "yes"):
+    if ask("Download it now from huggingface.co/%s (%s)? [y/N] " % (repo, weighs)).strip().lower() not in ("y", "yes"):
         raise Refused("not downloaded — run `%s` when you want it" % command)
     return _download(repo, path)
 
@@ -204,11 +210,14 @@ def programs_of(names, release=None):
     return set(keep), later
 
 
-def differences(path, repo, programs_only=False, release=None):
+def differences(path, repo, programs_only=False, release=None, tick=None):
     """What `update` fetches into the model folder at `path` from its pack `repo` (▶ the note above): {"repo", "commit",
     "files": [(name, bytes)] — those the folder lacks or holds otherwise —, "bytes", "newer": [a later release's program
     folder], "linked": [a file here that is a symbolic link or under one, left as it is], "read": the bytes hashed}.
-    `programs_only`: the program's files alone, listed from the pack's lisp/ folders."""
+    `programs_only`: the program's files alone, listed from the pack's lisp/ folders. A file the client's record says is
+    the pack's is not read, nor one it says is another (the pack changed it since: fetched); one without a record — a
+    folder copied here, whose files are newer than their records — is read and hashed, `tick(bytes read, bytes to read)`
+    told as it goes."""
     from huggingface_hub import HfApi
     from huggingface_hub.hf_api import RepoFile
     api = HfApi()
@@ -246,12 +255,27 @@ def differences(path, repo, programs_only=False, release=None):
         elif f.lfs is None:
             if _blob(local) != f.blob_id:
                 files.append((f.path, f.size))
-        elif _recorded(path, f.path) != f.lfs.sha256:
-            hashed.append(f)
+        else:
+            recorded = _recorded(path, f.path)
+            if recorded is None:
+                hashed.append(f)
+            elif recorded != f.lfs.sha256:      # the file the client fetched, which the pack has replaced since
+                files.append((f.path, f.size))
     if hashed:
+        import threading
         from concurrent.futures import ThreadPoolExecutor
+        to_read, read, lock = sum(f.size for f in hashed), [0], threading.Lock()
+
+        def add(n):
+            with lock:
+                read[0] += n
+                done = read[0]
+            if tick:
+                tick(done, to_read)
+        if tick:
+            tick(0, to_read)
         with ThreadPoolExecutor(max(1, min(8, os.cpu_count() or 1))) as pool:
-            sums = list(pool.map(lambda f: _sha256(os.path.join(path, *f.path.split("/"))), hashed))
+            sums = list(pool.map(lambda f: _sha256(os.path.join(path, *f.path.split("/")), add), hashed))
         for f, digest in zip(hashed, sums):
             if digest == f.lfs.sha256:
                 _record(path, f.path, commit, digest)
@@ -261,9 +285,10 @@ def differences(path, repo, programs_only=False, release=None):
             "newer": later, "linked": sorted(linked), "read": sum(f.size for f in hashed)}
 
 
-def update(path, repo, files, quiet=False):
+def update(path, repo, files, quiet=False, report=None):
     """The files named — `differences`' — fetched from the pack `repo` into the folder at `path`, as the pack holds
-    them now; every other file as it is."""
+    them now; every other file as it is. `report`: the progress file's (▶ `_Report`), else the one
+    `SILVANN_DOWNLOAD_PROGRESS` names."""
     if not files:
         return path
     from huggingface_hub import snapshot_download
@@ -273,7 +298,7 @@ def update(path, repo, files, quiet=False):
     if rest:
         snapshot_download(repo_id=repo, local_dir=os.path.abspath(path), allow_patterns=[glob.escape(f) for f in rest],
                           force_download=True, **({"tqdm_class": _quiet()} if quiet else
-                                                  _reported(os.environ.get("SILVANN_DOWNLOAD_PROGRESS"))))
+                                                  _reported(report or _Report(os.environ.get("SILVANN_DOWNLOAD_PROGRESS")))))
     if VERSION_FILE in files:               # last: the folder says the pack's version once it holds the pack's files
         snapshot_download(repo_id=repo, local_dir=os.path.abspath(path), allow_patterns=[VERSION_FILE],
                           force_download=True, **({"tqdm_class": _quiet()} if quiet else {}))
@@ -294,12 +319,15 @@ def _blob(local):
     return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
 
 
-def _sha256(local):
+def _sha256(local, read=None):
+    """The file's sha256, `read(bytes)` told after each block."""
     import hashlib
     h = hashlib.sha256()
     with open(local, "rb") as f:
         for block in iter(lambda: f.read(16 << 20), b""):
             h.update(block)
+            if read:
+                read(len(block))
     return h.hexdigest()
 
 
@@ -402,36 +430,82 @@ def _quiet():
 
 def _download(repo, path):
     from huggingface_hub import snapshot_download
-    snapshot_download(repo_id=repo, local_dir=path, ignore_patterns=[VERSION_FILE],
-                      **_reported(os.environ.get("SILVANN_DOWNLOAD_PROGRESS")))
+    report = _Report(os.environ.get("SILVANN_DOWNLOAD_PROGRESS"))
+    report.set(force=True, phase="downloading")
+    snapshot_download(repo_id=repo, local_dir=path, ignore_patterns=[VERSION_FILE], **_reported(report))
     snapshot_download(repo_id=repo, local_dir=path, allow_patterns=[VERSION_FILE])     # last, as `update` fetches it
     if not present(path):
         raise Refused("the download of %s finished but %s is not a model folder" % (repo, path))
     return path
 
 
-def _reported(report):
-    """`snapshot_download`'s progress, counted into the file `report` names (`SILVANN_DOWNLOAD_PROGRESS`, which the UI's
-    downloader sets) as JSON at most twice a second: `{bar: [count, total]}` for each of its bars, the bytes received
-    among them. Hugging Face's client writes a file in blocks of a few hundred MB, so the bytes received are what moves
-    on a slow connection. No file named: nothing is passed and the client's own bars are drawn."""
-    if not report:
-        return {}
-    import json
+class _Report:
+    """⭐ THE PROGRESS FILE the UI's downloader reads (`SILVANN_DOWNLOAD_PROGRESS`, which it sets): JSON, rewritten at
+    most twice a second — `phase` "checking" (the folder's files read against the pack's hashes, `checking`: [bytes
+    read, bytes to read]) and then "downloading" (`total`: the bytes an update fetches; Hugging Face's client's bars,
+    `{bar: [count, total]}`, the bytes received among them). No file named: nothing is written."""
+
+    def __init__(self, path):
+        import threading
+        self.path, self.data, self.lock, self.last = path, {}, threading.Lock(), 0.0
+
+    def __bool__(self):
+        return bool(self.path)
+
+    def set(self, force=False, **values):
+        if not self.path:
+            return
+        import json
+        import time
+        with self.lock:
+            self.data.update(values)
+            now = time.monotonic()
+            if not force and now - self.last < 0.5:
+                return
+            self.last = now
+            tmp = self.path + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(self.data, f)
+            os.replace(tmp, self.path)
+
+
+def _checking(report, every=10.0):
+    """`differences`' `tick(read, to_read)` for a download: the bytes read into the report's `checking`, and a line
+    every `every` seconds and at the end — what is read so far, the rate and the time left — so a folder read whole
+    (one copied here) is seen to move."""
     import threading
     import time
-    from huggingface_hub.utils import tqdm as hf_tqdm
-    counts, lock, last = {}, threading.Lock(), [0.0]
+    t0, said_at, lock = time.monotonic(), [None], threading.Lock()
 
-    def write(force):
+    def tick(done, total):
+        report.set(force=done >= total, phase="checking", checking=[done, total])
         now = time.monotonic()
-        if not force and now - last[0] < 0.5:
-            return
-        last[0] = now
-        tmp = report + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(counts, f)
-        os.replace(tmp, report)
+        with lock:
+            if said_at[0] is None:
+                said_at[0] = now
+                print("checking %s of files against the pack's hashes (files newer than the record of their download)"
+                      % size(total), flush=True)
+                return
+            if done < total and now - said_at[0] < every:
+                return
+            said_at[0] = now
+        rate = done / max(now - t0, 1e-9)
+        secs = (total - done) / rate if rate > 0 else 0
+        left = "" if done >= total or rate <= 0 else ", about %s left" % (
+            "%d s" % max(1, round(secs)) if secs < 90 else "%d min" % round(secs / 60))
+        print("checking: %s of %s read (%s/s%s)" % (size(done), size(total), size(rate), left), flush=True)
+    return tick
+
+
+def _reported(report):
+    """`snapshot_download`'s progress, counted into the report (▶ `_Report`): `{bar: [count, total]}` for each of its
+    bars, the bytes received among them. Hugging Face's client writes a file in blocks of a few hundred MB, so the bytes
+    received are what moves on a slow connection. No report: nothing is passed and the client's own bars are drawn."""
+    if not report:
+        return {}
+    import threading
+    from huggingface_hub.utils import tqdm as hf_tqdm
+    lock = threading.Lock()
 
     class Reported(hf_tqdm):
         # counted here as well as by tqdm, which counts nothing when it draws nothing (no terminal)
@@ -443,15 +517,15 @@ def _reported(report):
         def update(self, n=1):
             with lock:
                 self._count += int(n or 0)
-                counts[self._bar] = [self._count, int(self.total or 0)]
-                write(False)
+                count = [self._count, int(self.total or 0)]
+            report.set(**{self._bar: count})
             return super().update(n)
 
         def close(self):
-            with lock:
-                if hasattr(self, "_bar"):
-                    counts[self._bar] = [self._count, int(self.total or 0)]
-                    write(True)
+            if hasattr(self, "_bar"):
+                with lock:
+                    count = [self._count, int(self.total or 0)]
+                report.set(force=True, **{self._bar: count})
             return super().close()
 
     return {"tqdm_class": Reported}

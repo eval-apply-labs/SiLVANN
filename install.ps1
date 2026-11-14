@@ -41,6 +41,10 @@ $ErrorActionPreference = "Continue"
 function Say($m)  { Write-Host $m -ForegroundColor Cyan }
 function Note($m) { Write-Host "   $m" }
 function Fail($m) { Write-Host "STOPPED: $m" -ForegroundColor Red; exit 1 }
+# how long a step took, so an update that waits on pip or the build is seen to be at work
+function Took($watch) { Note ("({0:N0} s)" -f $watch.Elapsed.TotalSeconds) }
+# pip's lines that say what it fetches and installs, as it goes (its errors, on stderr, as pip writes them)
+function Pip-Lines { process { if ("$_" -match '^(Collecting|Downloading|Installing collected|Successfully installed)') { Note "$_" } } }
 
 $Source = if ($env:SILVANN_SOURCE) { $env:SILVANN_SOURCE } else { "https://github.com/eval-apply-labs/SiLVANN" }
 # where a release's prebuilt libraries are attached
@@ -213,9 +217,11 @@ function Make-Environment {
         & $script:Python -m venv (Join-Path $Dir "venv")
         if ($LASTEXITCODE -ne 0) { Fail "Python could not make its environment in $Dir\venv" }
     }
-    & $py -m pip install --quiet --upgrade pip
-    & $py -m pip install --quiet -r (Join-Path $Dir "scripts\requirements.txt")
+    $watch = [Diagnostics.Stopwatch]::StartNew()
+    & $py -m pip install --upgrade pip | Pip-Lines
+    & $py -m pip install -r (Join-Path $Dir "scripts\requirements.txt") | Pip-Lines
     if ($LASTEXITCODE -ne 0) { Fail "pip could not install requirements.txt (the lines above)" }
+    Took $watch
 }
 
 # Windows 11's Smart App Control, on: it loads code that is signed, or that Microsoft's reputation service knows - a
@@ -299,6 +305,10 @@ function Get-Libraries {
     return $true
 }
 
+function Show-Built($lines) {
+    foreach ($l in $lines) { if ($l -match '^==|->|skipped|failed|would not|does not|^ {6}\S') { Write-Host "   $l" } }
+}
+
 function Build-Engine {
     Say "the cards and the compilers"
     Find-Cards
@@ -307,10 +317,29 @@ function Build-Engine {
     $py = Join-Path $Dir "venv\Scripts\python.exe"
     $log = Join-Path $Dir "build.log"
     $err = Join-Path $Dir "build.err"
-    $p = Start-Process -FilePath $py -ArgumentList "`"$(Join-Path $Dir 'scripts\build.py')`"" -WorkingDirectory $Dir -NoNewWindow -Wait `
+    $watch = [Diagnostics.Stopwatch]::StartNew()
+    $env:PYTHONUNBUFFERED = "1"                # its lines into build.log as it writes them, not a block at a time
+    $p = Start-Process -FilePath $py -ArgumentList "`"$(Join-Path $Dir 'scripts\build.py')`"" -WorkingDirectory $Dir -NoNewWindow `
                        -PassThru -RedirectStandardOutput $log -RedirectStandardError $err
-    $shown = Get-Content -Encoding UTF8 $log | Where-Object { $_ -match '^==|->|skipped|failed|would not|does not|^ {6}\S' }
-    foreach ($l in $shown) { Write-Host "   $l" }
+    $null = $p.Handle                          # kept, so the exit code can be read once it has exited
+    # each family's line as the build writes it - its last line held back until it is whole - and, while nothing new
+    # comes, how long it has been building
+    $seen, $said = 0, 0
+    while (-not $p.HasExited) {
+        Start-Sleep -Seconds 2
+        $lines = @(Get-Content -Encoding UTF8 $log -ErrorAction SilentlyContinue)
+        if ($lines.Count - 1 -gt $seen) {
+            Show-Built $lines[$seen..($lines.Count - 2)]
+            $seen, $said = ($lines.Count - 1), $watch.Elapsed.TotalSeconds
+        } elseif ($watch.Elapsed.TotalSeconds - $said -ge 60) {
+            Note ("still building ({0:N0} s)" -f $watch.Elapsed.TotalSeconds)
+            $said = $watch.Elapsed.TotalSeconds
+        }
+    }
+    $p.WaitForExit()
+    $lines = @(Get-Content -Encoding UTF8 $log -ErrorAction SilentlyContinue)
+    if ($lines.Count -gt $seen) { Show-Built $lines[$seen..($lines.Count - 1)] }
+    Took $watch
     if ($p.ExitCode -ne 0) {
         Get-Content -Encoding UTF8 $err -Tail 30 | ForEach-Object { Write-Host "   $_" }
         Fail "the build failed - the lines above, and all of it in $log, $err and the .log files under $Dir\lib"
@@ -480,8 +509,10 @@ if (-not $Build) {
     } elseif (Test-Path -LiteralPath ([IO.Path]::Combine($data, "models"))) {
         Say "The models here: each one's program for this release"
         $env:SILVANN_DATA = $data
+        $watch = [Diagnostics.Stopwatch]::StartNew()
         & (Join-Path $Dir "venv\Scripts\python.exe") (Join-Path $Dir "silvann_core.py") update-programs
         if ($LASTEXITCODE -ne 0) { Note "not checked now - each model's boot checks its program again" }
+        Took $watch
     }
 }
 Say "done: SiLVANN is in $Dir, and 'silvann' with it"

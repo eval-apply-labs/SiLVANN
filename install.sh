@@ -24,6 +24,13 @@ set -euo pipefail
 say()  { printf '\033[1m%s\033[0m\n' "$*"; }
 note() { printf '   %s\n' "$*"; }
 stop() { printf '\033[31m⛔ %s\033[0m\n' "$*" >&2; exit 1; }
+# a step and how long it took, so an update that waits on pip or the build is seen to be at work
+timed() { local t=$SECONDS; "$@"; note "($(( SECONDS - t )) s)"; }
+# pip's lines that say what it fetches and installs, as it goes; the rest of its output (and its errors, on stderr) as pip
+# writes them
+pip_lines() { local line; while IFS= read -r line; do
+    case "$line" in Collecting*|Downloading*|"Installing collected"*|"Successfully installed"*) note "$line" ;; esac
+done; }
 
 SOURCE=${SILVANN_SOURCE:-https://github.com/eval-apply-labs/SiLVANN}
 BIN=${SILVANN_BIN:-$HOME/.local/bin}
@@ -202,11 +209,11 @@ fetch() {
 environment() {
     say "the Python environment ($DIR/venv)"
     [ -x "$DIR/venv/bin/python" ] || python3 -m venv "$DIR/venv"
-    "$DIR/venv/bin/python" -m pip install --quiet --upgrade pip
-    "$DIR/venv/bin/python" -m pip install --quiet -r "$DIR/scripts/requirements.txt"
+    "$DIR/venv/bin/python" -m pip install --upgrade pip | pip_lines
+    "$DIR/venv/bin/python" -m pip install -r "$DIR/scripts/requirements.txt" | pip_lines
     # what it reads more with and runs without: a failure is said, not fatal
     if [ "${SILVANN_NONFREE:-1}" != 0 ] && [ -f "$DIR/scripts/requirements-nonfree.txt" ]; then
-        "$DIR/venv/bin/python" -m pip install --quiet -r "$DIR/scripts/requirements-nonfree.txt" \
+        "$DIR/venv/bin/python" -m pip install -r "$DIR/scripts/requirements-nonfree.txt" | pip_lines \
             || note "requirements-nonfree.txt was not installed: SiLVANN runs without it (a video file other than an animated picture is refused)"
     fi
 }
@@ -215,13 +222,21 @@ build() {
     say "the cards and the compilers"
     find_cards
     say "building the engine and the families for this machine: $FAMILIES (a few minutes; everything in $DIR/build.log)"
+    # each family's line as it is built, the whole of it in build.log; while a family takes long, a line each minute
+    local t0 ticker; t0=$(date +%s)
+    ( while sleep 60; do note "still building ($(( $(date +%s) - t0 )) s)"; done ) & ticker=$!
     if ! (cd "$DIR" && env SILVANN_PYTHON="$DIR/venv/bin/python" SILVANN_SILICON_FAMILIES="$FAMILIES" ${BUILD_ENV[@]+"${BUILD_ENV[@]}"} \
-              scripts/build.sh > "$DIR/build.log" 2>&1); then
+              PYTHONUNBUFFERED=1 scripts/build.sh 2>&1 | tee "$DIR/build.log" | built_lines); then
+        kill "$ticker" 2>/dev/null || true; wait "$ticker" 2>/dev/null || true
         tail -n 30 "$DIR/build.log" >&2
         stop "the build failed — the lines above, and all of it in $DIR/build.log"
     fi
-    grep -E '^(✅|⛔|== built)' "$DIR/build.log" | sed 's/^/   /'
+    kill "$ticker" 2>/dev/null || true; wait "$ticker" 2>/dev/null || true
 }
+
+built_lines() { local line; while IFS= read -r line; do
+    case "$line" in ✅*|⛔*|"== built"*) note "$line" ;; esac
+done; }
 
 # ── the command ───────────────────────────────────────────────────────────────────────────────────────────────────────
 command_file() {
@@ -341,10 +356,10 @@ main() {
         # the rest by the installer just fetched, which an update makes newer than this one
         exec env SILVANN_FETCHED=1 SILVANN_DIR="$DIR" SILVANN_BIN="$BIN" bash "$DIR/install.sh" "$@"
     fi
-    [ $only_build -eq 1 ] || environment
-    build
+    [ $only_build -eq 1 ] || timed environment
+    timed build
     command_file
-    [ $only_build -eq 1 ] || programs
+    [ $only_build -eq 1 ] || timed programs
     say "done: SiLVANN is in $DIR, and \`silvann\` in $BIN"
     case ":$PATH:" in
         *":$BIN:"*) ;;

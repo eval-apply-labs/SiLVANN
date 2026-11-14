@@ -928,8 +928,7 @@ def _whoami(cid):
             lines.append("  %s — %s; %s" % (name, m.folder.lora_about(name)["description"] or "no description",
                                              "starts at once" if _switches_to(name) else
                                              "your model is loaded again under it, in your place (minutes each way)"))
-        here = sorted(d.name for d in (DATA / "models").glob("*")
-                      if d.is_dir() and d.name != S.model_id and (d / "pack.json").exists() and not image_pack(str(d)))
+        here = _other_models()
         if here:
             lines.append("other models on this machine, loaded in your place (minutes each way): %s" % ", ".join(here))
         for w in S.config.get("workers") or []:
@@ -1013,12 +1012,22 @@ def _worker_for(model):
     return None
 
 
+def _other_models():
+    """This machine's text models besides the one served: the folders in models/ holding a pack, an image pack's aside.
+    A folder this process may not look into — a disk's own lost+found, root's — is none (`Path.exists` raises on it)."""
+    def text(d):
+        try:
+            return d.is_dir() and d.name != S.model_id and (d / "pack.json").is_file() and not image_pack(str(d))
+        except OSError:
+            return False
+    return sorted(d.name for d in (DATA / "models").glob("*") if text(d))
+
+
 def _reachable():
     """The models (agent …) names besides 'self, for a refusal that says them: this machine's other text models, the
     config's workers' and the registry's servers'."""
     import httpx
-    names = sorted(d.name for d in (DATA / "models").glob("*")
-                   if d.is_dir() and d.name != S.model_id and (d / "pack.json").exists() and not image_pack(str(d)))
+    names = _other_models()
     for w in S.config.get("workers") or []:
         try:
             names.append(httpx.get((w if "://" in w else "http://" + w) + "/health", timeout=5).json()["model_id"])

@@ -849,9 +849,10 @@ class ModelDownloads:
     the disk under MODELS_DIR has less room than the model still needs, and 1 GB.
 
     A model that is here says **update** or **done** by its pack's version against its own (`silvann_core.py
-    check-versions`, ▶ `fetch.state`), read when the panel opens and after each download. An update fetches the files
-    that differ alone (`check-model`, ▶ `fetch.differences`) — the same `download-model`, which for a folder that is
-    there fetches those; its progress is the bytes received against theirs."""
+    check-versions`, ▶ `fetch.state`), read when the panel opens and after each download. An update is the same
+    `download-model`, which for a folder that is there fetches the files that differ alone (▶ `fetch.differences`), in
+    two runs of the bar: **checking** while it reads the files it has no record of (a folder copied here) against the
+    pack's hashes, the bytes read against theirs, then **downloading**, the bytes received against those it fetches."""
 
     def __init__(self):
         self.known: Optional[list] = None   # [{name, repo, size, base}], read once from silvann_core.py
@@ -895,14 +896,6 @@ class ModelDownloads:
             self.states = {m["name"]: {"state": "unknown", "why": "not checked: %s" % str(ex)[:200]}
                            for m in self.catalogue() if m["here"]}
 
-    def check(self, name: str) -> dict:
-        """What an update of the model `name`, which is here, fetches: `fetch.differences`' answer, or {"error"}. The
-        first check of a folder that was not downloaded here reads its large files once."""
-        try:
-            return self._core("check-model", name)
-        except Exception as ex:
-            return {"error": str(ex)[:300]}
-
     def start(self, name: str):
         if self.running():
             raise RuntimeError(f"{self.name} is downloading — one at a time")
@@ -910,21 +903,16 @@ class ModelDownloads:
         if model is None:
             raise RuntimeError(f"{name} is not a model this release knows")
         updating = model_present(name)
-        if updating:
-            d = self.check(name)
-            if "files" not in d:
-                raise RuntimeError("not checked: " + d.get("error", "?"))
-            if not d["files"]:
-                raise RuntimeError(f"{name} holds every file of its pack already")
-            total, base, need = d["bytes"], 0, d["bytes"]
+        if updating:                         # what differs, and the room for it, the subprocess finds and says
+            total, base = 0, 0
         else:
             total = repo_bytes(model["repo"]) or approx_bytes(model["size"])
             MODELS_DIR.mkdir(parents=True, exist_ok=True)
             base = folder_bytes(MODELS_DIR / name)
             need = max(0, total - base)
-        free = shutil.disk_usage(MODELS_DIR).free
-        if need + (1 << 30) > free:
-            raise RuntimeError(f"{name} needs {need / 1e9:.1f} GB more, and {MODELS_DIR} has {free / 1e9:.1f} GB free")
+            free = shutil.disk_usage(MODELS_DIR).free
+            if need + (1 << 30) > free:
+                raise RuntimeError(f"{name} needs {need / 1e9:.1f} GB more, and {MODELS_DIR} has {free / 1e9:.1f} GB free")
         self.name, self.total, self.base, self.message, self.updating = name, total, base, "", updating
         self.lines.clear()
         try:
@@ -947,20 +935,25 @@ class ModelDownloads:
         self.states = None                             # what is here now, read again
 
     def progress(self) -> tuple:
-        """(bytes there, bytes in all) of the model being or last downloaded: those on the disk, or those it held at
-        the start and the bytes received since when that is more."""
+        """(phase, bytes so far, bytes in all) of the model being or last downloaded (▶ `fetch._Report`): "checking",
+        the bytes read against those to read; "downloading", for an update the bytes received against those it fetches,
+        for a download those on the disk, or those it held at the start and the bytes received since when that is
+        more."""
         if not self.name:
-            return 0, self.total
-        received = 0
+            return "downloading", 0, self.total
         try:
-            bars = json.load(open(self.report))
-            received = (bars.get("huggingface_hub.snapshot_download.transfer")
-                        or bars.get("huggingface_hub.snapshot_download") or [0])[0]
+            report = json.load(open(self.report))
         except (OSError, ValueError):
-            pass
+            report = {}
+        if report.get("phase") == "checking" and self.running():
+            done, total = (report.get("checking") or [0, 0])[:2]
+            return "checking", done, total
+        received = (report.get("huggingface_hub.snapshot_download.transfer")
+                    or report.get("huggingface_hub.snapshot_download") or [0])[0]
         if self.updating:
-            return (self.total if self.message == "done" else min(received, self.total)), self.total
-        return max(folder_bytes(MODELS_DIR / self.name), self.base + received), self.total
+            total = int(report.get("total") or 0)
+            return "downloading", (total if self.message == "done" else min(received, total)), total
+        return "downloading", max(folder_bytes(MODELS_DIR / self.name), self.base + received), self.total
 
     def cancel(self):
         if self.running():
@@ -1755,11 +1748,16 @@ async def page():
                     def pump_download():
                         running = DOWNLOADS.running()
                         if DOWNLOADS.name and (running or DOWNLOADS.message):
-                            have, total = DOWNLOADS.progress()
+                            phase, have, total = DOWNLOADS.progress()
                             dl_row.set_visibility(True)
-                            dl_bar.set_value(min(1.0, have / total) if total else 0)
+                            # an update in two runs of the bar: the files read against the pack's, then those fetched
+                            nothing = not running and DOWNLOADS.message == "done" and not total
+                            dl_bar.set_value(1.0 if nothing else min(1.0, have / total) if total else 0)
                             dl_label.set_text(f"{DOWNLOADS.name}{' (update)' if DOWNLOADS.updating else ''}: "
-                                              f"{human_bytes(have)} of {human_bytes(total)}"
+                                              + ("nothing to fetch, every file the pack's" if nothing else
+                                                 f"{'checking' if phase == 'checking' else 'downloading'}… "
+                                                 f"{human_bytes(have)} of {human_bytes(total)}"
+                                                 + (" read" if phase == "checking" else ""))
                                               + ("" if running else f" — {DOWNLOADS.message}"))
                             dl_stop.set_visibility(running)
                         if running != dl_seen["running"]:
