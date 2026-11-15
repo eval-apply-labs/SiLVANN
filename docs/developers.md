@@ -53,7 +53,41 @@ does. The host has the same two (`Machine.new_process`, `as_process`, `kill`, `s
 process, the server's `/cartridges/<id>/stop` asks it to stop, and `/cartridges/<id>/kill` kills it, its answer so far
 kept and its conversation read again from its tokens at its next message.
 
-Every package has a README; read `engine/src/README.md` first, then `sys`'s and `nn`'s.
+Every package has a README; [Reading it](#reading-it) says in what order.
+
+## Reading it
+
+SiLVANN is about 125,000 lines, its docs included, and no one needs all of it: one model's way through it, end to end,
+is about 58,000. The rest is the other models, the app around the chat, and each silicon's own kernels. A route, each
+step what makes the next readable (the lines are 1.0.3's, comments included):
+
+1. **The docs**, an afternoon: the [README](../README.md), [`concepts.md`](concepts.md), [`local_ai.md`](local_ai.md),
+   [`users.md`](users.md) as far as an install, this file, [`models.md`](models.md) and
+   [`compression.md`](compression.md). [`config.md`](config.md), [`tools.md`](tools.md), [`ui.md`](ui.md),
+   [`platforms.md`](platforms.md) and [`results.md`](results.md) are for looking things up.
+2. **A model as a program**: `lisp/qwen3_5.lisp`, with `lisp/generate.lisp` and `lisp/sampling.lisp` (400 lines), then
+   the verbs they name — `engine/src/packages/ai_qwen_3/`'s README and `contracts/`, and `nn`'s `contracts/` (3,000
+   lines, more than half of them comments).
+3. **The evaluator and the language**: `engine/src/README.md`, `engine/src/engine/` with `operating_systems/` (4,800),
+   then `sys`'s README, its `contracts/` and its code (20,000) — the lists, the bindings, the heap, the scheduler.
+4. **The Neural Network library**: `nn`'s README and its code (15,000) — the buffers, the tables, the routed experts, and
+   in `gpu/kernels/kernels.cuh` the arithmetic without the language — every door's generic body, what a family's own
+   kernel stands in for.
+5. **The model's verbs**: the rest of `engine/src/packages/ai_qwen_3/` (2,500).
+6. **The runtime, for that model** (10,000): `runtime/silvann_runtime/machine.py` (the engine booted, its workers),
+   `model_folder.py` and `fetch.py` (a pack on the disk and from Hugging Face), `qwen3_5.py` (the tables the program
+   reads and the names it is written against), `generate.py`, `sampling.py`, `chat.py`, `session.py`, the expert tier
+   (`expert_tier.py`, `experts_split.py`, `experts_file.py`, `ram_table.py`), `autotune.py`, and
+   `start_silvann_server.py`, the server around them.
+7. **Your silicon**: [`add_a_family.md`](../engine/src/silicon_families/add_a_family.md), the choice at the top of
+   `engine/src/silicon_families/` (`choose.cuh`, `roster.cuh`, `card.cuh`, `entry.cuh`) and `host/`, then your
+   architecture's family — its own files and its `overrides/`, a file for each group of nn's verbs (2,500-7,000 lines).
+
+Leave until you need them: the other models, each a package, a runtime file and a program (600-6,000 lines each); the
+other families' overrides (19,000 lines across them), each an architecture's own, worth reading for ideas when writing
+yours; the app around the chat (`silvann_ui.py`, `tools.py`, `browser.py`, `users.py`, `sso.py`, `jail.py`); the
+pictures (`vision*.py`, `qwen_image*.py`); a ring of machines (`pipeline.py`); and `engine/scripts/third_party/`,
+carried code.
 
 ## Where the programs are
 
