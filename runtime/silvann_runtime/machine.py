@@ -198,6 +198,10 @@ class Machine:
         #   starts; a value the user set stays.
         os.environ.setdefault("HIP_FORCE_DEV_KERNARG", "1")
         self.e = importlib.import_module("silvann_engine_" + engine)
+        # `silicon="cpu"`: the processors' own family and never a card — the host's where none counts a device (the base
+        #   REPL's machine, ▶ main/silvann_base_repl.py)
+        if silicon == "cpu":
+            silicon = next((f for f in CPU_FAMILIES if self.e.devices(f) > 0), "host")
         # a card if any family drives one — its vendor's own first (AMD's: ROCm 7's family for the MI100 on, then ROCm 6's
         #   for the MI50), then OpenCL 2.0 (Intel's own first), then 1.2 — else the CPU's own
         # cores. x86_avx2 counts no devices on a CPU without AVX2 (nor an Arm family on one without its features); the

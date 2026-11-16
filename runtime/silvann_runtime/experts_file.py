@@ -370,7 +370,7 @@ def _write(bundle, todo, plan, layers, experts, directory, pieces, progress):
                     slot[into:into + piece.nbytes] = piece
                 write_at(fd, slot, off[(l, x)])
         if progress:
-            progress(i + 1, len(layers))
+            progress(i + 1, len(layers), "experts")
     for fd, (path, ident, size, part, parts, _) in zip(fds, todo):
         os.fsync(fd)
         os.close(fd)

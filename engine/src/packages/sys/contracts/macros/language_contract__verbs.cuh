@@ -212,7 +212,9 @@
     /* the value an answer came to, waited for — the data's end; and a block waited for until it is idle — the device's,  */ \
     /* which hands no value over (▶ `cpu/opcodes/opcodes_abi.cuh`)                                                     */ \
     X(PKG, 60, "sys__wait_for_result",        sys__opcodes__zzpackage_apply_wait_for_result,     SYS__COMPUTING_BASE__WAIT_FOR_RESULT) \
-    X(PKG, 61, "sys__wait_for_device",        sys__opcodes__zzpackage_apply_wait_for_device,     SYS__COMPUTING_BASE__WAIT_FOR_DEVICE)
+    X(PKG, 61, "sys__wait_for_device",        sys__opcodes__zzpackage_apply_wait_for_device,     SYS__COMPUTING_BASE__WAIT_FOR_DEVICE) \
+    /* a name assigned where it has a scope here, given its first where it has none — what `define` lowers to (NN-193) */ \
+    X(PKG, 62, "sys__bindings__define",       sys__opcodes__zzabi_adapter_bindings_define,       SYS__BINDINGS__DEFINE)
 
 /* ── AND THE OPCODES, NAMED ──────────────────────────────────────────────────────────────────────────
  * ⚖ ARCHITECT: *"the enum addition on the opcodes."* A published verb had a number and no name, so every

@@ -5,15 +5,16 @@
   <img src="images/users_light.svg" alt="The ways in, each with the line to start from, what it needs and where the
   chat then is. On Linux, a container (recommended): docker/setup.sh, with Podman or Docker, the chat at
   http://silvann.localhost:8080 or the first free port after 8080; or installed: install.sh, with Python's venv and its
-  headers, g++ and git, then silvann ui, the chat at http://localhost:8090. On Windows 10 and 11, the portable app:
-  silvann_portable_windows_x64.zip unzipped and SiLVANN.exe double-clicked, a card needing only its driver, the chat in
-  its own window; or the installer: install.ps1 in PowerShell, with Python 3.11 to 3.14, Git and the card's driver, then
+  headers, g++ and git, then silvann ui, the chat at http://localhost:8090. On Windows 10 and 11, the portable app,
+  which runs on Linux too: silvann_portable_x64.zip unzipped and windows\SiLVANN.exe double-clicked (on Linux
+  linux/SiLVANN.sh run), a card needing only its driver, the chat in its own window; or the installer: install.ps1 in PowerShell, with Python 3.11 to 3.14, Git and the card's driver, then
   silvann ui, the chat at http://localhost:8090. On an Android phone, experimental: a build from source inside Termux,
   the chat in a second Termux session with python silvann_cli.py. In Options, Download models fetches a model and start
   runs it.">
 </picture>
 
-This is a **public beta**: what it is tested on is in the [README](../README.md#platforms). If something does not
+This is a **public beta**: the normal path has been tested on a reasonable sample of cards, but a bug-free experience is
+not expected yet; what it is tested on is in the [README](../README.md#platforms). If something does not
 build or run on your machine, you are expected to be able to read the error and the source. On Linux the recommended way
 to run it is a container ([below](#on-linux-a-container-recommended)); installed, it runs the same, and installing is the
 way on Windows.
@@ -110,28 +111,46 @@ generation only, which is much faster than building for every one, and `SILVANN_
 (the number is the card's compute capability: 120 for the RTX 50 series, 89 for the 40, 86 for the 30). A card is given
 to the family that includes it when the server starts; a model's config only picks which card (`card`, in [`config.md`](config.md)).
 
-### On Windows: the portable app
+### The portable app, on Windows and Linux
 
-One folder, nothing installed: `silvann_portable_windows_x64.zip`, attached to each
-[release](https://github.com/eval-apply-labs/SiLVANN/releases) from v0.26.1, holds `SiLVANN.exe`, Python's embeddable
-build with the runtime's packages, the evaluator and every silicon family the Windows build makes, Microsoft's C++
-runtime, and the release's tree. Unzip it anywhere you can write to and double-click `SiLVANN.exe`:
+One folder, nothing installed, that runs on both systems: `silvann_portable_x64.zip`, attached to each
+[release](https://github.com/eval-apply-labs/SiLVANN/releases), unzips to `SiLVANN` and three folders in it:
 
-- **The window** is Microsoft Edge in app mode, on a profile of its own, showing the UI — the chat, **Options** with
-  **Download models** and **start**, as `silvann ui` shows them. Edge comes with Windows 10 and 11; where it is not found,
-  the default browser opens the UI and a small message box stands for the window.
+- `windows\` — `SiLVANN.exe`, Python's embeddable build with the runtime's packages, the evaluator and every silicon
+  family the Windows build makes, Microsoft's C++ runtime, and the release's tree;
+- `linux/` — `SiLVANN.sh`, a standalone Python with the runtime's packages, the evaluator and the families for Linux on
+  64-bit x86 with glibc 2.28 or later (RHEL 8, Debian 10, Ubuntu 20.04 and on), and the release's tree;
+- `data/` — the models, the conversations and the logs (`data/logs/ui.log`), the two systems' together.
+
+Unzip it anywhere you can write to — a folder of yours, or a USB drive formatted exFAT, which both systems read and
+write — and start it: on Windows double-click `windows\SiLVANN.exe`; on Linux run `linux/SiLVANN.sh`, from a terminal
+or by a double-click in a file manager that runs scripts (it asks first), and `linux/SiLVANN.sh --menu` puts it in the
+desktop's applications menu. A model downloaded on one system is there on the other, and so are the conversations.
+
+- **The window** shows the UI — the chat, **Options** with **Download models** and **start**, as `silvann ui` shows
+  them. On Windows it is Microsoft Edge in app mode, on a profile of its own; Edge comes with Windows 10 and 11. On
+  Linux it is Chrome, Chromium, Edge or Brave in app mode, on a profile of its own in your home folder's
+  `.cache/silvann_portable/browser`. Where none is found, or Linux's hands the window to a browser already running (as
+  a snap's may), the default browser opens the UI and a small message box stands for the window: its OK ends the app.
+  On Linux with no display at all (over ssh) it says the address and runs until Ctrl-C.
 - **The cards:** an NVIDIA card through CUDA (its driver from CUDA 12's line on), an AMD or Intel GPU through OpenCL with
-  its own driver, and the CPU alone (AVX2) where there is neither — the same libraries `install.ps1` takes.
-- **Your data** — the models, the conversations, the logs (`data\logs\ui.log`) — is in `data\` beside `SiLVANN.exe`;
-  where the folder cannot be written to (Program Files), in `Documents\SiLVANN`. The model started last starts again
-  with the app.
+  its own driver, and the CPU alone (AVX2) where there is neither. On Windows these are the libraries `install.ps1`
+  takes; on Linux an AMD card goes through OpenCL too, as ROCm's own families open the ROCm a system has installed and
+  are built by [`install.sh`](#on-linux-installed) and the AMD image instead.
+- **Your data** is in `data\`, beside `windows\` and `linux/`; where the folder cannot be written to (Program Files), in
+  `Documents\SiLVANN` (on Linux `~/Documents/SiLVANN`). The model started last starts again with the app.
 - **Closing the window** ends the app: a small window says *SiLVANN is shutting down* while the conversations are
   saved and the model's server stops, then everything the app started has ended. Closing that small window stops at once,
-  without saving; the conversations' files stay readable either way.
-- **Updating:** unzip the new release's folder and move the old one's `data\` into it.
+  without saving; the conversations' files stay readable either way. On Linux the app ended another way — a `kill`, the
+  session closing — stops the same way.
+- **Updating:** unzip the new release's folder and move the old one's `data` into it. Before v1.1.0 the app was
+  Windows' alone and its `data\` was beside `SiLVANN.exe`: it goes beside `windows\` now.
+- **A drive Linux will not run programs from** (mounted `noexec`, or giving its files no right to run): `SiLVANN.sh`
+  says so, and the folder runs from your own disk. A desktop mounts a USB drive so that it can.
 
 `SiLVANN.exe`, the evaluator and the families are signed by Eval Apply Consulting LTD, and Windows 11's Smart App Control
-lets them run ([below](#on-windows)). The model's shell starts switched off, as on any Windows install ([`tools.md`](tools.md#where-the-models-commands-reach)).
+lets them run ([below](#on-windows)); Linux checks no signature. The model's shell starts switched off, as on any
+Windows install ([`tools.md`](tools.md#where-the-models-commands-reach)).
 
 ### On Windows
 

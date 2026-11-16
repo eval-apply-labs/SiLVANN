@@ -495,6 +495,23 @@ static __device__ inline bool sys__bindings__set(uint64_t bindings, const sys__h
     return true;
 }
 
+static __device__ inline bool sys__bindings__define(uint64_t bindings, const sys__heap_node* name,
+                                                    const sys__heap_node* value) {
+    if (name == 0 || value == 0) {
+        sys__fault__raise(0ull, SYS__HEAP_OBJECT__FAULT_NO_VALUE);
+        return false;
+    }
+    sys__heap_node stack;
+    if (!sys__bindings__zzprivate_scope(bindings, name, &stack)) return false;   /* no name, or no bindings: raised */
+    if (sys__bindings__zzprivate_scoped(&stack)) {
+        sys__stack__replace(&stack, value);                       /* a scope of its own holds it: assigned */
+        (void)sys__heap_object__release(stack.args[0]);
+        return true;
+    }
+    if (sys__heap_node__carries_reference(stack.dtype)) (void)sys__heap_object__release(stack.args[0]);
+    return sys__bindings__add(bindings, name, value);             /* none does: its first scope here */
+}
+
 /* What every spelled name means now, as a SEALED dictionary at the picture's element 0 — or nothing
  * there, when no spelled name means anything. The base's own spelled names are copied first and this
  * environment's scopes are written over them, which is the read order of a name. The keys go across as

@@ -1,10 +1,10 @@
 # SiLVANN
 
-> **Public beta, v1.0.3.** The worst bugs have been handled, but system stability is not guaranteed. It is shared for
-> enthusiasts with patience, who can follow a guide and do some troubleshooting. Some testing has been done — NVIDIA
-> cards from a GTX 1080 Ti to a B200, AMD's MI50, MI355X and RDNA4 Radeons, Windows natively on one PC
-> ([`docs/platforms.md`](docs/platforms.md)) — but less common setups may not behave as expected, and a bug-free
-> experience is not guaranteed. macOS is not supported.
+> **Public beta, v1.1.0.** The normal path has been tested on a reasonable sample of cards, but a bug-free experience is
+> not expected yet. It is shared for enthusiasts with patience, who can follow a guide and do some troubleshooting. The
+> cards it has run on — NVIDIA's from a GTX 1080 Ti to a B200, AMD's MI50, MI355X and RDNA4 Radeons, and Windows natively
+> on one PC — are in [`docs/platforms.md`](docs/platforms.md); less common setups may not behave as expected, and a
+> report from one is welcome (Issues → **Hardware report**). macOS is not supported.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/silvann_dark.svg">
@@ -70,7 +70,7 @@ every machine one model was measured on, its packs and its notes: [`docs/models.
 names no setup chooses its own when the server starts, by trying it on the card: where its experts go, how much of the
 card holds the ones used most, the context the card has room for ([`docs/config.md`](docs/config.md)).
 
-**New in v1.0.3**: [`docs/release_logs/v1.md`](docs/release_logs/v1.md); every 0.x release before it:
+**New in v1.1.0**: [`docs/release_logs/v1.md`](docs/release_logs/v1.md); every 0.x release before it:
 [`docs/release_logs/v0.md`](docs/release_logs/v0.md).
 
 ## Platforms
@@ -112,16 +112,18 @@ the conversations, and the workspace where you put what it should read — and n
 ([why](docs/local_ai.md#container-first)). Updating, stopping, and the commands by hand:
 [`docker/README.md`](docker/README.md).
 
-### Windows: the portable app
+### Windows and Linux: the portable app
 
 No installer and no command line: from the [latest release](https://github.com/eval-apply-labs/SiLVANN/releases/latest),
-download `silvann_portable_windows_x64.zip`, unzip it anywhere — a folder of yours, a USB drive — and double-click
-`SiLVANN.exe` in it. The chat opens in a window of its own; in **Options**, **Download models** fetches a model and
-**start** runs it. The folder carries its own Python and the libraries for every card the families list, so a card
-needs only its driver, and without one the CPU runs the models. Its models and conversations stay in its `data\` folder;
-closing the window saves them and ends everything it started
-([`docs/users.md`](docs/users.md#on-windows-the-portable-app)). `SiLVANN.exe` and its libraries are signed by Eval Apply
-Consulting LTD, and Windows 11's Smart App Control lets them run.
+download `silvann_portable_x64.zip` and unzip it anywhere — a folder of yours, a USB drive. It holds three folders:
+`windows\`, `linux/` and `data/`. On Windows double-click `windows\SiLVANN.exe`; on Linux (64-bit x86) run
+`linux/SiLVANN.sh`. The chat opens in a window of its own; in **Options**, **Download models** fetches a model and
+**start** runs it. Each system's folder carries its own Python and the libraries for every card the families list, so a
+card needs only its driver, and without one the CPU runs the models. The models and conversations stay in `data/`, the
+two systems' together: one USB drive carries them from one machine to another, Windows or Linux. Closing the window
+saves them and ends everything it started ([`docs/users.md`](docs/users.md#the-portable-app-on-windows-and-linux)).
+`SiLVANN.exe` and its libraries are signed by Eval Apply Consulting LTD, and Windows 11's Smart App Control lets them
+run.
 
 ### Windows: the installer
 
@@ -159,6 +161,22 @@ silvann ui
 `silvann help` lists the rest; `silvann update` updates, and the models and the conversations stay. The compilers a
 card needs, building by hand, and keeping the models on another drive: [`docs/users.md`](docs/users.md).
 
+### The Lisp, at a prompt
+
+Each install also leaves two REPLs that need no model and no server — in the container, `podman exec -it silvann` before
+them:
+
+```bash
+silvann_base_repl      # the interpreter's own Lisp: (+ 1 2), (defun (sq x) (* x x)), a file, or another program's pipe
+silvann_tools_repl     # the model's tool at your prompt: its commands, skills and kept definitions, in the same workspace
+```
+
+`silvann_base_repl` boots the Eval-Apply Generalized Interpreter on the CPU in a fraction of a second and keeps it up
+between forms, so another program can drive it as it would `java`
+([`docs/developers.md`](docs/developers.md#the-interpreter-at-a-prompt)). `silvann_tools_repl` runs the forms a model
+writes, and asks you what the model would ask its user
+([`docs/tools.md`](docs/tools.md#the-same-repl-at-your-prompt)).
+
 ### If you get stuck
 
 An AI assistant can walk you through it. Paste this into one:
@@ -178,7 +196,8 @@ uname -a; cat /etc/os-release; podman --version; docker --version; nvidia-smi -L
 - The model's tool, and adding your own commands to it: [`docs/tools.md`](docs/tools.md).
 - The experts read from the disk, and a model split over several machines: [`docs/users.md`](docs/users.md).
 - Every measurement: [`docs/results.md`](docs/results.md).
-- How it is built, and how a model or a silicon is added: [`docs/developers.md`](docs/developers.md).
+- How it is built, and how a model or a silicon is added: [`docs/developers.md`](docs/developers.md); the interpreter's
+  Lisp and the tool's, and where they part: [`docs/two_evaluators.md`](docs/two_evaluators.md).
 - The concepts it is built on, the interpreter and the library and the Lisp lineage:
   [`docs/concepts.md`](docs/concepts.md); what inspired the design, meaning as a negotiation and the weights as a
   frozen map: [`docs/inspiration.md`](docs/inspiration.md); how the weights are packed:
@@ -202,6 +221,8 @@ lisp/               each model family's program, in Lisp — a model folder carr
                     for each release that changed it
 silvann_core.py     download-model · check-model · list-models · hf-token
 start_silvann_server.py, silvann_ui.py, silvann_cli.py     the server, the chat in a browser, the chat in a terminal
+silvann_base_repl.py   the interpreter at a prompt with no model — or another program's, through a pipe
+silvann_tools_repl.py  the model's tool at your prompt: the commands, skills and kept definitions the models use
 models/             where downloaded models go
 skills/             commands for the model's tool, a folder each — docs/tools.md says how to add yours
 docs/               users.md — running it; ui.md — the chat in the browser; config.md — a model's settings; tools.md — the model's tool and your own

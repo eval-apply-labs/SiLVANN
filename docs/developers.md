@@ -194,6 +194,46 @@ stays on the CPU: a variable bound at boot (`runtime/silvann_runtime/expert_tier
 card against the CPU computing one, the medians of five readings — 15 for GLM and 4 for the 35B on the test machine — and read by the prompt's
 program.
 
+## The interpreter at a prompt
+
+`silvann_base_repl` (`silvann_base_repl.py`) boots the Eval-Apply Generalized Interpreter with no model — the processors'
+own family, one worker, the language alone — and runs forms in one environment, a `defun` or a name defined with
+`(define n 5)` there for the next form, until the input ends:
+
+```
+silvann_base_repl                      a prompt; from a pipe, a line for each form it is sent, the machine kept between
+silvann_base_repl prog.lisp [-i]       each file's forms in order, its last answer written; -i, a prompt after
+silvann_base_repl -e '(+ 1 2)'         each form's answer, a line each
+```
+
+So another program runs it as it would `java`: it writes forms, reads an answer a line, and closes the pipe when it is
+done. An answer is a value as the reader reads it again (`3`, `2.5`, `#t`, `(1 a (2 b))`), an object by its kind
+(`#<nn__buffer @753>`), an error (`#<error BNDU>`, the machine and its names kept), `#<refused …>` (nothing ran), or
+`#<panic EVAV>` — the machine stopped, every form refused until `,reboot`. SIGINT (Ctrl-C) kills the form running and
+nothing else: it answers `#<error SCKL>`. The commands are `,help`, `,quit`, `,reboot`, `,load FILE`,
+`,verbs [TEXT]` and `,tools FORM`, which runs the form by the model's tool (below); `--silicon` names another family. nn's buffers come from pools carved once at the boot, so it boots
+none unless asked — `nn__buffer__getnew` answers `#<error NBNP>` — and `--nn` boots small ones (1 MiB at most a buffer),
+`--params FILE` the device parameters a file names. The exit code is the last answer's: 0 a value, 1 an error, 2
+refused, 3 a panic.
+
+### One syntax, two Lisps
+
+The engine's Lisp and the model's tool (`silvann_tools_repl`, [`tools.md`](tools.md)) are two evaluators that read one
+core the same way (`test/src_one_syntax.py` holds it):
+
+```
+quote 'x   if   begin   let   set!   define   defun   while   and   or   ;comments
+numbers  #t  #f  nil    + - * < > = eq?
+```
+
+`define` binds in the frame it runs in, the session at the prompt and a `let`'s or a procedure's inside one; `set!`
+changes the nearest binding and refuses a name nobody bound (`#<error BNDS>`). A `while` written with its parts quoted,
+`(while '(< i n) '(…))`, as programs before 1.1.0 were, still runs. Where the two part — the engine's scoping is dynamic
+and the tool's lexical, the engine's tests take only truths and its arithmetic one kind of number at a time, a failed
+call stops the engine's machine, text and `lambda` are the tool's — and why there are two at all:
+[`two_evaluators.md`](two_evaluators.md). The tool hands a form to the
+engine with `(engine '(form))`, and `,tools FORM` at `silvann_base_repl`'s prompt runs one by the tool.
+
 ## Adding a model
 
 1. **Pack it.** The weights become a TurboQuant bundle: every matrix a record, rotated along its input and

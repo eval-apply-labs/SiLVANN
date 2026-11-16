@@ -16,7 +16,7 @@ beside each conversation ([`users.md`](users.md#the-models-tool)).
 
 | command | what it does |
 |---|---|
-| `(help)`, `(help 'name)` | Lists every command, or gives one's page — made when it is called, from what the server holds: what is here, what is switched off or not available and why, and what asks the user first in this conversation's mode. |
+| `(help)`, `(help 'name)` | Lists every command, or gives one's page — made when it is called, from what the server holds: what is here, what is switched off or not available and why, and what asks the user first in this conversation's mode. `(help 'defun)` and the other Lisp forms' names give the form's shape. |
 | `(tools)` | The commands that answer in this conversation and the skills', a line each — the tool's description names it, so a model reaches for it first. A command that cannot answer here is left out; `(help)` keeps it as a comment saying why. |
 | `(ls "folder")` | The names in a folder; a folder's name ends in `/`. |
 | `(read "file")`, `(read "file" from count)` | A file's first 200 lines, or `count` of its lines from line `from`; a last line says how to read on. |
@@ -26,6 +26,7 @@ beside each conversation ([`users.md`](users.md#the-models-tool)).
 | `(fetch "https://…")` | A web page's words, without its markup. It names itself to the site and keeps to the site's `robots.txt` ([below](#searching-the-web)). |
 | `(search "query")`, `(search "query" count)` | The web searched: the first 8 results, or `count` (at most 20), each a title, its address and a few words from the page — then `(fetch "address")` reads one. It asks this machine's SearXNG or a search API with a key, never a search engine's own pages. A skill the release ships, `search` ([below](#searching-the-web)). |
 | `(cd "folder")`, `(pwd)` | The working folder. |
+| `(engine '(form))`, `(engine '(form) seconds)` | The form run by the Eval-Apply Generalized Interpreter, the engine models run on, in an engine the REPL keeps — for its own verbs, as the REPL computes on its own. It reaches no file, so nothing is asked ([below](#the-repl)). |
 | `(reset)` (or `(exit)`) | A fresh REPL: the names defined, the working folder and any once-allowances are gone. Files, allowed folders, the mode and the library stay. |
 | `(keep 'name "what it does")`, `(library)`, `(import 'name)`, `(forget 'name)` | The library: definitions kept across conversations in `tools_library.json` (below). |
 | `(skills)` | The skills installed, their commands, and any left out with the reason; those the model added say so. |
@@ -39,8 +40,24 @@ beside each conversation ([`users.md`](users.md#the-models-tool)).
 | `(agent 'model "config" "task")` | A subagent's session: another model, or this one under a LoRA, given a task ([below](#subagents)). |
 | `(guide)` | This page's part on [adding a command](#adding-a-command), headed by how the model adds a tool on this machine, or that adding is switched off. |
 
-**Lisp to put the commands together:** `define`, `let`, `lambda`, `if`, `map`, `filter`, `length`, `split`, and text and
-list words.
+**Lisp to put the commands together:** `define`, `defun`, `let`, `lambda`, `if`, `while`, `and`, `or`, `map`, `filter`,
+`length`, `split`, and text and list words — the core the engine's Lisp reads the same way, with text, `lambda` and the
+commands the tool's own ([`two_evaluators.md`](two_evaluators.md): where the two part, and why).
+
+**The engine, a form at a time:** `(engine '(form))` hands the form to the Eval-Apply Generalized Interpreter — a
+`silvann_base_repl` the conversation's REPL keeps, with no model — and answers what it answered. The REPL computes on
+its own, so a model needs the engine only for what the engine alone has, its verbs; its `(tools)` line says so. `(engine '(+ 1 2))` is
+`3`, and a `define` there stays for the next call until `(reset)`. A name the form uses and does not bind, and which the
+REPL bound to a number, a truth, a name or a list, goes with it by value: after `(define k 7)`, `(engine '(* k k))` is
+`49`. A procedure the REPL defined does not go — the engine's are its own — so a form that calls one is refused before
+it is sent: define it in the form, `(engine '(begin (define (sq x) (* x x)) (sq 9)))`, and it stays there for the next
+call. It computes and nothing more — it reaches no file, so it is asked of nobody — and a form past its time (the tools
+file's `engine` entry, `seconds`, 60 by default) is ended, the engine's names kept. Its errors come back as the REPL's
+own: `(error "(engine …): the engine answered the error BNDU")`. A call the engine cannot make stops it and every name
+defined there, so a form calling a head it has no verb or procedure for — `progn`, `lambda`, a procedure it does not
+hold — is refused before it is sent, and the engine and its names are kept: `(error "(engine …): progn is no verb of
+the engine's and no procedure it holds — its sequence is begin. …")`. In a procedure's body, which runs when the
+procedure is called and may call one defined later, only the words of other Lisps are refused.
 
 **Other names for the same commands:** `read-file`, `slurp-file`, `read-all`, `cat` and `slurp` are `read`; `system`,
 `shell` and `sh` are `bash` — on Windows `system`, `shell`, `cmd` and `pwsh` are `powershell`, and `sh` is `bash`.
@@ -161,6 +178,27 @@ The library keeps a definition the model wrote so another conversation can use i
 4. **Remove it.** `(forget 'word-count)` takes it out.
 
 The file is plain JSON: you can read it, edit it or share it.
+
+### The same REPL, at your prompt
+
+`silvann_tools_repl` (`silvann_tools_repl.py`) opens the session a conversation's model gets, with no model: the same
+commands and skills, the same workspace, the folders allowed in `tools.json`, and the library. You type the forms the
+model would write and read the answers it would read, so you can try a tool's script before a model does, or use a
+model's kept definitions yourself:
+
+```
+silvann_tools_repl                         a prompt; from a pipe, an answer a line for each form
+silvann_tools_repl script.lisp [-i]        each file's forms in order, its last answer written; -i, a prompt after
+silvann_tools_repl -e "(import 'word-count)" -e '(word-count "notes.txt")'
+```
+
+What the model would ask its user, it asks you, by the conversation's mode (`--mode ask|chill|full-auto`, "ask" by
+default). At the prompt the question is a line: **o** allows it once, **f** allows the folder, and Enter refuses. From a
+pipe, the answer is the ask itself, `(ask "…" (once folder refuse))`, and the program sends `(answer 'once)`.
+`(allow "folder")` and `(mode 'chill)` are yours, as in the chat. A picture from `(ui 'look)` or `(browser 'look)` is
+written to a file, and the REPL says where. `(image …)` and `(agent …)` need the server's model and answer an error
+here. `,quit` leaves (Ctrl-D too), and Ctrl-C ends a form that is running. The exit code is 0 for a value, 1 for an
+error or an ask nobody answered, and 2 for text that does not read.
 
 ## The tools file
 

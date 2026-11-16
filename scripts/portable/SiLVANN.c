@@ -1,11 +1,12 @@
 /* SiLVANN.exe — the portable app's launcher (NN-162).
  *
- * The folder unzipped anywhere: SiLVANN.exe beside `python\` (Python's embeddable build with the runtime's packages),
- * `lib\` (the evaluator and the silicon families), the release's tree and `scripts\portable\silvann_portable.py`. A
- * double-click starts the app — the UI in a window of its own (▶ silvann_portable.py) — inside a Windows job object that
- * kills every process in it when the job's last handle closes: this launcher holds it, so the app's end, a crash, or this
- * process ended from the Task Manager ends the UI, every model server it started and their children with it. No console,
- * no installer, no administrator.
+ * The folder unzipped anywhere — a USB drive carried between Windows and Linux: SiLVANN\windows\ holds SiLVANN.exe beside
+ * `python\` (Python's embeddable build with the runtime's packages), `lib\` (the evaluator and the silicon families), the
+ * release's tree and `scripts\portable\silvann_portable.py`; SiLVANN\linux\ is Linux's part, with SiLVANN.sh; and
+ * SiLVANN\data\ is both systems' (NN-194). A double-click starts the app — the UI in a window of its own
+ * (▶ silvann_portable.py) — inside a Windows job object that kills every process in it when the job's last handle
+ * closes: this launcher holds it, so the app's end, a crash, or this process ended from the Task Manager ends the UI,
+ * every model server it started and their children with it. No console, no installer, no administrator.
  *
  * Built by scripts\portable\build_portable.ps1 (MSVC: cl /O2 SiLVANN.c /link /SUBSYSTEM:WINDOWS user32.lib). */
 #define WIN32_LEAN_AND_MEAN
@@ -29,7 +30,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, PWSTR command, int s
     swprintf(app, MAX_PATH, L"%ls\\scripts\\portable\\silvann_portable.py", dir);
     if (GetFileAttributesW(py) == INVALID_FILE_ATTRIBUTES || GetFileAttributesW(app) == INVALID_FILE_ATTRIBUTES) {
         say(L"This folder is not SiLVANN's whole: python\\pythonw.exe or scripts\\portable\\silvann_portable.py is missing. "
-            L"Unzip silvann_portable_windows_x64.zip again, whole.");
+            L"Unzip silvann_portable_x64.zip again, whole.");
         return 1;
     }
     swprintf(line, 3 * MAX_PATH, L"\"%ls\" \"%ls\"", py, app);

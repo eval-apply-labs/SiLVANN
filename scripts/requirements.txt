@@ -10,3 +10,4 @@ PyJWT[crypto]>=2.8
 nicegui>=3.14
 pillow>=10.0
 pypdf>=5.0
+safetensors>=0.4

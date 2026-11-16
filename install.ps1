@@ -434,6 +434,8 @@ echo silvann users [add^|passwd^|remove^|adopt] ^<name^>   the users: each a sig
 echo silvann serve ^<model^> [config]      the server, on port 8765 (--port to change it)
 echo silvann ui                          the chat in a browser, on port 8090, talking to the server
 echo silvann_cli                         the chat in this terminal (--notools, --nothink), talking to the server
+echo silvann_base_repl                   the interpreter at a prompt, no model (FILE, -e FORM; a program's, through a pipe)
+echo silvann_tools_repl                  the model's tool at your prompt: its commands and skills, the same workspace
 echo silvann registry                    the registry of a network's servers, on port 8770 (--port), for the subagents
 echo silvann data [folder]               where the models, the conversations and the rest are kept - another folder
 echo silvann build                       build the libraries here, from source - after installing CUDA, say
@@ -447,6 +449,12 @@ exit /b 0
     $cli = "@echo off`r`nrem ``silvann_cli``, written by install.ps1: the chat in this terminal (silvann_cli.py).`r`n" +
            "set `"PYTHONUTF8=1`"`r`n`"%~dp0venv\Scripts\python.exe`" `"%~dp0silvann_cli.py`" %*`r`n"
     Set-Content -Path (Join-Path $Dir "silvann_cli.cmd") -Value $cli -Encoding ASCII -NoNewline
+    $repl = "@echo off`r`nrem ``silvann_base_repl``, written by install.ps1: the interpreter (silvann_base_repl.py).`r`n" +
+            "set `"PYTHONUTF8=1`"`r`n`"%~dp0venv\Scripts\python.exe`" `"%~dp0silvann_base_repl.py`" %*`r`n"
+    Set-Content -Path (Join-Path $Dir "silvann_base_repl.cmd") -Value $repl -Encoding ASCII -NoNewline
+    $tools = "@echo off`r`nrem ``silvann_tools_repl``, written by install.ps1: the model's tool (silvann_tools_repl.py).`r`n" +
+             "set `"PYTHONUTF8=1`"`r`n`"%~dp0venv\Scripts\python.exe`" `"%~dp0silvann_tools_repl.py`" %*`r`n"
+    Set-Content -Path (Join-Path $Dir "silvann_tools_repl.cmd") -Value $tools -Encoding ASCII -NoNewline
     $path = [Environment]::GetEnvironmentVariable("Path", "User")
     if (-not $path) { $path = "" }
     if (($path -split ";") -notcontains $Dir) {
@@ -524,6 +532,7 @@ if (-not $Build) {
    silvann serve silvann_tq_D8E4_qwen3.6_35b_a3b      the server
    silvann ui                                         the chat, at http://localhost:8090
    silvann_cli                                        or the chat in this terminal
+   silvann_base_repl, silvann_tools_repl              the Lisp at a prompt, no model: the interpreter's, the tool's
    silvann help                                       every command
    scripts\install_nonfree.ps1                        once, to read video files other than animated pictures (PyAV)
 "@

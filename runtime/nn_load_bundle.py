@@ -158,6 +158,11 @@ class Bundle:
         #   plausible wrong matrix. A path to an overlay elsewhere is accepted too; the identity decides either way.
         self.lora, self.overlay, self.mask = None, None, None
         where = (lora if os.sep in lora else os.path.join(path, "loras", lora)) if lora else None
+        if where and not os.path.isdir(where):
+            raise Refused("no LoRA or mask at %r: no such folder" % (where,))
+        if where and not any(os.path.isfile(os.path.join(where, f)) for f in ("mask.json", "pack.json")):
+            raise Refused("the LoRA or mask at %r holds neither mask.json (a mask) nor pack.json (a LoRA overlay)"
+                          % (where,))
         # ⭐ OR A RANK-1 MASK — a changed model kept as `W + r·vᵀ` for each matrix it changed (`nn_rank1_mask.py`), applied
         #   by the verbs beside the matrices rather than written into them. ⛔ Refused unless it was made from this
         #   bundle's model with its residual kept the same way: its `v` is rotated as this bundle's inputs are.
@@ -168,6 +173,8 @@ class Bundle:
             if mj.get("kind") != "rank1-mask" or theirs != mine:
                 raise Refused("the mask %r was made for another base: %r, this bundle's %r" % (lora, theirs, mine))
             tensors = os.path.join(where, "mask.safetensors")
+            if not os.path.isfile(tensors):
+                raise Refused("the mask at %r has its mask.json and no mask.safetensors" % (where,))
             with open(tensors, "rb") as fh:
                 sha = hashlib.sha256(fh.read()).hexdigest()[:16]
             self.mask = dict(name=mj["name"], path=tensors, layers=mj.get("layers", {}))

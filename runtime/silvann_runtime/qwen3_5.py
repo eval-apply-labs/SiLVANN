@@ -281,8 +281,6 @@ class Qwen35(Generates):
             raise Refused("experts_int8 is the CPU's arithmetic: experts_on 'cpu'")
         if self.CARD_GB and not self.CPU_EXPERTS:
             raise Refused("a card's tier of experts is beside the CPU's — experts_on='cpu'")
-        if self.CARD_GB and b.mask is not None:
-            raise Refused("a card's tier of experts does not take a mask yet")
         # ⭐ SEATS (NN-155 ②, as Flash-Next's): `seats` conversations held on the card at once, each its own state — its slot
         #   of every layer's state (▶ `_plan`, `state`) — its own buffers alive across a step's end, and a view its
         #   programs run in (▶ `load`, `on_seat`); the weights one. A seat's position is a chain of steps (▶ qwen3_5.lisp's
@@ -1153,8 +1151,8 @@ class Qwen35(Generates):
                 for x in range(self.EXPERTS):
                     loader.load_expert(self.b, e, 0, l, x, self.EXPERTS)
                     self.SRC.setdefault(l, []).append(loader.placed[-1][3])
-                if progress:                       # the experts' load said a layer at a time, as the dense part's
-                    progress(i + 1, len(layers))
+                if progress:                       # the experts' load said a layer at a time, on a line of its own
+                    progress(i + 1, len(layers), "experts")
             if loader.handed() != 0:
                 raise Refused("%d expert slots were reserved and never published" % loader.handed())
         self._backing = backing
@@ -1401,25 +1399,33 @@ class Qwen35(Generates):
     def _mask_layout(self):
         """Where each of the mask's tensors goes: `MASK_PLACE[(worker, l, site)]` its `r` and `v` as (start, count) in
         halves inside that worker's one mask buffer, and `MASK_BYTES` each buffer's size — the scratch for the verbs'
-        dots first. The mixers and the shared expert are the card's; the routed experts go wherever they run."""
+        dots first. The mixers and the shared expert are the card's; the routed experts go wherever they run — and with a
+        card's tier beside the CPU's experts, to the card as well, the routed experts' `r` and the whole of `V`, since the
+        tier holds whole experts and computes the picks it holds (▶ glm5.py's `_mask_layout`). ⚖ 2026-11-16 *"what's
+        preventing the loras to coexist with the l1 expert tier?"*"""
         self.MASK_BYTES, self.MASK_PLACE = {CARD: 0, self.CPU: 0}, {}
         mask = self.b.mask
         if mask is None:
             return
         from safetensors.numpy import load_file
         self._mask_tensors = t = load_file(mask["path"])
-        scratch = 8 * self.CHUNK * max(self.TOPK, 1) + 256
+        # the verbs' dots: a position's picks 12 bytes each, a chunk's — or, with a tier and a prompt streamed, a slice's
+        #   rows (▶ `T_SLICE`), which the tier's experts take at once — 8 each
+        rows = max(self.CHUNK, (self.SLICE or {}).get("rows", 0) if self.CARD_GB else 0)
+        scratch = 8 * rows * max(self.TOPK, 1) + 256
         at = {CARD: scratch, self.CPU: scratch}
         for l in self.run_layers:
             for site in ("attn", "shared", "moe"):
                 if "layers.%d.%s.r" % (l, site) not in t:
                     continue
-                w = self.CPU if site == "moe" and self.CPU_EXPERTS else CARD
-                place = []
-                for a in (t["layers.%d.%s.r" % (l, site)], t["layers.%d.%s.%s" % (l, site, "V" if site == "moe" else "v")]):
-                    place.append((at[w] // 2, a.size))
-                    at[w] += (a.nbytes + 255) & ~255
-                self.MASK_PLACE[(w, l, site)] = place
+                ws = ([self.CPU] + ([CARD] if self.CARD_GB else [])) if site == "moe" and self.CPU_EXPERTS else [CARD]
+                for w in ws:
+                    place = []
+                    for a in (t["layers.%d.%s.r" % (l, site)],
+                              t["layers.%d.%s.%s" % (l, site, "V" if site == "moe" else "v")]):
+                        place.append((at[w] // 2, a.size))
+                        at[w] += (a.nbytes + 255) & ~255
+                    self.MASK_PLACE[(w, l, site)] = place
         for w in (CARD, self.CPU):
             if any(k[0] == w for k in self.MASK_PLACE):
                 self.MASK_BYTES[w] = at[w]
@@ -1440,7 +1446,10 @@ class Qwen35(Generates):
             for (start, count), a in zip(place, (t["layers.%d.%s.r" % (l, site)],
                                                  t["layers.%d.%s.%s" % (l, site, "V" if site == "moe" else "v")])):
                 m.write(base + 2 * start, np.ascontiguousarray(a, dtype="<f2").tobytes())
-            self.MASK_CELLS[(l, site)] = [view(*place[0]), view(*place[1]), view(0, self._mask_scratch // 2)]
+            # the routed experts' on the card beside the CPU's are the tier's (`_tier_tables`): the card's own MoE table
+            #   leaves the routed site to the CPU, as without a tier
+            key = (l, "tier") if site == "moe" and w == CARD and self.CPU_EXPERTS else (l, site)
+            self.MASK_CELLS[key] = [view(*place[0]), view(*place[1]), view(0, self._mask_scratch // 2)]
 
     def _masked(self, l, site, at, have=None, both=False):
         """A table's mask cells for layer `l`'s site at cell `at` — zeros up to it from `have` cells — or nothing when the
@@ -1600,8 +1609,11 @@ class Qwen35(Generates):
             d = int(self.b.record(l, GU).d)
             if l in self.SRC and card == 0:
                 self._int_array("src%d" % l, self.SRC[l])
+            # a mask's three cells, the card's copy of the routed experts' `r` and `V` (▶ `_mask_layout`), where the experts
+            #   verb reads them — cell 16 — or zeros
+            masked = self._masked(l, "tier", 16, 16) or [0, 0, 0]
             cells = [l, self.T_CEXP, e.at_up_lut, e.at_down_data, e.at_down_lut, self.H, self.INTER, self.EXPERTS, self.TOPK,
-                     d, 0, 0, 0, 0, 0, 0]
+                     d, 0, 0, 0] + masked
             m.table(nm("exk%d" % l), [nm("signs"), nm("kscratch"), nm("zero_h")] + cells)
             if card == 0:
                 m.table("exkr%d" % l, ["signs", "krscratch", "zero_h"] + cells)

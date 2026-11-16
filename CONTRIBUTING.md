@@ -1,9 +1,11 @@
 # Contributing to SiLVANN
 
-Thank you for wanting to help. SiLVANN is a developer preview, and the most useful contributions right now are:
+Thank you for wanting to help. SiLVANN is a public beta: the normal path has been tested on a reasonable sample of cards,
+but a bug-free experience is not expected yet. The most useful contributions right now are:
 
 - **Running it on hardware we have not** — another AMD card, an NVIDIA card, an Intel or AMD iGPU through OpenCL, a
-  CPU with AVX-512 — and reporting what happened, with the command, the model and the numbers.
+  CPU with AVX-512 — and reporting what happened, with the command, the model and the numbers: Issues → **Hardware
+  report** asks for each of them.
 - **Bug reports** with the smallest program or prompt that shows the problem.
 - **Fixes and new silicon families** (`engine/src/silicon_families/add_a_family.md`).
 

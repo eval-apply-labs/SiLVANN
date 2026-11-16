@@ -436,6 +436,18 @@ static __device__ sys__heap_node sys__opcodes__zzabi_bindings_set(const sys__hea
 }
 SYS__ENGINE__ABI__BRIDGE(sys__opcodes__zzabi_adapter_bindings_set, sys__opcodes__zzabi_bindings_set)
 
+/* `(sys__bindings__define env 'name value)` — what `define` lowers to (NN-193): assign where this environment holds
+ * the name, enter its first scope here where it does not (▶ `sys__bindings__define`). It answers `#t`, or `#f` where
+ * the cell is no name or the environment no bindings — raised by the lookup — as `add_bindings` answers. */
+static __device__ sys__heap_node sys__opcodes__zzabi_bindings_define(const sys__heap_node* argv,
+                                                                      unsigned argc, sys__engine__ctx* ctx) {
+    if (argc != 3u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
+    /* ⛳ 0 FOR THE ENVIRONMENT IS THE ONE THIS COMPUTATION RUNS IN — ▶ `sys__bindings__zzpackage_named` */
+    return sys__opcodes__truth(sys__bindings__define(sys__bindings__zzpackage_named(ctx->base, argv[0].args[0]),
+                                                     &argv[1], &argv[2]));
+}
+SYS__ENGINE__ABI__BRIDGE(sys__opcodes__zzabi_adapter_bindings_define, sys__opcodes__zzabi_bindings_define)
+
 /* ── THE DISPATCH TRIO. A request addresses a block by its number, and its value goes into an answer. ─────── */
 
 /* `(sys__scheduler__add block names actions [answer])` -> the answer: queue a computation on another block and carry on;
@@ -1020,7 +1032,8 @@ SYS__ENGINE__ABI__BRIDGE(sys__opcodes__zzabi_adapter_package_init, sys__opcodes_
 /* ⛳ THE LAYOUT IS DESCRIBED IN `procedure.cuh`, WITH THE KIND — this file writes the two halves and
  * reads what they mean from where the thing itself is described. */
 
-/* `(defun env 'name '(params) '(body))` — make a procedure and bind it.
+/* `(defun env 'name '(params) '(body))` — make a procedure and define it: `sys__bindings__define`, so a procedure
+ * defined again is one binding, and one defined in a frame that holds its name is that frame's (NN-193).
  * ⛳ THE PARAMETERS AND BODY ARRIVE QUOTED, for the reason every unevaluated thing here does — the scan
  * does not descend into a value, so a body is not run at the moment it is written down. */
 static __device__ sys__heap_node sys__opcodes__zzabi_defun(const sys__heap_node* argv, unsigned argc,
@@ -1057,7 +1070,7 @@ static __device__ sys__heap_node sys__opcodes__zzabi_defun(const sys__heap_node*
     sys__procedure__zzpackage_adopt(proc);
     sys__heap_node value = sys__heap_object__reference_to(proc);
     value.dtype = SYS__KIND__PROCEDURE_REFERENCE;
-    const bool ok = sys__bindings__add(env, &name, &value);
+    const bool ok = sys__bindings__define(env, &name, &value);
     (void)sys__heap_object__release(proc);            /* the binding holds it now */
     return sys__opcodes__truth(ok);
 }

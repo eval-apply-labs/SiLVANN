@@ -1071,7 +1071,7 @@ class Glm5(Generates):
             if l not in moved and b.release(l):   # its experts copied out: the file let go (▶ `Bundle.release`)
                 raise Refused("layer %d's file is still mapped after its experts were copied out" % l)
             if progress:
-                progress(i + 1, len(moe))
+                progress(i + 1, len(moe), "experts")
         for c in self.CPUS:
             m.act_as(c["w"])
             if loaders[c["w"]].handed() != 0:

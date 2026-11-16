@@ -80,6 +80,8 @@ COPY docker/entrypoint.sh /opt/silvann/docker/entrypoint.sh
 # /data/python/<the image's Python version>, which silvann-data.pth puts on the environment's path when it exists
 RUN ln -s /opt/silvann/silvann /usr/local/bin/silvann \
  && ln -s /opt/silvann/silvann_cli /usr/local/bin/silvann_cli \
+ && ln -s /opt/silvann/silvann_base_repl /usr/local/bin/silvann_base_repl \
+ && ln -s /opt/silvann/silvann_tools_repl /usr/local/bin/silvann_tools_repl \
  && chmod 755 /opt/silvann/docker/entrypoint.sh \
  && /opt/silvann/venv/bin/python /opt/silvann/docker/image_notices.py > /opt/silvann/IMAGE_NOTICES.md \
  && /opt/silvann/venv/bin/python -c "import site, sys; open(site.getsitepackages()[0] + '/silvann-data.pth', 'w').write('/data/python/%d.%d\n' % sys.version_info[:2])"

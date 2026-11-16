@@ -3,7 +3,7 @@
 ⚖ 2026-11-07 *"ideally i would also like a silvann portable app on windows, so instead of calling it via command line you
 open it up as an ui by just doing a double click and when you close it it's over"*. SiLVANN.exe runs this with the folder's
 own Python (`python\\pythonw.exe`, no console) inside a job object that ends every process it holds when the launcher goes
-(▶ SiLVANN.c). Here:
+(▶ SiLVANN.c), from `windows\\` — Linux's part is `linux\\` beside it, and `data\\` theirs together. Here:
 
   1. the data — the models, the conversations, the logs — in `data\\` beside SiLVANN.exe, or in Documents\\SiLVANN where
      the folder cannot be written to (a read-only place, Program Files), handed on as `SILVANN_DATA`
@@ -17,32 +17,79 @@ own Python (`python\\pythonw.exe`, no console) inside a job object that ends eve
      terminate there is TerminateProcess, which runs nothing), while a small window says "Shutting down" with its dots
      cycling. ⚖ 2026-11-10 *"the close does say shutting down with the dots cycling and pressing x again would be a hard
      close"*: that window's X ends the UI at once, and the launcher's job ends whatever is left.
+
+ON LINUX (NN-194, ⚖ 2026-11-16 *"i'd like to have a single portable app, and when unzipped it should have windows, linux
+and data folders ... one usb key and being able to move it across systems"*): SiLVANN.sh, beside SiLVANN.exe at the top
+of the folder, runs this with `linux/python/bin/python3`, a standalone Python, from `linux/` — the release's tree, its
+evaluator and families in `linux/lib/` — and the data is the same `data/` Windows' part uses. The same four steps, with
+Linux's own means:
+
+  1. Documents/SiLVANN in the home folder where the folder cannot be written to (or ~/SiLVANN where there is no Documents)
+  2. the UI in a process group of its own, which its model's servers join; it is sent SIGTERM — the `docker stop` it
+     already answers — should this launcher die first (PR_SET_PDEATHSIG), and a hard stop ends the whole group
+  3. the window: the Chromium family's app mode (Chrome, Chromium, Edge, Brave) on its own profile in `data/.browser`.
+     A browser that hands the window to one already running and returns at once (a snap's, a flatpak's), or none of
+     them: the default browser opens the UI and a message box — zenity's, kdialog's or Tk's — stands for the window
+  4. the end: the same quit route, a "Shutting down" window drawn by Tk; with no display at all (a terminal over ssh),
+     the app runs until Ctrl-C or SIGTERM, and stops the same way
 """
 import ctypes
 import os
 import secrets
+import shutil
+import signal
 import socket
 import subprocess
 import sys
 import threading
 import time
 import urllib.request
+import webbrowser
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]          # scripts\portable\ → the folder SiLVANN.exe is in
-CREATE_NO_WINDOW = 0x08000000
+WINDOWS = os.name == "nt"
+ROOT = Path(__file__).resolve().parents[2]          # scripts\portable\ → this system's part: windows\ or linux/
+APP = ROOT.parent                                   # the folder SiLVANN.exe and SiLVANN.sh are in, data\ beside them
+CREATE_NO_WINDOW = 0x08000000 if WINDOWS else 0
 STOP_SECONDS = 660                                  # the UI's stop without a window to cut it short: the server's save
                                                     # (its 600 s) and its end
+HANDED_OVER = 5                                     # seconds: a browser back sooner gave its window to one already running
+# Linux's app-mode browsers, in the order looked for: the Chromium family's `--app` and `--user-data-dir`, as Edge's
+CHROMIUMS = ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "microsoft-edge",
+             "microsoft-edge-stable", "brave-browser")
+TITLE = "SiLVANN is shutting down"
+NOTE = "Saving the conversations and stopping the model.\nClose this window to stop at once, without saving."
 
 
 def say(text, title="SiLVANN", flags=0):
-    """A message box (MB_OK, or `flags`): the app has no console to write to."""
-    return ctypes.windll.user32.MessageBoxW(None, text, title, flags)
+    """A message box (MB_OK, or `flags` on Windows), waited on: the app has no console to write to. On Linux zenity's or
+    kdialog's where one is installed, else Tk's; with no display, the line on stderr and no wait (False)."""
+    if WINDOWS:
+        return ctypes.windll.user32.MessageBoxW(None, text, title, flags)
+    if os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"):
+        for line in (["zenity", "--info", "--no-wrap", "--title", title, "--text", text],
+                     ["kdialog", "--title", title, "--msgbox", text]):
+            if shutil.which(line[0]):
+                subprocess.call(line, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                return True
+        try:
+            import tkinter
+            from tkinter import messagebox
+            root = tkinter.Tk()
+            root.withdraw()
+            messagebox.showinfo(title, text, parent=root)
+            root.destroy()
+            return True
+        except Exception:                             # no Tk, or no display it can open
+            pass
+    print("%s: %s" % (title, text), file=sys.stderr, flush=True)
+    return False
 
 
 def data_folder():
-    """`data\\` beside SiLVANN.exe where it can be written to, else Documents\\SiLVANN."""
-    here = ROOT / "data"
+    """`data\\` beside SiLVANN.exe and SiLVANN.sh, both systems' — where it can be written to, else Documents\\SiLVANN
+    (on Linux the home folder's Documents/SiLVANN, or ~/SiLVANN where it has no Documents)."""
+    here = APP / "data"
     try:
         here.mkdir(exist_ok=True)
         probe = here / ".writable"
@@ -50,7 +97,8 @@ def data_folder():
         probe.unlink()
         return here
     except OSError:
-        docs = Path(os.environ.get("USERPROFILE", str(Path.home()))) / "Documents" / "SiLVANN"
+        home = Path(os.environ.get("USERPROFILE", str(Path.home()))) if WINDOWS else Path.home()
+        docs = (home / "Documents" / "SiLVANN") if WINDOWS or (home / "Documents").is_dir() else (home / "SiLVANN")
         docs.mkdir(parents=True, exist_ok=True)
         return docs
 
@@ -94,11 +142,71 @@ def edge():
     return None
 
 
+def app_browser():
+    """The browser that opens the UI as a window of its own: Edge on Windows; on Linux the first of CHROMIUMS on the
+    PATH, where a display is."""
+    if WINDOWS:
+        return edge()
+    if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+        return None
+    for name in CHROMIUMS:
+        found = shutil.which(name)
+        if found:
+            return Path(found)
+    return None
+
+
+def _die_with_launcher():
+    """Linux, in the UI's process before it runs: SIGTERM to it when this launcher's thread ends (PR_SET_PDEATHSIG), so
+    a launcher killed or crashed stops the UI as `docker stop` does — what the job object does on Windows."""
+    try:
+        ctypes.CDLL(None, use_errno=True).prctl(1, signal.SIGTERM)
+    except Exception:
+        pass
+
+
+def _shutting_down_tk(stopped):
+    """Linux's "shutting down" window, by Tk: the same words, the dots cycling, its X a stop at once (False)."""
+    import tkinter
+    root = tkinter.Tk()
+    root.title("SiLVANN")
+    root.resizable(False, False)
+    title = tkinter.Label(root, text=TITLE, font=("TkDefaultFont", 15), anchor="w", width=28)
+    title.pack(padx=24, pady=(20, 6), anchor="w")
+    tkinter.Label(root, text=NOTE, justify="left", anchor="w").pack(padx=24, pady=(0, 20), anchor="w")
+    root.update_idletasks()
+    root.geometry("+%d+%d" % ((root.winfo_screenwidth() - root.winfo_width()) // 2,
+                              (root.winfo_screenheight() - root.winfo_height()) // 2))
+    root.attributes("-topmost", True)
+    window = {"dots": 0, "x": False}
+
+    def tick():
+        if stopped.is_set():
+            root.destroy()
+            return
+        window["dots"] = (window["dots"] + 1) % 4
+        title.config(text=TITLE + "." * window["dots"])
+        root.after(400, tick)
+
+    def close():                                      # the X: stop at once
+        window["x"] = True
+        root.destroy()
+
+    root.protocol("WM_DELETE_WINDOW", close)
+    root.after(400, tick)
+    root.mainloop()
+    return not window["x"]
+
+
 def shutting_down(stopped):
     """A small window while the app stops — "SiLVANN is shutting down", its dots cycling — closed when `stopped` is set.
     Its X (or Alt+F4) closes it first: False then, True when the stop finished."""
     if stopped.wait(0.3):                             # nothing to wait for: no window
         return True
+    if not WINDOWS:
+        if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+            raise RuntimeError("no display")         # waited on unseen (▶ stop)
+        return _shutting_down_tk(stopped)
     from ctypes import wintypes
     user32 = ctypes.WinDLL("user32", use_last_error=True)
     gdi32 = ctypes.WinDLL("gdi32")
@@ -205,7 +313,8 @@ def shutting_down(stopped):
 def stop(ui, url, token):
     """The app's end: the UI asked to stop through its quit route — it saves the conversations, stops the model's server
     and exits — while `shutting_down` shows it; that window's X, a UI that does not answer, or no window and
-    STOP_SECONDS gone, and the UI is ended at once (the launcher's job then ends what it started)."""
+    STOP_SECONDS gone, and the UI is ended at once (the launcher's job then ends what it started; on Linux, the UI's
+    process group here)."""
     if ui.poll() is not None:
         return
     stopped = threading.Event()
@@ -232,9 +341,16 @@ def stop(ui, url, token):
             ui.wait(5)
         except subprocess.TimeoutExpired:
             pass
+    if not WINDOWS:                                   # what the UI started and left — the job object's end, by its group
+        try:
+            os.killpg(ui.pid, signal.SIGKILL)
+        except OSError:                               # the group gone with the UI: nothing left
+            pass
 
 
 def main():
+    if not WINDOWS:                                   # a session's end or a `kill` ends the app as its window does
+        signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     data = data_folder()
     (data / "logs").mkdir(exist_ok=True)
     token = secrets.token_hex(16)                     # opens the UI's quit route: this app's alone
@@ -242,24 +358,44 @@ def main():
     port = free_port()
     url = "http://127.0.0.1:%d" % port
     log = open(data / "logs" / "ui.log", "a", encoding="utf-8")
+    own = (dict(creationflags=CREATE_NO_WINDOW) if WINDOWS else
+           dict(start_new_session=True, preexec_fn=_die_with_launcher))
     ui = subprocess.Popen([sys.executable, str(ROOT / "silvann_ui.py"), "--port", str(port), "--host", "127.0.0.1",
-                           "--no-browser", "--local"], cwd=str(ROOT), env=env, stdout=log, stderr=subprocess.STDOUT,
-                          creationflags=CREATE_NO_WINDOW)
+                           "--no-browser", "--local"], cwd=str(ROOT), env=env, stdout=log, stderr=subprocess.STDOUT, **own)
+    window = None
     try:
         if not answers(url, 120):
             say("SiLVANN's UI did not start. What it said is in %s." % (data / "logs" / "ui.log"))
             return 1
-        browser = edge()
+        browser = app_browser()
+        handed_over = False
         if browser is not None:
-            window = subprocess.Popen([str(browser), "--app=" + url, "--user-data-dir=" + str(data / ".edge"),
+            # Edge's profile in data\.edge; a Chromium's on Linux in the home folder's cache, which a Linux filesystem
+            #   holds — its lock is a symbolic link, which a drive formatted for both systems (exFAT) cannot make
+            profile = (data / ".edge") if WINDOWS else (
+                Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "silvann_portable" / "browser")
+            started = time.time()
+            window = subprocess.Popen([str(browser), "--app=" + url, "--user-data-dir=" + str(profile),
                                        "--no-first-run", "--no-default-browser-check", "--disable-features=Translate"],
-                                      creationflags=CREATE_NO_WINDOW)
-            window.wait()                             # the window closed: the app is over
-        else:
+                                      **(dict(creationflags=CREATE_NO_WINDOW) if WINDOWS else
+                                         dict(stdout=log, stderr=subprocess.STDOUT)))
+            code = window.wait()                      # the window closed: the app is over
+            if WINDOWS or time.time() - started >= HANDED_OVER:
+                return 0
+            handed_over = code == 0                   # back at once: its window given to a browser already running
+        if WINDOWS:
             os.startfile(url)
-            say("SiLVANN is open in your browser at %s.\n\nPress OK to close SiLVANN." % url)
+        elif not handed_over and (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+            webbrowser.open(url)                      # with no display it could start a text browser in the terminal
+        if not say("SiLVANN is open in your browser at %s.\n\nPress OK to close SiLVANN." % url) and not WINDOWS:
+            print("SiLVANN runs at %s until Ctrl-C." % url, file=sys.stderr, flush=True)
+            signal.pause()                            # no display: Ctrl-C or SIGTERM
+        return 0
+    except KeyboardInterrupt:
         return 0
     finally:
+        if window is not None and window.poll() is None:
+            window.terminate()
         stop(ui, url, token)
         log.close()                                   # and the launcher's job ends whatever is left
 

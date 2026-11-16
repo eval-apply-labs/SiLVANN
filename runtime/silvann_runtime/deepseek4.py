@@ -969,7 +969,7 @@ class DeepSeek4(Generates):
             if l not in moved:
                 b.release(l)
             if progress:
-                progress(i + 1, len(self.run_layers))
+                progress(i + 1, len(self.run_layers), "experts")
         for c in self.CPUS:
             m.act_as(c["w"])
             if loaders[c["w"]].handed() != 0:
@@ -1036,7 +1036,7 @@ class DeepSeek4(Generates):
                 view = piece = None
                 b.release(l)
             if progress and l in ram:
-                progress(i + 1, len(self.run_layers))
+                progress(i + 1, len(self.run_layers), "experts")
         if loader.handed() != 0:
             raise Refused("%d expert slots were reserved and never published" % loader.handed())
         for l in mapped:

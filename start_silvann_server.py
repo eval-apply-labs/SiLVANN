@@ -122,10 +122,11 @@ def _cards(m):
 def _loading():
     """`progress(done, total, what)` for a model's load: a dot every 2.5% and the tens, the whole line so far each time it
     grows (`loading weights: ...10...20...30.`) — the UI shows it as one line growing — so a long load (GLM's experts
-    copied into RAM, minutes) is seen to move. `what` names what is loading: the weights, unless the load says the
-    engrams (an n-gram memory's tables, ▶ ram_table.steps), and each has a line of its own. A load of the weights in
-    passes — the dense part, then the experts copied into RAM — climbs again after the pass before, on the same line
-    (`loading weights: ...10...100 · ...10.`): a pass begins where `done` falls back."""
+    copied into RAM, minutes) is seen to move. `what` names what is loading, each on a line of its own: the weights, the
+    experts the CPUs run (copied into RAM or cached from their file, after the weights), the engrams (an n-gram memory's
+    tables, ▶ ram_table.steps). ⚖ 2026-11-16 *"yes name them as such otherwise it looks like the engine is stuck in a
+    loop"*: the experts' copy once climbed again on the weights' line. A pass of one thing after another of it still
+    climbs again on its line (`loading weights: ...10...100 · ...10.`): a pass begins where `done` falls back."""
     said, last, before, named = [0], [0], [""], [None]
 
     def tick(done, total, what="weights"):

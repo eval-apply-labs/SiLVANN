@@ -114,7 +114,7 @@ a number, tagged like a kind. From Python, `e.verbs()` lists them. ▶
 ```
 arithmetic   add sub mul less eq, and their int__ / float__ forms
 control      if begin prog1 while unquote
-names        let defun bindings__set bindings__viewonly add_bindings remove_bindings
+names        let defun bindings__set bindings__define bindings__viewonly add_bindings remove_bindings
 objects      create type clone
 node arrays  node_array__get node_array__set
 lists        list__shared_append list__shared_take list__shared_length

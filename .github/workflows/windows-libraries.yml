@@ -3,6 +3,10 @@
 # release a tag names, as silvann_windows_x64.zip. install.ps1 takes them when their stamp is its own folder's (the
 # engine's tree and scripts/build.py, by git's hash); otherwise it builds them, as scripts/build.ps1 does.
 #
+# The same run makes the portable app, silvann_portable_x64.zip (NN-162, NN-194): Windows' part here (`portable`), Linux's
+# in a manylinux container (`linux_portable`), joined into one folder — windows/, linux/, data/ — that a USB drive carries
+# between the two systems (`portable_app`).
+#
 # The runners have no GPU: each library is built and loaded, no model is run. Windows Server 2022's runner, for its
 # Visual Studio 2022: CUDA 12.9's front end does not take Visual Studio 2026's headers (cudafe++ crashed on them),
 # and a library built with the older toolset runs on an older Visual C++ runtime. NVIDIA's family is built with CUDA 12.9
@@ -164,7 +168,7 @@ jobs:
           python3 scripts/sign_plan.py plan built "$prev" "$RUNNER_TEMP/plan.json"
           if grep -q '"action": "reuse"' "$RUNNER_TEMP/plan.json"; then
             t=$(python3 -c "import json, sys; print(json.load(open(sys.argv[1]))['previous'])" "$RUNNER_TEMP/plan.json")
-            gh release download "$t" --pattern silvann_windows_x64.zip --pattern silvann_portable_windows_x64.zip \
+            gh release download "$t" --pattern silvann_windows_x64.zip --pattern 'silvann_portable*_x64.zip' \
               --dir "$RUNNER_TEMP/prev"
             python3 scripts/sign_plan.py reuse built "$RUNNER_TEMP/plan.json" "$RUNNER_TEMP/prev"
           fi
@@ -261,9 +265,9 @@ jobs:
             built/signed_manifest.json
           if-no-files-found: error
 
-  # the portable app (NN-162): SiLVANN.exe and its folder — Python's embeddable build with the runtime's packages, the
-  #   evaluator for it, the families, the release's tree — built by scripts/portable/build_portable.ps1 and attached to the
-  #   tag's release as silvann_portable_windows_x64.zip
+  # the portable app's Windows part (NN-162): SiLVANN\windows\ — SiLVANN.exe, Python's embeddable build with the runtime's
+  #   packages, the evaluator for it, the families, the release's tree — built by scripts/portable/build_portable.ps1;
+  #   `portable_app` joins it with Linux's into the one archive a release carries
   portable:
     needs: [evaluator, families, sign]
     if: ${{ !cancelled() && !failure() }}   # on a release candidate's branch `sign` is skipped, and the files are unsigned
@@ -300,19 +304,86 @@ jobs:
         run: pwsh scripts/portable/build_portable.ps1 -Lib built -Out portable -Launcher built/families/lib/SiLVANN.exe
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: silvann_portable_windows_x64
-          path: portable/silvann_portable_windows_x64.zip
+          name: silvann_portable_windows_part
+          path: portable/silvann_portable_windows_part.zip
+          if-no-files-found: error
+
+  # the portable app's Linux part (NN-194): SiLVANN/linux/ — SiLVANN.sh, a standalone Python with the runtime's packages,
+  #   the evaluator for it, the families, the release's tree — built by scripts/portable/build_portable.sh in a
+  #   manylinux_2_28 container (AlmaLinux 8, glibc 2.28), so it runs on the Linux systems from RHEL 8, Debian 10 and
+  #   Ubuntu 20.04 on. Its families: the CPU's, OpenCL's four (which open the OpenCL a GPU's driver installs) and NVIDIA's
+  #   (CUDA 12.9 for every card the family lists, its runtime linked in: a driver of CUDA 12's line is all it needs).
+  #   ROCm's are not in it — each opens the ROCm a system installed, at the version it was built with — so an AMD card
+  #   takes OpenCL 2.0 there; install.sh and the AMD image build ROCm's. Linux checks no signature: nothing is signed.
+  linux_portable:
+    runs-on: ubuntu-24.04
+    # quay.io/pypa/manylinux_2_28_x86_64:2026.11.01-2
+    container: quay.io/pypa/manylinux_2_28_x86_64@sha256:7e41b1c7fd64dfc69703a1124b43c404382973ee06ec5d764b85c34d2221fded
+    env:
+      SILVANN_SILICON_FAMILIES: "x86_avx2 khronos_opencl2 intel_opencl2 nvidia_opencl1 intel_opencl1_igpu nvidia_cuda12"
+      SILVANN_NVCC: /usr/local/cuda-12.9/bin/nvcc
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: CUDA 12.9's compiler and runtime, from NVIDIA's repository for RHEL 8
+        run: |
+          curl -fsSL -o /etc/yum.repos.d/cuda-rhel8.repo \
+            https://developer.download.nvidia.com/compute/cuda/repos/rhel8/x86_64/cuda-rhel8.repo
+          dnf install -y cuda-nvcc-12-9 cuda-cudart-devel-12-9
+      - name: The portable app's Linux part
+        run: bash scripts/portable/build_portable.sh --out portable
+      - name: Every family built, and none needing more than glibc 2.28
+        run: |
+          cd portable/SiLVANN/linux/lib
+          for f in $SILVANN_SILICON_FAMILIES; do
+            test -f silicon_families/libsilvann_$f.so || { echo "no $f"; exit 1; }
+          done
+          for f in silvann_engine_cpu*.so silicon_families/*.so; do
+            minor=$(objdump -T "$f" | grep -oE 'GLIBC_2\.[0-9]+' | cut -d. -f2 | sort -n | tail -1)
+            echo "$f: GLIBC_2.$minor"
+            [ "$minor" -le 28 ] || { echo "$f needs glibc 2.$minor"; exit 1; }
+          done
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: silvann_portable_linux_part
+          path: portable/silvann_portable_linux_part.tar.gz
+          if-no-files-found: error
+
+  # the portable app (NN-194): one archive, silvann_portable_x64.zip — SiLVANN/windows/, SiLVANN/linux/ and SiLVANN/data/,
+  #   one folder a USB drive carries between the two systems — by scripts/portable/pack_portable.py, attached to the tag's
+  #   release
+  portable_app:
+    needs: [portable, linux_portable]
+    if: ${{ !cancelled() && !failure() }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: silvann_portable_windows_part
+          path: parts
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: silvann_portable_linux_part
+          path: parts
+      - name: The two parts, one archive
+        run: |
+          python3 scripts/portable/pack_portable.py parts/silvann_portable_windows_part.zip \
+            parts/silvann_portable_linux_part.tar.gz silvann_portable_x64.zip
+          ls -l silvann_portable_x64.zip
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: silvann_portable_x64
+          path: silvann_portable_x64.zip
           if-no-files-found: error
       - name: Attached to the tag's release
         if: startsWith(github.ref, 'refs/tags/')
-        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           tag="${GITHUB_REF#refs/tags/}"
           gh release view "$tag" > /dev/null 2>&1 || gh release create "$tag" --verify-tag --title "SiLVANN $tag" \
-            --notes "SiLVANN $tag."
-          gh release upload "$tag" portable/silvann_portable_windows_x64.zip --clobber
+            --notes "SiLVANN $tag." || gh release view "$tag" > /dev/null
+          gh release upload "$tag" silvann_portable_x64.zip --clobber
 
   zip:
     needs: [evaluator, families, sign]
@@ -367,8 +438,9 @@ jobs:
           gh release upload "$tag" silvann_windows_x64.zip --clobber
 
   # the release's manifest, attached last: the next release reuses this one's signed files only once both zips are on it
+  #   (SiLVANN.exe from silvann_portable_x64.zip, the libraries from silvann_windows_x64.zip)
   manifest:
-    needs: [sign, portable, zip]
+    needs: [sign, portable_app, zip]
     if: startsWith(github.ref, 'refs/tags/rel')
     runs-on: ubuntu-latest
     steps:

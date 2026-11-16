@@ -53,6 +53,10 @@ def built_in():
                            "\"auto\" the first picture model there; card: its own card, or null the text model's, put "
                            "down while it draws; host: \"local\", or another SiLVANN server serving a picture model, "
                            "\"http://host:port\""},
+        "engine": {"enabled": "yes", "config": {"seconds": 60},
+                   "about": "(engine '(form)): a form run by the Eval-Apply Generalized Interpreter in a silvann_base_repl "
+                            "the session keeps, with no model and no buffer pools — computing, never a file. seconds: a "
+                            "form's time before it is ended (NN-193)"},
         "bash": {"enabled": on, "config": {"confined": "auto"},
                  "about": "(bash \"command\"), and (powershell \"command\") on Windows: a shell command, as the "
                           "server's user — on Windows switched off until you switch it on. confined: \"auto\" — in a "

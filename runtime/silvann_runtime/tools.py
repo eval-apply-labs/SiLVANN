@@ -16,7 +16,8 @@ session and the answer back (`Session.run`):
   (keep 'f "what it does")     -> the library, a JSON file every conversation shares: (import 'f) in another session
 ```
 The forms are read by the composer's reader (`composer.read`: names, numbers, `"text"`, quotes) and evaluated here:
-`quote` `if` `define` `set!` `let` `lambda` `begin` `and` `or`; numbers, text, lists, `#t`, `#f` and `nil`. A value
+`quote` `if` `define` `defun` `set!` `let` `lambda` `begin` `while` `and` `or`; numbers, text, lists, `#t`, `#f` and
+`nil` — the core the engine's Lisp reads the same way (NN-193), `(engine '(form))` handing a form to it. A value
 is written back in the reader's syntax, so the model reads what it would write; an error is the value `(error "…")`.
 """
 import ast
@@ -40,7 +41,7 @@ from . import jail as _jail
 from . import repos as _repos
 from . import skills as _skills
 from . import tools_config as _tools_config
-from .composer import ComposerError, Text, read, to_text
+from .composer import LOWERED, SURFACE, ComposerError, Text, read, to_text
 from .system import WINDOWS
 
 ANSWER_MAX = 16384               # the most characters an answer carries back; the rest is said to be cut
@@ -170,11 +171,43 @@ def source(form):
 
 # ── the evaluator ─────────────────────────────────────────────────────────────────────────────────────────────────
 CONSTANTS = {"#t": True, "#f": False, "nil": None}
-SPECIAL = {"quote", "if", "define", "set!", "lambda", "let", "begin", "and", "or"}     # the forms evaluate reads itself
+SPECIAL = {"quote", "if", "define", "defun", "set!", "lambda", "let", "begin", "and", "or", "while"}  # evaluate's own
 
 
 def _truth(v):
     return v is not False and v is not None
+
+
+def _defun_shape(form):
+    """What a defun is — and where `form` is Common Lisp's `(defun name (params…) body…)`, it written as one."""
+    said = "a defun is (defun (name param …) body …)"
+    if len(form) >= 3 and isinstance(form[1], str) and isinstance(form[2], list) and all(
+            isinstance(p, str) and not isinstance(p, Text) for p in form[2]):
+        said += ": here, (defun (%s) …)" % " ".join([str(form[1])] + [str(p) for p in form[2]])
+    return said
+
+
+# The forms (help 'name) says, as it says a command
+LISP_FORMS = {
+    "define": "(define name value) a name for a value; (define (name param …) body …) a procedure. At the top it stays "
+              "for the session; inside a let or a procedure's body it is that one's and ends with it. Answers the name.",
+    "defun": "(defun (name param …) body …) a procedure, as (define (name param …) body …) — the engine's spelling of it, "
+             "read by both. Answers #t: (defun (cube x) (* x x x)), then (cube 7).",
+    "set!": "(set! name value) changes the nearest binding of a name already bound; a name nobody bound is an error.",
+    "let": "(let ((name value) …) body …) binds the names for the body, and they end with it.",
+    "lambda": "(lambda (param …) body …) a procedure with no name — this REPL's; the engine has none.",
+    "if": "(if test then else) — the test a truth: #t or #f in the engine, anything but #f and nil here.",
+    "begin": "(begin form …) each in turn, the last one's value the answer.",
+    "while": "(while test body …) the body again while the test is true; answers #f.",
+}
+
+
+def _same(a, b):
+    """As the engine's `eq?` answers: an atom the same kind and the same value — `(= 1 1.0)` is #f — and a list only
+    itself — `(eq? L L)` is #t, `(eq? '(1 2) '(1 2))` #f, two lists however alike."""
+    if isinstance(a, list) or isinstance(b, list):
+        return a is b
+    return type(a) is type(b) and a == b
 
 
 def evaluate(x, env, session):
@@ -192,6 +225,10 @@ def evaluate(x, env, session):
         if not x:
             return None
         head = x[0]
+        if head == "quote":                              # (quote x), the spelling `'x` is read from
+            if len(x) != 2:
+                raise Fault("(quote form)")
+            return _quoted(x[1])
         if head == "if":
             if len(x) not in (3, 4):
                 raise Fault("(if test then [else])")
@@ -212,11 +249,24 @@ def evaluate(x, env, session):
             env[x[1]] = evaluate(x[2], env, session)
             session.sources[x[1]] = source(x)
             return Sym(x[1])
-        if head == "set!":
+        if head == "defun":                              # the engine's spelling of a procedure's define (NN-193)
+            if len(x) < 3 or not isinstance(x[1], list) or not x[1] or not isinstance(x[1][0], str):
+                raise Fault(_defun_shape(x))
+            env[x[1][0]] = Closure(x[1][1:], x[2:], env)
+            session.sources[x[1][0]] = source(["define"] + x[1:])
+            return True                                  # as the engine's defun answers
+        if head == "set!":                               # a name already bound, never a new one: the typo's guard
             if len(x) != 3 or not isinstance(x[1], str):
                 raise Fault("(set! name value)")
             env.find(x[1])[x[1]] = evaluate(x[2], env, session)
-            return env.find(x[1])[x[1]]
+            return True                                  # as the engine's set! answers (NN-193)
+        if head == "while":                              # the test again before each turn; #f the answer, as the engine's
+            if len(x) < 3:
+                raise Fault("(while test body…)")
+            while _truth(evaluate(x[1], env, session)):
+                for form in x[2:]:
+                    evaluate(form, env, session)
+            return False
         if head == "lambda":
             if len(x) < 3 or not isinstance(x[1], list):
                 raise Fault("(lambda (args…) body…)")
@@ -312,9 +362,19 @@ def _list(v):
 
 
 def _builtins(session):
+    def fold(op, unit):
+        def f(*xs):
+            _num(*xs)
+            if not xs:
+                return unit
+            a = xs[0]
+            for b in xs[1:]:            # left to right, as the engine's (+ (+ a b) c): a float rounds the same
+                a = op(a, b)
+            return a
+        return f
+
     def sub(a, *bs):
-        _num(a, *bs)
-        return -a if not bs else a - sum(bs)
+        return -_num(a)[0] if not bs else fold(lambda x, y: x - y, 0)(a, *bs)
 
     def div(a, b):
         _num(a, b)
@@ -329,8 +389,10 @@ def _builtins(session):
         return f
 
     return {
-        "+": lambda *xs: sum(_num(*xs)), "-": sub, "*": lambda *xs: __import__("math").prod(_num(*xs)), "/": div,
-        "=": lambda a, b: a == b, "<": cmp(lambda a, b: a < b), ">": cmp(lambda a, b: a > b),
+        "+": fold(lambda a, b: a + b, 0), "-": sub, "*": fold(lambda a, b: a * b, 1), "/": div,
+        # `=` and `eq?` are the engine's: the same kind and the same value, a list only itself — (= 1 1.0) is #f
+        #   (NN-193, ⚖ 2026-11-16 "make = strict")
+        "=": _same, "eq?": _same, "<": cmp(lambda a, b: a < b), ">": cmp(lambda a, b: a > b),
         "<=": cmp(lambda a, b: a <= b), ">=": cmp(lambda a, b: a >= b), "not": lambda v: not _truth(v),
         "list": lambda *xs: list(xs), "car": lambda v: _list(v)[0] if _list(v) else None,
         "cdr": lambda v: _list(v)[1:] or None, "cons": lambda a, v: [a] + _list(v), "length": lambda v: len(_list(v))
@@ -719,6 +781,299 @@ def _names(names):
     return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
 
 
+# ── THE ENGINE, A FORM AT A TIME (NN-193) ────────────────────────────────────────────────────────────────────────────
+# ⚖ 2026-11-15 *"in this scenario the lowering would be calling silvann_base_repl from the silvann_tools_repl"*: `(engine
+#   'form)` hands the form to a silvann_base_repl this session keeps running — the Eval-Apply Generalized Interpreter
+#   with no model and no buffer pools — and answers what it answered. Each name the form uses and does not bind, bound
+#   here to a number, a truth, nil, a name or a list of them, is bound by value in a `let` around it: the engine's
+#   scoping is dynamic and captures nothing, so the sender makes the closure. It reaches nothing past its machine — the
+#   files' two verbs, its only way to a path, are refused here — so it is asked of nobody.
+ENGINE_SECONDS = 60                  # a form's time unless the tools file's engine entry says another
+_ENGINE_REFUSED = re.compile(r"(?<![\w-])sys__file__\w+")
+
+
+def _base_repl():
+    """silvann_base_repl.py: beside this runtime in a release, in main/ in the development tree."""
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    for at in (os.path.join(root, "silvann_base_repl.py"), os.path.join(root, "main", "silvann_base_repl.py")):
+        if os.path.isfile(at):
+            return at
+    raise Fault("(engine …): silvann_base_repl.py is not beside this runtime")
+
+
+class Engine:
+    """A resident silvann_base_repl: a form written to its input, its answer the line it writes back — read by a thread
+    of its own into a queue, as Windows' pipes cannot be waited on with a timeout."""
+
+    def __init__(self):
+        self.p, self.lines = None, None
+        self.defined = set()             # the names this engine's own forms defined at their top: its procedures
+        self.verbs = None                # its verbs as `,verbs` lists them: the module's, the same in every process
+
+    def words(self):
+        """The heads the engine calls with no procedure of its own: its verbs and the words its composer lowers."""
+        if self.verbs is None:
+            self.verbs = set(self.ask(",verbs", 30).strip().strip("()").split())
+        return self.verbs | set(SURFACE) | set(LOWERED) | {"quote"}
+
+    def holds_procedure(self, name):
+        """Whether `name` is bound in the engine to a procedure — asked of it: an unbound name is an error there, not a
+        stop. What else it holds, or the error, is the second value."""
+        said = self.ask("(begin %s)" % name, 10)
+        return said.startswith("#<sys__procedure_reference"), said
+
+    def ask(self, text, seconds):
+        import queue
+        if self.p is None or self.p.poll() is not None:
+            self.p = subprocess.Popen([sys.executable, _base_repl()], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                      stderr=subprocess.DEVNULL, text=True, bufsize=1, encoding="utf-8")
+            self.lines = queue.Queue()
+            self.defined = set()
+            threading.Thread(target=self._read, args=(self.p, self.lines), daemon=True).start()
+        self.p.stdin.write(text + "\n")
+        self.p.stdin.flush()
+        line = self._line(seconds)
+        if line is None and self.p.poll() is not None:   # its process ended under the form: the next call starts one
+            self.close()
+            raise Fault("(engine …): the engine ended under the form: its names are gone")
+        if line is None:
+            # ⛳ PAST ITS TIME, THE FORM IS KILLED AND THE MACHINE KEPT — on Linux and macOS, by the SIGINT the base REPL
+            #   answers with SCKL; Windows has no such signal for a pipe's process, so there the engine goes, its names too
+            if not WINDOWS:
+                self.p.send_signal(signal.SIGINT)
+                if self._line(10) is not None:
+                    raise Fault("(engine …): past %g seconds, the form ended" % seconds)
+            self.close()
+            raise Fault("(engine …): past %g seconds, the form ended and the engine with it: its names are gone" % seconds)
+        return line
+
+    @staticmethod
+    def _read(p, lines):
+        for line in p.stdout:
+            lines.put(line.rstrip("\n"))
+        lines.put(None)
+
+    def _line(self, seconds):
+        import queue
+        try:
+            return self.lines.get(timeout=seconds)
+        except queue.Empty:
+            return None
+
+    def close(self):
+        if self.p is not None and self.p.poll() is None:
+            self.p.kill()
+        self.p = None
+        self.defined = set()
+
+
+def _engine_literal(v):
+    """A value of this REPL as the engine reads it, or None where it has no such value (a procedure)."""
+    if isinstance(v, bool):
+        return "#t" if v else "#f"
+    if v is None:
+        return "nil"
+    if isinstance(v, (int, float)):
+        return v
+    if isinstance(v, Text):
+        raise Fault("a text — and the engine has no texts")
+    if isinstance(v, str):
+        return ("quote", str(v))
+    if isinstance(v, list):
+        items = [_engine_literal(e) for e in v]
+        if any(i is None for i in items):
+            return None
+        return ("quote", [i[1] if isinstance(i, tuple) else i for i in items])
+    return None
+
+
+def _engine_bound_inside(form, inside):
+    """The names a form binds itself — a let's, a define's, a defun's and its parameters — into `inside`."""
+    if isinstance(form, list) and form:
+        if form[0] == "let" and len(form) > 1 and isinstance(form[1], list):
+            inside.update(p[0] for p in form[1] if isinstance(p, list) and p and isinstance(p[0], str))
+        if form[0] in ("define", "defun") and len(form) > 1:
+            target = form[1]
+            inside.update(t for t in (target if isinstance(target, list) else [target]) if isinstance(t, str))
+        for part in form:
+            _engine_bound_inside(part, inside)
+
+
+def _engine_defines(form, out):
+    """The names a form defines where it runs, into `out` — a let's body and a procedure's are frames of their own, and
+    what they define ends with them, as the composer lowers it."""
+    if not isinstance(form, list) or not form:
+        return
+    if form[0] in ("define", "defun") and len(form) > 1:
+        target = form[1]
+        if isinstance(target, list):
+            if target and isinstance(target[0], str):
+                out.add(str(target[0]))
+            return
+        if isinstance(target, str):
+            out.add(str(target))
+        for part in form[2:]:
+            _engine_defines(part, out)
+        return
+    if form[0] == "let" and len(form) > 1 and isinstance(form[1], list):
+        for pair in form[1]:
+            if isinstance(pair, list) and len(pair) == 2:
+                _engine_defines(pair[1], out)
+        return
+    for part in form[1:]:
+        _engine_defines(part, out)
+
+
+def _holds_procedure(v):
+    return isinstance(v, Closure) or (isinstance(v, list) and any(_holds_procedure(e) for e in v))
+
+
+def _engine_names(form, out):
+    """Every name a form mentions, into `out` — a quoted part left out: it is data, not read."""
+    if isinstance(form, list):
+        for part in form:
+            _engine_names(part, out)
+    elif isinstance(form, str) and not isinstance(form, Text):
+        out.add(str(form))
+
+
+def _to_read(v):
+    """A value of this REPL as the reader would give it again: a truth, nil, and a `(quote x)` back to their spelling."""
+    if v is True:
+        return "#t"
+    if v is False:
+        return "#f"
+    if v is None:
+        return "nil"
+    if isinstance(v, list):
+        if len(v) == 2 and isinstance(v[0], Sym) and v[0] == "quote":
+            return ("quote", _to_read(v[1]))
+        return [_to_read(e) for e in v]
+    return v
+
+
+def _engine_form(form, env, defined=()):
+    """The form with each name it uses and does not bind, bound here to a value the engine reads, around it.
+    ⛳ A PROCEDURE OF THIS SESSION'S IS REFUSED BEFORE THE FORM GOES — the engine has none of ours, and a call on a
+    procedure it does not hold stops its machine, every name defined there with it — unless the engine defined that
+    name itself (`defined`)."""
+    names, inside = set(), set()
+    _engine_names(form, names)
+    _engine_bound_inside(form, inside)
+    pairs = []
+    for name in sorted(names - inside - set(CONSTANTS)):
+        try:
+            value = env.find(name)[name]
+        except Fault:
+            continue
+        if _holds_procedure(value) and name not in defined:
+            raise Fault("(engine …): %s %s a procedure of this session, and the engine holds none of this session's — "
+                        "define it in the form: (engine '(begin (define (name …) …) …))"
+                        % (name, "is" if isinstance(value, Closure) else "holds"))
+        try:
+            literal = _engine_literal(value)
+        except Fault as ex:
+            raise Fault("(engine …): %s is %s" % (name, ex))
+        if literal is not None:
+            pairs.append((name, literal))
+    # ⛳ THE VALUES GO BY `sys__let`, NOT `let`: a `let` is a frame, and what its body defines is the frame's (▶ composer
+    #   `_defined_here`) — a `(define n …)` sent here would end with the values that carried it. These values are the
+    #   sender's closure, not a frame the form wrote, so what the form defines stays the engine's for the next call.
+    if not pairs:
+        return form
+    return ["sys__let", 0] + [part for name, literal in pairs for part in (("quote", name), literal)] + [("quote", form)]
+
+
+# ⛳ A CALL THE ENGINE CANNOT MAKE STOPS ITS MACHINE, every name defined there with it — a head that is no verb of its
+#   and no procedure it holds. So the heads a form calls are looked at before it goes: each must be a verb or a word of
+#   the engine's, a name the form binds itself, or a procedure the engine holds (asked of it). A procedure's body runs
+#   when it is called, where the engine's scoping is dynamic — it may call a procedure defined later or bound by its
+#   caller's let — so there only the words of other Lisps below are refused, the ones the engine never has.
+_ENGINE_ELSEWHERE = {
+    "progn": "its sequence is begin",
+    "lambda": "it makes a procedure with defun, (defun (name x) …), and hands it on by its name",
+    "cond": "it chooses with if", "case": "it chooses with if", "when": "it chooses with if",
+    "unless": "it chooses with if", "let*": "a let inside a let binds one after another",
+    "letrec": "a procedure is made with defun", "labels": "a procedure is made with defun",
+    "flet": "a procedure is made with defun", "setq": "it changes a binding with set!",
+    "setf": "it changes a binding with set!", "defvar": "it defines a name with define",
+    "defparameter": "it defines a name with define", "funcall": "it calls a procedure by its name",
+    "apply": "it calls a procedure by its name", "print": "it has no text: a form's value is its answer",
+    "display": "it has no text: a form's value is its answer", "format": "it has no text: a form's value is its answer",
+    "dotimes": "it loops with while", "dolist": "it loops with while", "do": "it loops with while",
+    "loop": "it loops with while",
+}
+
+
+def _engine_heads(form, now, later, misshapen, in_body=False):
+    """The names a form calls, into `now` — what runs when it is sent — and `later`, what a procedure's body calls. A
+    quoted part is data; a define's or a defun's (name params…) and a let's pairs are no calls; a defun not in the
+    engine's shape, and a call whose head is a list — the engine calls a name, and stops at any other head — go into
+    `misshapen`, their parts not read."""
+    if not isinstance(form, list) or not form:
+        return
+    head = form[0]
+    if head == "defun" and not (len(form) > 2 and isinstance(form[1], list)):
+        misshapen.append(form)
+        return
+    if isinstance(head, list):
+        misshapen.append(form)
+        return
+    if isinstance(head, str) and not isinstance(head, Text):
+        (later if in_body else now).add(str(head))
+    if head in ("define", "defun") and len(form) > 2 and isinstance(form[1], list):
+        for part in form[2:]:
+            _engine_heads(part, now, later, misshapen, True)
+        return
+    rest = form[1:]
+    if head == "let" and len(form) > 1 and isinstance(form[1], list):
+        for pair in form[1]:
+            if isinstance(pair, list) and len(pair) == 2:
+                _engine_heads(pair[1], now, later, misshapen, in_body)
+        rest = form[2:]
+    for part in rest:
+        _engine_heads(part, now, later, misshapen, in_body)
+
+
+def _engine_check_heads(form, engine):
+    """Refuses the form, before it goes, where it calls a head the engine cannot call (▶ `_ENGINE_ELSEWHERE`'s note)."""
+    now, later, inside, misshapen = set(), set(), set(), []
+    _engine_heads(form, now, later, misshapen)
+    if misshapen:
+        bad = misshapen[0]
+        if bad[0] == "defun":
+            raise Fault("(engine …): %s" % _defun_shape(bad))
+        said = to_text(bad)
+        raise Fault("(engine …): %s calls a list, and the engine calls a name — a verb or a procedure — and stops at any "
+                    "other head, so the form was not sent; forms one after another are (begin form …)"
+                    % (said if len(said) <= 60 else said[:57] + "…"))
+    _engine_bound_inside(form, inside)
+    known = engine.words() | inside
+    for head in sorted(now - known) + sorted((later - known - now) & set(_ENGINE_ELSEWHERE)):
+        is_procedure, said = engine.holds_procedure(head)
+        if is_procedure:
+            continue
+        what = ("%s is no verb of the engine's and no procedure it holds" % head if said.startswith("#<error")
+                else "%s holds %s in the engine, not a procedure" % (head, said))
+        instead = _ENGINE_ELSEWHERE.get(head)
+        raise Fault("(engine …): %s%s. A call it cannot make stops the engine and every name defined there, so the "
+                    "form was not sent" % (what, " — " + instead if instead else ""))
+
+
+def _engine_answer(line):
+    """The engine's line as this REPL's value: a number, a truth, nil, a name or a list; an object's text; an error raised."""
+    for word, said in (("#<error ", "the engine answered the error %s"), ("#<panic ", "the engine stopped (%s): its names "
+                       "are gone, and the next (engine …) starts it again"), ("#<refused ", "the engine refused it: %s")):
+        if line.startswith(word):
+            raise Fault("(engine …): " + said % line[len(word):-1])
+    if line.startswith("#<"):
+        return Text(line)
+    try:
+        return _quoted(read(line))
+    except ComposerError:
+        return Text(line)
+
+
 def _commands(session):
     def help_(what=None):
         if what is None:
@@ -740,12 +1095,14 @@ def _commands(session):
                         + ("\nSkills — (skills) says whose:\n" + "\n".join(skilled) if skilled else "")
                         + "\nAlso: " + "; ".join("%s %s %s" % (_names(a), "is" if len(a) == 1 else "are", n)
                                                  for n, a in also.items()) + "."
-                        + "\nAnd Lisp: define, set!, let, lambda, if, begin, and, or, quote; + - * / = < >; list car cdr"
+                        + "\nAnd Lisp: define, defun, set!, let, lambda, if, begin, while, and, or, quote; + - * / = < >; list car cdr"
                         " cons length nth map filter append; string-append substring string=? contains? split join"
                         " lines number->string string->number. (help 'name) says more about a command."
                         + "\nThis conversation's mode is '%s': %s" % (session.classifier.mode, MODE_SAID[session.classifier.mode]))
         name = ALIASES.get(str(what), str(what))
         c = session.commands.get(name) or session.skill_commands.get(name)
+        if c is None and name in LISP_FORMS:
+            return Text(LISP_FORMS[name])
         if c is None:
             raise Fault("no command %s — (help) lists them" % write(what))
         said = "(%s) is (%s). " % (what, name) if name != str(what) else ""
@@ -1221,6 +1578,26 @@ def _commands(session):
         return Text("a fresh session: the names it defined are gone and the working folder is %s again; the files, the "
                     "folders allowed, the mode and the library stay" % session.cwd)
 
+    def engine_(form, seconds=None):
+        if not ((isinstance(form, list) and form) or (isinstance(form, (int, float)) and not isinstance(form, bool))):
+            raise Fault("(engine '(form …)): a quoted form — (engine '(+ 1 2))")
+        if session.engine is None:
+            session.engine = Engine()
+        elif session.engine.p is not None and session.engine.p.poll() is not None:
+            session.engine.close()               # it ended on its own: what it defined went with it
+        read = _to_read(form)
+        text = source(_engine_form(read, session.env, session.engine.defined))
+        if _ENGINE_REFUSED.search(text):
+            raise Fault("(engine …): the files' verbs are not handed to the engine — (read …) reads a file")
+        limit = (session.toolbox.config("engine") or {}).get("seconds", ENGINE_SECONDS) if seconds is None else _num(seconds)[0]
+        _engine_check_heads(read, session.engine)
+        line = session.engine.ask(text, float(limit))
+        if line.startswith("#<panic "):          # its machine stopped: the process goes, the next call starts another
+            session.engine.close()
+        answer = _engine_answer(line)
+        _engine_defines(read, session.engine.defined)
+        return answer
+
     table = [
         Command("help", help_, "the commands, or one of them: (help 'read)", "(help) lists every command a line each;"
                 " (help 'name) says one in full."),
@@ -1252,6 +1629,16 @@ def _commands(session):
         Command("pwd", pwd, "the working folder", "(pwd) the folder relative paths start from."),
         Command("cd", cd, "change the working folder: (cd \"path\")", "(cd \"path\") relative or absolute; answers "
                 "the folder it is now.", "read"),
+        Command("engine", engine_, "a form run by the Eval-Apply Generalized Interpreter, the engine models run on, "
+                "for its own verbs — this REPL evaluates Lisp itself: (engine '(form))",
+                "(engine '(form) [seconds]) hands the form to the engine this session keeps — the Lisp models are "
+                "written in, its verbs and its define, defun, let, while — and answers what it answered. Computing "
+                "needs none of it: this REPL evaluates Lisp itself, arithmetic and procedures too. The engine's Lisp is "
+                "not this one: its procedures are made with defun and read the names bound where they are called, its "
+                "+ - * take one kind of number, it has no lambda and no text, and a call it cannot make stops it and "
+                "every name defined there — so a form calling a head it has no verb or procedure for is refused before "
+                "it goes. The names the form uses that this session bound to a number, a truth, a name or a list go "
+                "with it by value; this session's procedures do not. It reaches no file."),
         Command("reset", reset, "a fresh session: (reset)", "(reset) forgets every name the session defined and goes "
                 "back to the working folder it started in; what is outside it stays — the files, the folders allowed, "
                 "the mode, the library."),
@@ -1814,6 +2201,9 @@ class Session:
         if getattr(self, "inside", None) is not None:  # a subagent's session left open ends with the session
             self.inside.close()
             self.inside = None
+        if getattr(self, "engine", None) is not None:  # the engine's names go with the session's (▶ `Engine`)
+            self.engine.close()
+        self.engine = None
         self.cwd, self.pending = self.home, None       # (the form's text, its Asked) while the user is to answer
         self.sources = {}                              # a name defined -> its definition's source, for `keep`
         self.classifier.once = set()

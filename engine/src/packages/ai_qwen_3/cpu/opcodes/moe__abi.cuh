@@ -454,11 +454,12 @@ static sys__heap_node ai_qwen_3__experts__zzabi_apply(const sys__heap_node* argv
     }
     nn__routed r;
     if (!ai_qwen_3__moe__zzprivate_routed(table, at, room, v, int8, &r)) return sys__engine__abi__error(AI_QWEN_3__MOE__FAULT_TABLE);
-    /* ⭐ A CARD'S TIER: the picks it holds computed here and marked held; the CPU's skip them */
+    /* ⭐ A CARD'S TIER: the picks it holds computed here and marked held; the CPU's skip them. With a mask each side adds
+     *   its own picks' terms — the card's tier table carries the card's copy of the routed `r` and `V` — and the sums add */
     nn__expert_tier tier;
     bool tier_ok = true;
     const bool holds = !ahead && ai_qwen_3__moe__zzprivate_tier(argv, argc, 4u, r.layer, &tier, &tier_ok);
-    if (!tier_ok || (holds && masked)) return sys__engine__abi__error(AI_QWEN_3__MOE__FAULT_TABLE);
+    if (!tier_ok) return sys__engine__abi__error(AI_QWEN_3__MOE__FAULT_TABLE);
     nn__routed next;
     if (ahead) {
         uint64_t nat[AI_QWEN_3__EXP__TABLE], nroom[AI_QWEN_3__EXP__TABLE], nv[AI_QWEN_3__EXP__TABLE];
@@ -886,7 +887,7 @@ static sys__heap_node ai_qwen_3__experts_rows__zzabi_apply(const sys__heap_node*
     nn__expert_tier tier;
     bool tier_ok = true;
     const bool holds = ai_qwen_3__moe__zzprivate_tier(argv, argc, 4u, v[AI_QWEN_3__EXP__LAYER], &tier, &tier_ok);
-    if (!tier_ok || (holds && masked)) return sys__engine__abi__error(AI_QWEN_3__MOE__FAULT_TABLE);
+    if (!tier_ok) return sys__engine__abi__error(AI_QWEN_3__MOE__FAULT_TABLE);
     /* a prompt's rows on the CPU in integers unless the table says exact, a card's tier's exactly (▶ AI_QWEN_3__EXP__INT8) */
     bool int8 = !holds;
     if (!holds && sys__node_array__length(table) > AI_QWEN_3__EXP__INT8) {

@@ -229,9 +229,10 @@ static __device__ inline sys__kind sys__bindings__type(uint64_t bindings, const 
 static __device__ inline bool sys__bindings__bound(uint64_t bindings, const sys__heap_node* name);
 
 /* ── CHANGING WHAT A NAME MEANS ──────────────────────────────────────────────────────────────────────
- * Three verbs, and they are three different events rather than three spellings of one. Entering a scope
+ * Four verbs, and they are four different events rather than four spellings of one. Entering a scope
  * and leaving it come in pairs and never lose what was underneath; assigning replaces what the innermost
- * scope is holding and leaves the pairing alone.
+ * scope is holding and leaves the pairing alone; defining is assigning where there is a scope to assign
+ * into and entering one where there is not.
  * ⛔ NONE OF THEM REACHES THE BASE, WHICH IS WHAT MAKES IT SHARABLE. A write lands in this object's own
  * scopes or it does not land, so no reader of a shared table can be surprised by another one.
  * ────────────────────────────────────────────────────────────────────────────────────────────────── */
@@ -261,6 +262,20 @@ static __device__ inline bool sys__bindings__remove(uint64_t bindings, const sys
  * A caller that needs the two apart asks `sys__bindings__bound`, which reads through to the base. */
 static __device__ inline bool sys__bindings__set(uint64_t bindings, const sys__heap_node* name,
                                                  const sys__heap_node* value);
+
+/* Define (NN-193): `set` where this environment's own scopes hold the name, `add` where none does — so a name
+ * defined a thousand times is ONE binding, where `add` would stack a thousand, and a definition inside a `let`
+ * of its name changes the let's binding, which the let then takes away, rather than stacking one above it
+ * for the let to take instead. ⚖ 2026-11-15 *"i'd make that a set! creates a binding if it would otherwise
+ * find it null"* · *"keep set! strict ig the define is doing that job"*: `set` keeps refusing a name with no
+ * scope, the one guard against a mistyped name in a language whose scoping is dynamic.
+ * ⛳ A NAME BOUND ONLY IN THE BASE IS GIVEN A SCOPE OF ITS OWN, as `add` gives it — the base is read, never
+ *   written, so a definition shadows what is underneath. The lookup raises only for a cell that is no name.
+ * ⛳ WHICH SCOPE A DEFINITION LANDS IN IS THE COMPOSER'S: a `let` or a procedure whose body defines a name binds it
+ *   first, so the definition assigns that frame's scope and ends with it (SICP 4.1.6, ▶ composer.py `_defined_here`);
+ *   a definition at a program's top is the environment's. `defun` binds its procedure with this verb too. */
+static __device__ inline bool sys__bindings__define(uint64_t bindings, const sys__heap_node* name,
+                                                    const sys__heap_node* value);
 
 /* ── THE TWO ROW METHODS ─────────────────────────────────────────────────────────────────────────────
  * What the kind's row names, and neither is called by hand: one runs when the last hold goes, the other

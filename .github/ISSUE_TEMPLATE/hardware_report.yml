@@ -1,0 +1,108 @@
+name: Hardware report
+description: SiLVANN on a machine of yours — what ran, how fast, or where it stopped.
+title: "[hardware] "
+labels: ["hardware"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for trying SiLVANN on your machine. A report from hardware we have not run on is the most useful
+        contribution right now, whether it worked or not. The numbers and the log are what make it something we can act
+        on: please paste them as they came out.
+  - type: input
+    id: version
+    attributes:
+      label: SiLVANN's version
+      description: The first line of README.md in your SiLVANN folder (also under Help → Overview in the chat), or the image's tag in a container.
+      placeholder: "1.0.3"
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: How it is installed
+      options:
+        - A container (docker/setup.sh)
+        - The portable app, on Windows (windows\SiLVANN.exe)
+        - The portable app, on Linux (linux/SiLVANN.sh)
+        - The Windows installer (install.ps1)
+        - Linux, from source (install.sh)
+        - Built by hand
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: Operating system
+      placeholder: "Ubuntu 24.04, kernel 6.8 / Windows 11 24H2"
+    validations:
+      required: true
+  - type: input
+    id: cards
+    attributes:
+      label: Card or cards
+      description: The model and its memory, each card the model ran on — or "none" for the CPU alone.
+      placeholder: "Radeon RX 9070 XT 16 GB / 2× MI50 32 GB / GeForce RTX 4090 24 GB / none"
+    validations:
+      required: true
+  - type: input
+    id: driver
+    attributes:
+      label: Driver and its version
+      placeholder: "ROCm 6.4.1 / NVIDIA 575.57, CUDA 12.9 / Intel compute-runtime 25.13"
+    validations:
+      required: true
+  - type: input
+    id: cpu
+    attributes:
+      label: CPU and RAM
+      placeholder: "Ryzen 9 7950X, 64 GB DDR5"
+    validations:
+      required: true
+  - type: input
+    id: model
+    attributes:
+      label: Model
+      description: The model's folder name, as the chat's Options or `silvann list` show it.
+      placeholder: "silvann_tq_D8E4_qwen3.6_35b_a3b"
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: What you ran
+      description: The command, or the steps in the chat — and the config if you changed it (the model folder's configs/*.json).
+      placeholder: |
+        silvann serve silvann_tq_D8E4_qwen3.6_35b_a3b
+        configs/default.json: {"max_context": 32768, "options": {"experts_on": "cpu"}}
+    validations:
+      required: true
+  - type: dropdown
+    id: result
+    attributes:
+      label: What happened
+      options:
+        - It ran, at about the speed the README lists for a card like mine
+        - It ran, but slower than I expected
+        - It ran, but its answers were wrong or garbled
+        - It did not build, install or start
+        - It started, then stopped or crashed
+    validations:
+      required: true
+  - type: textarea
+    id: numbers
+    attributes:
+      label: The numbers
+      description: Tokens a second for the prompt and for the answer, and the prompt's length — as the chat's status or the server's lines show them.
+      placeholder: "prompt of 2,048 tokens at 310 tokens/s, answer at 41 tokens/s, context 32768"
+  - type: textarea
+    id: log
+    attributes:
+      label: What it printed
+      description: The server's lines from its start — the terminal, the chat's Subprocess log, or data\logs\ui.log in the portable app. An error's last 50 lines at least.
+      render: text
+  - type: textarea
+    id: more
+    attributes:
+      label: Anything else
+      description: Another card in the machine, a BIOS setting, what you tried already.

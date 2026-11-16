@@ -28,6 +28,15 @@ goes back at the moment that form is placed. What comes back holds everything un
     (set! n v)              becomes `(sys__bindings__set env 'n v)` — the name quoted, the value not
     (defun (f a) b ...)     becomes `(sys__defun env 'f '(a) '(begin b ...))`
     (=> s1 s2 ... sn)       becomes nesting, each step's answer the next step's first argument
+    (define n v)            becomes `(if (sys__bindings__define env 'n v) 'n #f)` — set where the name has a binding,
+                            made where it has none (NN-193), answering the name as the tool's REPL does
+    (define (f a) b ...)    becomes the `defun` of it, answering `f`
+    a let or a procedure    whose body defines a name binds it first, to nil — `(let ((x 1)) (define y 2) …)` becomes
+                            `(let ((x 1) (y nil)) …)` — so the definition is the frame's and ends with it (SICP 4.1.6)
+    (while c b ...)         becomes `(sys__while 'c '(begin b ...))` — the test and the body quoted as `if`'s arms
+                            are; a `while` written with them quoted already is passed through as it is
+    (and a b ...)           becomes `(if a '(and b ...) '#f)`, `(or a b ...)` `(if a '#t '(or b ...))` — on truths
+    (> a b), (= a b)        become `(< b a)` over `a` and `b` bound in order, and `(eq? a b)`
 ⛳ THE ENVIRONMENT IS AN ARGUMENT TO `let`, `set!` AND `defun`, because it is one to the verbs they become.
 A program written here names no environment; the composer writes 0 into that cell, which those verbs read as
 the environment of whatever computation runs the form (▶ `_env_cell`).
@@ -65,11 +74,21 @@ SURFACE = {
 # what it means.
 # ⛳ THE SPELLING A PROGRAM WRITES -> THE `_lower_*` THAT HANDLES IT. A table, because a method name
 # derived by stripping punctuation cannot name `=>` — and a table says what a derivation only implies.
-LOWERED = {"let": "let", "set!": "set", "defun": "defun", "if": "if", "=>": "thread"}
+LOWERED = {"let": "let", "set!": "set", "defun": "defun", "if": "if", "=>": "thread", "define": "define",
+           "while": "while", "and": "and", "or": "or", ">": "greater", "=": "equal"}
+
+# ⚖ 2026-11-15 *"users should not do an unquote, it is reserved from the engine. they can only add a binding"* (NN-193):
+#   what binds by hand and runs a quoted form is the engine's and the runtime's — a `let` and the seats' views bind with
+#   them — and a person's text at a prompt is refused them; `define` and `let` are a program's ways to bind a name. The
+#   runtime's composer refuses nothing (`Composer.refused` empty); silvann_base_repl sets this one.
+#   The verbs `define` and `defun` lower to are refused by name too: written by hand they skip the composer's frame rule
+#   (▶ `_defined_here`), so a definition inside a `let` would outlive it.
+REFUSED_AT_A_PROMPT = frozenset({"add-bindings", "sys__add_bindings", "remove-bindings", "sys__remove_bindings",
+                                 "unquote", "sys__unquote", "sys__bindings__define", "sys__defun"})
 
 # The two truths, written as a value rather than a name: `#t` and `#f` are what a program hands a switch —
 # `(sys__garbage_collection__manual #t)` (▶ sys's `garbage_collection__header.cuh`).
-TRUTH = {"#t": "sys__value_true", "#f": "sys__value_false"}
+TRUTH = {"#t": "sys__value_true", "#f": "sys__value_false", "nil": "sys__value_null"}
 
 # a text literal (a tool form's: ▶ tools.py), a lone `"` (a text never closed), the parentheses, the quote, a name
 _TOKENS = re.compile(r""""(?:[^"\\]|\\.)*"|"|\(|\)|'|[^\s()'"]+""", re.S)
@@ -208,6 +227,7 @@ class Composer:
         self.width = engine.bindings_symbols(env) if env else engine.BINDINGS_WIDTH_MAX
         if self.width == 0:
             raise ComposerError("the environment this composer was given is not one")
+        self.refused = frozenset()       # heads this composer refuses — a person's prompt's: ▶ REFUSED_AT_A_PROMPT
 
     # ── the pieces a cell is made of ────────────────────────────────────────────────────────────────
     def symbol(self, name):
@@ -333,6 +353,13 @@ class Composer:
             raise ComposerError("an empty form")
 
         head = node[0]
+        if head == "quote" and len(node) == 2:          # (quote x), the spelling `'x` is read from
+            return self._form(("quote", node[1]))
+        if isinstance(head, str) and head in self.refused:
+            raise ComposerError("%s is the engine's and the runtime's, not a program's here: (define name value) defines "
+                                "a name, (let ((name value)) …) binds one for its body" % head)
+        if head in ("+", "-", "*") and len(node) > 3:   # (+ a b c …) is (+ (+ a b) c …), left to right as the tool's:
+            return self._form([head, node[:3]] + node[3:])   # the verbs take two
         if isinstance(head, str) and head in LOWERED:
             return getattr(self, "_lower_" + LOWERED[head])(node)
         if isinstance(head, str) and self._verb_named(head) is not None:
@@ -359,6 +386,13 @@ class Composer:
                 raise ComposerError("a let binding is (name value)")
             cells.append(self._cell_quoted_name(pair[0]))
             cells.append(self._form(pair[1]))
+        own, defined = {pair[0] for pair in node[1]}, []
+        for form in node[2:]:
+            self._defined_here(form, defined)
+        for name in defined:                   # the body's definitions, the let's: bound to nil until they run
+            if name not in own:
+                cells.append(self._cell_quoted_name(name))
+                cells.append(self._form("nil"))
         cells.append(self._quoted(self._body(node[2:])))
         return self._emit(cells)
 
@@ -445,8 +479,105 @@ class Composer:
             if empty == 0:
                 raise ComposerError("the pool would not give an empty parameter list")
             names = (self.kinds["sys__quoted_list"], 0, empty)
+        body, defined = node[2:], []
+        for form in body:
+            self._defined_here(form, defined)
+        local = [n for n in defined if n not in params]
+        if local:                              # the body's definitions, the call's: a let around the body binds them
+            body = [["let", [[n, "nil"] for n in local]] + body]
         return self._emit([self._cell_verb("sys__defun"), self._env_cell(),
-                           self._cell_quoted_name(name), names, self._quoted(self._body(node[2:]))])
+                           self._cell_quoted_name(name), names, self._quoted(self._body(body))])
+
+    # ── the forms one syntax shares with the tool's REPL (NN-193) ──────────────────────────────────────
+    @staticmethod
+    def _defined_here(node, out):
+        """The names `node` defines in the frame it runs in, appended to `out` in the order written.
+        ⚖ 2026-11-16 *"it works correctly if it is done as a standalone repl function but if it is done in the middle of
+        something … i dont know if it is the expected behaviour for SICP"*: SICP's `define` binds in the innermost frame
+        — a `let`'s or a procedure's — and the binding ends with it. The engine's scopes are a stack a name, not frames,
+        so the frame binds the names its body defines before the body runs (SICP 4.1.6, "scanning out internal
+        definitions"), and each `define` then assigns that binding. ⛳ A LET'S BODY AND A PROCEDURE'S ARE FRAMES OF
+        THEIR OWN AND ARE NOT ENTERED; a let's values, `begin`, `if`, `while`, `and` and `or` run in this frame and
+        are; a quoted form is data."""
+        if not isinstance(node, list) or not node:
+            return
+        head = node[0]
+        if head in ("define", "defun") and len(node) > 1:
+            target = node[1]
+            name = target[0] if isinstance(target, list) and target else target
+            if isinstance(name, str) and name not in out:
+                out.append(name)
+            if not isinstance(target, list):
+                for part in node[2:]:
+                    Composer._defined_here(part, out)
+            return
+        if head == "let" and len(node) > 1 and isinstance(node[1], list):
+            for pair in node[1]:
+                if isinstance(pair, list) and len(pair) == 2:
+                    Composer._defined_here(pair[1], out)
+            return
+        for part in node[1:]:
+            Composer._defined_here(part, out)
+
+    def _lower_define(self, node):
+        """`(define (f a …) body …)` — a `defun`, answering `f`; `(define n v)` — `sys__bindings__define`, which sets a
+        name that has a binding here and makes the binding of one that has none, answering `n` (the tool's REPL answers
+        a definition with its name). ⛳ THE NAME AND NOT `#t`, AND `#f` WHERE THE VERB REFUSED: the `if` costs a test."""
+        if len(node) >= 3 and isinstance(node[1], list) and node[1] and isinstance(node[1][0], str):
+            made = self._lower_defun(["defun"] + node[1:])
+            name = node[1][0]
+        elif len(node) == 3 and isinstance(node[1], str):
+            made = self._emit([self._cell_verb("sys__bindings__define"), self._env_cell(),
+                               self._cell_quoted_name(node[1]), self._form(node[2])])
+            name = node[1]
+        else:
+            raise ComposerError("a define is (define name value) or (define (name param ...) body ...)")
+        return self._emit([self._cell_verb("if"), made, self._quoted(self._form(["begin", ("quote", name)])),
+                           self._quoted(self._form(["begin", "#f"]))])
+
+    def _lower_while(self, node):
+        """`(while test body …)` — the test and the body quoted, as `if`'s arms are: `sys__while` runs them again each
+        turn. A `while` whose test is quoted already — every program written before NN-193 — is passed through as written.
+        It answers `#f`, the test that ended it."""
+        if len(node) < 3:
+            raise ComposerError("a while is (while test body ...)")
+        if isinstance(node[1], tuple) and node[1][:1] == ("quote",):
+            return self._emit([self._cell_verb("while")] + [self._form(a) for a in node[1:]])
+        test = node[1] if isinstance(node[1], list) else ["begin", node[1]]
+        return self._emit([self._cell_verb("while"), self._quoted(self._form(test)), self._quoted(self._body(node[2:]))])
+
+    def _lower_and(self, node):
+        """`(and a b …)` — `(if a (and b …) #f)`: the first `#f` ends it, else the last answer. Its parts are truths:
+        the engine's `if` refuses any other test."""
+        rest = node[1:]
+        if not rest:
+            return self._form(["begin", "#t"])                    # a form, as a program needs one
+        if len(rest) == 1:
+            return self._form(rest[0] if isinstance(rest[0], list) else ["begin", rest[0]])
+        return self._form(["if", rest[0], ["and"] + rest[1:], "#f"])
+
+    def _lower_or(self, node):
+        """`(or a b …)` — `(if a #t (or b …))`: the first `#t` ends it, else the last answer."""
+        rest = node[1:]
+        if not rest:
+            return self._form(["begin", "#f"])                    # a form, as a program needs one
+        if len(rest) == 1:
+            return self._form(rest[0] if isinstance(rest[0], list) else ["begin", rest[0]])
+        return self._form(["if", rest[0], "#t", ["or"] + rest[1:]])
+
+    def _lower_greater(self, node):
+        """`(> a b)` — `(< b a)`, with `a` and `b` read in the order written: a `let` binds them first, under names a
+        program does not write."""
+        if len(node) != 3:
+            raise ComposerError("a > is (> a b)")
+        return self._form(["let", [["sys__composer__gt_a", node[1]], ["sys__composer__gt_b", node[2]]],
+                           ["<", "sys__composer__gt_b", "sys__composer__gt_a"]])
+
+    def _lower_equal(self, node):
+        """`(= a b)` — `(eq? a b)`: the same kind and the same value, so `(= 1 1.0)` is `#f`."""
+        if len(node) != 3:
+            raise ComposerError("an = is (= a b)")
+        return self._emit([self._cell_verb("eq?"), self._form(node[1]), self._form(node[2])])
 
     # ── running one ─────────────────────────────────────────────────────────────────────────────────
     def run(self, text):

@@ -262,6 +262,8 @@ silvann users [add|passwd|remove|adopt] <name>   the users: each a sign-in, a fo
 silvann serve <model> [config]      the server, on port 8765 (--port to change it)
 silvann ui                          the chat in a browser, on port 8090, talking to the server
 silvann_cli                         the chat in this terminal (--notools, --nothink), talking to the server
+silvann_base_repl                   the interpreter at a prompt, no model (FILE, -e FORM; a program's, through a pipe)
+silvann_tools_repl                  the model's tool at your prompt: its commands and skills, the same workspace
 silvann registry                    the registry of a network's servers, on port 8770 (--port), for the subagents
 silvann data [folder]               where the models, the conversations and the rest are kept — another folder, a drive's
 silvann build                       build again — after installing CUDA or ROCm, say
@@ -330,9 +332,25 @@ EOF
 exec "$DIR/venv/bin/python" "$DIR/silvann_cli.py" "\$@"
 EOF
     chmod +x "$DIR/silvann_cli"
+    # `silvann_base_repl`: the interpreter at a prompt with no model — or run by another program, as `java` is
+    cat > "$DIR/silvann_base_repl" <<EOF
+#!/usr/bin/env bash
+# \`silvann_base_repl\`, written by install.sh for the release in this folder: the interpreter (silvann_base_repl.py).
+exec "$DIR/venv/bin/python" "$DIR/silvann_base_repl.py" "\$@"
+EOF
+    chmod +x "$DIR/silvann_base_repl"
+    # `silvann_tools_repl`: the model's tool at a person's prompt — its commands, skills and kept definitions, no model
+    cat > "$DIR/silvann_tools_repl" <<EOF
+#!/usr/bin/env bash
+# \`silvann_tools_repl\`, written by install.sh for the release in this folder: the model's tool (silvann_tools_repl.py).
+exec "$DIR/venv/bin/python" "$DIR/silvann_tools_repl.py" "\$@"
+EOF
+    chmod +x "$DIR/silvann_tools_repl"
     mkdir -p "$BIN"
     ln -sf "$DIR/silvann" "$BIN/silvann"
     ln -sf "$DIR/silvann_cli" "$BIN/silvann_cli"
+    ln -sf "$DIR/silvann_base_repl" "$BIN/silvann_base_repl"
+    ln -sf "$DIR/silvann_tools_repl" "$BIN/silvann_tools_repl"
 }
 
 # ── the models here: each one's program for this release, from its pack (a boot fetches it otherwise) ──────────────
@@ -372,6 +390,7 @@ main() {
    silvann serve silvann_tq_D8E4_qwen3.6_35b_a3b      the server
    silvann ui                                         the chat, at http://localhost:8090
    silvann_cli                                        or the chat in this terminal
+   silvann_base_repl · silvann_tools_repl             the Lisp at a prompt, no model: the interpreter's, the tool's
    silvann help                                       every command
 EOF
 }

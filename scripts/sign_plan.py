@@ -32,7 +32,7 @@ INCLUDE = re.compile(r'^\s*#\s*include\s*"([^"]+)"', re.M)
 OPENCL_GENERATOR = {"khronos_opencl2": "opencl_kernel_source.py", "intel_opencl2": "opencl_kernel_source.py",
                     "nvidia_opencl1": "opencl1_kernel_source.py", "intel_opencl1_igpu": "opencl1_kernel_source.py"}
 # where each file is in the release's zips, for a reuse
-WINDOWS_ZIP, PORTABLE_ZIP = "silvann_windows_x64.zip", "silvann_portable_windows_x64.zip"
+WINDOWS_ZIP, PORTABLE_ZIP = "silvann_windows_x64.zip", "silvann_portable_x64.zip"
 
 
 def sha256(path):
@@ -120,7 +120,7 @@ def files_of(built):
         out.append(("families/lib/silicon_families/" + n, k, (WINDOWS_ZIP, "lib/silicon_families/" + n)))
     if os.path.isfile(os.path.join(built, "families", "lib", "SiLVANN.exe")):
         launcher = [os.path.join("scripts", "portable", "SiLVANN.c"), os.path.join("scripts", "portable", "build_launcher.ps1")]
-        out.append(("families/lib/SiLVANN.exe", key(set(), launcher, ["launcher"]), (PORTABLE_ZIP, "SiLVANN/SiLVANN.exe")))
+        out.append(("families/lib/SiLVANN.exe", key(set(), launcher, ["launcher"]), (PORTABLE_ZIP, "SiLVANN/windows/SiLVANN.exe")))
     return out
 
 
