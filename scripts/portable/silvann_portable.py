@@ -8,7 +8,10 @@ own Python (`python\\pythonw.exe`, no console) inside a job object that ends eve
   1. the data — the models, the conversations, the logs — in `data\\` beside SiLVANN.exe, or in Documents\\SiLVANN where
      the folder cannot be written to (a read-only place, Program Files), handed on as `SILVANN_DATA`
   2. the UI (`silvann_ui.py --local`: the app over this machine's models, the model started last started again, its
-     servers stopped with it) on a free port of 127.0.0.1, its output in `data\\logs\\ui.log`
+     servers stopped with it) on port 8080 (SILVANN_PORT another), its output in `data\\logs\\ui.log`: on this computer
+     alone while the machine is single user, on the network too once it is multi user (NN-196 — whether another
+     computer reaches it is then its firewall's to say). The switch between them starts the UI again, on its new
+     address: it exits RESTART, and this launcher starts it again, the window kept
   3. Microsoft Edge in app mode — a window with no browser around it — on its own profile in `data\\.edge`, so it is its
      own process and not a tab of an Edge already open. Edge comes with Windows 10 and 11; where it is not found, the
      default browser opens the UI and a message box stands for the window: its OK ends the app.
@@ -54,6 +57,9 @@ CREATE_NO_WINDOW = 0x08000000 if WINDOWS else 0
 STOP_SECONDS = 660                                  # the UI's stop without a window to cut it short: the server's save
                                                     # (its 600 s) and its end
 HANDED_OVER = 5                                     # seconds: a browser back sooner gave its window to one already running
+PORT = 8080                                         # the UI's, as an install's and the container's (SILVANN_PORT another)
+RESTART = 75                                        # the UI's exit asking to be started again (▶ silvann_ui.py's
+                                                    #   SILVANN_RESTART_EXIT): single user or multi user switched
 # Linux's app-mode browsers, in the order looked for: the Chromium family's `--app` and `--user-data-dir`, as Edge's
 CHROMIUMS = ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "microsoft-edge",
              "microsoft-edge-stable", "brave-browser")
@@ -103,10 +109,17 @@ def data_folder():
         return docs
 
 
-def free_port():
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
+def port_taken(port):
+    """Whether something listens on `port` already — on this computer's address or on all of them."""
+    for host in ("127.0.0.1", "0.0.0.0"):
+        with socket.socket() as s:
+            if not WINDOWS:                           # a port the UI left a moment ago, its connections closing: free
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                s.bind((host, port))
+            except OSError:
+                return True
+    return False
 
 
 def answers(url, seconds):
@@ -354,14 +367,30 @@ def main():
     data = data_folder()
     (data / "logs").mkdir(exist_ok=True)
     token = secrets.token_hex(16)                     # opens the UI's quit route: this app's alone
-    env = dict(os.environ, SILVANN_DATA=str(data), PYTHONUTF8="1", SILVANN_QUIT_TOKEN=token)
-    port = free_port()
+    env = dict(os.environ, SILVANN_DATA=str(data), PYTHONUTF8="1", SILVANN_QUIT_TOKEN=token,
+               SILVANN_RESTART_EXIT=str(RESTART))
+    port = int(os.environ.get("SILVANN_PORT") or PORT)
+    if port_taken(port):
+        say("Port %d is in use already — is SiLVANN open already, or another program on that port? Close it, or start "
+            "SiLVANN with SILVANN_PORT set to another port." % port)
+        return 1
     url = "http://127.0.0.1:%d" % port
     log = open(data / "logs" / "ui.log", "a", encoding="utf-8")
     own = (dict(creationflags=CREATE_NO_WINDOW) if WINDOWS else
            dict(start_new_session=True, preexec_fn=_die_with_launcher))
-    ui = subprocess.Popen([sys.executable, str(ROOT / "silvann_ui.py"), "--port", str(port), "--host", "127.0.0.1",
-                           "--no-browser", "--local"], cwd=str(ROOT), env=env, stdout=log, stderr=subprocess.STDOUT, **own)
+    # the UI on its own address — this computer's alone, or the network's too once the machine is multi user (▶ the
+    #   module's note) — started again whenever it exits asking to be (the switch between them)
+    argv = [sys.executable, str(ROOT / "silvann_ui.py"), "--port", str(port), "--no-browser", "--local"]
+    held = {"ui": subprocess.Popen(argv, cwd=str(ROOT), env=env, stdout=log, stderr=subprocess.STDOUT, **own),
+            "over": False}
+
+    def keep_ui():
+        while True:
+            code = held["ui"].wait()
+            if code != RESTART or held["over"]:
+                return
+            held["ui"] = subprocess.Popen(argv, cwd=str(ROOT), env=env, stdout=log, stderr=subprocess.STDOUT, **own)
+    threading.Thread(target=keep_ui, daemon=True).start()
     window = None
     try:
         if not answers(url, 120):
@@ -394,9 +423,10 @@ def main():
     except KeyboardInterrupt:
         return 0
     finally:
+        held["over"] = True
         if window is not None and window.poll() is None:
             window.terminate()
-        stop(ui, url, token)
+        stop(held["ui"], url, token)
         log.close()                                   # and the launcher's job ends whatever is left
 
 

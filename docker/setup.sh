@@ -305,7 +305,7 @@ sign_in_on() { [ -f "$DATA/sso.json" ] || compgen -G "$DATA/users/*/user.json" >
 if [ $PRIVATE = 0 ] && [ "$ACTION" = setup ] && [ $DRY = 0 ] && ! sign_in_on; then
     echo
     note "Other machines on your network can reach the chat once it asks for a sign-in."
-    tty_read "  A user name to make now (Enter keeps the chat on this machine alone): " FIRST_USER
+    tty_read "  The admin's name, to make the machine multi user now (Enter keeps it single user, on this machine alone): " FIRST_USER
     if [ -n "$FIRST_USER" ]; then
         "$ENGINE" run --rm -it "${FLAGS[@]}" -v "$VOLUME" "$IMAGE" silvann users add "$FIRST_USER" </dev/tty \
             || note "The user was not made; the chat stays on this machine (later: $ENGINE exec -it $NAME silvann users add <name>)."

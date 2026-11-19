@@ -1275,7 +1275,7 @@ def _commands(session):
         lines = []
         for sk in session.skills:
             lines.append("%s — %s%s" % (sk.name, sk.description or "(no description)",
-                                         " (added by you)" if session.toolbox.added(sk) else ""))
+                                         " (added by you)" if session.toolbox.removable(sk) else ""))
             lines += ["  %s   [%s]%s" % (c.usage, c.touches, " — " + session.why_not(c.name) if session.why_not(c.name) else "")
                       for c in sk.commands if getattr(session.skill_commands.get(c.name), "skill", None) == sk.name]
         return Text("\n".join(lines + ["⚠ " + p for p in session.skill_problems]))
@@ -1942,7 +1942,7 @@ def _remove_tool(session, name):
     back. A built-in, and a tool of the owner's, are not the model's to remove. Asked as adding is."""
     box = session.toolbox
     sk = next((k for k in box.skills if k.name == name), None)
-    if sk is None or not box.added(sk):
+    if sk is None or not box.removable(sk):
         raise Fault("%s is not a tool you added: %s" % (name, "a built-in command" if name in _tools_config.BUILT_IN
                                                        else "one of the owner's" if sk is not None
                                                        else "(skills) lists the tools, and says which you added"))
@@ -2077,6 +2077,9 @@ def _add_tool(session, src):
     box = session.toolbox
     if not box.added_folder:
         raise Fault("this REPL has no folder for the tools the model adds")
+    c = session.confinement()
+    if c.rules is None and c.wanted:                   # it would run as the commands do, which cannot run here
+        raise Fault("a tool cannot be added here: %s" % c.why)
     if os.path.islink(src):
         raise Fault("%s is a link: a tool is added from its own files" % src)
     session.classifier.check("read", os.path.realpath(src))   # what the model may read, before anything is said of it
@@ -2087,7 +2090,7 @@ def _add_tool(session, src):
                     % name)
     final = os.path.join(box.added_folder, name)
     before = next((sk for sk in box.skills if sk.name == name), None)
-    if name in box.tools and not (before is not None and box.added(before)):
+    if name in box.tools and not (before is not None and box.removable(before)):
         raise Fault("the name %s is taken: %s — name the file otherwise" % (
             name, "a built-in's" if name in _tools_config.BUILT_IN else "a tool installed ((skills) says which)"))
     if os.path.lexists(final) and before is None:
@@ -2161,8 +2164,9 @@ def _add_tool(session, src):
     settings = sorted(box.config(name))
     return Text("%s the tool %s: %s — each asked of the user as (bash …) is, and run as it is. %s" % (
         "replaced" if before is not None else "added", name, ", ".join(c.usage for c in sk.commands),
-        "Its settings, which the machine's owner sets in the tools file: %s." % ", ".join(settings) if settings
-        else "It has no settings."))
+        "Its settings, which %s: %s." % ("its user sets in their tools.json" if getattr(box, "own", None) is not None
+                                         else "the machine's owner sets in the tools file", ", ".join(settings))
+        if settings else "It has no settings."))
 
 
 # ── a session ─────────────────────────────────────────────────────────────────────────────────────────────────────

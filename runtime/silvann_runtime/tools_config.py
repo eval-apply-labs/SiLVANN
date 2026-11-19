@@ -314,6 +314,10 @@ class Toolbox:
         root = os.path.realpath(self.added_folder)
         return os.path.realpath(skill.folder).startswith(root.rstrip(os.sep) + os.sep)
 
+    def removable(self, skill):
+        """Whether the model may take this skill away, or replace it (▶ tools' `remove_tool`, `add_tool`): one it added."""
+        return self.added(skill)
+
     def writable_folders(self):
         """The skill folders and the server's own Python (`code_folders`) the server's user can write — the ones a model's
         command must not (▶ tools' classifier, jail.py): only (add_tool …) writes a skill folder."""

@@ -17,11 +17,18 @@
     python3 silvann_core.py hf-token                  whether a Hugging Face token is saved, and whose it is
     python3 silvann_core.py hf-token --set            save one, asked for without echoing it (or: hf-token <token>)
     python3 silvann_core.py hf-token --forget         remove it
-    python3 silvann_core.py users                     the users, each with how many conversations they hold
-    python3 silvann_core.py users add <name>          a user: a folder of their own and a password (asked twice,
-                                                      without echoing it; read from stdin when that is no terminal) —
-                                                      the first turns sign-in on for every server on this data folder
-    python3 silvann_core.py users passwd <name>       a new password: their sign-ins end
+    python3 silvann_core.py users                     the users, each with how many conversations they hold, the
+                                                      admins marked
+    python3 silvann_core.py users add <name> [--admin]   a user: a folder of their own and a password (asked twice,
+                                                      without echoing it; read from stdin when that is no terminal).
+                                                      On a single user's machine it is the switch to multi user: the
+                                                      single user's folder, users/__local/, renamed <name>'s, an admin
+                                                      — and every server on this data folder asks for a sign-in
+    python3 silvann_core.py users admin <name> on|off   an admin or not: the machine's settings, users and models
+    python3 silvann_core.py users single              back to single user: the one user left, an admin, renamed
+                                                      users/__local/ — no sign-in, this machine alone
+    python3 silvann_core.py users passwd <name>       a new password: their sign-ins end — the way back in for an
+                                                      admin locked out
     python3 silvann_core.py users remove <name> [--with-conversations]
     python3 silvann_core.py users adopt <name>        the conversations made before there were users moved into
                                                       <name>'s folder, every model's
@@ -185,25 +192,41 @@ def users_command(argv):
             names = u.names()
             for name in names:
                 n = u.conversations(name)
-                print("%-32s %d conversation%s" % (name, n, "" if n == 1 else "s"))
+                print("%-32s %d conversation%s%s" % (name, n, "" if n == 1 else "s", " · admin" if u.admin(name) else ""))
                 for iss, sub, email in u.accounts(name):
                     print("%-32s   signs on as %s at %s (subject %s)" % ("", email or "-", iss, sub))
             if not names and u.on():
                 print("no users yet: a server on this data folder asks for a sign-in, and its provider (sso.json) makes "
                       "a user at their first sign-on where its allow lets them in")
             elif not names:
-                print("no users: a server on this data folder asks no one to sign in. `silvann users add <name>` makes one")
+                print("single user: a server on this data folder asks no one to sign in, and its conversations are in "
+                      "%s. `silvann users add <name>` makes it multi user, <name> its admin" % u.local())
+            if names and not u.admins():
+                print("no admin: `silvann users admin <name> on` names one — until then no one changes the machine's "
+                      "settings in the UI")
+            return 0
+        if what == "single":
+            was = u.single()
+            print("single user: %s's folder is users/%s/ again, their password gone — no sign-in, this machine alone"
+                  % (was, _users.LOCAL))
             return 0
         if not rest:
             raise SystemExit("users %s <name>" % what)
         name = rest[0].strip().lower()
         if what == "add":
-            first = not u.on()
-            u.add(name, _password(name))
-            print("%s added, their folder %s" % (name, u.folder(name)))
-            if first:
-                print("sign-in is on for every server on this data folder, from its next request. The conversations made "
-                      "before are nobody's until `silvann users adopt <name>` gives them to someone")
+            if not u.on():
+                u.multi(name, _password(name))
+                print("multi user: users/%s/ is %s's now, an admin — the single user's conversations theirs. Every server "
+                      "on this data folder asks for a sign-in from its start" % (_users.LOCAL, name))
+                return 0
+            u.add(name, _password(name), admin="--admin" in rest[1:])
+            print("%s added%s, their folder %s" % (name, " as an admin" if "--admin" in rest[1:] else "", u.folder(name)))
+            return 0
+        if what == "admin":
+            if rest[1:2] not in (["on"], ["off"]):
+                raise SystemExit("users admin <name> on|off")
+            u.set_admin(name, rest[1] == "on")
+            print("%s %s" % (name, "is an admin" if rest[1] == "on" else "is an admin no more"))
             return 0
         if what == "passwd":
             u.passwd(name, _password(name))
@@ -231,7 +254,7 @@ def users_command(argv):
             return 0
     except _users.Refused as ex:
         raise SystemExit(str(ex))
-    raise SystemExit("users: list, add, passwd, remove, adopt, link or unlink — not %r" % what)
+    raise SystemExit("users: list, add, admin, single, passwd, remove, adopt, link or unlink — not %r" % what)
 
 
 def main(argv):

@@ -50,8 +50,10 @@ from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
 ROOT = Path(__file__).resolve().parent
-# the skills the release ships (▶ silvann_runtime/skills.py): skills/ beside this file, or the development tree's
-SKILLS_SHIPPED = ROOT / "skills" if (ROOT / "skills").is_dir() else ROOT.parent / "release" / "skills"
+# the skills the release ships (▶ silvann_runtime/skills.py): skills/ beside this file in a release — one has its docs
+#   beside it too, as the UI tells it (silvann_ui.py's RELEASE_DIR) — or the development tree's. A skills/ beside this
+#   file and no docs/ is the data folder's own (main/ is the development tree's data folder), the user's skills
+SKILLS_SHIPPED = ROOT / "skills" if (ROOT / "docs" / "users.md").exists() else ROOT.parent / "release" / "skills"
 # the tool's guide, which the REPL's (guide) answers: docs/ beside this file, or the development tree's
 TOOLS_GUIDE = ROOT / "docs" / "tools.md" if (ROOT / "docs").is_dir() else ROOT.parent / "release" / "docs" / "tools.md"
 # the conversations go beside the release, or in the folder SILVANN_DATA names (the Docker image's volume)
@@ -198,12 +200,24 @@ S = State()
 #   in their folder — another user's answers 404, as one that is not there.
 USERS = users.Users(DATA)
 SSO = sso.SignOn(USERS, DATA)                       # a provider to sign on with (NN-157), where sso.json names one
+
+
+def _machine(part):
+    """The machine's own conversations ("sessions"), workspace, kept definitions ("library") or folders allowed
+    ("allowed"): the single user's, in users/__local/ (NN-196, ▶ users.Users.home) — read as a model boots."""
+    return Path(USERS.machine()[part])
 _ME = contextvars.ContextVar("silvann_user", default=None)    # who the request in hand is from, set by the gate
 CID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")                     # a conversation's id: a name, never a path
 
 
 def _me():
     return _ME.get()
+
+
+def _admin_only(what):
+    """⛔ What the machine's settings are, an admin's alone where the machine is multi user (NN-196): 403 otherwise."""
+    if USERS.on() and not USERS.admin(_me()):
+        raise HTTPException(403, "%s is an admin's" % what)
 
 
 def _folder_of(name):
@@ -509,8 +523,8 @@ def _boot(args):
     S.model_id = folder.name
     # the model's REPL starts in the workspace, where it reads unasked (▶ the classifier); tools.json keeps the folders
     #   allowed since, tools_library.json the definitions kept (▶ tools' `keep`) — every conversation's
-    S.workspace = Path(cfg.get("tools_folder") or DATA / "workspace")
-    S.library = DATA / "tools_library.json"
+    S.workspace = Path(cfg.get("tools_folder") or _machine("workspace"))
+    S.library = _machine("library")
     S.skills = [DATA / "skills", SKILLS_SHIPPED]         # the user's first: theirs takes a shipped skill's name
     # ⭐ THE TOOLS FILE (NN-127): what the REPL reaches on this machine, set up in one place — `tools/default.json` in the
     #   data folder, or the one the config's `tools_config` names; its folder is never the model's to read or write
@@ -523,12 +537,12 @@ def _boot(args):
     if tools._jail.in_container():
         (DATA / "python").mkdir(parents=True, exist_ok=True)
     S.toolbox = tools_config.Toolbox(_tools_file(cfg), S.skills, added=DATA / "skills_added", code=[DATA / "python"])
-    S.classifier = tools.Classifier(str(DATA / "tools.json"), "ask" if S.tools == "no" else S.tools,
+    S.classifier = tools.Classifier(str(_machine("allowed")), "ask" if S.tools == "no" else S.tools,
                                     allowed=[str(S.workspace)], sealed=[S.toolbox.file.folder()])
     S.web = tools.Web()
     for line in _tools_ready(cfg):
         print("[silvann_server] %s" % line, flush=True)
-    S.dir = DATA / "user_sessions" / folder.name
+    S.dir = _machine("sessions") / folder.name
     S.dir.mkdir(parents=True, exist_ok=True)
     S.where.clear()
     lent = S.model.lent() if hasattr(S.model, "lent") else None
@@ -905,7 +919,7 @@ class _Kept:
         rt.active = None if rt.active is not None and rt.active.id == cid else rt.active
         S.tool_sessions.pop(cid, None)
         S.owner.pop(cid, None)
-        shutil.rmtree(DATA / "user_sessions" / Path(folder).name / cid, ignore_errors=True)
+        shutil.rmtree(_machine("sessions") / Path(folder).name / cid, ignore_errors=True)
         self.link.cid = None
         self.link.close()
 
@@ -1159,7 +1173,7 @@ def _lend(folder, conf, rt=None):
     else:
         rt.model = m
     S.model, S.runtime, S.chat, S.model_id = m, rt, Chat(m.folder), Path(folder).name
-    S.dir = DATA / "user_sessions" / S.model_id
+    S.dir = _machine("sessions") / S.model_id
     S.dir.mkdir(parents=True, exist_ok=True)
     S.where.clear()                                       # another model's conversations, found again
     print("[agent] the card lent to %s in %.0f s (%s)" % (S.model_id, time.time() - t0, why), flush=True)
@@ -1209,12 +1223,12 @@ def _boot_image(folder, cfg, t0):
     S.model = image_session.ImageModel(str(folder), settings=cfg.get("image"))
     S.runtime = image_session.ImageRuntime(S.model)
     threading.Thread(target=S.runtime.start, daemon=True).start()     # the picture worker, ready before the first prompt
-    S.workspace = Path(cfg.get("tools_folder") or DATA / "workspace")
-    S.classifier = tools.Classifier(str(DATA / "tools.json"), "ask", allowed=[str(S.workspace)])
-    S.library = DATA / "tools_library.json"
+    S.workspace = Path(cfg.get("tools_folder") or _machine("workspace"))
+    S.classifier = tools.Classifier(str(_machine("allowed")), "ask", allowed=[str(S.workspace)])
+    S.library = _machine("library")
     S.skills = [DATA / "skills", SKILLS_SHIPPED]         # the user's first: theirs takes a shipped skill's name
     S.model_id = folder.name
-    S.dir = DATA / "user_sessions" / folder.name
+    S.dir = _machine("sessions") / folder.name
     S.dir.mkdir(parents=True, exist_ok=True)
     S.where.clear()
     print("[silvann_server] %s (a picture model, %s) ready in %.0f s — a picture %s"
@@ -1354,8 +1368,8 @@ class SignInReq(BaseModel):
 
 @app.post("/users/sign_in")
 def users_sign_in(req: SignInReq):
-    """A sign-in: a token the requests that follow carry (`Authorization: Bearer <token>`), good until it is unused for
-    twelve hours, its user's password changes, or the server stops."""
+    """A sign-in: a token the requests that follow carry (`Authorization: Bearer <token>`), good — on every server and
+    UI on this data folder — until it is unused for twelve hours, it is signed out, or its user's password changes."""
     if not USERS.on():
         raise HTTPException(409, "this server has no users: nothing to sign in to")
     name = req.name.strip().lower()
@@ -1431,7 +1445,8 @@ def users_me():
     me = _me()
     if me is None:
         return {"user": None, "users": USERS.on()}
-    return {"user": me, "users": True, "conversations": USERS.conversations(me), "kept": _user_box(me).kept()}
+    return {"user": me, "users": True, "admin": USERS.admin(me), "conversations": USERS.conversations(me),
+            "kept": _user_box(me).kept()}
 
 
 # ── endpoints ───────────────────────────────────────────────────────────────────────────────────────────────
@@ -1447,7 +1462,7 @@ def health():
             "max_context": m.max_context if m else 0,
             "adapter": "silvann_runtime", "images": _reads_pictures(), "files": not S.image, "pictures": S.image,
             "picture_settings": S.model.settings if S.image else None, "user_system_prompt": _user_system(),
-            "users": USERS.on(), "user": _me()}
+            "users": USERS.on(), "user": _me(), "admin": USERS.admin(_me()) if USERS.on() else True}
 
 
 def _reads_pictures():
@@ -2251,6 +2266,7 @@ async def tools_rebuild():
     again, the tools file's entries kept in step with them, and the startup check run again — what a skill installed or
     a setting changed since the boot needs. A conversation's REPL reads its skills again at its `(reset)`; what the
     check found reaches every one at once. Answers what it did, `said`, and the tools as `GET /tools` does."""
+    _admin_only("rebuilding the machine's tools")
     if S.toolbox is None:
         raise HTTPException(409, "%s is a picture model: it has no tools" % S.model_id)
     try:
@@ -2290,6 +2306,9 @@ def main():
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8765)          # the port the UI looks for by default
     args = p.parse_args()
+    for line in USERS.settle():                               # the single user's folder (NN-196): made, once
+        print("[silvann_server] moved into users/%s/: %s" % (users.LOCAL, line), flush=True)
+    USERS.serve()                                             # the switch to multi user waits for this server to end
     # ⛔ A BOOT THAT CANNOT BE MADE IS SAID IN ONE LINE, `⛔ not started:` and why — the UI that started this server shows
     #   it in its status (▶ silvann_ui.py, `ServerProcess.failure`)
     try:

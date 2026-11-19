@@ -293,14 +293,14 @@ case "\$cmd" in
             [ "\$SILVANN_DATA" = "\$DATA" ] || echo "   (SILVANN_DATA in the environment; silvann data set \$DATA)"
             exit 0
         fi
-        mkdir -p "\$1/models" "\$1/user_sessions" || { echo "silvann: \$1 cannot be written" >&2; exit 1; }
+        mkdir -p "\$1/models" "\$1/users" || { echo "silvann: \$1 cannot be written" >&2; exit 1; }
         to=\$(cd "\$1" && pwd)
         if [ "\$to" = "\$HERE" ]; then rm -f "\$HERE/data_folder"; else echo "\$to" > "\$HERE/data_folder"; fi
         echo "the models, the conversations and the rest are kept in \$to from now on"
         if [ "\$to" != "\$DATA" ]; then
             # what is the user's in the folder left behind, by name: a model's folder, a skill's, the conversations — not
             # the release's own files in models/ and skills/ when that folder is this one (an update needs them here)
-            kept=\$(cd "\$DATA" && for f in models/* skills/* user_sessions workspace tools tools.json tools_library.json \\
+            kept=\$(cd "\$DATA" && for f in models/* skills/* users user_sessions workspace tools tools.json tools_library.json \\
                          .huggingface_token ui_last_start.json; do
                          case \$f in (models/*|skills/*) [ -d "\$f" ] || continue ;;
                                      (*) [ -n "\$(ls -A "\$f" 2>/dev/null)" ] || continue ;; esac

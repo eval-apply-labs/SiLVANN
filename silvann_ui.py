@@ -505,6 +505,91 @@ def ensure_config(model: str) -> tuple:
 # local mode needs the server beside the UI; a machine with no model yet downloads one from the same panel
 LOCAL_AVAILABLE = SERVER_SCRIPT.exists()
 LOCAL_APP = False                                    # --local: the UI as the app over this machine's models
+LISTEN = {"host": None, "argv": None}                # where this UI listens and how it was asked to (▶ main)
+START_AGAIN = DATA_DIR / "ui_start_again.json"       # the model a switch stopped, started by the UI started after it
+# the runtime beside the UI in a release, the development tree's otherwise (as silvann_tools_repl.py finds it)
+RUNTIME_DIR = Path(os.environ.get("SILVANN_RUNTIME") or (REPO_ROOT / "runtime" if (REPO_ROOT / "runtime").is_dir()
+                                                         else REPO_ROOT.parent / "python"))
+
+
+def _runtime_module(name: str):
+    """silvann_runtime.<name> — users.py, sso.py: the standard library's and httpx's alone — without the package's own
+    __init__, which boots the engine: a stand-in package whose path is the runtime's folder."""
+    import importlib
+    import types
+    if "silvann_runtime" not in sys.modules:
+        pkg = types.ModuleType("silvann_runtime")
+        pkg.__path__ = [str(RUNTIME_DIR / "silvann_runtime")]
+        sys.modules["silvann_runtime"] = pkg
+    return importlib.import_module("silvann_runtime." + name)
+
+
+# ⭐ THE USERS OF THIS DATA FOLDER, READ BY THE UI ITSELF (NN-196): a sign-in checked here whether a model runs or not —
+#   the same sign-ins the server checks (users/.sign_ins.json) — and the admin's panels built for an admin alone. None
+#   where the UI has no server and runtime beside it (a UI that talks to another machine's server): that server's
+#   sign-in, as before.
+try:
+    USERS_MOD = _runtime_module("users") if LOCAL_AVAILABLE else None
+    LOCAL_USERS = USERS_MOD.Users(DATA_DIR) if USERS_MOD is not None else None
+except Exception as _ex:                              # noqa: BLE001 — a runtime that does not import: the server's sign-in
+    print("[ui] the users of %s not read here (%s): the server's sign-in" % (DATA_DIR, _ex), flush=True)
+    USERS_MOD = LOCAL_USERS = None
+_SSO: dict = {}
+
+
+def local_sso():
+    """The data folder's provider (sso.json), its sign-ons begun and finished in this process (▶ silvann_runtime/sso.py)."""
+    if "sign_on" not in _SSO:
+        _SSO["sign_on"] = _runtime_module("sso").SignOn(LOCAL_USERS, DATA_DIR)
+    return _SSO["sign_on"]
+
+
+def gate(state: dict) -> tuple:
+    """⭐ WHO A PAGE IS FOR (NN-196, ⚖ 2026-11-18 *"i'd make everyone sign in regardless in multi user, so only admins can
+    touch the config"*): (multi user, the user signed in or None, an admin). Single user: no one signs in, and whoever
+    reaches the UI — this machine alone — is its admin. Multi user: the browser's sign-in, checked here; the machine's
+    settings, its users and its models an admin's. A UI with no users of its own (no runtime beside it): as before, the
+    Options its own and the server's sign-in the server's."""
+    if LOCAL_USERS is None:
+        return False, None, True
+    if not LOCAL_USERS.on():
+        return False, None, True
+    me = LOCAL_USERS.signed(state.get("user_token"))
+    return True, me, LOCAL_USERS.admin(me)
+
+
+def _this_address() -> str:
+    """This machine's address on its network — the one a connection outward would leave from (no packet sent) — or its
+    name."""
+    import socket
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("192.0.2.1", 9))                   # a documentation address: only the route is looked up
+            return s.getsockname()[0]
+    except OSError:
+        return socket.gethostname()
+
+
+def start_again_later(args: Optional[tuple]):
+    """The model a switch stopped — (its folder, its config, its port) — started by the UI that starts next (▶ main)."""
+    if args:
+        START_AGAIN.write_text(json.dumps({"model_dir": args[0], "config": args[1], "port": args[2]}))
+
+
+def restart_ui():
+    """⭐ THE UI STARTED AGAIN AS IT WAS STARTED (NN-196): the switch between single and multi user changes where it
+    listens (▶ listen_host), which a running UI cannot. The portable app's launcher starts it again itself — the UI exits
+    the code it waits for (SILVANN_RESTART_EXIT); elsewhere this process becomes the new one (Windows has no exec that
+    keeps the process: a new one, this one gone)."""
+    DOWNLOADS.cancel()
+    code = os.environ.get("SILVANN_RESTART_EXIT")
+    if code:
+        os._exit(int(code))
+    argv = [sys.executable] + LISTEN["argv"]
+    if os.name == "nt":
+        subprocess.Popen(argv, cwd=os.getcwd())
+        os._exit(0)
+    os.execv(sys.executable, argv)
 
 # The Help view's documents, a group each: (group, label, path) — every document the release ships, the UI's guide first
 HELP_DOCS = [
@@ -645,6 +730,7 @@ class ServerProcess:
         self.started = False                   # whether it had booted when it ended (else it never started)
         self.stopping = False                  # `stop` asked it to end: not a failure
         self.remember: Optional[dict] = None   # the start written to LAST_START once the server has booted
+        self.args: Optional[tuple] = None      # the last start's model folder, config and port
 
     def is_running(self) -> bool:
         return self.proc is not None and self.proc.poll() is None
@@ -663,6 +749,7 @@ class ServerProcess:
         self.setup = self.failure = None
         self.started = self.stopping = False
         self.remember = remember
+        self.args = (str(model_dir), config_name, int(port))   # what a switch starts again (▶ start_again_later)
         # The packed-models launch contract: --model <folder> + a config that overrides default_config.
         self.cmd = [sys.executable, str(SERVER_SCRIPT), "--model", str(model_dir),
                     config_name, "--port", str(int(port))]
@@ -1257,6 +1344,71 @@ def _with_turn(live: dict) -> list:
     return [dict(m) for m in live["before"]] + [dict(m) for m in live["turn"]]
 
 
+# what a browser keeps of its own whoever signs in on it: its look, and where it sends conversations
+BROWSER_OWN = ("dark", "show_thinking", "convs_expanded", "endpoint", "server_mode", "server_port")
+
+
+def fresh_session(state: dict):
+    """⛔ THE BROWSER'S STATE BACK TO ITS DEFAULTS, ITS OWN CHOICES KEPT (NN-196): at its sign-in page, a sign-in and a
+    sign-out — so the next person on the same browser finds nothing of the last one's: their open conversation and its
+    messages, the conversations they unlocked with a password, the panel they had open."""
+    kept = {k: state[k] for k in BROWSER_OWN if k in state}
+    state.clear()
+    state.update(_session_default())
+    state.update(kept)
+
+
+async def sign_in_page(state: dict):
+    """⭐ THE SIGN-IN, A PAGE OF ITS OWN (NN-196, ⚖ 2026-11-18 *"i would like a proper login screen and not a popup, so
+    silvann does not load for not authenticated users"*): a browser not signed in to a multi user machine is given this
+    and nothing else of SiLVANN — no drawer, no conversations, no documents — and SiLVANN itself once it has signed in.
+    The provider's button where the data folder names one (sso.json, ▶ silvann_runtime/sso.py)."""
+    fresh_session(state)
+    ui.dark_mode(bool(state.get("dark", False)))
+    with ui.column().classes("absolute-center items-center gap-6"):
+        ui.html('<span class="silvann-logo" style="font-size: 2rem">'
+                + SILVANN_TILE.replace('<svg ', '<svg class="silvann-tile" style="width: 3rem; height: 3rem" ', 1)
+                + '<span>LVANN</span></span>')
+        with ui.card().classes("w-80 gap-2").mark("sign-in"):
+            ui.label("Sign in").classes("text-lg")
+            ui.label("This machine has users: each signs in, and sees their own conversations.").classes(
+                "text-sm opacity-70")
+            name_in = ui.input("name").classes("w-full")
+            password_in = ui.input("password", password=True, password_toggle_button=True).classes("w-full")
+            said = ui.label("").classes("text-sm text-red-700")
+
+            async def sign_in():
+                name = (name_in.value or "").strip().lower()
+                token = await asyncio.to_thread(LOCAL_USERS.sign_in, name, password_in.value or "")
+                if token is None:
+                    said.text = "wrong name or password"
+                    password_in.value = ""
+                    return
+                fresh_session(state)
+                state["user_token"], state["user_name"] = token, name
+                ui.navigate.reload()                       # SiLVANN, as the signed-in user
+
+            name_in.on("keydown.enter", lambda: password_in.run_method("focus"))
+            password_in.on("keydown.enter", sign_in)
+            ui.button("Sign in", on_click=sign_in).classes("w-full")
+            try:
+                provider = await asyncio.to_thread(local_sso().public)
+            except Exception:                              # noqa: BLE001 — no provider to offer
+                provider = {}
+            if provider.get("on"):
+                async def sign_on():                       # its page, then back to /_silvann/sso, checked there
+                    try:
+                        got = await asyncio.to_thread(local_sso().start)
+                    except Exception as ex:                # noqa: BLE001 — the provider's refusal or silence, said
+                        said.text = str(ex)
+                        return
+                    state["sso_state"] = got["state"]      # the page coming back checks the browser is this one
+                    ui.navigate.to(got["url"])
+                ui.separator()
+                ui.button("Sign in with %s" % provider.get("label", "your organisation"), on_click=sign_on
+                          ).props("outline").classes("w-full").mark("sign-on")
+
+
 @ui.page("/")
 async def page():
     state = app.storage.user.setdefault("silvann", _session_default())
@@ -1270,10 +1422,22 @@ async def page():
     if live is not None and live["cart"] == state.get("active_id"):
         state["history"] = _with_turn(live)                # the turn so far, rather than what the file last kept of it
     state["active_bound"] = False
+    # ⭐ WHO THIS PAGE IS FOR (NN-196, ▶ gate): what it builds follows — the machine's Options and its Users an admin's
+    #   alone, never built for anyone else (a hidden panel's handlers would still answer), and a check every few seconds
+    #   reloads the page when its answer changes (a sign-in ended, an admin made a user, the machine switched)
+    multi, me, admin = gate(state)
+    built_for = (multi, me, admin)
+    if multi and me is None:
+        state.pop("user_token", None)                    # ended, or never this data folder's
+        state.pop("user_name", None)
+        await sign_in_page(state)                        # and nothing else of SiLVANN
+        return
+    if state.get("view") in ("options", "users") and not admin or state.get("view") == "account" and me is None:
+        state["view"] = "chat"
     if LOCAL_APP:
         # the app over this machine's models: its local panel, and the options view until a server is up
         state["server_mode"] = "local"
-        if not SERVER.is_running():
+        if not SERVER.is_running() and admin:
             state["view"] = "options"
     # Per-browser-tab UUID. app.storage.tab requires the WS handshake to be done first —
     # await client.connected() before touching it. Survives reloads within the tab, dies on close.
@@ -1294,7 +1458,12 @@ async def page():
     client = Client(state["endpoint"],
                     passwords=state.setdefault("passwords", {}),
                     web_user_id=web_user_id)
-    client.use_token(state.get("user_token"))             # this browser's sign-in, where the server has users
+
+    def token_for(endpoint: str) -> Optional[str]:
+        """The token a request to `endpoint` carries: one that server gave this browser (another machine's, with users of
+        its own), else this data folder's sign-in (▶ gate) — the same token its server checks."""
+        return (state.get("server_tokens") or {}).get(endpoint.rstrip("/")) or (state.get("user_token") if multi else None)
+    client.use_token(token_for(state["endpoint"]))
 
     # Capture the page-level NiceGUI Client now (while the slot stack is set up) so event-handler
     # tasks — which run with an empty slot stack — can still trigger downloads/notifications by
@@ -1371,10 +1540,18 @@ async def page():
                 ui.icon("help_outline")
                 ui.label("Help")
 
-            opts_row = ui.row().classes("silvann-menu-item w-full")
-            with opts_row:
-                ui.icon("settings")
-                ui.label("Options")
+            # ⛔ A ROW BUILT ONLY FOR WHOEVER MAY OPEN IT (NN-196) — never one built and hidden: the active row's
+            #   highlight replaces a row's classes (▶ update_view), NiceGUI's `hidden` among them
+            def menu_row(icon, label):
+                row = ui.row().classes("silvann-menu-item w-full")
+                with row:
+                    ui.icon(icon)
+                    ui.label(label)
+                return row
+            opts_row = menu_row("settings", "Options") if admin else None
+            # multi user: the users, an admin's; the account, each signed-in user's own
+            users_row = menu_row("group", "Users") if multi and admin else None
+            account_row = menu_row("account_circle", "Account") if me is not None else None
 
             chat_row = ui.row().classes("silvann-menu-item w-full")
             with chat_row:
@@ -1589,11 +1766,14 @@ async def page():
     # --- Options view (was "Server" tab) ---
     opts_view = ui.column().classes("silvann-main w-full p-4 gap-2 overflow-auto")
     with opts_view:
-        ui.label("Server control").classes("text-lg font-bold")
+        if admin:
+            ui.label("Server control").classes("text-lg font-bold")
 
         # this machine's models and its server; which server the UI talks to is chosen at the bottom
         with ui.column().classes("w-full gap-2"):
-            if not LOCAL_AVAILABLE:
+            if not admin:
+                pass                                       # never built for a user who is not an admin (▶ gate)
+            elif not LOCAL_AVAILABLE:
                 ui.label(
                     f"Local mode unavailable: this UI process can't find start_silvann_server.py "
                     f"beside it. Run the UI from main/ (the runtime root) to enable local control."
@@ -1866,60 +2046,348 @@ async def page():
                     "w-full h-48 bg-slate-100 text-slate-800 font-mono text-xs p-2 border rounded"
                 )
 
-        # ⭐ THE SERVER THE UI TALKS TO: this machine's, at the port above, or another's at an address — a server
-        #   elsewhere is started and stopped on its own machine
-        ui.separator().classes("mt-4")
-        with ui.row().classes("items-center gap-4"):
-            ui.label("Send conversations to:").classes("font-bold")
-            server_sel = ui.toggle({"local": "this machine", "remote": "remote"}, value=state["server_mode"])
-        with ui.row().classes("items-end gap-2") as remote_row:
-            endpoint_in = ui.input(label="Address", value=state["endpoint"]).props("dense outlined").classes("w-96")
-            connect_btn = ui.button("connect").props("dense outline color=primary")
-        remote_row.bind_visibility_from(server_sel, "value", lambda v: v == "remote")
-        if not LOCAL_AVAILABLE:                           # no server beside this UI to start: another's only
-            server_sel.set_value("remote")
-            server_sel.disable()
-        server_sel.on_value_change(lambda e: asyncio.create_task(on_server_mode(e.value)))
+        if admin:                                          # the rest of the Options, an admin's too
+            # ⭐ THE SERVER THE UI TALKS TO: this machine's, at the port above, or another's at an address — a server
+            #   elsewhere is started and stopped on its own machine
+            ui.separator().classes("mt-4")
+            with ui.row().classes("items-center gap-4"):
+                ui.label("Send conversations to:").classes("font-bold")
+                server_sel = ui.toggle({"local": "this machine", "remote": "remote"}, value=state["server_mode"])
+            with ui.row().classes("items-end gap-2") as remote_row:
+                endpoint_in = ui.input(label="Address", value=state["endpoint"]).props("dense outlined").classes("w-96")
+                connect_btn = ui.button("connect").props("dense outline color=primary")
+            remote_row.bind_visibility_from(server_sel, "value", lambda v: v == "remote")
+            if not LOCAL_AVAILABLE:                           # no server beside this UI to start: another's only
+                server_sel.set_value("remote")
+                server_sel.disable()
+            server_sel.on_value_change(lambda e: asyncio.create_task(on_server_mode(e.value)))
 
-        # ⭐ THE SERVER'S TOOLS (NN-127): what its model's REPL reaches on its machine, as the machine's tools file sets
-        #   it up — the file is edited there (docs/tools.md); "Rebuild the tools" reads the skills again, gives each one
-        #   installed since its entry, and checks again what each tool needs
-        ui.separator().classes("mt-4")
-        with ui.row().classes("items-center gap-2"):
-            ui.label("The server's tools").classes("font-bold")
-            ui.button("Rebuild the tools", icon="build", on_click=lambda: asyncio.create_task(on_rebuild_tools())
-                      ).props("dense outline").tooltip(
-                "Read the skills again, give each one installed since its entry in the tools file, and check again "
-                "what each tool needs — a SearXNG to search with, a picture model to draw with")
-            ui.button(icon="refresh", on_click=lambda: asyncio.create_task(show_tools())
-                      ).props("dense flat").tooltip("Ask the server again")
-        tools_lbl = ui.label("").classes("text-xs font-mono whitespace-pre-wrap")
+            # ⭐ THE SERVER'S TOOLS (NN-127): what its model's REPL reaches on its machine, as the machine's tools file sets
+            #   it up — the file is edited there (docs/tools.md); "Rebuild the tools" reads the skills again, gives each one
+            #   installed since its entry, and checks again what each tool needs
+            ui.separator().classes("mt-4")
+            with ui.row().classes("items-center gap-2"):
+                ui.label("The server's tools").classes("font-bold")
+                ui.button("Rebuild the tools", icon="build", on_click=lambda: asyncio.create_task(on_rebuild_tools())
+                          ).props("dense outline").tooltip(
+                    "Read the skills again, give each one installed since its entry in the tools file, and check again "
+                    "what each tool needs — a SearXNG to search with, a picture model to draw with")
+                ui.button(icon="refresh", on_click=lambda: asyncio.create_task(show_tools())
+                          ).props("dense flat").tooltip("Ask the server again")
+            tools_lbl = ui.label("").classes("text-xs font-mono whitespace-pre-wrap")
 
-        async def show_tools(got=None, said=()):
-            try:
-                got = got or await client.tools_settings()
-            except Exception as ex:                       # noqa: BLE001 — said in the section
-                tools_lbl.set_text("the server does not answer (%s)" % type(ex).__name__)
-                return
-            if not got.get("tools_file"):
-                tools_lbl.set_text("the server's model has no tools")
-                return
-            lines = list(said) + (["—"] if said else []) + ["the tools file: %s" % got["tools_file"]]
-            for name, e in sorted(got.get("entries", {}).items()):
-                now = ("switched off" if e["enabled"] == "no" else "not available — %s" % e["unavailable"]
-                       if e.get("unavailable") else "on" if e["enabled"] == "yes" else "on (auto)")
-                settings = ", ".join("%s %s" % (k, json.dumps(v)) for k, v in e.get("config", {}).items())
-                lines.append("%-10s %s%s" % (name, now, "\n           %s" % settings if settings else ""))
-            tools_lbl.set_text("\n".join(lines))
+            async def show_tools(got=None, said=()):
+                try:
+                    got = got or await client.tools_settings()
+                except Exception as ex:                       # noqa: BLE001 — said in the section
+                    tools_lbl.set_text("the server does not answer (%s)" % type(ex).__name__)
+                    return
+                if not got.get("tools_file"):
+                    tools_lbl.set_text("the server's model has no tools")
+                    return
+                lines = list(said) + (["—"] if said else []) + ["the tools file: %s" % got["tools_file"]]
+                for name, e in sorted(got.get("entries", {}).items()):
+                    now = ("switched off" if e["enabled"] == "no" else "not available — %s" % e["unavailable"]
+                           if e.get("unavailable") else "on" if e["enabled"] == "yes" else "on (auto)")
+                    settings = ", ".join("%s %s" % (k, json.dumps(v)) for k, v in e.get("config", {}).items())
+                    lines.append("%-10s %s%s" % (name, now, "\n           %s" % settings if settings else ""))
+                tools_lbl.set_text("\n".join(lines))
 
-        async def on_rebuild_tools():
-            try:
-                got = await client.rebuild_tools()
-            except Exception as ex:                       # noqa: BLE001 — said to the user
-                safe_notify("the tools were not rebuilt: %s" % ex, type="negative")
-                return
-            await show_tools(got, got.get("said") or ["nothing changed"])
-            safe_notify("the tools rebuilt", type="positive")
+            async def on_rebuild_tools():
+                try:
+                    got = await client.rebuild_tools()
+                except Exception as ex:                       # noqa: BLE001 — said to the user
+                    safe_notify("the tools were not rebuilt: %s" % ex, type="negative")
+                    return
+                await show_tools(got, got.get("said") or ["nothing changed"])
+                safe_notify("the tools rebuilt", type="positive")
+
+            # ⭐ SINGLE USER OR MULTI USER (NN-196, ⚖ 2026-11-18 *"the admin consolle has the single user vs multi user
+            #   option in the config panel, and to enable that it makes you create the admin account before rebooting
+            #   and asking for the credentials and starting as multi user"*)
+            ui.separator().classes("mt-4")
+            ui.label("Single user or multi user").classes("font-bold")
+            windows_note = ("On Windows a user's model runs no commands — (powershell …), (bash …), the tools it adds — "
+                            "as Windows cannot hold them to the user's own folder; a single user's model runs them."
+                            if os.name == "nt" else "")
+            if LOCAL_USERS is None:
+                ui.label("This UI has no users of its own to switch: it talks to a server elsewhere, whose users are its "
+                         "machine's.").classes("text-xs opacity-70 max-w-2xl whitespace-normal")
+            elif not multi:
+                ui.label("Single user: no one signs in, and SiLVANN is reached from this machine alone. Multi user: "
+                         "everyone signs in, on this machine too; each sees their own conversations, and only an admin "
+                         "changes these Options and the users. The switch makes you the admin — your conversations, "
+                         "workspace and definitions your account's. The model stops, SiLVANN starts again, and you sign "
+                         "in. " + windows_note).classes("text-xs opacity-70 max-w-2xl whitespace-normal")
+                with ui.row().classes("items-end gap-2"):
+                    sw_name = ui.input("the admin's name").props("dense").classes("w-48")
+                    sw_pw1 = ui.input("password", password=True, password_toggle_button=True).props("dense").classes("w-48")
+                    sw_pw2 = ui.input("again", password=True).props("dense").classes("w-40")
+                    sw_btn = ui.button("switch to multi user", icon="group").props("dense outline")
+                sw_said = ui.label("").classes("text-sm text-red-700")
+
+                async def do_multi():
+                    if not gate(state)[2]:
+                        ui.navigate.reload()
+                        return
+                    name = (sw_name.value or "").strip().lower()
+                    if not USERS_MOD.NAME.match(name):
+                        sw_said.text = "a name is 1 to 32 of a-z, 0-9, _ and -, beginning with a letter or a digit"
+                        return
+                    if not sw_pw1.value or sw_pw1.value != sw_pw2.value:
+                        sw_said.text = "the two passwords differ" if sw_pw1.value else "the admin needs a password"
+                        return
+                    if os.path.lexists(LOCAL_USERS.folder(name)):
+                        sw_said.text = "%s is taken: users/%s/ is there already — choose another name" % (name, name)
+                        return
+                    sw_btn.disable()
+                    sw_said.classes(replace="text-sm opacity-70")
+                    sw_said.text = "the model stopping, its conversations saved…"
+                    again = SERVER.args if SERVER.is_running() else None
+                    await asyncio.to_thread(SERVER.stop)
+                    try:
+                        await asyncio.to_thread(LOCAL_USERS.multi, name, sw_pw1.value)
+                    except USERS_MOD.Refused as ex:
+                        sw_said.classes(replace="text-sm text-red-700")
+                        sw_said.text = "not switched: %s" % ex
+                        sw_btn.enable()
+                        if again:
+                            SERVER.start(*again)
+                        return
+                    switched(again, "multi user: sign in as %s when SiLVANN is back" % name)
+                sw_btn.on("click", do_multi)
+            else:
+                port = LISTEN.get("port") or 8080
+                if LISTEN.get("host") in ("127.0.0.1", "localhost", "::1"):
+                    reach = ("This UI listens on this machine alone (--private, or the address --host names): other "
+                             "machines cannot reach it.")
+                elif os.path.exists("/.dockerenv") or os.path.exists("/run/.containerenv"):
+                    reach = ("SiLVANN runs in a container: other machines reach it once the host publishes its port on "
+                             "the network — `setup.sh update` on the host (docker/README.md).")
+                else:
+                    reach = ("Others on your network reach SiLVANN at http://%s:%d once this machine's firewall lets port "
+                             "%d in." % (_this_address(), port, port))
+                ui.label("Multi user: everyone signs in; an admin changes these Options and the users (Users). " + reach
+                         + (" " + windows_note if windows_note else "")
+                         ).classes("text-xs opacity-70 max-w-2xl whitespace-normal")
+                alone = LOCAL_USERS.names() == [me]
+                sso_on = (DATA_DIR / "sso.json").is_file()
+                with ui.row().classes("items-center gap-2"):
+                    back_btn = ui.button("back to single user", icon="person").props("dense outline")
+                    ui.label("" if alone and not sso_on else
+                             "sso.json signs people on: remove it first" if sso_on else
+                             "the other users removed first (Users): you, the admin, alone"
+                             ).classes("text-xs opacity-70")
+                back_btn.set_enabled(alone and not sso_on)
+
+                async def do_single():
+                    if not gate(state)[2]:
+                        ui.navigate.reload()
+                        return
+                    with page_client, ui.dialog() as dlg, ui.card().classes("gap-2"):
+                        ui.label("Back to single user?").classes("font-bold")
+                        ui.label("Your account becomes the single user's — your conversations kept, your password "
+                                 "gone. No one signs in, and SiLVANN is reached from this machine alone. The model "
+                                 "stops and SiLVANN starts again.").classes("text-xs opacity-70 max-w-md")
+                        with ui.row().classes("justify-end w-full gap-2"):
+                            ui.button("cancel", on_click=lambda: dlg.submit(False)).props("flat")
+                            ui.button("back to single user", on_click=lambda: dlg.submit(True)).props("color=primary")
+                    if not await dlg:
+                        return
+                    again = SERVER.args if SERVER.is_running() else None
+                    await asyncio.to_thread(SERVER.stop)
+                    try:
+                        await asyncio.to_thread(LOCAL_USERS.single)
+                    except USERS_MOD.Refused as ex:
+                        safe_notify("not switched: %s" % ex, type="negative")
+                        if again:
+                            SERVER.start(*again)
+                        return
+                    switched(again, "single user: no sign-in")
+                back_btn.on("click", do_single)
+
+    def switched(again, said):
+        """After the switch: the UI started again where its address changes (▶ restart_ui), the model the switch stopped
+        started by the next one; else that model started again here, and every page — this one now, the others at their
+        next look (▶ gate) — drawn afresh."""
+        safe_notify(said, type="positive")
+        if listen_host(LISTEN.get("named"), LISTEN.get("private"))[0] != LISTEN.get("host"):
+            start_again_later(again)
+            asyncio.get_running_loop().call_later(1.0, restart_ui)
+            return
+        if again:
+            SERVER.start(*again)
+        ui.navigate.reload()
+
+    # --- Users view (NN-196): who signs in to this machine, an admin's to change ---
+    users_view = ui.column().classes("silvann-main w-full p-4 gap-2 overflow-auto")
+    with users_view:
+        if multi and admin:
+            ui.label("Users").classes("text-lg font-bold")
+            ui.label("Each user signs in and sees their own conversations, and their model works in their own folder. "
+                     "An admin also changes the Options — the models, the configs, the tools — and these users. A user "
+                     "made at a sign-on (sso.json) signs in with their organisation's account.").classes(
+                "text-xs opacity-70 max-w-2xl whitespace-normal")
+
+            def admin_now() -> bool:
+                if gate(state)[2]:
+                    return True
+                safe_notify("an admin's alone", type="negative")
+                ui.navigate.reload()
+                return False
+
+            @ui.refreshable
+            def users_table():
+                with ui.grid(columns="auto auto auto auto").classes("items-center gap-x-6 gap-y-1"):
+                    for head in ("user", "", "signs in with", ""):
+                        ui.label(head).classes("text-xs opacity-70")
+                    for n in LOCAL_USERS.names():
+                        ui.label(n + (" (you)" if n == me else "")).classes("font-mono text-sm")
+                        ui.label("admin" if LOCAL_USERS.admin(n) else "").classes("text-xs text-green-700")
+                        ways = (["a password"] if LOCAL_USERS.has_password(n) else []) + [
+                            "%s's account %s" % (iss, email or sub) for iss, sub, email in LOCAL_USERS.accounts(n)]
+                        ui.label(", ".join(ways) or "nothing yet").classes("text-xs")
+                        with ui.row().classes("gap-1 no-wrap"):
+                            ui.button("not admin" if LOCAL_USERS.admin(n) else "make admin",
+                                      on_click=lambda _, n=n: toggle_admin(n)).props("dense flat size=sm")
+                            if LOCAL_USERS.has_password(n) or not LOCAL_USERS.accounts(n):
+                                ui.button("password", on_click=lambda _, n=n: set_password(n)
+                                          ).props("dense flat size=sm")
+                            ui.button("remove", on_click=lambda _, n=n: remove_user(n)
+                                      ).props("dense flat size=sm color=negative")
+
+            def toggle_admin(n):
+                if not admin_now():
+                    return
+                try:
+                    LOCAL_USERS.set_admin(n, not LOCAL_USERS.admin(n))
+                except USERS_MOD.Refused as ex:
+                    safe_notify(str(ex), type="warning")
+                    return
+                if n == me and not LOCAL_USERS.admin(me):
+                    ui.navigate.reload()                   # an admin no more: this page's Options and Users go
+                    return
+                users_table.refresh()
+
+            async def set_password(n):
+                if not admin_now():
+                    return
+                with page_client, ui.dialog() as dlg, ui.card().classes("gap-2"):
+                    ui.label("A new password for %s" % n).classes("font-bold")
+                    ui.label("Their sign-ins end: they sign in again with it.").classes("text-xs opacity-70")
+                    p1 = ui.input("new password", password=True, password_toggle_button=True).classes("w-72")
+                    p2 = ui.input("again", password=True).classes("w-72")
+                    err = ui.label("").classes("text-red-500 text-sm")
+
+                    def apply():
+                        if not p1.value or p1.value != p2.value:
+                            err.text = "the two passwords differ" if p1.value else "a password, please"
+                            return
+                        dlg.submit(p1.value)
+                    with ui.row().classes("justify-end w-full gap-2"):
+                        ui.button("cancel", on_click=lambda: dlg.submit(None)).props("flat")
+                        ui.button("set", on_click=apply).props("color=primary")
+                pw = await dlg
+                if not pw or not admin_now():
+                    return
+                await asyncio.to_thread(LOCAL_USERS.passwd, n, pw)
+                if n == me:                                # your own: this browser signed in again with it
+                    state["user_token"] = await asyncio.to_thread(LOCAL_USERS.issue, me)
+                    client.use_token(token_for(state["endpoint"]))
+                safe_notify("%s's password set" % n, type="positive")
+                users_table.refresh()
+
+            async def remove_user(n):
+                if not admin_now():
+                    return
+                held = LOCAL_USERS.conversations(n)
+                with page_client, ui.dialog() as dlg, ui.card().classes("gap-2"):
+                    ui.label("Remove %s?" % n).classes("font-bold")
+                    ui.label("Their folder goes: %s." % ("their %d conversation%s, their workspace and settings with it"
+                                                          % (held, "" if held == 1 else "s") if held else
+                                                          "their workspace and settings")).classes("text-xs opacity-70")
+                    with ui.row().classes("justify-end w-full gap-2"):
+                        ui.button("cancel", on_click=lambda: dlg.submit(False)).props("flat")
+                        ui.button("remove", on_click=lambda: dlg.submit(True)).props("color=negative")
+                if not await dlg or not admin_now():
+                    return
+                try:
+                    await asyncio.to_thread(LOCAL_USERS.remove, n, True)
+                except USERS_MOD.Refused as ex:
+                    safe_notify(str(ex), type="warning")
+                    return
+                safe_notify("%s removed" % n, type="info")
+                if n == me:
+                    ui.navigate.reload()
+                    return
+                users_table.refresh()
+
+            users_table()
+            ui.separator().classes("mt-2")
+            ui.label("Add a user").classes("font-bold")
+            with ui.row().classes("items-end gap-2"):
+                add_name = ui.input("name").props("dense").classes("w-48")
+                add_pw1 = ui.input("password", password=True, password_toggle_button=True).props("dense").classes("w-48")
+                add_pw2 = ui.input("again", password=True).props("dense").classes("w-40")
+                add_admin = ui.checkbox("an admin")
+                add_btn = ui.button("add", icon="person_add").props("dense outline")
+            add_said = ui.label("").classes("text-sm text-red-700")
+
+            async def do_add():
+                if not admin_now():
+                    return
+                name = (add_name.value or "").strip().lower()
+                if not add_pw1.value or add_pw1.value != add_pw2.value:
+                    add_said.text = "the two passwords differ" if add_pw1.value else "a user needs a password"
+                    return
+                try:
+                    await asyncio.to_thread(LOCAL_USERS.add, name, add_pw1.value, bool(add_admin.value))
+                except USERS_MOD.Refused as ex:
+                    add_said.text = str(ex)
+                    return
+                add_said.text = ""
+                add_name.value = add_pw1.value = add_pw2.value = ""
+                add_admin.value = False
+                safe_notify("%s added: they sign in with that password" % name, type="positive")
+                users_table.refresh()
+            add_btn.on("click", do_add)
+
+    # --- Account view (NN-196): the signed-in user's own ---
+    account_view = ui.column().classes("silvann-main w-full p-4 gap-2 overflow-auto")
+    with account_view:
+        if me is not None:
+            ui.label("Account").classes("text-lg font-bold")
+            ui.label("Signed in as %s%s." % (me, ", an admin" if admin else "")).classes("text-sm")
+            for iss, sub, email in LOCAL_USERS.accounts(me):
+                ui.label("You also sign in with %s's account %s." % (iss, email or sub)).classes("text-xs opacity-70")
+            if LOCAL_USERS.has_password(me):
+                ui.label("Your password").classes("font-bold mt-2")
+                with ui.row().classes("items-end gap-2"):
+                    acc_now = ui.input("the one you have", password=True).props("dense").classes("w-48")
+                    acc_pw1 = ui.input("a new one", password=True, password_toggle_button=True).props("dense"
+                                                                                                    ).classes("w-48")
+                    acc_pw2 = ui.input("again", password=True).props("dense").classes("w-40")
+                    acc_btn = ui.button("change", icon="key").props("dense outline")
+                acc_said = ui.label("").classes("text-sm text-red-700")
+
+                async def change_password():
+                    if not acc_pw1.value or acc_pw1.value != acc_pw2.value:
+                        acc_said.text = "the two new passwords differ" if acc_pw1.value else "a new password, please"
+                        return
+                    if not await asyncio.to_thread(LOCAL_USERS.password_ok, me, acc_now.value or ""):
+                        acc_said.text = "that is not your password"
+                        return
+                    await asyncio.to_thread(LOCAL_USERS.passwd, me, acc_pw1.value)
+                    state["user_token"] = await asyncio.to_thread(LOCAL_USERS.issue, me)   # signed in again with it
+                    client.use_token(token_for(state["endpoint"]))
+                    acc_now.value = acc_pw1.value = acc_pw2.value = acc_said.text = ""
+                    safe_notify("your password changed: your other sign-ins ended", type="positive")
+                acc_btn.on("click", change_password)
+            else:
+                ui.label("You sign in with your organisation's account; an admin can give you a password as well."
+                         ).classes("text-xs opacity-70")
+            ui.button("sign out", icon="logout", on_click=lambda: asyncio.create_task(do_sign_out())
+                      ).props("dense flat").classes("mt-2")
 
     # --- Help view: a document picker over the release's documents, the UI's guide first ---
     help_view = ui.column().classes("silvann-main w-full p-6 overflow-auto")
@@ -1974,6 +2442,8 @@ async def page():
         expanded = bool(state.get("convs_expanded", True))
         chat_view.set_visibility(v == "chat")
         opts_view.set_visibility(v == "options")
+        users_view.set_visibility(v == "users")
+        account_view.set_visibility(v == "account")
         help_view.set_visibility(v == "help")
         # Sub-tree is shown only when Chat is the active view AND the user hasn't collapsed it.
         convs_col.set_visibility(v == "chat" and expanded)
@@ -1981,9 +2451,10 @@ async def page():
             f"name={'expand_less' if (v == 'chat' and expanded) else 'expand_more'}")
         # Highlight active menu row.
         base = "silvann-menu-item w-full"
-        chat_row.classes(replace=base + (" silvann-menu-active" if v == "chat" else ""))
-        opts_row.classes(replace=base + (" silvann-menu-active" if v == "options" else ""))
-        help_row.classes(replace=base + (" silvann-menu-active" if v == "help" else ""))
+        for row, name in ((chat_row, "chat"), (opts_row, "options"), (users_row, "users"), (account_row, "account"),
+                          (help_row, "help")):
+            if row is not None:                            # a row this page was not built with (▶ menu_row)
+                row.classes(replace=base + (" silvann-menu-active" if v == name else ""))
 
     async def on_chat_click():
         # Clicking Chat: if it's already the active view, toggle the sub-tree. Otherwise switch
@@ -1998,13 +2469,17 @@ async def page():
             await render_convs()
 
     async def select_other_view(v: str):
+        if v in ("options", "users") and not admin or v == "account" and me is None:
+            return                                         # not built for this page (▶ gate)
         state["view"] = v
         update_view()
         if v == "options":
             await show_tools()
 
     chat_row.on("click", lambda: asyncio.create_task(on_chat_click()))
-    opts_row.on("click", lambda: asyncio.create_task(select_other_view("options")))
+    for row, name in ((opts_row, "options"), (users_row, "users"), (account_row, "account")):
+        if row is not None:
+            row.on("click", lambda _=None, name=name: asyncio.create_task(select_other_view(name)))
     help_row.on("click", lambda: asyncio.create_task(select_other_view("help")))
 
     # light or dark, as this browser last chose — the row offers the other
@@ -2081,10 +2556,12 @@ async def page():
     async def connect_clicked():
         state["endpoint"] = endpoint_in.value
         client.set_endpoint(endpoint_in.value)
+        client.use_token(token_for(endpoint_in.value))
         await ping()
         await render_convs()
 
-    connect_btn.on("click", connect_clicked)
+    if admin:
+        connect_btn.on("click", connect_clicked)
 
     async def on_server_mode(mode):
         """The server chosen at the bottom of Options: this machine's, at its port, or the address given."""
@@ -3078,7 +3555,7 @@ async def page():
                  lambda e: asyncio.create_task(send_or_stop()))
 
     # ----- Options view: server-control wiring (only if LOCAL_AVAILABLE) -----
-    if LOCAL_AVAILABLE:
+    if LOCAL_AVAILABLE and admin:
         async def refresh_status():
             # Probe the configured endpoint so externally-started servers (e.g. ones spawned by a
             # previous UI instance and outliving it) get surfaced too, not just subprocesses we own.
@@ -3291,26 +3768,28 @@ async def page():
                 ui.button("delete", on_click=do_delete).props("color=negative")
         dlg.open()
 
-    # ⭐ A SERVER WITH USERS (NN-150): a sign-in asked for before anything else, and again when a request answers 401 — a
-    #   token this browser keeps, its conversations the signed-in user's alone
+    # ⭐ ANOTHER MACHINE'S SERVER WITH USERS OF ITS OWN (NN-150): its sign-in, asked for in a dialog when it answers 401 —
+    #   a token this browser keeps for that server (`server_tokens`). This machine's own sign-in is a page of its own
+    #   (▶ sign_in_page): a page whose sign-in ended is drawn again, and that is the page it gets.
     sign_in_dialog = ui.dialog().props("persistent").mark("sign-in")
     with sign_in_dialog, ui.card().classes("w-80 gap-2"):
         ui.label("Sign in").classes("text-lg")
-        ui.label("This server has users: each sees their own conversations.").classes("text-sm opacity-70")
+        sign_in_about = ui.label("").classes("text-sm opacity-70")
         sign_in_name = ui.input("name").classes("w-full")
         sign_in_password = ui.input("password", password=True, password_toggle_button=True).classes("w-full")
         sign_in_said = ui.label("").classes("text-sm text-red-700")
 
         async def do_sign_in():
             try:
-                got = await client.sign_in(sign_in_name.value or "", sign_in_password.value or "")
+                got = await client.sign_in((sign_in_name.value or "").strip().lower(), sign_in_password.value or "")
             except httpx.HTTPStatusError as ex:
                 sign_in_said.text = "wrong name or password" if ex.response.status_code == 401 else ex.response.text[:200]
                 return
             except httpx.HTTPError as ex:
                 sign_in_said.text = "the server does not answer: %s" % ex
                 return
-            state["user_token"], state["user_name"] = got["token"], got["name"]
+            state.setdefault("server_tokens", {})[client.endpoint] = got["token"]
+            state["server_user"] = got["name"]
             sign_in_dialog.close()
             ui.navigate.reload()                          # every panel again, as the signed-in user
 
@@ -3336,10 +3815,12 @@ async def page():
         sso_box.set_visibility(False)
 
     async def need_sign_in():
-        if state.get("user_token"):
-            state.pop("user_token", None)
-            state.pop("user_name", None)
-            client.use_token(None)
+        if multi and LOCAL_USERS.signed(state.get("user_token")) is None:
+            ui.navigate.reload()                          # this machine's sign-in ended: its own page (▶ sign_in_page)
+            return
+        (state.get("server_tokens") or {}).pop(client.endpoint, None)
+        sign_in_about.text = "The server at %s has users: each sees their own conversations." % client.endpoint
+        client.use_token(token_for(client.endpoint))
         signed_row.set_visibility(False)
         sign_in_said.text = ""
         try:
@@ -3353,9 +3834,15 @@ async def page():
     client.on_signed_out = need_sign_in
 
     async def do_sign_out():
-        await client.sign_out()
-        state.pop("user_token", None)
-        state.pop("user_name", None)
+        if multi and state.get("user_token"):
+            await asyncio.to_thread(LOCAL_USERS.sign_out, state["user_token"])   # every process's (▶ users.py)
+            fresh_session(state)                          # nothing of theirs left for the next on this browser
+        elif (state.get("server_tokens") or {}).get(client.endpoint):
+            try:
+                await client.sign_out()
+            except httpx.HTTPError:
+                pass
+            state["server_tokens"].pop(client.endpoint, None)
         ui.navigate.reload()
 
     with chat_header.parent_slot.parent:
@@ -3367,10 +3854,12 @@ async def page():
         h_users = await client.health()
     except Exception:
         h_users = {}
-    if h_users.get("users") and not h_users.get("user"):
+    asking = False
+    if h_users.get("users") and not h_users.get("user"):     # a server whose users are not this machine's
+        asking = True
         await need_sign_in()
-    elif h_users.get("user"):
-        signed_label.text = "signed in as %s" % h_users["user"]
+    elif me is not None or h_users.get("user"):
+        signed_label.text = "signed in as %s" % (me or h_users["user"])
         signed_row.set_visibility(True)
 
     # Initial render
@@ -3382,7 +3871,7 @@ async def page():
         # back on another tab while this browser's answer streams: the conversation claimed for this one, so the server
         #   does not put it away as the tab that went's
         await bind_active()
-    if not (h_users.get("users") and not h_users.get("user")):
+    if not asking:
         await render_convs()
     # a streaming answer drawn at most ten times a second, whatever the tokens' rate
     ui.timer(0.1, live_tick)
@@ -3390,6 +3879,8 @@ async def page():
     # Keep the status dot live — re-ping every 5s.
     def _periodic_ping():
         asyncio.create_task(ping())
+        if gate(state) != built_for:                       # a sign-in ended, an admin made a user, the machine switched
+            ui.navigate.reload()
     ui.timer(5.0, _periodic_ping)
 
     # Heartbeat: tell the server we're still here so the idle-eviction loop doesn't unbind us.
@@ -3452,6 +3943,15 @@ async def sso_back(code: str = "", state: str = "", error: str = "", error_descr
         said = "the provider: %s" % (error_description or error)
     elif not expected or not secrets.compare_digest(state.encode(), str(expected).encode()):
         said = "this sign-on was not begun in this browser, or it was finished already: begin it again"
+    elif LOCAL_USERS is not None and LOCAL_USERS.on() and LOCAL_USERS.signed(session.get("user_token")) is None:
+        # this data folder's sign-in (NN-196): the provider's answer checked here, a token every process here takes
+        try:
+            name = await asyncio.to_thread(local_sso().finish, code, state)
+            fresh_session(session)
+            session["user_token"], session["user_name"] = await asyncio.to_thread(LOCAL_USERS.issue, name), name
+            return RedirectResponse("/")
+        except Exception as ex:                           # noqa: BLE001 — refused, or the provider silent: said
+            said = str(ex)
     else:
         try:
             async with httpx.AsyncClient(timeout=30) as http:
@@ -3459,7 +3959,8 @@ async def sso_back(code: str = "", state: str = "", error: str = "", error_descr
                                     json={"code": code, "state": state})
             if r.status_code == 200:
                 got = r.json()
-                session["user_token"], session["user_name"] = got["token"], got["name"]
+                session.setdefault("server_tokens", {})[session["endpoint"].rstrip("/")] = got["token"]
+                session["server_user"] = got["name"]
                 return RedirectResponse("/")
             said = _said(r)
         except httpx.HTTPError as ex:
@@ -3471,7 +3972,17 @@ async def sso_back(code: str = "", state: str = "", error: str = "", error_descr
 
 
 def _start_last():
-    """The model a --local UI started last, started again as it was — the app opens where it was left."""
+    """The model a --local UI started last, started again as it was — the app opens where it was left. A model a switch
+    between single and multi user stopped (▶ START_AGAIN) comes first, whatever UI this is."""
+    try:
+        again = json.loads(START_AGAIN.read_text())
+        START_AGAIN.unlink()
+        SERVER.start(again["model_dir"], again["config"], int(again["port"]))
+        return
+    except (OSError, ValueError, KeyError):
+        pass
+    if not LOCAL_APP:
+        return
     try:
         last = json.loads(LAST_START.read_text())
     except (OSError, ValueError):
@@ -3524,7 +4035,8 @@ def listen_host(host: Optional[str], private: bool) -> tuple:
     if private:
         return "127.0.0.1", "this machine alone (--private)"
     if not sign_in_on(DATA_DIR):
-        return "127.0.0.1", "this machine alone: no sign-in yet (`silvann users add <name>` opens it to the network)"
+        return "127.0.0.1", ("this machine alone: single user (Options, or `silvann users add <name>`, makes it multi "
+                             "user and opens it to the network)")
     return "0.0.0.0", "every address: sign-in is on"
 
 
@@ -3547,20 +4059,37 @@ def main():
                    help="the UI as the app over this machine's models: the local panel first, "
                         "the model started last started again, and the server stopped with the UI")
     args = p.parse_args()
+    restarted = os.environ.pop("SILVANN_RESTARTED", None) is not None     # by a switch (▶ restart_ui)
 
     if args.endpoint:
         os.environ["SILVANN_DEFAULT_ENDPOINT"] = args.endpoint
+    if LOCAL_USERS is not None:
+        for line in LOCAL_USERS.settle():                 # the single user's folder (NN-196): made, once
+            print("[ui] moved into users/%s/: %s" % (USERS_MOD.LOCAL, line), flush=True)
+    app.on_startup(_start_last)                           # a --local app's last model, or the one a switch stopped
     if args.local:
         LOCAL_APP = True
-        app.on_startup(_start_last)
         app.on_shutdown(_stop_all)
         if os.environ.get("SILVANN_QUIT_TOKEN"):
             _quit_route(os.environ["SILVANN_QUIT_TOKEN"])
 
     host, why = listen_host(args.host, args.private)
+    LISTEN.update(host=host, private=args.private, named=args.host, port=args.port, argv=list(sys.argv))
+    os.environ["SILVANN_RESTARTED"] = "1"                 # for the process a switch starts after this one, not this one
+    if restarted:                                         # the UI before this one may hold the port a moment longer
+        import socket
+        for _ in range(60):
+            with socket.socket() as s:
+                if os.name != "nt":
+                    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                try:
+                    s.bind((host, args.port))
+                    break
+                except OSError:
+                    time.sleep(0.25)
     print("[ui] listening on %s:%d — %s" % (host, args.port, why), flush=True)
-    ui.run(port=args.port, title="SiLVANN", favicon=SILVANN_TILE, show=not args.no_browser, storage_secret="silvann-ui",
-           reload=args.reload and not args.local, host=host)
+    ui.run(port=args.port, title="SiLVANN", favicon=SILVANN_TILE, show=not args.no_browser and not restarted,
+           storage_secret="silvann-ui", reload=args.reload and not args.local, host=host)
 
 
 if __name__ in {"__main__", "__mp_main__"}:

@@ -287,7 +287,9 @@ their own search (`search`'s `searxng` and `brave_key`), `fetch`'s `contact`, th
 skill's setting this file leaves `null`, and a tool switched off — what else it asks stays this file's
 ([`users.md`](users.md#several-people-on-one-server-a-user-each)). A user's REPL and commands see the machine as from a
 chroot — their workspace to write; the system's programs, the tools they have on and the runtime to read; the rest
-closed — whatever `bash`'s `confined` says here, and `add_tool` is off for them.
+closed — whatever `bash`'s `confined` says here. `add_tool`, where this file switches it on, puts what a user's model
+adds in their own folder, `users/<name>/skills_added/`: theirs alone, run confined as their commands are, and refused on
+Windows, where a user's commands cannot be confined.
 
 ## Where the model's commands reach
 
@@ -473,8 +475,8 @@ conversation; its settings stay in the tools file, should you add it again. Only
 reaching what your commands reach ([above](#where-the-models-commands-reach)), stopped after 60 seconds. It is asked of
 the user as `(bash …)` is, in "ask first" and "reads unasked", whatever it does.
 
-**Where adding is switched off** — the tools file's `add_tool` entry: off where the server serves several people, and on
-Windows until the owner switches it on — `(guide)` says so in its first line, and `(add_tool …)` and `(remove_tool …)`
+**Where adding is switched off** — the tools file's `add_tool` entry: on Windows until the owner switches it on, and
+for a multi user machine's users on Windows always (their commands cannot be confined there) — `(guide)` says so in its first line, and `(add_tool …)` and `(remove_tool …)`
 answer that they are disabled. Adding, replacing and removing are asked of the user as a write is, in "ask first" and
 "reads unasked"; where the owner set the entry's `ask` to `"always"`, in every mode, full auto too.
 

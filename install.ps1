@@ -194,7 +194,7 @@ function Fetch {
         return
     }
     # a folder of its own, or one this installer filled before: never files it did not write
-    $others = Get-ChildItem -Force $Dir | Where-Object { @("models", "venv", "user_sessions") -notcontains $_.Name }
+    $others = Get-ChildItem -Force $Dir | Where-Object { @("models", "venv", "users", "user_sessions") -notcontains $_.Name }
     if (-not (Test-Path (Join-Path $Dir "scripts\build.py")) -and $others) {
         Fail "$Dir already holds other files: install into a folder of its own (the default, .\silvann)"
     }
