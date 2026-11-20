@@ -82,6 +82,7 @@ class Conversations(Part):
                 pass                                       # a server before the tool
             self.state["protected_active"] = bool(resp.get("protected", False))
             self.chat.protected_icon.props(f"icon={'lock' if self.state['protected_active'] else 'lock_open'}")
+            self.chat.set_archived(bool(resp.get("archived", False)))
             # bound_by_self happens if the cart is already bound to OUR session (e.g., we
             # navigated away and back within the heartbeat window). Treat that as already-bound.
             self.state["active_bound"] = bool(resp.get("bound_by_self", False))
@@ -141,6 +142,9 @@ class Conversations(Part):
         cart_id = self.state.get("active_id")
         if not cart_id:
             self.safe_notify("no conversation selected", type="warning")
+            return
+        if self.state.get("archived_active"):
+            self.safe_notify("This conversation is archived: it is shown, and not written to", type="warning")
             return
         self.chat.bind_btn.disable()
         try:
@@ -406,11 +410,38 @@ class Conversations(Part):
                 ui.button("rename", on_click=ok)
         dlg.open()
 
+    def open_archive_dialog(self, cart_id: str, name: str):
+        """Archive a conversation (NN-200): its state given up — the larger part of what it holds — its transcript and
+        its files kept; shown from then on, and not written to."""
+        with self.page_client, ui.dialog() as dlg, ui.card():
+            ui.label(f"Archive {name or cart_id}?").classes("font-bold")
+            ui.label("Its state is given up — most of the space it takes — and its transcript and files are kept. It is "
+                     "still shown, and no more messages are sent to it. This is final: an archived conversation is not "
+                     "opened again.").classes("text-sm opacity-70 max-w-md")
+            with ui.row().classes("justify-end w-full"):
+                ui.button("cancel", on_click=dlg.close).props("flat")
+                async def ok():
+                    await self.archive_cart(cart_id)
+                    dlg.close()
+                ui.button("archive", on_click=ok).props("color=primary")
+        dlg.open()
+
+    async def archive_cart(self, cart_id: str):
+        try:
+            got = await self.client.archive(cart_id)
+            self.safe_notify("archived: %.1f MB given back" % (got.get("freed", 0) / 1e6), type="positive")
+            if cart_id == self.state.get("active_id"):
+                self.state["active_bound"] = False
+                self.chat.set_archived(True)
+            await self.render_convs()
+        except Exception as e:
+            self.safe_notify(f"archive failed: {e}", type="negative")
+
     def open_delete_dialog(self, cart_id: str):
         with self.page_client, ui.dialog() as dlg, ui.card():
             ui.label(f"Delete {cart_id}?").classes("font-bold")
-            ui.label("This is irreversible — the cartridge dir is removed from disk."
-                     ).classes("text-sm opacity-70")
+            ui.label("This is irreversible — the conversation's folder is removed from the disk: its transcript, its "
+                     "state, and the files sent to it and made in it.").classes("text-sm opacity-70 max-w-md")
             with ui.row().classes("justify-end w-full"):
                 ui.button("cancel", on_click=dlg.close).props("flat")
                 async def ok():
@@ -449,7 +480,9 @@ class Conversations(Part):
                                 with ui.row().classes("flex-grow items-center gap-1 cursor-pointer min-w-0"
                                                        ).on("click",
                                                             lambda cid=c["id"]: asyncio.create_task(self.activate_cart(cid))):
-                                    if c.get("protected"):
+                                    if c.get("archived"):
+                                        ui.icon("inventory_2", size="xs").classes("text-slate-500").tooltip("archived")
+                                    elif c.get("protected"):
                                         ui.icon("lock", size="xs").classes("text-slate-500")
                                     elif c["loaded"]:
                                         ui.icon("memory", size="xs").classes("text-green-500")
@@ -477,6 +510,11 @@ class Conversations(Part):
                                               on_click=lambda cid=c["id"], n=c["name"]:
                                                   asyncio.create_task(self.export_chat_history(cid, n))
                                               ).props("flat dense size=sm align=left").classes("w-full justify-start")
+                                    if not c.get("archived"):
+                                        ui.button("Archive", icon="inventory_2",
+                                                  on_click=lambda cid=c["id"], n=c["name"]:
+                                                      self.open_archive_dialog(cid, n)
+                                                  ).props("flat dense size=sm align=left").classes("w-full justify-start")
                                     ui.button("Delete", icon="delete",
                                               on_click=lambda cid=c["id"]:
                                                   self.open_delete_dialog(cid)

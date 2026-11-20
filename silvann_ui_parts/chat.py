@@ -66,16 +66,25 @@ class ChatView(Part):
                 self.tools_toggle.on_value_change(self.on_tools)
 
                 self.tools_mode.on_value_change(self.on_tools_mode)
+            # ⭐ AN ARCHIVED CONVERSATION IS SHOWN, AND NOT WRITTEN TO (NN-200, ⚖ 2026-11-20: *"the ui can say "this
+            #   conversation is archived" and show it to you anyway but with no send enabled"*): this banner in the
+            #   place of the one that activates, the message box and its buttons off (▶ `set_archived`)
+            with ui.row().classes("w-full items-center gap-2 p-3 rounded bg-slate-100 border border-slate-300"
+                                  ).bind_visibility_from(self.state, "archived_active"):
+                ui.icon("inventory_2", size="sm").classes("text-slate-600")
+                ui.label("This conversation is archived: its transcript is kept and its state was given up. It is shown "
+                         "here, and not written to.").classes("text-sm flex-grow")
             # Banner shown when the active cart is loaded into UI memory but NOT bound to VRAM.
             # User must click Activate to /bind. Hidden once bound; reappears after server eviction.
-            with ui.row().classes("w-full items-center gap-2 p-3 rounded bg-amber-50 border border-amber-300"
-                                  ).bind_visibility_from(self.state, "active_bound", lambda b: not b
-                                                         ) as bind_banner:
-                ui.icon("info", size="sm").classes("text-amber-700")
-                self.bind_banner_label = ui.label("Conversation loaded. Type a message, or click Activate, to bring the session online."
-                                              ).classes("text-sm flex-grow")
-                self.bind_btn = ui.button("Activate", icon="play_arrow"
-                                          ).props("color=primary unelevated")
+            with ui.column().classes("w-full gap-0").bind_visibility_from(self.state, "archived_active", lambda a: not a):
+                with ui.row().classes("w-full items-center gap-2 p-3 rounded bg-amber-50 border border-amber-300"
+                                      ).bind_visibility_from(self.state, "active_bound", lambda b: not b
+                                                             ) as bind_banner:
+                    ui.icon("info", size="sm").classes("text-amber-700")
+                    self.bind_banner_label = ui.label("Conversation loaded. Type a message, or click Activate, to bring the session online."
+                                                  ).classes("text-sm flex-grow")
+                    self.bind_btn = ui.button("Activate", icon="play_arrow"
+                                              ).props("color=primary unelevated")
             self.chat_scroll = ui.scroll_area().classes("silvann-chat w-full flex-grow min-h-0 border rounded")
             with self.chat_scroll:
                 self.chat_history_col = ui.column().classes("w-full p-4 gap-3")
@@ -98,12 +107,13 @@ class ChatView(Part):
                 # auto_upload fires on file selection so the user doesn't have to click upload twice.
                 self.attach_upload = ui.upload(auto_upload=True, max_files=1,
                                            max_file_size=100 * 1024 * 1024
-                                           ).props('label="" accept="image/*,video/*,.pdf,.docx,.txt,.md,.csv,.json,text/*" '
-                                                   'flat hide-upload-btn color=primary')
+                                           ).props('label="" flat hide-upload-btn color=primary')
                 self.attach_upload.classes("hidden")
                 self.attach_btn = ui.button(icon="attach_file"
                                             ).props("color=primary"
-                                                    ).tooltip("Attach a document, or a picture or video for a model that reads them, to the next message")
+                                                    ).tooltip("Send a file to this conversation, for the next message: a document, a "
+                                                              "picture or a video for a model that reads them, or any other "
+                                                              "file. It is kept with the conversation and deleted with it.")
                 self.attach_btn.set_visibility(False)       # shown when the server's model reads pictures or files (its /health)
                 self.input_box = ui.textarea(placeholder="Type a message — Enter to send, Shift+Enter for newline"
                                              ).classes("flex-grow").props("autogrow outlined")
@@ -113,6 +123,14 @@ class ChatView(Part):
             self.attach_btn.on("click", lambda _: self.attach_upload.run_method("pickFiles"))
             # Hide chips initially (no attachments).
             self.pending_images_row.set_visibility(False)
+
+    def set_archived(self, archived: bool):
+        """The conversation shown is archived, or is not: the banner, and the message box and its buttons off or on."""
+        self.state["archived_active"] = bool(archived)
+        for w in (self.input_box, self.send_btn, self.attach_btn):
+            w.set_enabled(not archived)
+        self.input_box.props('placeholder="%s"' % ("This conversation is archived" if archived else
+                                                    "Type a message — Enter to send, Shift+Enter for newline"))
 
     def wire(self):
         """What a drawn conversation is kept in."""
@@ -181,16 +199,18 @@ class ChatView(Part):
         with self.pending_images_row:
             ui.icon("attach_file", size="sm").classes("opacity-70")
             for idx, ent in enumerate(entries):
-                if ent.get("kind") == "document":
+                if ent.get("kind") in ("document", "file"):
                     # ⭐ A DOCUMENT IS NOT READ WHOLE UNLESS IT IS SMALL OR ASKED FOR (⚖ 2026-11-20): the chip says how the
                     #   next message carries it — the server's own word, `carried` — and one kept as a file is put in
                     #   the message whole by a click, and back by another
                     how = "whole in the message" if ent.get("whole") else {
                         "text": "in the message", "cut": "what fits of it",
                         "named": "kept as a file for the model to look into"}.get(ent.get("carried"), "in the message")
+                    if ent.get("kind") == "file":             # not text: kept with the conversation, named to the model
+                        how = "kept with the conversation, named to the model"
                     chip = ui.chip(f"{ent['filename']} · {how}", icon="description", removable=True
                                    ).props("dense color=blue-2 text-color=blue-9")
-                    if ent.get("carried") == "named":
+                    if ent.get("carried") == "named" and ent.get("kind") == "document":
                         chip.props("clickable")
                         chip.tooltip("Not read whole: the model searches it and reads the lines it needs. Click to put all of "
                                      "it in the message instead — as much as the conversation has room for."
@@ -244,6 +264,9 @@ class ChatView(Part):
                 self.safe_notify(f"attached {filename} ({int(resp.get('chars', 0)):,} characters)" + (
                     " — kept as a file for the model to look into, not read whole; click its chip to put it in the message"
                     if resp.get("carried") == "named" else ""), type="positive")
+            elif resp.get("kind") == "file":
+                self.safe_notify(f"attached {filename} ({int(resp.get('bytes', 0)):,} bytes) — kept with the conversation "
+                                 "and named to the model", type="positive")
             else:
                 self.safe_notify(f"attached {filename} ({resp.get('n_placeholders')} placeholders)",
                                  type="positive")

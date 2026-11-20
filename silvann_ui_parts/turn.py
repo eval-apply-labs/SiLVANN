@@ -70,6 +70,9 @@ class Turn(Part):
         attached = list(self.chat._cart_pending()) if self.state["active_id"] else []
         if not txt and not attached:
             return
+        if self.state.get("archived_active"):
+            self.safe_notify("This conversation is archived: it is shown, and not written to", type="warning")
+            return
         # a message typed with no conversation open goes to a new one, and one not online is brought online: typing is
         # the user's say-so, as the Activate button is
         if self.state["active_id"] is None and not await self.conversations.start_conversation():
@@ -92,7 +95,8 @@ class Turn(Part):
         if attached:
             # a document the server keeps as a file for the model to look into is said so beside its name
             display_user = "📎 " + ", ".join(
-                a["filename"] + (" (kept as a file, not read whole)" if a.get("carried") == "named" and not a.get("whole") else "")
+                a["filename"] + (" (kept as a file, not read whole)" if a.get("carried") == "named" and not a.get("whole")
+                                 and a.get("kind") == "document" else " (a file, named to the model)" if a.get("kind") == "file" else "")
                 for a in attached) + (f"\n\n{txt}" if txt else "")
         before = [dict(m) for m in self.state["history"]]
         self.state["history"].append({"role": "user", "content": display_user})

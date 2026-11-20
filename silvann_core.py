@@ -31,6 +31,8 @@
                                                       reaching the machine, the UI on this machine alone
     python3 silvann_core.py users passwd <name>       a new password: their sign-ins end — the way back in for an
                                                       admin locked out
+    python3 silvann_core.py users space <name> [<size>|none]   the most the account's folder may hold — 5GB, 500MB —
+                                                      or none; with no size, what it holds now and what occupies it
     python3 silvann_core.py users remove <name> [--with-conversations]
     python3 silvann_core.py users adopt <name>        the conversations made before there were users moved into
                                                       <name>'s folder, every model's
@@ -62,6 +64,7 @@ from silvann_runtime.fetch import KNOWN, differences, ensure_model, present, sai
 from silvann_runtime.fetch import size as fetch_size                                # noqa: E402
 from silvann_runtime.model_folder import Refused                   # noqa: E402
 from silvann_runtime import users as _users                         # noqa: E402
+from silvann_runtime import space as _space                         # noqa: E402
 
 # what a user's machine keeps — the models and the conversations: beside the release, or where SILVANN_DATA says
 DATA = Path(os.environ.get("SILVANN_DATA") or ROOT)
@@ -197,7 +200,9 @@ def users_command(argv):
                                      if u.active() else ": one account at a time" if u.mode() == "single" else ""))
             for name in names:
                 n = u.conversations(name)
-                print("%-32s %d conversation%s%s" % (name, n, "" if n == 1 else "s", " · admin" if u.admin(name) else ""))
+                print("%-32s %d conversation%s%s · %s%s" % (
+                    name, n, "" if n == 1 else "s", " · admin" if u.admin(name) else "", _space.said(_space.used(u, name)),
+                    " of %s" % _space.said(u.space(name)) if u.space(name) else ""))
                 for iss, sub, email in u.accounts(name):
                     print("%-32s   signs on as %s at %s (subject %s)" % ("", email or "-", iss, sub))
             if not names and u.ready():
@@ -244,6 +249,23 @@ def users_command(argv):
             u.passwd(name, _password(name))
             print("%s's password changed; their sign-ins on a running server end" % name)
             return 0
+        if what == "space":
+            if u._record(name) is None:
+                raise SystemExit("%s is no user here" % name)
+            if rest[1:]:
+                u.set_space(name, _space.parse(rest[1]))
+                _space.forget(u, name)
+            g = _space.usage(u, name)
+            print("%s: %s used%s" % (name, _space.said(g["used"]), " of %s — %s left" % (_space.said(g["limit"]), _space.said(g["left"]))
+                                     if g["limit"] else " — no limit"))
+            for c in g["conversations"]:
+                print("  %-28s %-10s transcript %-9s state %-9s files %-9s%s" % (
+                    c["name"][:28], _space.said(c["bytes"]), _space.said(c["transcript"]), _space.said(c["state"]),
+                    _space.said(c["files"]), " · archived" if c["archived"] else ""))
+            print("  %-28s %-10s of it the shared folder, attached/: %s" % ("the workspace", _space.said(g["workspace"]),
+                                                                           _space.said(g["shared"])))
+            print("  %-28s %s" % ("settings and the rest", _space.said(g["other"])))
+            return 0
         if what == "remove":
             u.remove(name, with_conversations="--with-conversations" in rest[1:])
             print("%s removed, their folder with them" % name)
@@ -266,7 +288,7 @@ def users_command(argv):
             return 0
     except _users.Refused as ex:
         raise SystemExit(str(ex))
-    raise SystemExit("users: list, add, admin, multi, single, passwd, remove, adopt, link or unlink — not %r" % what)
+    raise SystemExit("users: list, add, admin, multi, single, passwd, space, remove, adopt, link or unlink — not %r" % what)
 
 
 def main(argv):

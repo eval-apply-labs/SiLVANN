@@ -12,8 +12,10 @@ From the top:
 - **Help**: this guide and the release's documents.
 - **Options** (an admin's alone): the models on this machine, their configs, a server to start and stop, and whether
   the machine is single user or multi user ([below](#single-user-or-multi-user)).
-- **Users** (an admin's alone): who signs in, and how.
-- **Account**: your own name on this machine, your password, and **sign out**.
+- **Users** (an admin's alone): who signs in, and how, and the space each account may take.
+- **Account**: your own name on this machine, your password, **sign out**, and **your space**: what your account
+  keeps and what occupies it — each conversation's transcript, state and files, and your shared folder — with what you
+  delete, archive, download and upload there ([users.md](users.md#several-people-on-one-server-a-user-each)).
 - **Chat**: the conversations, under the Chat row. Click one to open it.
 
 The dot next to "SiLVANN" is the server's state: **gray** not asked yet, **green** answering, **red** unreachable. Its
@@ -26,11 +28,13 @@ Each conversation in the list has an icon:
 - a **chip**: the server holds it now, so it answers at once;
 - a **bubble**: it is saved on the server's disk, and is read back when it is opened and written to;
 - a **lock**: it has a password;
+- a **box**: it is archived — its transcript kept, its state given up: it is shown, and no more is sent to it;
 - a **⚠** after its name: it belongs to another model than the one the server runs, and that server will not open it.
 
-The arrow at its right opens its menu: **Rename**; **Export full session**, a `.silvann.tar` with its state that another
-server running the same model can import; **Export chat history (.md)**, its messages as a Markdown file; **Delete**,
-which removes it from the server's disk.
+The arrow at its right opens its menu: **Rename**; **Export full session**, a `.silvann.tar` with its state and the
+files sent to it and made in it, which another server running the same model can import; **Export chat history
+(.md)**, its messages as a Markdown file; **Archive**, which gives up its state — most of the space it takes — and
+keeps its transcript and files, for good: it is not opened again; **Delete**, which removes it from the server's disk, the files sent to it with it.
 
 **+ new** starts one. The dialog shows the model's context window (its config's `max_context`), how much RAM it takes
 saved, and on a model over several cards each card's share of its cache. **import** takes a `.silvann.tar` exported
@@ -81,6 +85,7 @@ Below the messages:
 - **📎** attaches a file to the next message. A document (PDF, Word, text, Markdown, CSV, JSON) is read as text by any
   model. A picture or a video needs a model that reads them: the Qwen models and GLM 5.3 Flash. The server reads it when
   it is attached, a chip shows it, and the message carries it. It stays in the conversation and is saved with it.
+  Any file can be sent: it is kept with the conversation — private to it, deleted with it — and named to the model.
   A document's chip says how the message will carry it: **in the message**, a small one's text; or **kept as a file
   for the model to look into**, a larger one's — not read whole, the model searches it and reads the lines it needs.
   Click that chip to put all of it in the message instead, as much as the conversation has room for; click again to

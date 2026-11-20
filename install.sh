@@ -261,6 +261,7 @@ silvann check [model]               update or done, each model here — with one
 silvann token [--set | --forget]    the Hugging Face token the downloads use (faster than none)
 silvann users [add|passwd|remove|adopt] <name>   the accounts: each a sign-in, a folder and their own conversations
 silvann users [multi|single]        the accounts signed in side by side, or one at a time (the default)
+silvann users space <name> [<size>|none]   the most an account's folder may hold (5GB), and what occupies it
 silvann serve <model> [config]      the server, on port 8765 (--port to change it)
 silvann ui                          the chat in a browser, on port 8090, talking to the server
 silvann_cli                         the chat in this terminal (--notools, --nothink), talking to the server

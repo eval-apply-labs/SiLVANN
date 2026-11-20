@@ -176,24 +176,39 @@ Both are `net`: asked in "ask first" and "reads unasked" each time — `web sear
 
 ### A document you attach
 
-A document attached to a message is not read whole unless it is small or you ask. One of at most about 4,000 tokens —
-a few pages — goes into the message as its text, since reading it there costs no more than a call would. A larger one
-is kept as a text file in your workspace, `attached/<its name>` (a Word document's or a PDF's text as
-`<its name>.txt`), and the message carries a line in its place: the file's name, where it is kept, how many lines it
-has, how it begins, and that `(grep "words" "file")` finds its lines and `(read "file" from count)` reads them. The
-model then looks for what you asked: send an encyclopedia and ask for one entry, and it searches for the entry and
-reads those lines — the conversation grows by what it read, not by the book. Both commands read inside the workspace,
-so nothing is asked of you in any mode.
+**A file you send to a conversation is the conversation's own.** Whatever it is, it is kept as you sent it in the
+conversation's folder, `attached/`, and the model is told its name and where it is. That conversation's tool reads it
+there — `(read …)`, `(grep …)`, a command — unasked in every mode, and never writes there. It is private to the
+conversation: no other conversation's model reaches it, your own others included, and no model reads a conversation's
+transcript or state at all — an admin's model that reaches the machine neither. It is exported with the conversation
+and deleted with it, so a confidential file sent to a chat is gone when the chat is. You see a conversation's files,
+download them and delete them one by one in **Account**. What holds this: the commands that read files, and any
+command line that names a closed path, everywhere; a shell command that gets there by a path of its own, wherever the
+model's commands are confined — every account that works in its own folder, and a container. On a direct install an
+admin's shell commands run as your own user, as [below](#where-the-models-commands-reach) says of everything there.
+
+**A document is not read whole unless it is small or you ask.** One of at most about 4,000 tokens — a few pages — goes
+into the message as its text, since reading it there costs no more than a call would. For a larger one the message
+carries a line in its place: the file's name, where it is kept, how many lines it has, how it begins, and that
+`(grep "words" "file")` finds its lines and `(read "file" from count)` reads them. The model then looks for what you
+asked: send an encyclopedia and ask for one entry, and it searches for the entry and reads those lines — the
+conversation grows by what it read, not by the book. A Word document's or a PDF's text is kept beside the file, as
+`<its name>.txt`, and that is what the model looks into. A file that is not text — a spreadsheet, an archive — is named
+to the model the same way, and a command of the model's opens it where it has one for its kind.
 
 You ask for the whole in words — "read all of it" has the model read it through, 200 lines a call — or, in the UI, by
 clicking the attachment's chip before you send: all of it then goes into the message, as much as the conversation has
 room for, cut with a note where it does not fit. A conversation whose tool is switched off, and an account's model
-that has no `(read …)`, get the document in the message that way too: there is no other way for the model to reach it.
+that has no `(read …)`, get a document in the message that way too: there is no other way for the model to reach it.
 
-The file stays in `attached/` until you or the model remove it: the same text sent again is the same file, another
-text under the same name is numbered. A client of your own sends the document at `POST /cartridges/<id>/images` — the
-answer's `carried` says how the next message would take it, `"text"`, `"cut"` or `"named"` — and names the documents
-it wants whole in the message's `whole`, a list of their ids.
+**The shared folder is `attached/` in your workspace.** What you put there every conversation of yours reads, as it
+reads the rest of your workspace: a house style, a reference, a dataset you come back to. You upload to it, make
+folders in it and delete from it in **Account**. A file gets from a conversation to the shared folder by your own
+hand: download it there, upload it here.
+
+A client of your own sends a file at `POST /cartridges/<id>/images`: the answer's `kind` is `"document"`, `"picture"`,
+`"video"` or `"file"`, `kept` the name it is kept under, and for a document `carried` says how the next message would
+take it — `"text"`, `"cut"` or `"named"`. A message's `whole` names the documents it wants in the message whole.
 
 ### The library
 

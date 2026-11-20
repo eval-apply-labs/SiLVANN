@@ -2,14 +2,14 @@
 
     doc = read_document(data, "report.docx")    # .name, .text, .kind
     text = doc.framed() + user_text             # <file name="report.docx"> … </file> before the message
-    path = doc.saved(workspace)                 # its text under the workspace's attached/, for the model's tool
-    text = doc.named(path) + user_text          # where it is and how it is looked into — and not its text
+    text = doc.named(path) + user_text          # where its text is kept and how it is looked into — and not its text
 
 ⭐ A DOCUMENT IS NOT READ WHOLE UNLESS IT IS SMALL OR THE USER ASKS (⚖ 2026-11-20: *"maybe i want to send him a whole
 encyclopedia to say look at the definition of barricade, it would be good if uploaded documents would not trigger a full
 read unless explicitly asked to do so"*). `carried` says which way a message takes one: its text where it is at most
 `INLINE` tokens and fits, or where the user asked for the whole, or where the conversation has no tool to read a file
-with; else kept in the account's workspace and named, for `(grep …)` and `(read …)` to look into.
+with; else named, for `(grep …)` and `(read …)` to look into where the server keeps it — in the conversation's own
+attachments, as every file sent to a conversation is (NN-200, ▶ space.py, the server's `upload_image`).
 
 What it reads: a Word document (`.docx`, the zip of XML Word writes — its paragraphs, tables a row a line with tabs between
 cells, read with the standard library); a PDF through pypdf, where it is installed (each page's text, a blank line between
@@ -32,7 +32,6 @@ TEXT_SUFFIXES = (".txt", ".md", ".markdown", ".csv", ".tsv", ".json", ".jsonl", 
 
 INLINE = 4000                     # tokens: a document at most this long goes in its message — about what one (read …)
 #                                   answers, so reading it there costs no more than a call would
-ATTACHED = "attached"             # the folder of a workspace where the documents a message names are kept
 HEAD = 600                        # the characters of a document's beginning its line in the message shows
 CHARS = 12                        # a text longer than this many characters a token of its room is taken to be past it:
 #                                   only that much of it is encoded, so a book costs what a page does to place
@@ -59,40 +58,43 @@ def fitted(doc, share, tool, whole, encode, decode):
     return how, (doc.text if how == "text" else decode(ids[:limit]) if how == "cut" else None)
 
 
+class Attached:
+    """A file sent with a message that is not text — a spreadsheet, an archive, a picture for a model that reads none —
+    kept as it was sent and named to the model: `named` is its line in the message."""
+
+    def __init__(self, name, path, size):
+        self.name, self.kept, self.size = name, path, size
+
+    def named(self):
+        at = self.kept.replace("\\", "/")
+        return ('<file name="%s" kept="%s" bytes="%d">\n'
+                "This file was sent with the message and is kept at the path above. It is not text: (read …) does not "
+                "show it. Where you have a command that opens its kind, use it; else tell the user what you would need."
+                "\n</file>\n" % (os.path.basename(self.name.replace("\\", "/")).replace('"', "'") or "file", at, self.size))
+
+
 class Document:
-    def __init__(self, name, text, kind):
+    def __init__(self, name, text, kind, sent=None):
         self.name, self.text, self.kind = name, text, kind
+        self.sent = sent              # its bytes as they were sent, where the reader kept them
+        self.kept = None              # where its text is kept for the tool, once the server has kept it
 
     def framed(self, text=None):
-        """The document's text (or `text`, a part of it) as the message carries it."""
-        return '<file name="%s">\n%s\n</file>\n' % (self.name.replace('"', "'"), (self.text if text is None else text).strip())
+        """The document's text (or `text`, a part of it) as the message carries it — with where the file is kept, once
+        the server has kept it, so a model that reaches for the file itself finds it."""
+        kept = ' kept="%s"' % self.kept.replace("\\", "/") if self.kept else ""
+        return '<file name="%s"%s>\n%s\n</file>\n' % (self.name.replace('"', "'"), kept,
+                                                      (self.text if text is None else text).strip())
 
-    def file_name(self):
-        """The name its text is kept under: its own, without a folder and with nothing a file system refuses — and
-        `.txt` after a Word document's or a PDF's, whose text it is and not the file."""
-        base = os.path.basename((self.name or "").replace("\\", "/")).strip()
-        base = re.sub(r"[^\w .()+,=@\[\]-]", "_", base).strip(" .") or "file"
-        return base[:120] + (".txt" if self.kind in ("docx", "pdf") else "")
+    def text_name(self, kept_as):
+        """The name its text is kept under beside `kept_as`, the file as it was sent — None where the file is its text
+        (a text file in UTF-8): `<name>.txt` for a Word document or a PDF, and for a text in another encoding."""
+        same = self.kind == "text" and self.as_text() == self.sent
+        return None if same else os.path.basename(kept_as) + ".txt"
 
-    def saved(self, workspace):
-        """This document's text as a file in `workspace`'s `ATTACHED` folder, and its path. Its lines end as a text
-        file's do. The same text sent again is the file already there; another text under the same name is numbered."""
-        folder = os.path.join(workspace, ATTACHED)
-        os.makedirs(folder, exist_ok=True)
-        data = self.text.replace("\r\n", "\n").replace("\r", "\n").encode("utf-8")
-        stem, suffix = os.path.splitext(self.file_name())
-        n = 1
-        while True:
-            path = os.path.join(folder, "%s%s%s" % (stem, "" if n == 1 else "-%d" % n, suffix))
-            if not os.path.exists(path):
-                with open(path, "wb") as f:
-                    f.write(data)
-                return path
-            if os.path.isfile(path) and os.path.getsize(path) == len(data):
-                with open(path, "rb") as f:
-                    if f.read() == data:
-                        return path
-            n += 1
+    def as_text(self):
+        """Its text as a file holds it: UTF-8, its lines ending as a text file's."""
+        return self.text.replace("\r\n", "\n").replace("\r", "\n").encode("utf-8")
 
     def named(self, path, grep=True):
         """The document as a message carries it by name: where its text is kept, how long it is, how it begins, and how
@@ -112,6 +114,20 @@ class Document:
                    head))
 
 
+MEDIA_SUFFIXES = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff", ".mp4", ".mov", ".m4v", ".webm", ".mkv",
+                  ".avi", ".mpg", ".mpeg")
+
+
+def is_media(data, name):
+    """Whether `name` or the first bytes say a picture or a video — what a model that reads them is given to read. A
+    file that is neither this nor a document is kept and named (▶ `Attached`)."""
+    suffix = os.path.splitext(name or "")[1].lower()
+    head = bytes(data[:16])
+    return (suffix in MEDIA_SUFFIXES or head.startswith((b"\x89PNG", b"\xff\xd8\xff", b"GIF8", b"BM"))
+            or (head[:4] == b"RIFF" and head[8:12] in (b"WEBP", b"AVI ")) or head[4:8] == b"ftyp"
+            or head[:4] == b"\x1a\x45\xdf\xa3")
+
+
 def is_document(data, name):
     """Whether `name` and the first bytes say this is a file `read_document` takes rather than a picture or a video."""
     suffix = os.path.splitext(name or "")[1].lower()
@@ -124,9 +140,9 @@ def read_document(data, name):
     """`data`, a file's bytes, and its `name` -> a `Document`, or Refused saying why it is not read."""
     suffix = os.path.splitext(name or "")[1].lower()
     if suffix == ".docx" or (data[:2] == b"PK" and suffix not in TEXT_SUFFIXES):
-        return Document(name, _docx(data), "docx")
+        return Document(name, _docx(data), "docx", data)
     if suffix == ".pdf" or data[:5] == b"%PDF-":
-        return Document(name, _pdf(data), "pdf")
+        return Document(name, _pdf(data), "pdf", data)
     if suffix == ".doc":
         raise Refused("an old Word document (.doc) is not read here: save it as .docx")
     try:
@@ -135,7 +151,7 @@ def read_document(data, name):
         if b"\x00" in data[:8192]:
             raise Refused("%s is not a document read here (.docx, .pdf, or text)" % name)
         text = data.decode("latin-1")
-    return Document(name, text, "text")
+    return Document(name, text, "text", data)
 
 
 def _docx(data):

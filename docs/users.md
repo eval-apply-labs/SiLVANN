@@ -360,15 +360,16 @@ frame's: "1.0 seconds"); a video is made at most half the conversation's context
 it within 25 megapixels over all its frames, as their processor does — and every video within the config's
 `max_tokens_per_video` (8,192 by default, below).
 
-**Files**, for every model: a Word document (`.docx`), a PDF (its text, through pypdf, which `install.sh` installs) or
-a text file (Markdown, CSV, JSON, code) attached with the same button is read into its text when it is attached. A
-small one — a few pages — goes into the message before what you type, as `<file name="…">…</file>`. A larger one is
-not read whole: it is kept as a text file in your workspace, `attached/`, the message names it, and the model's tool
-searches it and reads the lines it needs — so a book costs the conversation the pages that answer your question. Click
-its chip before you send to put all of it in the message instead, cut with a note to what the conversation's context
-still holds; a conversation with the tool switched off gets it that way always
-([`tools.md`](tools.md#a-document-you-attach)). The server takes them at the same `POST /cartridges/<id>/images` (it
-answers `kind: "document"`), and `/health` says `files`.
+**Files**, for every model: any file sent with the same button is kept with the conversation — in its own folder,
+private to it, deleted and exported with it — and the model is told its name. A Word document (`.docx`), a PDF (its
+text, through pypdf, which `install.sh` installs) or a text file (Markdown, CSV, JSON, code) is read into its text: a
+small one — a few pages — goes into the message before what you type, as `<file name="…">…</file>`; a larger one is
+not read whole — the message names it, and the model's tool searches it and reads the lines it needs, so a book costs
+the conversation the pages that answer your question. Click its chip before you send to put all of it in the message
+instead, cut with a note to what the conversation's context still holds; a conversation with the tool switched off
+gets it that way always. What every conversation of yours should read goes in your shared folder instead, in
+**Account** ([`tools.md`](tools.md#a-document-you-attach)). The server takes them at the same
+`POST /cartridges/<id>/images` (it answers `kind`), and `/health` says `files`.
 
 The UI is a web page on port 8090 (`silvann ui`; `silvann_ui.py` alone takes 8080 unless `--port` says) that talks to the server on port 8765; it can also start a server itself (Options). Conversations are saved under your account's `users/<name>/user_sessions/` and
 can be exported and imported. One conversation runs at a time; a second request while one is running is
@@ -439,7 +440,7 @@ A machine is **single user** until an admin makes it **multi user**:
 |---|---|---|
 | who is signed in | **one account at a time.** The first to sign in has the machine; another account's sign-in is refused, saying who has it, until that account signs out, ten minutes pass with nothing asked of it, or SiLVANN is closed and opened again. The same account signs in again freely — a second browser, the terminal chat, a script | the accounts side by side |
 | what ends a sign-in, besides the above | signing out ends the account's every sign-in, on every browser and terminal; opening SiLVANN again — the UI or the server started while neither was running — ends everyone's | signing out ends that browser's |
-| what a model reaches | an **admin's** model reaches the machine as the tools file lets it (§ The model's tool). Any other account's works in its own folder, as below | every account's works in its own folder, an admin's too |
+| what a model reaches | an **admin's** model reaches the machine as the tools file lets it (§ The model's tool) — but for the conversations, of which every model reads its own conversation's files and nothing more. Any other account's works in its own folder, as below | every account's works in its own folder, an admin's too |
 | where the chat listens | this machine alone (`--host` names another address) | the network (`--private` keeps it here) |
 
 **The switch** is in the UI's **Options**, under **Single user or multi user**, an admin's; `silvann users multi` and
@@ -478,8 +479,9 @@ until `silvann users adopt <name>` moves them into a folder.
 A model that works in its account's folder — every account's on a multi user machine, every account's but an admin's on
 a single user's — has a REPL of its own, and it sees the machine as from a chroot, with no root asked for:
 it writes in the user's workspace (`users/<name>/workspace/`) alone, and reads, besides, the system's programs (`/usr`,
-`/etc` and the like), the folders of the tools the user has switched on, and the runtime it runs from. The rest is
-closed in every mode: of the data folder every other user's folder, the user's own password, settings and
+`/etc` and the like), the folders of the tools the user has switched on, the runtime it runs from, and its own
+conversation's files — what was sent to that conversation and the pictures made in it, which no other conversation's
+model reaches. The rest is closed in every mode: of the data folder every other user's folder, the user's own password, settings and
 conversations, the conversations made before the users, the Hugging Face token, a file made there later; of the
 machine its other disks, `/home`, `/tmp`. Such a model's `(bash …)` is held to the same by Linux's Landlock; where the
 machine has none, the command is refused. **On Windows**, which has no Landlock, such a model therefore runs no commands
@@ -491,6 +493,21 @@ its account's own folder (`users/<name>/skills_added/`): their conversations hav
 confined as their commands do. The machine's tools are every user's to run and no user's to change; what an admin's
 model adds on a single user's machine is the machine's.
 
+**Your space.** **Account** shows what your account keeps on the machine and what occupies it: each conversation — its
+transcript, its state (what the model holds of it, the larger part) and its own files — your workspace, and in it the
+shared folder, `attached/`, which every conversation of yours reads. There you delete a conversation or one of its
+files, download a file, upload to the shared folder and make folders in it. **Archiving** a conversation gives up its
+state and keeps its transcript and files: it is still shown, saying it is archived, and no more is sent to it. It is
+final: an archived conversation is not opened again. An
+admin may set the most an account's folder holds — in **Users**, or `silvann users space <name> 5GB` (`none` for no
+limit; with no size it says what the account holds). Past it the server saves no more for the account — a file sent,
+a picture, `(write …)`, a new conversation, a message are refused in words that say so — while what the account has
+is still read, deleted and archived, and a conversation's state is always put away, so nothing is lost to the limit.
+A shell command the model runs writes without passing the server: it is counted when the folder is next measured,
+and the saves after it are refused until space is freed. Account shows the data folder this UI runs on; a script asks
+the server — `GET /account/space` for what the signed-in account holds, `POST /cartridges/<id>/archive` to archive a
+conversation.
+
 `users/<name>/tools.json` is the user's own settings over the machine's tools file: their search —
 `{"search": {"config": {"brave_key": "…", "searxng": "…"}}}` — `fetch`'s `contact`, the agent registry's `registry` and
 `key`, a setting a skill's entry leaves `null`, their own tools' settings, and a tool switched off
@@ -499,8 +516,9 @@ single user's machine has the machine's tools file itself, in Options.
 
 From the command line, for scripts and for getting back in: `silvann users` says the machine's mode and lists the
 accounts, their conversations and the admins; `silvann users add <name> [--admin]`, `silvann users admin <name>
-on|off`, `silvann users passwd <name>` (an admin who forgot their password sets a new one here), `silvann users remove
-<name> [--with-conversations]`, `silvann users multi`, `silvann users single`. A machine that had users before 1.2.0 has
+on|off`, `silvann users passwd <name>` (an admin who forgot their password sets a new one here), `silvann users space
+<name> [<size>|none]`, `silvann users remove <name> [--with-conversations]`, `silvann users multi`, `silvann users
+single`. A machine that had users before 1.2.0 has
 no admin until `silvann users admin <name> on` names one. `silvann_tools_repl` works over an account's files
 (`--user <name>` where the machine has several) and asks for no password: it reads them as the person who runs it.
 

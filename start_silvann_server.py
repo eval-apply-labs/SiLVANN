@@ -67,7 +67,7 @@ from silvann_core import default_config                                   # noqa
 sys.path.insert(0, str(RUNTIME))
 import silvann_runtime as SR                                              # noqa: E402
 from silvann_runtime import autotune, experts_file, registry, skills, tools, tools_config     # noqa: E402
-from silvann_runtime import sso, users                                    # noqa: E402
+from silvann_runtime import space, sso, users                             # noqa: E402
 from silvann_runtime.chat import Chat, ToolMarkup                         # noqa: E402
 from silvann_runtime.fetch import ensure_model                            # noqa: E402
 from silvann_runtime.machine import CPU_FAMILIES                         # noqa: E402
@@ -398,6 +398,24 @@ def _load(cid):
         raise HTTPException(409, str(ex))
 
 
+ARCHIVED = ("this conversation is archived: its transcript is kept and its state was given up — it is read, and not "
+            "written to")
+
+
+def _open(cid):
+    """A conversation that is worked in — 409 where it is archived (NN-200)."""
+    if _sidecar(cid).get("archived"):
+        raise HTTPException(409, ARCHIVED)
+
+
+def _full(what, more=0, name=None):
+    """507, in words, where the account's space does not hold `more` bytes of `what` (▶ space.room)."""
+    try:
+        space.room(USERS, name or _me(), more, what)
+    except space.Full as ex:
+        raise HTTPException(507, str(ex))
+
+
 def _describe(cid, x_web_user_id=None):
     side, meta = _sidecar(cid), _meta(cid) or {}
     extra = side.get("extra", {})
@@ -411,6 +429,7 @@ def _describe(cid, x_web_user_id=None):
             "tools": _tools_on(extra), "tools_mode": _tools_mode(extra),
             "ask": S.asks[cid].ask if cid in S.asks else None,
             "protected": bool(side.get("password")), "lora": (meta.get("lora") or {}).get("name"),
+            "archived": bool(side.get("archived")),
             "bound": c is not None, "bound_by_self": owner is not None and owner == x_web_user_id,
             "bound_by_other": owner is not None and owner != x_web_user_id}
 
@@ -738,6 +757,10 @@ def _tool_picture(cid, text):
     if S.picture is None:                             # answered at once, so the model can tell the user
         raise SR.Refused("no picture can be made: %s. Do not look for one or try to install it: tell the user now that "
                          "you cannot make pictures here, and why." % S.no_picture)
+    try:                                              # a picture is the conversation's, of its account's space
+        space.room(USERS, _owner(cid), 0, "a picture")
+    except space.Full as ex:
+        raise SR.Refused(str(ex))
     p, session = S.picture, S.tool_sessions.get(cid)
     answering = getattr(session, "answering", None)
     if p["host"]:
@@ -1614,12 +1637,13 @@ def list_cartridges():
         out.append({"id": d.name, "name": side.get("name", d.name), "model_id": meta.get("model_id", "?"),
                     "compatible": meta.get("model_id") == S.model_id, "current_pos": meta.get("current_pos", 0),
                     "loaded": d.name in S.runtime.cartridges, "protected": bool(side.get("password")),
-                    "lora": (meta.get("lora") or {}).get("name")})
+                    "lora": (meta.get("lora") or {}).get("name"), "archived": bool(side.get("archived"))})
     return {"cartridges": out}
 
 
 @app.post("/cartridges")
 async def create_cartridge(req: CreateConvReq, x_web_user_id: Optional[str] = Header(default=None)):
+    _full("a new conversation", 4096)                 # its folder, before it has said a word
     async with S.lock:
         if x_web_user_id:                     # one open conversation a web user, as before
             for other in [c for c, o in list(S.owner.items()) if o == x_web_user_id]:
@@ -1673,6 +1697,7 @@ async def bind_cartridge(cid: str, x_cart_password: Optional[str] = Header(defau
     _check_password(cid, x_cart_password)
     if not x_web_user_id:
         raise HTTPException(400, "missing X-Web-User-Id header")
+    _open(cid)
     async with S.lock:
         for other in [c for c, o in list(S.owner.items()) if o == x_web_user_id and c != cid]:
             await _put_away(other)
@@ -1730,7 +1755,42 @@ async def delete_cartridge(cid: str, x_cart_password: Optional[str] = Header(def
         S.where.pop(cid, None)
         S.tool_sessions.pop(cid, None)                        # its REPL, and an ask it left waiting
         S.asks.pop(cid, None)
+        S.images.pop(cid, None)                               # what was sent to it and not yet in a message
+        space.forget(USERS, _me())
     return {"deleted": cid}
+
+
+@app.post("/cartridges/{cid}/archive")
+async def archive_cartridge(cid: str, x_cart_password: Optional[str] = Header(default=None)):
+    """⭐ A CONVERSATION ARCHIVED (NN-200, ⚖ 2026-11-20: *"close a conversation so it only retains the transcript and
+    deletes the kv cache. the ui can say "this conversation is archived" and show it to you anyway but with no send
+    enabled"*): put away, its state given up — its transcript, its tokens and its own files stay — and from then on
+    read and not written to: no message, no file sent, no bind.
+    ⛔ FINAL (⚖ 2026-11-20: *"archive is final, no reopen button otherwise it would be possible to edit a conversation
+    (which is an abilteration technique and i'd rather not make it too easy to do)"*): nothing here opens one again —
+    a conversation read anew from what is kept of it would be one whose past can be rewritten first."""
+    _check_password(cid, x_cart_password)
+    if _meta(cid) is None:
+        raise HTTPException(404, "cartridge %r not found" % cid)
+    async with S.lock:
+        await _put_away(cid)
+        S.tool_sessions.pop(cid, None)
+        S.asks.pop(cid, None)
+        S.images.pop(cid, None)
+        side = _sidecar(cid)
+        freed = await asyncio.to_thread(space.archive, str(_cdir(cid) / "cartridge.npz"))
+        side.setdefault("archived", time.time())
+        _write_sidecar(cid, side)
+        space.forget(USERS, _me())
+    return {"id": cid, "archived": True, "freed": freed}
+
+
+@app.get("/account/space")
+def account_space():
+    """What the signed-in account's folder holds and the most it may (▶ space.usage): its conversations — each one's
+    transcript, state and files — its workspace, the shared `attached/` in it, its limit and what is left."""
+    me = _me()
+    return dict(space.usage(USERS, me, workspace=str(_place_of(me)[0])), user=me)
 
 
 @app.patch("/cartridges/{cid}")
@@ -1781,7 +1841,11 @@ async def export_cartridge(cid: str, x_cart_password: Optional[str] = Header(def
 
 @app.post("/cartridges/import")
 async def import_cartridge(file: UploadFile = File(...)):
+    """A conversation from its export: its state and transcript, and — a conversation's files being its own (NN-200) —
+    what was sent to it and the pictures made in it, back in its `attached/` and `pictures/`. Only plain files, under
+    those two folders or among the four a conversation is; a path that leaves them is refused."""
     blob = await file.read()
+    _full("the conversation", len(blob))
     new_id = uuid.uuid4().hex[:12]
     _made_by(new_id)
     d = _cdir(new_id)
@@ -1789,9 +1853,16 @@ async def import_cartridge(file: UploadFile = File(...)):
     try:
         with tarfile.open(fileobj=io.BytesIO(blob), mode="r") as tar:
             for member in tar.getmembers():
-                if member.isfile() and "/" not in member.name and member.name in ("cartridge.npz", "meta.json", "server_meta.json",
-                                                                                   "conversation_config.json"):
+                if not member.isfile():
+                    continue
+                parts = member.name.split("/")
+                if len(parts) == 1 and member.name in ("cartridge.npz", "meta.json", "server_meta.json",
+                                                       "conversation_config.json"):
                     open(d / member.name, "wb").write(tar.extractfile(member).read())
+                elif len(parts) > 1 and parts[0] in (space.ATTACHED, space.PICTURES):
+                    to = space.within(str(d / parts[0]), "/".join(parts[1:]))     # Refused where it leaves the folder
+                    os.makedirs(os.path.dirname(to), exist_ok=True)
+                    open(to, "wb").write(tar.extractfile(member).read())
         c = Cartridge.load(str(d / "cartridge.npz"))
         if not c.matches(S.runtime.identity):
             raise HTTPException(409, "the cartridge belongs to %s, and this server runs %s" % (c.identity, S.runtime.identity))
@@ -1844,13 +1915,19 @@ async def kill_cartridge(cid: str, x_cart_password: Optional[str] = Header(defau
 
 @app.post("/cartridges/{cid}/images")
 async def upload_image(cid: str, file: UploadFile = File(...), x_cart_password: Optional[str] = Header(default=None)):
-    """An attachment for the conversation's next message, kept under the id this answers until a message names it —
-    `{image_id, kind, merged_thw, n_placeholders}`: a picture or a video read through the model's vision
-    tower; or a document — Word, PDF, text — for any model, which the message carries as its text or by name
-    (▶ silvann_runtime/documents.py): `carried` says which as things stand — "text", "cut" or "named"."""
+    """A file sent to the conversation, for its next message — kept under the id this answers until a message names it:
+    `{image_id, kind, merged_thw, n_placeholders, kept}`.
+    ⭐ EVERY FILE SENT TO A CONVERSATION IS KEPT IN THE CONVERSATION'S OWN `attached/` (NN-200, ⚖ 2026-11-20: *"uploads to
+    the per chat folder and says "uploaded <filename> from the chat" to the model, so the model can read it himself no
+    matter what it is. those remain private"*): as it was sent, private to the conversation, read by its own REPL
+    (▶ `_tool_session`), exported and deleted with it. Then, by what it is: a picture or a video is read through the
+    model's vision tower (`kind` "picture", "video"); a document — Word, PDF, text — is carried by the message as its
+    text or by name (`kind` "document", `carried` "text", "cut" or "named": ▶ silvann_runtime/documents.py), its text
+    kept beside it where the file is not its text; anything else is named to the model (`kind` "file")."""
     _check_password(cid, x_cart_password)
     if S.runtime.cartridges.get(cid) is None:
         raise HTTPException(409, "not bound — call /bind first")
+    _open(cid)
     if S.image:
         raise HTTPException(415, "%s makes pictures from a prompt; reference pictures come with a later release" % S.model_id)
     if (file.size or 0) > ATTACH_MOST:               # said before it is read into memory: the UI's own limit
@@ -1860,38 +1937,53 @@ async def upload_image(cid: str, file: UploadFile = File(...), x_cart_password: 
     if len(data) > ATTACH_MOST:
         raise HTTPException(413, "an attachment is %d MB at most" % (ATTACH_MOST >> 20))
     from silvann_runtime import documents
-    if documents.is_document(data, file.filename):
+    name, owner, folder = file.filename or "file", _owner(cid), str(_cdir(cid) / space.ATTACHED)
+    image_id = uuid.uuid4().hex[:12]
+
+    def keep(name, data):                            # in the conversation's own files, where the account has room
+        _full("the file %s" % name, len(data), owner)
+        return space.keep(folder, name, data)
+
+    if documents.is_document(data, name):
         try:
-            doc = await asyncio.to_thread(lambda: documents.read_document(data, file.filename or "file"))
+            doc = await asyncio.to_thread(lambda: documents.read_document(data, name))
         except SR.Refused as ex:
             raise HTTPException(415, str(ex))
-        image_id = uuid.uuid4().hex[:12]
+        sent = await asyncio.to_thread(keep, name, data)
+        beside = doc.text_name(sent)                 # its text, where the file as sent is not it
+        doc.kept = sent if beside is None else await asyncio.to_thread(keep, beside, doc.as_text())
+        doc.sent = None                              # the file is on the disk now, not in this process
         S.images.setdefault(cid, {})[image_id] = doc
         c = S.runtime.cartridges.get(cid)
         how, _ = await asyncio.to_thread(lambda: documents.fitted(
             doc, max(0, S.model.max_context - len(c.tokens) - 512), _reads_files(cid), False, S.chat.encode, S.chat.tok.decode))
         return {"image_id": image_id, "kind": "document", "merged_thw": [], "n_placeholders": 0, "chars": len(doc.text),
-                "carried": how}
-    if not hasattr(S.model, "vision"):
-        raise HTTPException(415, "%s reads no pictures" % S.model_id)
+                "carried": how, "kept": os.path.basename(sent)}
+
     def read(data):
         vision = S.model.vision()
         vision.max_video_tokens = S.video_tokens
         return vision.read(data)
 
-    try:
-        image = await asyncio.to_thread(read, data)
-    except SR.Refused as ex:
-        raise HTTPException(415, str(ex))
-    except Exception as ex:                                   # not a picture Pillow reads
-        raise HTTPException(400, "not read as a picture: %s" % ex)
-    image_id = uuid.uuid4().hex[:12]
+    image = None
+    if hasattr(S.model, "vision") and documents.is_media(data, name):    # a picture or a video, for a model that reads them
+        try:
+            image = await asyncio.to_thread(read, data)
+        except SR.Refused as ex:
+            raise HTTPException(415, str(ex))
+        except Exception as ex:                               # not a picture Pillow reads
+            raise HTTPException(400, "not read as a picture: %s" % ex)
+    sent = await asyncio.to_thread(keep, name, data)
+    if image is None:                                         # neither a document nor seen by this model: named to it
+        S.images.setdefault(cid, {})[image_id] = documents.Attached(name, sent, len(data))
+        return {"image_id": image_id, "kind": "file", "merged_thw": [], "n_placeholders": 0, "bytes": len(data),
+                "carried": "named", "kept": os.path.basename(sent)}
     S.images.setdefault(cid, {})[image_id] = image
     m = S.model.vision().merge
     pairs = getattr(image, "pairs", None)                   # a video: its pairs of frames, each read as a picture
     return {"image_id": image_id, "merged_thw": [image.grid[0], image.grid[1] // m, image.grid[2] // m],
             "n_placeholders": image.tokens, "kind": "video" if pairs is not None else "picture",
-            "frames": 2 * len(pairs) if pairs is not None else 1}
+            "frames": 2 * len(pairs) if pairs is not None else 1, "kept": os.path.basename(sent)}
 
 
 @app.post("/cartridges/{cid}/save")
@@ -1924,6 +2016,8 @@ async def post_message(cid: str, req: MessageReq, x_cart_password: Optional[str]
     c = S.runtime.cartridges.get(cid)
     if c is None:
         raise HTTPException(409, "not bound — call /bind first")
+    _open(cid)
+    _full("the message")
     owner = S.owner.get(cid)
     if owner and owner != x_web_user_id:
         raise HTTPException(423, "in use by another session")
@@ -1940,20 +2034,20 @@ async def post_message(cid: str, req: MessageReq, x_cart_password: Optional[str]
     # its documents before its own text — a small one's text, a larger one kept in the account's workspace and named for
     # the tool to look into, and the text cut to the context's room where the user asked for the whole or the
     # conversation has no tool to read a file with (▶ documents.carried)
+    from silvann_runtime import documents
     docs = [im for im in items if hasattr(im, "framed")]
+    files = [im for im in items if isinstance(im, documents.Attached)]     # sent, kept, and not text: named
     asked_whole = {id(waiting[i]) for i in req.whole if i in waiting}
-    pics = [im for im in items if not hasattr(im, "pairs") and not hasattr(im, "framed")]
+    pics = [im for im in items if not hasattr(im, "pairs") and not hasattr(im, "framed") and im not in files]
     vids = [im for im in items if hasattr(im, "pairs")]
     text = req.text
-    if docs:
+    if docs or files:
         room = S.model.max_context - len(c.tokens) - len(S.chat.encode(req.text)) - sum(im.tokens for im in pics + vids) - 512
-        from silvann_runtime import documents
-        framed, tool, share = [], _reads_files(cid), max(0, room // len(docs))
+        framed, tool, share = [f.named() for f in files], _reads_files(cid), max(0, room // max(1, len(docs)))
         for d in docs:
             how, body = documents.fitted(d, share, tool, id(d) in asked_whole, S.chat.encode, S.chat.tok.decode)
-            if how == "named":
-                session = _tool_session(cid)
-                framed.append(d.named(d.saved(session.home), grep=_answers(session, "grep")))
+            if how == "named":                        # kept in the conversation's own files when it was sent
+                framed.append(d.named(d.kept, grep=_answers(_tool_session(cid), "grep")))
             else:
                 framed.append(d.framed(body if how == "text" else
                                        body + "\n[… the rest of %s did not fit the conversation]" % d.name))
@@ -2150,6 +2244,10 @@ def _repl_place(cid):
             #   the tools they have switched on, the runtime and the venv — looked at afresh at each command
             k.sealed = users.Fence(USERS, owner, machine_sealed=list(k.sealed),
                                    keep=[os.path.dirname(tools.RUNNER), sys.prefix], tools=box.tool_folders)
+        else:
+            # ⛔ A MODEL THAT REACHES THE MACHINE STILL DOES NOT READ THE CONVERSATIONS (▶ users.Conversations, NN-200):
+            #   what is sent to one conversation is not another's to read, an admin's own others included
+            k.sealed = users.Conversations(USERS, machine_sealed=list(k.sealed))
         kept = S.classifiers[owner] = (S.toolbox, k)
     return home, kept[1], library, box
 
@@ -2161,7 +2259,16 @@ def _tool_session(cid):
         home.mkdir(parents=True, exist_ok=True)
         extra = _sidecar(cid).get("extra", {})
         mode = _tools_mode(extra)
-        s = S.tool_sessions[cid] = tools.Session(str(home), classifier.conversation(mode),
+        owner, own = _owner(cid), [_cdir(cid) / space.ATTACHED, _cdir(cid) / space.PICTURES]
+
+        def room(more, what):                       # (write …): refused in words where the account's space is full
+            try:
+                space.room(USERS, owner, more, "%s" % what)
+            except space.Full as ex:
+                return str(ex)
+        # ⭐ THE CONVERSATION'S OWN FILES ARE ITS REPL'S TO READ (NN-200): what was sent to it and the pictures made in
+        #   it — a door in its account's fence for this conversation alone, never written through
+        s = S.tool_sessions[cid] = tools.Session(str(home), classifier.conversation(mode, own=own), room=room,
                                                  library=str(library),
                                                  guide=str(TOOLS_GUIDE),
                                                  image=lambda text: _tool_picture(cid, text),

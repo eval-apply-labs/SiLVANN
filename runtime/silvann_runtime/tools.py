@@ -736,6 +736,7 @@ class Classifier:
         self.sealed = [os.path.realpath(a) for a in sealed] + ([os.path.realpath("/proc/self")]
                                                                 if os.path.isdir("/proc/self") else [])
         self.read_only = []           # the skill folders: the model reads them, and only (add_tool …) writes there
+        self.own = []                 # a conversation's own files (▶ `conversation`): read unasked, by its REPL alone
         if path and os.path.isfile(path):
             import json
             with open(path) as f:
@@ -744,13 +745,19 @@ class Classifier:
         if self.mode not in MODES:
             raise Fault("the mode is one of %s, not %r" % (", ".join(MODES), self.mode))
 
-    def conversation(self, mode):
-        """A conversation's classifier: its own mode and what it allowed once; the folders this one's, shared."""
+    def conversation(self, mode, own=()):
+        """A conversation's classifier: its own mode and what it allowed once; the folders this one's, shared. `own`:
+        the conversation's own folders — its attachments, its pictures — which its REPL reads unasked and no other
+        conversation's reaches: a door in the account's fence where it has one (▶ users.Fence.opened), read and never
+        written."""
         if mode not in MODES:
             raise Fault("the mode is one of %s, not %r" % (", ".join(MODES), mode))
         k = Classifier.__new__(Classifier)
         k.path, k.mode, k.allowed, k.once, k.sealed = self.path, mode, self.allowed, set(), self.sealed
         k.read_only = list(self.read_only)
+        k.own = [os.path.realpath(str(p)) for p in own]
+        if k.own and hasattr(self.sealed, "opened"):
+            k.sealed = self.sealed.opened(*k.own)
         return k
 
     def save(self):
@@ -760,7 +767,7 @@ class Classifier:
                 json.dump({"allowed": self.allowed}, f, indent=2)
 
     def inside(self, target):
-        return any(target == a or target.startswith(a.rstrip(os.sep) + os.sep) for a in self.allowed)
+        return any(target == a or target.startswith(a.rstrip(os.sep) + os.sep) for a in self.allowed + self.own)
 
     def closed_to(self, target, touches="read"):
         """Whether `target` is sealed to a read or a write: under a sealed folder — or, where the sealed list can say so
@@ -775,8 +782,11 @@ class Classifier:
         machine's tools file, its keys and passwords — is refused in every mode, and a command line that names it: it is
         not the model's."""
         if touches in ("read", "write") and self.closed_to(target, touches):
-            raise Fault("%s is closed to the model: the machine's tools file and the server's own process are not its "
-                        "to %s" % (target, touches))
+            raise Fault("%s is closed to the model: the machine's tools file, the server's own process and the "
+                        "conversations — but for this one's own files — are not its to %s" % (target, touches))
+        if touches == "write" and any(target == a or target.startswith(a.rstrip(os.sep) + os.sep) for a in self.own):
+            raise Fault("%s is among this conversation's own files, which the server keeps: the model reads them, and "
+                        "writes in its workspace" % target)
         if touches == "write" and any(target == a or target.startswith(a.rstrip(os.sep) + os.sep)
                                       for a in self.read_only):
             raise Fault("%s is in the tools' folders, the code the server runs, which the model reads and does not write: "
@@ -873,7 +883,7 @@ class Confinement:
         self.rules, self.shape, self.wanted, self.why = rules, shape, wanted, why
 
 
-def confinement(toolbox, closed, home):
+def confinement(toolbox, closed, home, read_also=()):
     """⭐ WHERE THE MODEL'S COMMANDS REACH — the tools file's `bash` entry, `confined` (⚖ 2026-10-26 *"we only secure the
     docker as that is the intended usage of the tool"*): "auto", in a container the machine but its tools file and the
     server's own process (`closed`), on a direct install — a developer's machine — everything the server's user reaches;
@@ -891,6 +901,7 @@ def confinement(toolbox, closed, home):
             " — the container's seccomp profile must let Landlock's calls through (docs/tools.md)"
             if _jail.in_container() else ""))
     read_only = toolbox.writable_folders()             # the tools' folders: read and run, written by (add_tool …) alone
+    read_only = list(read_only) + [str(p) for p in read_also]    # and the conversation's own files, read alone
     # a user's toolbox (▶ users.UserToolbox) follows no link the model could make, and closes its data folder
     rules = (_jail.spec(home, abi, read_only, run_also=[sys.prefix, RUNNER],
                         follow_links=getattr(toolbox, "follows_links", True), closed=getattr(toolbox, "closed", ()))
@@ -1273,6 +1284,9 @@ def _commands(session):
         if how not in (None, "append") and str(how) != "append":
             raise Fault("(write \"path\" \"text\") replaces the file; (write \"path\" \"text\" 'append) adds to it")
         session.classifier.check("write", p)
+        full = session.room(len(text.encode("utf-8")), path) if session.room is not None else None
+        if full:
+            raise Fault(full)
         os.makedirs(os.path.dirname(p), exist_ok=True)
         with open(p, "a" if how is not None else "w", encoding="utf-8") as f:
             f.write(text)
@@ -2310,8 +2324,10 @@ class Session:
     (`run(text, user=True)`), where `answer`, `allow` and `mode` are, which a model's form never reaches."""
 
     def __init__(self, cwd, classifier=None, library=None, skills=None, guide=None, image=None, agent=None,
-                 allowed=None, whoami=None, web=None, toolbox=None, sees=None):
+                 allowed=None, whoami=None, web=None, toolbox=None, sees=None, room=None):
         self.home = self.cwd = os.path.realpath(cwd)
+        self.room = room                               # the server's: (bytes, what) -> nothing, or the words of a refusal
+        #                                                where the account's space does not hold them (▶ space.py)
         self._screen = None                            # the screen (ui …) reaches, opened at its first call (▶ `screen`)
         self.pictures = []                             # what (ui 'look …) showed, for the model's next turn (▶ `take_pictures`)
         self.page_elements = []                        # what (browser 'elements) last listed, by number
@@ -2436,7 +2452,7 @@ class Session:
 
     def confinement(self):
         """Where this session's commands reach (▶ `confinement`)."""
-        return confinement(self.toolbox, self.classifier.sealed, self.home)
+        return confinement(self.toolbox, self.classifier.sealed, self.home, read_also=self.classifier.own)
 
     def environment(self, **more):
         """The environment this session's commands get (▶ `_environment`): the named few of the server's, what the tools

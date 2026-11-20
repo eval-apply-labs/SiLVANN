@@ -547,6 +547,25 @@ class Users:
                 record.pop("admin", None)
             self._write(name, record)
 
+    def space(self, name):
+        """The most an account's folder may hold, in bytes — None where no admin set one (▶ space.py)."""
+        got = (self._record(name) or {}).get("space")
+        return int(got) if isinstance(got, (int, float)) and not isinstance(got, bool) and got > 0 else None
+
+    def set_space(self, name, size):
+        """An account's space: `size` bytes, or None for no limit — an admin's to set (▶ space.py, which holds to it)."""
+        if size is not None and (isinstance(size, bool) or not isinstance(size, int) or size <= 0):
+            raise Refused("an account's space is a number of bytes above zero, or none")
+        with self.lock:
+            record = self._record(name)
+            if record is None:
+                raise Refused("%s is no user here" % name)
+            if size is None:
+                record.pop("space", None)
+            else:
+                record["space"] = int(size)
+            self._write(name, record)
+
     def _record(self, name):
         try:
             with open(os.path.join(self.folder(name), "user.json")) as f:
@@ -903,18 +922,28 @@ class Fence:
     UserToolbox, tools.confinement). Looked at afresh at each command: a tool switched off since is closed at once.
     It stands where a classifier keeps its `sealed` list (▶ tools.Classifier's `closed_to`)."""
 
-    def __init__(self, users, me, machine_sealed=(), keep=(), tools=None):
+    def __init__(self, users, me, machine_sealed=(), keep=(), tools=None, own=()):
         self.users, self.me = users, me
         self.machine = [os.path.realpath(p) for p in machine_sealed]
         self.keep = [os.path.realpath(k) for k in keep]       # the runtime and the venv: read and run
         self.tools = tools or (lambda: [])                     # the folders of the user's tools switched on, asked now
+        self.own = [os.path.realpath(p) for p in own]          # a conversation's own files: read, by its REPL alone
+
+    def opened(self, *folders):
+        """⭐ THIS FENCE WITH A DOOR — `folders` read as well: a conversation's own attachments and pictures, for that
+        conversation's REPL and no other's (⚖ 2026-11-20: *"uploads to the per chat folder and says "uploaded <filename>
+        from the chat" to the model, so the model can read it himself ... those remain private"*). Read, never written;
+        the rest of the conversation — its state, its transcript, its password — stays closed, and every other
+        conversation whole."""
+        return Fence(self.users, self.me, self.machine, self.keep, self.tools, own=folders)
 
     def home(self):
         return os.path.realpath(self.users.workspace(self.me))
 
     def readable(self):
         from . import jail
-        return self.keep + [os.path.realpath(t) for t in self.tools()] + list(jail.SYSTEM) + list(jail.READABLE)
+        return (self.keep + self.own + [os.path.realpath(t) for t in self.tools()] + list(jail.SYSTEM)
+                + list(jail.READABLE))
 
     def paths(self):
         """What is closed of the data folder, as paths that are there now — a command line naming one is refused."""
@@ -934,6 +963,64 @@ class Fence:
         if under(real, os.path.realpath(self.users.data)):  # the data folder's own: what is kept of it, and no more —
             return not any(under(real, r) for r in readable if under(r, os.path.realpath(self.users.data)))
         return not any(under(real, r) for r in readable)   #   though it lie under a system folder, /opt say
+
+    def __iter__(self):
+        return iter(self.paths())
+
+    def __len__(self):
+        return len(self.paths())
+
+    def __add__(self, other):
+        return self.paths() + list(other)
+
+
+class Conversations:
+    """⭐ WHAT A MODEL THAT REACHES THE MACHINE STILL DOES NOT READ: THE CONVERSATIONS (NN-200, ⚖ 2026-11-20: *"those
+    remain private"* · *"i send them to a chat, and once the chat is deleted so are those files"*). An admin's model on
+    a single user's machine reaches the machine as the tools file lets it (▶ `Users.reaches_machine`) — and a file sent
+    to one of its conversations would then be every conversation's to read. So every account's conversations are
+    closed to it: their transcripts, their states, the files sent to them. Its own conversation's files are its door
+    (▶ `opened`), read and never written. It stands where a classifier keeps its `sealed` list, beside what the
+    machine seals — the tools file's folder, the server's own process.
+    ⛔ What holds it: the commands that run inside the server — (read …), (grep …), (ls …) — and a command line that
+    names a closed path, everywhere; a shell command that reaches one by a path the classifier does not see, where the
+    machine's commands are confined (a container, or the tools file's `bash` setting `confined`) — on a direct
+    install a command is the server's user, as the docs say of everything there."""
+
+    def __init__(self, users, machine_sealed=(), own=()):
+        self.users = users
+        self.machine = [os.path.realpath(p) for p in machine_sealed]
+        self.own = [os.path.realpath(p) for p in own]
+
+    def opened(self, *folders):
+        """This seal with a door: `folders`, a conversation's own files, read by its REPL alone."""
+        return Conversations(self.users, self.machine, own=folders)
+
+    def roots(self):
+        """Where conversations are kept: each account's `user_sessions/`, and the ones made before there were users."""
+        return [os.path.realpath(os.path.join(self.users.folder(n), "user_sessions")) for n in self.users.names()] + [
+            os.path.realpath(self.users.unowned())]
+
+    def paths(self):
+        """What is closed, as paths that are there now — a command line naming one is refused, and a confined command
+        does not reach one: the machine's own, and of the conversations everything but this one's files."""
+        out = list(self.machine)
+        for root in self.roots():
+            if any(o.startswith(root.rstrip(os.sep) + os.sep) for o in self.own):
+                out += _closed(root, self.own)
+            elif os.path.exists(root):
+                out.append(root)
+        return out
+
+    def covers(self, target, touches="read"):
+        """⛔ Whether `target` is closed to a read or a write — a path not made yet as well as one that is."""
+        real = os.path.realpath(str(target))
+        under = lambda p, a: p == a or p.startswith(a.rstrip(os.sep) + os.sep)       # noqa: E731
+        if any(under(real, a) for a in self.machine):
+            return True
+        if any(under(real, o) for o in self.own):
+            return False                                   # its own files: read (a write is the classifier's to refuse)
+        return any(under(real, r) for r in self.roots())
 
     def __iter__(self):
         return iter(self.paths())

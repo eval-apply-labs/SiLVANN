@@ -194,6 +194,19 @@ class Client:
                                    headers=self._hdr(cart_id))
         r.raise_for_status()
 
+    async def archive(self, cart_id: str) -> dict:
+        """A conversation archived — its state given up, its transcript and files kept, no more written to, and for
+        good: `{"archived", "freed"}`, the bytes its state gave back."""
+        r = await self.http.post(f"{self.endpoint}/cartridges/{cart_id}/archive", headers=self._hdr(cart_id))
+        r.raise_for_status()
+        return r.json()
+
+    async def account_space(self) -> dict:
+        """What the signed-in account's folder holds on the server, and the most it may (▶ the server's /account/space)."""
+        r = await self.http.get(f"{self.endpoint}/account/space", headers=self._hdr(None))
+        r.raise_for_status()
+        return r.json()
+
     def export_ticket(self, cart_id: str) -> str:
         """A one-time path the browser downloads a conversation's archive from — ▶ `_export_download`."""
         token = secrets.token_urlsafe(16)

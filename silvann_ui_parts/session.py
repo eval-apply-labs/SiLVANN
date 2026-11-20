@@ -16,6 +16,7 @@ def _session_default():
         # other users' sessions.
         "passwords": {},
         "protected_active": False,
+        "archived_active": False,                 # the conversation shown is archived: read, and not written to
         # Whether the active cart is currently bound to VRAM. False after a lazy /activate
         # (metadata only) — flips True after the user clicks the Activate banner.
         "active_bound": False,
