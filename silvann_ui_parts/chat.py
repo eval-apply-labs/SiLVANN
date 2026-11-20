@@ -120,7 +120,13 @@ class ChatView(Part):
                 self.send_btn = ui.button(icon="send")
 
             self.attach_upload.on_upload(self.on_attach_upload)
-            self.attach_btn.on("click", lambda _: self.attach_upload.run_method("pickFiles"))
+            self.attach_upload.on_rejected(self.on_attach_rejected)
+            # ⭐ THE 📎 OPENS THE FILE CHOOSER IN THE CLICK ITSELF, EVERY TIME (⚖ 2026-11-20: *"i dont see a popup allowing
+            #   me to upload my file"*): in the page, with no round trip to this process — a browser opens a file chooser
+            #   only for the person's own click — and with the uploader emptied first: it takes one file at a time, and
+            #   one left in it by an upload that did not go through would have it open no chooser again.
+            self.attach_btn.on("click", js_handler="() => { runMethod(%d, 'reset', []); runMethod(%d, 'pickFiles', []); }"
+                                                   % (self.attach_upload.id, self.attach_upload.id))
             # Hide chips initially (no attachments).
             self.pending_images_row.set_visibility(False)
 
@@ -235,16 +241,27 @@ class ChatView(Part):
                         self.render_pending_images()
                 chip.on("remove", _on_remove)
 
+    def on_attach_rejected(self, *_):
+        """A file the page did not take — larger than an attachment may be: said, and the 📎 ready for another."""
+        self.safe_notify("That file is larger than an attachment may be: 100 MB at most", type="warning")
+        self.attach_upload.reset()
+
     async def on_attach_upload(self, e):
-        cart_id = self.state.get("active_id")
-        if not cart_id or not self.state.get("active_bound"):
-            self.safe_notify("Activate a conversation first", type="warning")
-            return
         # Give the user feedback for the whole round-trip — the upload itself is quick but
         # the server then runs the vision encoder, which has no other progress signal.
         self.attach_btn.disable()
         self.image_busy_row.set_visibility(True)
         try:
+            # ⭐ A FILE CHOSEN WITH NO CONVERSATION OPEN GOES TO A NEW ONE, and one not online is brought online: choosing
+            #   a file is the user's say-so, as typing a message is (▶ turn.py's `send`). Whatever comes of it, the
+            #   uploader is emptied after (`finally`), so the 📎 opens its chooser the next time.
+            if self.state["active_id"] is None and not await self.page.conversations.start_conversation():
+                return
+            if not self.state.get("active_bound"):
+                await self.page.conversations.bind_active()
+                if not self.state.get("active_bound"):
+                    return
+            cart_id = self.state["active_id"]
             # NiceGUI 3.x upload event: e.file is a FileUpload with async read() +
             # name + content_type. (Older NiceGUI used e.content/e.name/e.type.)
             blob = await e.file.read()
