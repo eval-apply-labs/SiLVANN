@@ -10,13 +10,16 @@ things"*.
     silvann_tools_repl                         a prompt in a terminal; from a pipe, a line for each form it is sent
     silvann_tools_repl FILE … [-i]             each file's forms in order, its last answer written; -i, a prompt after
     silvann_tools_repl -e FORM [-e FORM …]     each form's answer, a line each
+    silvann_tools_repl --user NAME …           over that account's files, where the machine has several
     venv/bin/python silvann_tools_repl.py …    the same, from the release's folder
 
-The session is the one the server opens for a conversation of the machine's (▶ start_silvann_server.py's
-`_tool_session`), over the same files: the workspace (`$SILVANN_DATA/workspace`, where it starts and reads unasked), the
-folders allowed (`tools.json`), the definitions kept (`tools_library.json`), the tools file (`tools/default.json`, or
-`--tools-config`) and the skills (`skills/`, the release's and the user's). What a person keeps or allows here, every
-conversation has. Each form runs as the model's would, and its answer is written as the model reads it — one line, a
+The session is the one the server opens for a conversation of an account whose model reaches the machine (▶
+start_silvann_server.py's `_tool_session`), over that account's files (`$SILVANN_DATA/users/<name>/`): its workspace,
+where it starts and reads unasked, folders allowed (`tools_allowed.json`) and definitions kept (`tools_library.json`);
+the tools file (`tools/default.json`, or `--tools-config`) and the skills (`skills/`, the release's and the user's).
+The account is the machine's only one, else its only admin, else the one `--user` names; no password is asked — this
+program reads the account's files as the person who runs it, who could read them without it. What a person keeps or
+allows here, every conversation of that account has. Each form runs as the model's would, and its answer is written as the model reads it — one line, a
 text's line breaks written `\\n` — except at a prompt, where an answer that is a text is written as its text.
 ⛳ WHAT THE MODEL WOULD ASK ITS USER IS ASKED HERE (`--mode`, "ask" by default, as the chat's): at a prompt, a line —
 o once, f the folder from now on, Enter refuses; from a pipe the ask is the answer, `(ask "…" (once folder refuse))`,
@@ -40,13 +43,13 @@ ROOT = Path(__file__).resolve().parent
 # the runtime beside this file in a release, or the development tree's
 _HERE = ROOT / "runtime" if (ROOT / "runtime").is_dir() else ROOT.parent / "python"
 sys.path.insert(0, os.environ.get("SILVANN_RUNTIME", str(_HERE)))
-from silvann_runtime import tools, tools_config                      # noqa: E402
+from silvann_runtime import tools, tools_config, users             # noqa: E402
 from silvann_runtime.composer import ComposerError, Text, read, read_all  # noqa: E402
 from silvann_runtime.prompt import texts                             # noqa: E402
 
 # the server's places (▶ start_silvann_server.py): the skills the release ships, the tool's guide, and the data — the
 #   folder SILVANN_DATA names, else the one `silvann data` named (data_folder), else this one
-SKILLS_SHIPPED = ROOT / "skills" if (ROOT / "skills").is_dir() else ROOT.parent / "release" / "skills"
+SKILLS_SHIPPED = ROOT / "skills" if (ROOT / "docs" / "users.md").exists() else ROOT.parent / "release" / "skills"
 TOOLS_GUIDE = ROOT / "docs" / "tools.md" if (ROOT / "docs").is_dir() else ROOT.parent / "release" / "docs" / "tools.md"
 _NAMED = ROOT / "data_folder"
 DATA = Path(os.environ.get("SILVANN_DATA") or
@@ -79,7 +82,8 @@ class ToolsRepl:
         wrong = tools_file.problems()
         if wrong:
             raise ValueError("; ".join(wrong))
-        workspace = DATA / "workspace"
+        mine = users.Users(DATA).files(whose(users.Users(DATA), a.user))
+        workspace = Path(mine["workspace"])
         for place in (workspace, DATA / "skills", DATA / "skills_added"):
             place.mkdir(parents=True, exist_ok=True)
         box = tools_config.Toolbox(tools_file, [DATA / "skills", SKILLS_SHIPPED], added=DATA / "skills_added",
@@ -87,10 +91,11 @@ class ToolsRepl:
         box.refresh()
         web = tools.Web()
         web.named(box.config("fetch").get("contact"))
-        classifier = tools.Classifier(str(DATA / "tools.json"), a.mode, allowed=[str(workspace)],
+        web.reaches(box.config("fetch").get("local"))
+        classifier = tools.Classifier(mine["allowed"], a.mode, allowed=[str(workspace)],
                                       sealed=[box.file.folder()])
         self.session = tools.Session(str(workspace), classifier.conversation(a.mode),
-                                     library=str(DATA / "tools_library.json"), guide=str(TOOLS_GUIDE),
+                                     library=mine["library"], guide=str(TOOLS_GUIDE),
                                      image=no_image, agent=None, whoami=lambda: "a person at silvann_tools_repl, no "
                                      "model: the forms are theirs", web=web, toolbox=box, sees=lambda: True)
 
@@ -180,6 +185,21 @@ class ToolsRepl:
                 self.write(tools.write([tools.Sym("error"), Text("the input ends inside a form")]), REFUSED)
 
 
+def whose(machine, named):
+    """The account whose files the session works over: `named`, else the machine's only account, else its only admin."""
+    names = machine.names()
+    if not names:
+        raise ValueError("this machine has no account yet — `silvann users add <name>` makes its first, and the tool "
+                         "works in its workspace")
+    if named:
+        if named.strip().lower() not in names:
+            raise ValueError("%s is no account here: --user one of %s" % (named, ", ".join(names)))
+        return named.strip().lower()
+    if len(names) == 1 or len(machine.admins()) == 1:
+        return names[0] if len(names) == 1 else machine.admins()[0]
+    raise ValueError("whose workspace? --user one of %s" % ", ".join(names))
+
+
 def main():
     ap = argparse.ArgumentParser(description="The model's tool at your prompt: its commands and skills, with no model.")
     ap.add_argument("files", nargs="*", help="files of forms run in order; each file's last answer is written")
@@ -189,6 +209,9 @@ def main():
                     help="after the files and the -e forms, read forms as they come — a prompt, or a pipe")
     ap.add_argument("--mode", choices=tools.MODES, default="ask",
                     help="what the commands may do unasked, as the chat's mode (default: ask)")
+    ap.add_argument("--user", default=None, metavar="NAME",
+                    help="the account whose workspace, definitions and folders allowed it works over (default: the "
+                         "machine's only account, or its only admin)")
     ap.add_argument("--tools-config", dest="tools_config", default="default",
                     help="the tools file: a name in the data folder's tools/, or a path (default: default)")
     a = ap.parse_args()

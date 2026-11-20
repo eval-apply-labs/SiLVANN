@@ -1,6 +1,6 @@
 # SiLVANN
 
-> **Public beta, v1.1.0.** The normal path has been tested on a reasonable sample of cards, but a bug-free experience is
+> **Public beta, v1.3.0.** The normal path has been tested on a reasonable sample of cards, but a bug-free experience is
 > not expected yet. It is shared for enthusiasts with patience, who can follow a guide and do some troubleshooting. The
 > cards it has run on — NVIDIA's from a GTX 1080 Ti to a B200, AMD's MI50, MI355X and RDNA4 Radeons, and Windows natively
 > on one PC — are in [`docs/platforms.md`](docs/platforms.md); less common setups may not behave as expected, and a
@@ -70,7 +70,7 @@ every machine one model was measured on, its packs and its notes: [`docs/models.
 names no setup chooses its own when the server starts, by trying it on the card: where its experts go, how much of the
 card holds the ones used most, the context the card has room for ([`docs/config.md`](docs/config.md)).
 
-**New in v1.1.0**: [`docs/release_logs/v1.md`](docs/release_logs/v1.md); every 0.x release before it:
+**New in v1.3.0**: [`docs/release_logs/v1.md`](docs/release_logs/v1.md); every 0.x release before it:
 [`docs/release_logs/v0.md`](docs/release_logs/v0.md).
 
 ## Platforms
@@ -117,7 +117,8 @@ the conversations, and the workspace where you put what it should read — and n
 No installer and no command line: from the [latest release](https://github.com/eval-apply-labs/SiLVANN/releases/latest),
 download `silvann_portable_x64.zip` and unzip it anywhere — a folder of yours, a USB drive. It holds three folders:
 `windows\`, `linux/` and `data/`. On Windows double-click `windows\SiLVANN.exe`; on Linux (64-bit x86) run
-`linux/SiLVANN.sh`. The chat opens in a window of its own; in **Options**, **Download models** fetches a model and
+`linux/SiLVANN.sh`. The chat opens in a window of its own and asks, the first time, for this machine's account — a
+name and a password of your own, which you then sign in with; in **Options**, **Download models** fetches a model and
 **start** runs it. Each system's folder carries its own Python and the libraries for every card the families list, so a
 card needs only its driver, and without one the CPU runs the models. The models and conversations stay in `data/`, the
 two systems' together: one USB drive carries them from one machine to another, Windows or Linux. Closing the window
@@ -136,8 +137,9 @@ curl.exe -fsSLO https://raw.githubusercontent.com/eval-apply-labs/SiLVANN/HEAD/i
 powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
-Then, in a new PowerShell (the `silvann` command is on the path from there), `silvann ui`: the chat opens at
-http://localhost:8090, and in **Options**, **Download models** fetches a model and **start** runs it. To update,
+The installer ends by asking for this machine's account: a name and a password of your own, SiLVANN's sign-in. Then,
+in a new PowerShell (the `silvann` command is on the path from there), `silvann ui`: the chat opens at
+http://localhost:8090 and you sign in; in **Options**, **Download models** fetches a model and **start** runs it. To update,
 `silvann update`; the models and the conversations stay.
 
 The libraries GitHub built for the release are signed by Eval Apply Consulting LTD from v1.0.0, and Windows 11's Smart
@@ -150,8 +152,9 @@ On Windows the model's shell starts switched off ([`docs/tools.md`](docs/tools.m
 ### Linux, from source
 
 One line builds SiLVANN in `./silvann` for this machine's CPU and card, installs nothing system-wide, asks for no
-password, and leaves a `silvann` command; `silvann ui` then opens the chat at http://localhost:8090, where **Options**
-downloads a model and starts it:
+system password, and leaves a `silvann` command. It ends by asking for this machine's account — a name and a password
+of your own, SiLVANN's sign-in ([`docs/users.md`](docs/users.md#several-people-on-one-server-a-user-each)); `silvann ui`
+then opens the chat at http://localhost:8090, where you sign in and **Options** downloads a model and starts it:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/eval-apply-labs/SiLVANN/HEAD/install.sh | bash

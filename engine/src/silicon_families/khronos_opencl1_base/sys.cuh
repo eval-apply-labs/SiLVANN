@@ -571,11 +571,27 @@ static inline bool khronos_opencl1_base__memory_write(void* to, const void* from
     return khronos_opencl1_base__zzprivate_copy(to, from, bytes, 0);
 }
 
-/* The card's queue drained, and mapped RAM's newer card copies read back. */
+/* ⭐ A LAUNCH THE RUNTIME REFUSED IS REMEMBERED UNTIL ITS DEVICE IS WAITED FOR (⚖ 2026-11-19, the code review's row 4).
+ *   The wait after a refused launch reports nothing, and the door's output keeps the bytes it had: a program would go on
+ *   over a buffer no kernel wrote. So the launch raises its device's flag, and the next `compute_completed` on that device
+ *   answers false once, having waited: the engine raises that as a fault (`SYS__VERB_ABI__FAULT_WORK`), the program's
+ *   turn ends in an error, and the machine stays up. A device's flag and not a thread's: the thread that collects a
+ *   program's answer waits for each worker's device, and is not always the thread that launched there. */
+static volatile unsigned int khronos_opencl1_base__zzprivate_launch_refused[KHRONOS_OPENCL1_BASE__DEVICES_MAX];
+static inline void khronos_opencl1_base__zzpackage_launch_refused(uint32_t card) {
+    if (card < KHRONOS_OPENCL1_BASE__DEVICES_MAX) khronos_opencl1_base__zzprivate_launch_refused[card] = 1u;
+}
+static inline bool khronos_opencl1_base__zzprivate_launches_stood(uint32_t card) {
+    if (card >= KHRONOS_OPENCL1_BASE__DEVICES_MAX || khronos_opencl1_base__zzprivate_launch_refused[card] == 0u) return true;
+    khronos_opencl1_base__zzprivate_launch_refused[card] = 0u;
+    return false;
+}
+/* The card's queue drained, and mapped RAM's newer card copies read back — false, once, where a launch on it did not go. */
 static inline bool khronos_opencl1_base__compute_completed(void) {
     khronos_opencl1_base__state* s = khronos_opencl1_base__zzpackage_up();
     cl_command_queue q = khronos_opencl1_base__zzpackage_queue();
-    return q && clFinish(q) == CL_SUCCESS && khronos_opencl1_base__zzprivate_catch_up(s, khronos_opencl1_base__zzprivate_bound);
+    const bool waited = q && clFinish(q) == CL_SUCCESS && khronos_opencl1_base__zzprivate_catch_up(s, khronos_opencl1_base__zzprivate_bound);
+    return khronos_opencl1_base__zzprivate_launches_stood(khronos_opencl1_base__zzprivate_bound) && waited;
 }
 
 /* The side channel: a second queue on the same card, so a copy through it does not wait behind the work
@@ -624,9 +640,28 @@ static inline uint32_t khronos_opencl1_base__device_count(void) {
     return s ? (uint32_t)s->count : 0u;
 }
 
+/* ⭐ A CARD WHOSE COMPILER DOES NOT BUILD nn's KERNELS IS REFUSED, the first time a thread binds it — at the boot — rather
+ *   than taken for a card whose every launch does nothing (⚖ 2026-11-19, the code review's row 8). This family's kernels
+ *   are one program, built whole or not at all (`nn.cuh`): where it does not build, the card is the next family's that
+ *   takes it, or the machine runs on its processors, as a card OpenCL 2.0 refuses is. Asked once a card; a card the boot
+ *   never binds is never built for. */
+static bool khronos_opencl1_base__zzpackage_card_builds(khronos_opencl1_base__state* s, uint32_t card);   /* nn.cuh */
+static uint8_t khronos_opencl1_base__zzprivate_checked[KHRONOS_OPENCL1_BASE__DEVICES_MAX];
+static uint8_t khronos_opencl1_base__zzprivate_refused[KHRONOS_OPENCL1_BASE__DEVICES_MAX];
 static inline uint32_t khronos_opencl1_base__bind_device(uint32_t index) {
     khronos_opencl1_base__state* s = khronos_opencl1_base__zzpackage_up();
     if (s == 0 || index >= s->count) return 0u;
+    if (!__atomic_load_n(&khronos_opencl1_base__zzprivate_checked[index], __ATOMIC_ACQUIRE)) {
+        sys__os__lock_take(&khronos_opencl1_base__zzpackage_lock);
+        if (!khronos_opencl1_base__zzprivate_checked[index]) {
+            khronos_opencl1_base__zzprivate_refused[index] = !khronos_opencl1_base__zzpackage_card_builds(s, index);
+            if (khronos_opencl1_base__zzprivate_refused[index])
+                fprintf(stderr, KHRONOS_OPENCL1_BASE__NAME ": card %u refused — its compiler does not build nn's kernels\n", index);
+            __atomic_store_n(&khronos_opencl1_base__zzprivate_checked[index], 1u, __ATOMIC_RELEASE);
+        }
+        sys__os__lock_give(&khronos_opencl1_base__zzpackage_lock);
+    }
+    if (khronos_opencl1_base__zzprivate_refused[index]) return 0u;
     khronos_opencl1_base__zzprivate_bound = index;
     return 1u;
 }

@@ -67,8 +67,8 @@ static inline bool khronos_opencl1_base__zzprivate_read_only(cl_device_id d) {
     return read_only;
 }
 
-/* A card's program, built once, under the lock. A build that fails says why on stderr, once, and every
- * launch on that card after it does nothing — the verb's result then fails its own check. */
+/* A card's program, built once, under the lock — at the card's first bind (▶ sys.cuh, `bind_device`), which refuses a
+ * card it does not build for. A build that fails says why on stderr, once. */
 static inline bool khronos_opencl1_base__zzprivate_program_up(khronos_opencl1_base__state* s, uint32_t card) {
     if (khronos_opencl1_base__zzprivate_program[card]) return true;
     if (khronos_opencl1_base__zzprivate_tried[card]) return false;
@@ -97,6 +97,11 @@ static inline bool khronos_opencl1_base__zzprivate_program_up(khronos_opencl1_ba
     if (khronos_opencl1_base__zzprivate_kernels[card] == 0) { (void)clReleaseProgram(p); return false; }
     khronos_opencl1_base__zzprivate_program[card] = p;
     return true;
+}
+
+/* Whether the card's compiler builds this family's program: what `bind_device` asks, under the lock, once a card. */
+static bool khronos_opencl1_base__zzpackage_card_builds(khronos_opencl1_base__state* s, uint32_t card) {
+    return khronos_opencl1_base__zzprivate_program_up(s, card);
 }
 
 /* The kernel called `name` on `card`, made on first use; a kernel the program does not have is remembered
@@ -146,7 +151,10 @@ static inline void nn__silicon__launch(const void* kernel, const char* name, uin
         ok = clEnqueueNDRangeKernel(q, k->kernel, 1u, 0, &global, &local, 0u, 0, ev) == CL_SUCCESS;
     }
     sys__os__lock_give(&khronos_opencl1_base__zzpackage_lock);
-    if (!ok) fprintf(stderr, KHRONOS_OPENCL1_BASE__NAME ": %s did not launch\n", name);
+    if (!ok) {
+        fprintf(stderr, KHRONOS_OPENCL1_BASE__NAME ": %s did not launch\n", name);
+        khronos_opencl1_base__zzpackage_launch_refused(card);
+    }
 }
 
 /* ⛳ THE ARITHMETIC IS THE KERNELS' OWN, written into their source by the build (OpenCL's `exp`, `sqrt`,

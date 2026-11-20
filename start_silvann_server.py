@@ -45,13 +45,15 @@ from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, File, Header, HTTPException, UploadFile
+from fastapi import FastAPI, File, Header, HTTPException, Request, UploadFile
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
 ROOT = Path(__file__).resolve().parent
-# the skills the release ships (▶ silvann_runtime/skills.py): skills/ beside this file, or the development tree's
-SKILLS_SHIPPED = ROOT / "skills" if (ROOT / "skills").is_dir() else ROOT.parent / "release" / "skills"
+# the skills the release ships (▶ silvann_runtime/skills.py): skills/ beside this file in a release — one has its docs
+#   beside it too, as the UI tells it (silvann_ui_parts/local.py's RELEASE_DIR) — or the development tree's. A skills/ beside this
+#   file and no docs/ is the data folder's own (main/ is the development tree's data folder), the user's skills
+SKILLS_SHIPPED = ROOT / "skills" if (ROOT / "docs" / "users.md").exists() else ROOT.parent / "release" / "skills"
 # the tool's guide, which the REPL's (guide) answers: docs/ beside this file, or the development tree's
 TOOLS_GUIDE = ROOT / "docs" / "tools.md" if (ROOT / "docs").is_dir() else ROOT.parent / "release" / "docs" / "tools.md"
 # the conversations go beside the release, or in the folder SILVANN_DATA names (the Docker image's volume)
@@ -75,6 +77,7 @@ from silvann_runtime.qwen_image import Stopped, image_pack                 # noq
 from silvann_runtime.vision import MAX_VIDEO_TOKENS                       # noqa: E402
 
 IDLE_EVICTION_SECONDS = 120.0         # a page that stopped asking after its conversation without saying it went
+ATTACH_MOST = 100 << 20               # an attachment's bytes at most — a picture, a video, a document: the UI's limit too
 GONE_PARK_SECONDS = 20.0              # seats: a conversation whose page went, put away this long after its last answer
 PANIC_GRACE_SECONDS = 2.0             # a panic's error on its way to the UI before the server ends (▶ `_stopped`)
 PANIC_END_SECONDS = 15.0              # and the HTTP server's own shutdown, before the process is ended without it
@@ -157,7 +160,7 @@ class State:
         self.model = self.runtime = self.chat = None
         self.config = {}
         self.model_id = ""
-        self.dir = DATA / "user_sessions"
+        self.dir = DATA / "user_sessions"   # the model's conversations that are nobody's (▶ users.Users.unowned)
         self.owner = {}                     # cartridge id -> the web user who has it open
         self.where = {}                     # cartridge id -> (its folder, its user or None), as found (▶ `_locate`)
         self.user_boxes = {}                # a user -> their tools over the machine's (▶ users.UserToolbox)
@@ -170,9 +173,8 @@ class State:
         self.images = {}                    # cartridge id -> {image id: a picture read, waiting for its message}
         self.lock = asyncio.Lock()          # the endpoints that touch the card, one at a time
         self.tools = "chill"                # the config's tools: a new conversation's mode for its tool, or "no"
-        self.classifier = None              # tools.json's folders, every conversation's (each its own mode)
-        self.workspace = DATA / "workspace"
-        self.library = DATA / "tools_library.json"   # the definitions the REPL kept, every conversation's
+        self.classifier = None              # a new conversation's mode and what every one is sealed from (▶ `_repl_place`)
+        self.workspace = None               # the config's `tools_folder`, where it names one (▶ `_place_of`)
         self.skills = [DATA / "skills", SKILLS_SHIPPED]   # the folders the REPL's skills are in
         self.tool_sessions = {}             # cartridge id -> its REPL
         self.asks = {}                      # cartridge id -> its answer, waiting on the user's answer to an ask
@@ -184,6 +186,8 @@ class State:
                                             #   the startup check found it (▶ tools_config.Toolbox), every session's
         self.web = None                     # how the REPL's fetch goes onto the web (▶ tools.Web)
         self.listen = ("127.0.0.1", 8765)   # the address and port the server listens on
+        self.worker_tokens = {}             # another server's address -> this server's sign-in there (▶ `_worker_token`)
+        self.classifiers = {}               # an account -> (the toolbox it was made under, its classifier) (▶ `_repl_place`)
         self.offer = None                   # this server offered to the agent entry's registry (▶ registry.Offer)
         self.panic = None                   # the evaluator's stop the server is ending on (▶ `_stopped`)
         self.http = None                    # the HTTP server, which a panic ends (▶ `_stopped`)
@@ -191,13 +195,33 @@ class State:
 
 S = State()
 
-# ── the users (NN-150, ▶ silvann_runtime/users.py) ─────────────────────────────────────────────
-# ⚖ 2026-11-02 *"users have a folder with at least a password and they get in and only see their chat folder"*. With no
-#   user made, a server is as it was: no sign-in, every conversation the machine's. With one, every request but /health
-#   and the sign-in carries a token (`Authorization: Bearer …`, ▶ `_UsersGate`), and a user's conversations are the ones
-#   in their folder — another user's answers 404, as one that is not there.
+# ── the users (NN-150, NN-197, ▶ silvann_runtime/users.py) ─────────────────────────────────────
+# ⚖ 2026-11-02 *"users have a folder with at least a password and they get in and only see their chat folder"*; ⚖
+#   2026-11-19 an account from the first run, and nothing answered without a sign-in. Every request but /health and the
+#   sign-in carries a token (`Authorization: Bearer …`, ▶ `_UsersGate`), and an account's conversations are the ones in
+#   its folder — another's answers 404, as one that is not there. A machine with no account yet answers /health, and
+#   every other request with how its first is made.
 USERS = users.Users(DATA)
 SSO = sso.SignOn(USERS, DATA)                       # a provider to sign on with (NN-157), where sso.json names one
+NO_ACCOUNT = ("this machine has no account yet: its first is made at the first page of its UI, or with `silvann users "
+              "add <name>` on it")
+
+
+def _place_of(name):
+    """An account's REPL's own files (▶ users.Users.files): (its workspace, the definitions it kept, the folders it
+    allowed) — the workspace the folder the config's `tools_folder` names instead, for an account whose model reaches
+    the machine (▶ users.Users.reaches_machine)."""
+    f = USERS.files(name)
+    home = S.workspace if S.workspace is not None and USERS.reaches_machine(name) else Path(f["workspace"])
+    return home, Path(f["library"]), f["allowed"]
+
+
+def _token_for(name):
+    """A sign-in's token for `name` — 409 where the machine is single user and another account has it."""
+    try:
+        return USERS.issue(name)
+    except users.InUse as ex:
+        raise HTTPException(409, str(ex))
 _ME = contextvars.ContextVar("silvann_user", default=None)    # who the request in hand is from, set by the gate
 CID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")                     # a conversation's id: a name, never a path
 
@@ -206,8 +230,15 @@ def _me():
     return _ME.get()
 
 
+def _admin_only(what):
+    """⛔ What the machine's settings are, an admin's alone (NN-196): 403 otherwise."""
+    if not USERS.admin(_me()):
+        raise HTTPException(403, "%s is an admin's" % what)
+
+
 def _folder_of(name):
-    """Where `name`'s conversations of this model are — a user's folder — or, for None, the machine's."""
+    """Where `name`'s conversations of this model are — their folder — or, for None, where the ones made before a
+    machine's users wait for `silvann users adopt` (▶ users.Users.unowned), nobody's."""
     return Path(USERS.sessions(name, S.model_id)) if name else S.dir
 
 
@@ -492,7 +523,7 @@ def _boot(args):
         if not hasattr(S.model, "forward"):
             raise SR.Refused("%s runs on one machine only: its model has no stages" % folder.name)
         link = pipeline.Link(int(cfg.get("pipeline_parallelism_port", pipeline.DEFAULT_PORT)),
-                             cfg["pipeline_parallelism_next"])
+                             cfg["pipeline_parallelism_next"], cfg.get("pipeline_parallelism_prev") or None)
         say = lambda text: print("[silvann_server] " + text.replace("[pipeline] ", ""), flush=True)   # noqa: E731
         if layers[0] != 0:
             say("a stage of the ring: layers %d-%d of %d%s" % (layers[0], layers[-1], total,
@@ -507,10 +538,10 @@ def _boot(args):
     S.runtime = _runtime_for(S.model)
     S.chat = Chat(S.model.folder)
     S.model_id = folder.name
-    # the model's REPL starts in the workspace, where it reads unasked (▶ the classifier); tools.json keeps the folders
-    #   allowed since, tools_library.json the definitions kept (▶ tools' `keep`) — every conversation's
-    S.workspace = Path(cfg.get("tools_folder") or DATA / "workspace")
-    S.library = DATA / "tools_library.json"
+    # a model's REPL starts in its account's workspace, where it reads unasked (▶ the classifier); the account's
+    #   tools_allowed.json keeps the folders allowed since, its tools_library.json the definitions kept (▶ `_place_of`).
+    #   The config's `tools_folder` names another workspace for the account whose model reaches the machine
+    S.workspace = Path(cfg["tools_folder"]) if cfg.get("tools_folder") else None
     S.skills = [DATA / "skills", SKILLS_SHIPPED]         # the user's first: theirs takes a shipped skill's name
     # ⭐ THE TOOLS FILE (NN-127): what the REPL reaches on this machine, set up in one place — `tools/default.json` in the
     #   data folder, or the one the config's `tools_config` names; its folder is never the model's to read or write
@@ -523,13 +554,13 @@ def _boot(args):
     if tools._jail.in_container():
         (DATA / "python").mkdir(parents=True, exist_ok=True)
     S.toolbox = tools_config.Toolbox(_tools_file(cfg), S.skills, added=DATA / "skills_added", code=[DATA / "python"])
-    S.classifier = tools.Classifier(str(DATA / "tools.json"), "ask" if S.tools == "no" else S.tools,
-                                    allowed=[str(S.workspace)], sealed=[S.toolbox.file.folder()])
+    # the mode a new conversation's commands have and what every one is sealed from: each account's classifier is made
+    #   of these and of its own folders (▶ `_repl_place`)
+    S.classifier = tools.Classifier(None, "ask" if S.tools == "no" else S.tools, sealed=[S.toolbox.file.folder()])
     S.web = tools.Web()
     for line in _tools_ready(cfg):
         print("[silvann_server] %s" % line, flush=True)
-    S.dir = DATA / "user_sessions" / folder.name
-    S.dir.mkdir(parents=True, exist_ok=True)
+    S.dir = Path(USERS.unowned()) / folder.name
     S.where.clear()
     lent = S.model.lent() if hasattr(S.model, "lent") else None
     print("[silvann_server] %s (%s) booted in %.0f s — context %d, LoRA %s%s"
@@ -565,6 +596,7 @@ def _tools_ready(cfg):
     changed = box.refresh()
     said = ["the tools file %s: %s" % (box.file.path, "; ".join(changed) if changed else "as it was")]
     S.web.named(box.config("fetch").get("contact"))
+    S.web.reaches(box.config("fetch").get("local"))
     missing, cache = {}, {}
     switch = box.enabled("image")
     S.picture = _picture_model(cfg, switch)
@@ -610,8 +642,8 @@ def _tools_ready(cfg):
     if box.enabled("bash") == "no":
         said.append("the REPL's (bash …): switched off in the tools file")
     else:                                             # where the model's commands reach (▶ tools.confinement)
-        c = tools.confinement(box, S.classifier.sealed, str(S.workspace))
-        said.append("the REPL's (bash …): %s" % (
+        c = tools.confinement(box, S.classifier.sealed, str(S.workspace or USERS.root))
+        said.append("the REPL's (bash …), for an account whose model reaches the machine: %s" % (
             "the machine but its tools file and the server's process (Landlock ABI %d)" % c.rules["abi"]
             if c.rules is not None and c.shape == "machine" else
             "the workspace alone and what is linked at its top (Landlock ABI %d)" % c.rules["abi"]
@@ -854,32 +886,52 @@ def _tool_agent(cid, model, config, task):
         endpoint = S.endpoint
     busy = S.busy_cart
     try:
-        owner = _owner(cid)                           # a user's conversation: its subagent's on this server is theirs
-        token = USERS.issue(owner) if owner and endpoint == S.endpoint else None
+        owner = _owner(cid)                           # the caller's account: its subagent's conversation here is theirs;
+        token = USERS.issue(owner) if endpoint == S.endpoint else _worker_token(endpoint)   # on a worker, this server's
         link = agents.Link(endpoint, model, conf, task, user="agent-%s" % cid, progress=say, token=token)
     finally:
         if restore is not None:
             restore()                                 # the card back to the caller, who reads the answer
         S.busy_cart = busy                            # the caller's answer is still the one on the card
-    return _Kept(link, busy, (folder, conf, rt) if restore is not None else None)
+    return _Kept(link, busy, (folder, conf, rt) if restore is not None else None, owner,
+                 token if endpoint == S.endpoint else None)
 
 
 class _Kept:
     """A subagent's link, handing the caller's answer back the card's `busy_cart` after each of its turns."""
 
-    def __init__(self, link, busy, lent=None):
+    def __init__(self, link, busy, lent=None, owner=None, token=None):
         self.link, self.busy, self.lent = link, busy, lent    # lent: (folder, config, runtime) where it runs in place
+        self.owner = owner                                    # the caller's account, whose folder holds the conversation
+        self.token = token                                    # the sign-in this server gave itself for it, ended with it
         self.first, self.name = link.first, link.name
 
     @property
     def ask(self):
         return self.link.ask
 
+    def _signed_in(self):
+        """The link signed in still: its sign-in is over ten minutes after its last turn, and its caller's model may
+        work longer than that between two — on this server a token given again, on a worker the sign-in made again."""
+        if self.token is not None:
+            if USERS.signed(self.token) is None:
+                self.token = USERS.issue(self.owner)
+                self.link.http.headers["Authorization"] = "Bearer " + self.token
+        else:
+            try:
+                over = self.link.http.get("/users/me").status_code == 401
+            except Exception:                         # noqa: BLE001 — the worker silent: the turn itself says so
+                over = False
+            token = _worker_token(self.link.endpoint, again=True) if over else None
+            if token:
+                self.link.http.headers["Authorization"] = "Bearer " + token
+
     def _kept(self, fn, *args):
         restore = None
         try:
             if self.lent is not None:                 # in place: the card lent for this exchange
                 _, restore = _lend(*self.lent)
+            self._signed_in()
             self.link.http.post("/cartridges/%s/bind" % self.link.cid)   # back if the eviction put it away meanwhile
             return fn(*args)
         finally:
@@ -897,6 +949,14 @@ class _Kept:
         return self.link.shown(reply)
 
     def close(self):
+        try:
+            if self.lent is None:
+                self._signed_in()                     # its conversation is deleted by a request of its own
+            return self._close()
+        finally:
+            USERS.end(self.token)                     # the sign-in the server gave itself for it: over with it
+
+    def _close(self):
         if self.lent is None:
             return self.link.close()
         folder, _, rt = self.lent                     # in place: its conversation dropped without lending the card again
@@ -905,7 +965,7 @@ class _Kept:
         rt.active = None if rt.active is not None and rt.active.id == cid else rt.active
         S.tool_sessions.pop(cid, None)
         S.owner.pop(cid, None)
-        shutil.rmtree(DATA / "user_sessions" / Path(folder).name / cid, ignore_errors=True)
+        shutil.rmtree(Path(USERS.sessions(self.owner, Path(folder).name)) / cid, ignore_errors=True)
         self.link.cid = None
         self.link.close()
 
@@ -1005,12 +1065,46 @@ def _worker_for(model):
     urls += [e["address"] for e in _registry_servers()[0] if e.get("model_id") == model]
     for url in urls:
         try:
-            h = httpx.get(url + "/health", timeout=5).json()
-            if h.get("model_id") == model and not httpx.get(url + "/busy", timeout=5).json().get("busy"):
+            if httpx.get(url + "/health", timeout=5).json().get("model_id") != model:
+                continue
+            busy = httpx.get(url + "/busy", timeout=5, headers=_signed(_worker_token(url)))
+            if busy.status_code == 401:               # the sign-in there ended: once more, signed in again
+                busy = httpx.get(url + "/busy", timeout=5, headers=_signed(_worker_token(url, again=True)))
+            if busy.status_code == 200 and not busy.json().get("busy"):
                 return url
         except (httpx.HTTPError, ValueError):
             continue
     return None
+
+
+def _signed(token):
+    return {"Authorization": "Bearer " + token} if token else {}
+
+
+def _worker_token(url, again=False):
+    """⭐ THIS SERVER SIGNED IN ON ANOTHER (NN-197): a worker asks for a sign-in as every server does, and this one signs
+    in there as the account the tools file's `agent` entry names (`account`, `password`) — one the worker's admin made
+    for its callers, on a multi user machine, where several are signed in at once and each one's model works in its own
+    folder. The token is kept for the address, and asked for again once it is refused. None where the entry names no
+    account or the worker refuses it: the worker's own refusal is then what the caller reads."""
+    import httpx
+    url = url.rstrip("/")
+    if not again and S.worker_tokens.get(url):
+        return S.worker_tokens[url]
+    S.worker_tokens.pop(url, None)
+    entry = _offer_settings()
+    if not entry.get("account") or not entry.get("password"):
+        return None
+    try:
+        r = httpx.post(url + "/users/sign_in", json={"name": str(entry["account"]), "password": str(entry["password"])},
+                       timeout=10)
+        if r.status_code == 200:
+            S.worker_tokens[url] = r.json()["token"]
+        else:
+            print("[agent] %s refused this server's sign-in as %s: %s" % (url, entry["account"], r.text[:200]), flush=True)
+    except (httpx.HTTPError, ValueError, KeyError) as ex:
+        print("[agent] %s did not answer this server's sign-in: %s" % (url, ex), flush=True)
+    return S.worker_tokens.get(url)
 
 
 def _other_models():
@@ -1084,8 +1178,8 @@ def _stopped(panic):
     nothing boots it again: the request that met the stop answers its error, the word first, as any failure does; what
     the card held is let go of, so each conversation is saved from its tokens; the log's last line says why, and the
     process ends a moment later — once the error is on its way — with the HTTP server's own shutdown (the conversations
-    saved), then `main`'s exit 1. Starting it again is the user's choice: the UI's start (▶ silvann_ui.py,
-    `ServerProcess`, which shows the line)."""
+    saved), then `main`'s exit 1. Starting it again is the user's choice: the UI's start (▶
+    silvann_ui_parts/server_process.py's `ServerProcess`, which shows the line)."""
     if S.panic is not None:
         return
     S.panic = panic
@@ -1159,8 +1253,7 @@ def _lend(folder, conf, rt=None):
     else:
         rt.model = m
     S.model, S.runtime, S.chat, S.model_id = m, rt, Chat(m.folder), Path(folder).name
-    S.dir = DATA / "user_sessions" / S.model_id
-    S.dir.mkdir(parents=True, exist_ok=True)
+    S.dir = Path(USERS.unowned()) / S.model_id
     S.where.clear()                                       # another model's conversations, found again
     print("[agent] the card lent to %s in %.0f s (%s)" % (S.model_id, time.time() - t0, why), flush=True)
 
@@ -1209,13 +1302,11 @@ def _boot_image(folder, cfg, t0):
     S.model = image_session.ImageModel(str(folder), settings=cfg.get("image"))
     S.runtime = image_session.ImageRuntime(S.model)
     threading.Thread(target=S.runtime.start, daemon=True).start()     # the picture worker, ready before the first prompt
-    S.workspace = Path(cfg.get("tools_folder") or DATA / "workspace")
-    S.classifier = tools.Classifier(str(DATA / "tools.json"), "ask", allowed=[str(S.workspace)])
-    S.library = DATA / "tools_library.json"
+    S.workspace = Path(cfg["tools_folder"]) if cfg.get("tools_folder") else None
+    S.classifier = tools.Classifier(None, "ask")
     S.skills = [DATA / "skills", SKILLS_SHIPPED]         # the user's first: theirs takes a shipped skill's name
     S.model_id = folder.name
-    S.dir = DATA / "user_sessions" / folder.name
-    S.dir.mkdir(parents=True, exist_ok=True)
+    S.dir = Path(USERS.unowned()) / folder.name
     S.where.clear()
     print("[silvann_server] %s (a picture model, %s) ready in %.0f s — a picture %s"
           % (folder.name, S.model.folder.architecture, time.time() - t0, S.model.settings), flush=True)
@@ -1305,13 +1396,19 @@ def _bearer(value):
 
 class _UsersGate:
     """⭐ EVERY REQUEST THROUGH ONE DOOR (NN-150): who it is from — the sign-in its `Authorization: Bearer` token names —
-    set for the request (`_me`); with users on, one without a sign-in refused 401 but /health and the sign-in itself, and
-    a conversation that is not the signer's answered 404, as one that is not there. One door rather than a check in each
-    endpoint, so an endpoint added later is behind it too."""
+    set for the request (`_me`); one without a sign-in refused 401 but /health and the sign-in itself — on a machine
+    with no account yet, with how its first is made (NN-197) — and a conversation that is not the signer's answered 404,
+    as one that is not there. One door rather than a check in each endpoint, so an endpoint added later is behind it
+    too."""
     OPEN = ("/health", "/users/sign_in", "/admin/save-all",  # the last saves what is open and reads nothing: a UI
             "/users/sso", "/users/sso/start", "/users/sso/finish",   # stopping the server it started calls it unsigned;
             "/users/sso/device", "/users/sso/device/poll")           # the sign-on's steps, a sign-in's (▶ sso.py)
     NOT_A_CONVERSATION = ("estimate", "import")           # /cartridges/estimate and /cartridges/import
+    # ⭐ A SIGN-IN'S TEN MINUTES (▶ users.py): a request is a use of its sign-in, which is held while the response is
+    #   made — an answer of an hour is one request — and whose ten minutes begin as the response ends. A request that
+    #   says the person did not ask it (`X-Silvann-Unattended`: a page asking after the server every few seconds) is
+    #   answered for its sign-in and is no use of it: an open page keeps no one signed in.
+    UNATTENDED = "x-silvann-unattended"
 
     def __init__(self, app):
         self.app = app
@@ -1320,21 +1417,26 @@ class _UsersGate:
         if scope["type"] != "http":
             return await self.app(scope, receive, send)
         headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers", [])}
-        me = USERS.signed(_bearer(headers.get("authorization")))
+        token, used = _bearer(headers.get("authorization")), self.UNATTENDED not in headers
+        me = USERS.signed(token, use=used)
         path = scope.get("path", "")
-        if USERS.on():
-            if me is None and path not in self.OPEN:
-                return await self._refuse(send, 401, "sign in: this server has users (POST /users/sign_in)")
-            m = re.match(r"^/cartridges/([^/]+)(?:/|$)", path)
-            if m and m.group(1) not in self.NOT_A_CONVERSATION:
-                cid = m.group(1)
-                if not CID.match(cid) or _owner(cid) != me or not _cdir(cid).is_dir():
-                    return await self._refuse(send, 404, "cartridge %r not found" % cid)
+        if me is None and path not in self.OPEN:
+            return await self._refuse(send, 401, "sign in: POST /users/sign_in answers a token, sent as `Authorization: "
+                                                 "Bearer <token>`" if USERS.ready() else NO_ACCOUNT)
+        m = re.match(r"^/cartridges/([^/]+)(?:/|$)", path)
+        if m and m.group(1) not in self.NOT_A_CONVERSATION:
+            cid = m.group(1)
+            if not CID.match(cid) or _owner(cid) != me or not _cdir(cid).is_dir():
+                return await self._refuse(send, 404, "cartridge %r not found" % cid)
         held = _ME.set(me)
+        if me is not None and used:
+            USERS.hold(token)
         try:
             await self.app(scope, receive, send)
         finally:
             _ME.reset(held)
+            if me is not None and used:
+                USERS.release(token)
 
     @staticmethod
     async def _refuse(send, status, detail):
@@ -1353,15 +1455,23 @@ class SignInReq(BaseModel):
 
 
 @app.post("/users/sign_in")
-def users_sign_in(req: SignInReq):
-    """A sign-in: a token the requests that follow carry (`Authorization: Bearer <token>`), good until it is unused for
-    twelve hours, its user's password changes, or the server stops."""
-    if not USERS.on():
-        raise HTTPException(409, "this server has no users: nothing to sign in to")
+def users_sign_in(req: SignInReq, request: Request):
+    """A sign-in: a token the requests that follow carry (`Authorization: Bearer <token>`), good — on every server and
+    UI on this data folder — until ten minutes after its last use or the end of the last response to it, it is signed
+    out, or its user's password changes; on a single user's machine, until SiLVANN is opened again too. 409 where that
+    machine is another account's now. A wrong password is 401, told to the system's log with the caller's address,
+    and the name waits a minute at that address: 429 meanwhile, `Retry-After` the seconds left (▶ users.Users._checked)."""
+    if not USERS.ready():
+        raise HTTPException(409, NO_ACCOUNT)
     name = req.name.strip().lower()
-    token = USERS.sign_in(name, req.password)
+    try:
+        token = USERS.sign_in(name, req.password, at=request.client.host if request.client else None)
+    except users.InUse as ex:
+        raise HTTPException(409, str(ex))
+    except users.Wait as ex:
+        raise HTTPException(429, str(ex), headers={"Retry-After": str(ex.seconds)})
     if token is None:
-        raise HTTPException(401, "wrong name or password")
+        raise HTTPException(401, "wrong name or password: the next try in %d seconds" % users.WAIT)
     return {"token": token, "name": name}
 
 
@@ -1401,7 +1511,7 @@ def users_sso_start():
 def users_sso_finish(req: SsoFinishReq):
     """The browser back from the provider with its code: the account checked here, then a token as a password's."""
     name = _sso(SSO.finish, req.code, req.state)
-    return {"token": USERS.issue(name), "name": name}
+    return {"token": _token_for(name), "name": name}
 
 
 @app.post("/users/sso/device")
@@ -1416,12 +1526,22 @@ def users_sso_device_poll(req: SsoPollReq):
     name = _sso(SSO.device_poll, req.handle)
     if name is None:
         return {"pending": True}
-    return {"token": USERS.issue(name), "name": name}
+    return {"token": _token_for(name), "name": name}
+
+
+class SignOutReq(BaseModel):
+    alone: bool = False
 
 
 @app.post("/users/sign_out")
-def users_sign_out(authorization: Optional[str] = Header(default=None)):
-    USERS.sign_out(_bearer(authorization))
+def users_sign_out(req: Optional[SignOutReq] = None, authorization: Optional[str] = Header(default=None)):
+    """The person signs out: this sign-in over — and, on a single user's machine, the account's every sign-in, so the
+    machine is the next account's (▶ users.Users.sign_out). `{"alone": true}` ends this sign-in and no other: a
+    terminal's chat closing, which leaves the account's browser signed in."""
+    if req is not None and req.alone:
+        USERS.end(_bearer(authorization))
+    else:
+        USERS.sign_out(_bearer(authorization))
     return {"signed_out": True}
 
 
@@ -1430,8 +1550,9 @@ def users_me():
     """Who is signed in, how many conversations they hold, and what their settings ask that the machine keeps."""
     me = _me()
     if me is None:
-        return {"user": None, "users": USERS.on()}
-    return {"user": me, "users": True, "conversations": USERS.conversations(me), "kept": _user_box(me).kept()}
+        return {"user": None, "users": True}
+    return {"user": me, "users": True, "admin": USERS.admin(me), "conversations": USERS.conversations(me),
+            "mode": USERS.mode(), "kept": [] if USERS.reaches_machine(me) else _user_box(me).kept()}
 
 
 # ── endpoints ───────────────────────────────────────────────────────────────────────────────────────────────
@@ -1447,7 +1568,8 @@ def health():
             "max_context": m.max_context if m else 0,
             "adapter": "silvann_runtime", "images": _reads_pictures(), "files": not S.image, "pictures": S.image,
             "picture_settings": S.model.settings if S.image else None, "user_system_prompt": _user_system(),
-            "users": USERS.on(), "user": _me()}
+            # every server asks for a sign-in (`users`); `account`: whether one can be made here yet (▶ NO_ACCOUNT)
+            "users": True, "account": USERS.ready(), "user": _me(), "admin": USERS.admin(_me())}
 
 
 def _reads_pictures():
@@ -1476,13 +1598,13 @@ async def save_all():
         for cid, c in list(S.runtime.cartridges.items()):
             await asyncio.to_thread(_persist, c)
             saved.append(cid)
-    return {"saved": saved} if not USERS.on() or _me() else {"saved": len(saved)}   # no ids to a caller not signed in
+    return {"saved": saved} if _me() else {"saved": len(saved)}   # no ids to a caller not signed in
 
 
 @app.get("/cartridges")
 def list_cartridges():
     out = []
-    here = _folder_of(_me())                              # a user's own, or the machine's where there are no users
+    here = _folder_of(_me())                              # the signed-in account's own
     for d in sorted(here.iterdir()) if here.exists() else []:
         meta = _meta(d.name) if d.is_dir() else None
         if meta is None:
@@ -1729,7 +1851,12 @@ async def upload_image(cid: str, file: UploadFile = File(...), x_cart_password: 
         raise HTTPException(409, "not bound — call /bind first")
     if S.image:
         raise HTTPException(415, "%s makes pictures from a prompt; reference pictures come with a later release" % S.model_id)
-    data = await file.read()
+    if (file.size or 0) > ATTACH_MOST:               # said before it is read into memory: the UI's own limit
+        raise HTTPException(413, "an attachment is %d MB at most, and this one is %d MB"
+                            % (ATTACH_MOST >> 20, file.size >> 20))
+    data = await file.read(ATTACH_MOST + 1)
+    if len(data) > ATTACH_MOST:
+        raise HTTPException(413, "an attachment is %d MB at most" % (ATTACH_MOST >> 20))
     from silvann_runtime import documents
     if documents.is_document(data, file.filename):
         try:
@@ -1978,21 +2105,27 @@ def _user_box(name):
 
 
 def _repl_place(cid):
-    """Where a conversation's REPL works and what fences it: the machine's workspace, classifier and tools for a
-    conversation of the machine's; for a user's, their own workspace and kept definitions, a classifier that allows
-    their workspace and seals what is not theirs (▶ users.Fence), and their tools. (workspace, classifier, library, box)."""
+    """Where a conversation's REPL works and what fences it — its account's own workspace, kept definitions and
+    folders allowed (▶ `_place_of`): (workspace, classifier, library, box). For an account whose model reaches the
+    machine (▶ users.Users.reaches_machine: an admin on a single user's machine), the machine's tools and a classifier
+    sealed from the tools file alone; for any other, a classifier that seals what is not theirs (▶ users.Fence), and
+    their tools. An account's classifier is made once a boot: a folder one of its conversations allowed is every one's."""
     owner = _owner(cid)
-    if owner is None:
-        return S.workspace, S.classifier, S.library, S.toolbox
-    home = Path(USERS.workspace(owner))
-    k = tools.Classifier(str(Path(USERS.folder(owner)) / "tools_allowed.json"), S.classifier.mode, allowed=[str(home)],
-                         sealed=[S.toolbox.file.folder()])
-    # ⛔ A CHROOT'S VIEW (▶ users.Fence): the user's workspace to write; to read, besides, the system's programs, the
-    #   tools they have switched on, the runtime and the venv — looked at afresh at each command
-    box = _user_box(owner)
-    k.sealed = users.Fence(USERS, owner, machine_sealed=list(k.sealed), keep=[os.path.dirname(tools.RUNNER), sys.prefix],
-                           tools=box.tool_folders)
-    return home, k, Path(USERS.folder(owner)) / "tools_library.json", box
+    if owner is None:                                 # nobody's (▶ users.Users.unowned): no REPL until it is adopted
+        raise HTTPException(404, "cartridge %r not found" % cid)
+    home, library, allowed = _place_of(owner)
+    reaches = USERS.reaches_machine(owner)
+    box = S.toolbox if reaches else _user_box(owner)
+    kept = S.classifiers.get(owner)
+    if kept is None or kept[0] is not S.toolbox:
+        k = tools.Classifier(str(allowed), S.classifier.mode, allowed=[str(home)], sealed=[S.toolbox.file.folder()])
+        if not reaches:
+            # ⛔ A CHROOT'S VIEW (▶ users.Fence): the user's workspace to write; to read, besides, the system's programs,
+            #   the tools they have switched on, the runtime and the venv — looked at afresh at each command
+            k.sealed = users.Fence(USERS, owner, machine_sealed=list(k.sealed),
+                                   keep=[os.path.dirname(tools.RUNNER), sys.prefix], tools=box.tool_folders)
+        kept = S.classifiers[owner] = (S.toolbox, k)
+    return home, kept[1], library, box
 
 
 def _tool_session(cid):
@@ -2235,14 +2368,10 @@ def tools_settings():
     """The config's tools — a new conversation's mode ("ask", "chill", "full-auto"), or "no": no conversation has the
     tool — the modes, the folders every conversation reads unasked, where its REPL starts, and the machine's tools file
     (▶ `_tools_listed`)."""
-    me = _me()
-    if me:                                                # a user's own workspace and the folders their REPL allowed
-        home = Path(USERS.workspace(me))
-        k = tools.Classifier(str(Path(USERS.folder(me)) / "tools_allowed.json"), S.classifier.mode, allowed=[str(home)])
-        return {"tools": S.tools, "modes": list(tools.MODES), "allowed": k.allowed, "workspace": str(home),
-                **_tools_listed()}
-    return {"tools": S.tools, "modes": list(tools.MODES), "allowed": S.classifier.allowed,
-            "workspace": str(S.workspace), **_tools_listed()}
+    home, _, allowed = _place_of(_me())                   # the account's own workspace and the folders its REPL allowed
+    k = tools.Classifier(str(allowed), S.classifier.mode, allowed=[str(home)])
+    return {"tools": S.tools, "modes": list(tools.MODES), "allowed": k.allowed, "workspace": str(home),
+            **_tools_listed()}
 
 
 @app.post("/tools/rebuild")
@@ -2251,6 +2380,7 @@ async def tools_rebuild():
     again, the tools file's entries kept in step with them, and the startup check run again — what a skill installed or
     a setting changed since the boot needs. A conversation's REPL reads its skills again at its `(reset)`; what the
     check found reaches every one at once. Answers what it did, `said`, and the tools as `GET /tools` does."""
+    _admin_only("rebuilding the machine's tools")
     if S.toolbox is None:
         raise HTTPException(409, "%s is a picture model: it has no tools" % S.model_id)
     try:
@@ -2268,12 +2398,13 @@ def _tools_listed():
     if S.toolbox is None:
         return {"tools_file": None, "entries": {}}
     me = _me()
-    box = _user_box(me) if me else S.toolbox             # a user sees the tools as they have them
+    mine = not USERS.reaches_machine(me)                 # an account sees the tools as it has them
+    box = _user_box(me) if mine else S.toolbox
     out = box.listing()
     for e in out.values():
         e["config"] = {k: ("(set)" if v not in (None, "") else None) if _secret(k) else v for k, v in e["config"].items()}
     got = {"tools_file": S.toolbox.file.path, "entries": out}
-    if me:
+    if mine:
         got.update(user_tools_file=USERS.tools_file(me), kept=box.kept())
     return got
 
@@ -2290,8 +2421,14 @@ def main():
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8765)          # the port the UI looks for by default
     args = p.parse_args()
+    for line in USERS.settle():                               # a machine from before its mode was written keeps it
+        print("[silvann_server] %s" % line, flush=True)
+    USERS.serve()                                             # the switch between the modes waits for this server to end
+    USERS.open()                                              # the app opened, where no UI nor server of it was running
+    if not USERS.ready():
+        print("[silvann_server] %s — until then every request but /health is refused" % NO_ACCOUNT, flush=True)
     # ⛔ A BOOT THAT CANNOT BE MADE IS SAID IN ONE LINE, `⛔ not started:` and why — the UI that started this server shows
-    #   it in its status (▶ silvann_ui.py, `ServerProcess.failure`)
+    #   it in its status (▶ silvann_ui_parts/server_process.py, `ServerProcess.failure`)
     try:
         _boot(args)
     except (SR.Refused, SR.Panic) as ex:                      # a model not here, a config not found, a card too small;

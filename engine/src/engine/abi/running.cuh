@@ -116,7 +116,7 @@ static inline uint32_t eng__abi__zzprivate_callers_block(void) {
 /* ⭐ THE WORKER'S FAULT WORD, CARRIED INTO THE MACHINE'S CHANNEL — ⚖ *"fault channel is per worker and
  * cascades"*. A door flags an overflow on the worker's device and does not stop; when a program's answer
  * is collected, the worker is waited for, the word read, and if it is set it is raised ONCE here and
- * cleared. */
+ * cleared. A worker whose wait fails is raised the same way (`SYS__VERB_ABI__FAULT_WORK`). */
 static inline void eng__abi__zzprivate_surface_worker_fault(void) {
     /* ⛳ EVERY WORKER'S, ON ITS OWN DEVICE — a fault cascades from whichever worker flagged it — cleared as it is
      *   read, and raised ONCE after: the first flagged word is the one named. The caller's device is bound again
@@ -129,8 +129,14 @@ static inline void eng__abi__zzprivate_surface_worker_fault(void) {
         if (me->fault_word == 0) continue;
         uint32_t flagged = 0u;
         if (eng__abi__zzpackage_worker_count > 1u && !sys__silicon__bind_device(me->family, me->device)) continue;
-        if (!sys__gpu__compute_completed(me->family)
-         || !sys__gpu__memory_read(me->family, &flagged, me->fault_word, sizeof flagged)) continue;
+        /* ⛔ A WAIT THAT ANSWERS FALSE IS A FAULT, NOT A WORKER PASSED OVER: its queued work did not complete — a launch
+         *   its runtime refused (a family remembers one for this wait), or the wait itself failed — and the program's
+         *   answer may stand on a buffer no kernel wrote. */
+        if (!sys__gpu__compute_completed(me->family)) {
+            if (first == 0u) first = (uint32_t)SYS__VERB_ABI__FAULT_WORK;
+            continue;
+        }
+        if (!sys__gpu__memory_read(me->family, &flagged, me->fault_word, sizeof flagged)) continue;
         if (flagged == 0u) continue;
         (void)sys__gpu__memory_zerofill(me->family, me->fault_word, sizeof flagged);
         if (first == 0u) first = flagged;

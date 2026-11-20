@@ -136,12 +136,25 @@ static inline bool arm_base__memory_allocate(void** at, size_t bytes) {
     *at = (uint8_t*)base + ARM_BASE__ZZPRIVATE_PAGE;
     return true;
 }
+static void arm_base__zzprivate_pagers_let_go(uintptr_t from, uintptr_t to);   /* below, with the pagers */
 static inline void arm_base__memory_free(void* at) {
     if (at == 0) return;
     const arm_base__held* h = (const arm_base__held*)((uint8_t*)at - sizeof(arm_base__held));
-    if (h->mapped & ARM_BASE__ZZPRIVATE_GUARDED) sys__os__memory_unmap((uint8_t*)at - h->offset, h->mapped & ~ARM_BASE__ZZPRIVATE_GUARDED);
-    else if (h->mapped != 0u) sys__os__memory_unmap((uint8_t*)at - ARM_BASE__ZZPRIVATE_PAGE, h->mapped);
-    else sys__os__memory_aligned_free((uint8_t*)at - 64u);
+    if (h->mapped & ARM_BASE__ZZPRIVATE_GUARDED) {
+        uint8_t* base = (uint8_t*)at - h->offset;
+        const size_t bytes = h->mapped & ~ARM_BASE__ZZPRIVATE_GUARDED;
+        arm_base__zzprivate_pagers_let_go((uintptr_t)base, (uintptr_t)base + bytes);
+        sys__os__memory_unmap(base, bytes);
+    } else if (h->mapped != 0u) {
+        uint8_t* base = (uint8_t*)at - ARM_BASE__ZZPRIVATE_PAGE;
+        const size_t bytes = h->mapped;
+        arm_base__zzprivate_pagers_let_go((uintptr_t)base, (uintptr_t)base + bytes);
+        sys__os__memory_unmap(base, bytes);
+    } else {
+        /* the process's heap unmaps a large piece as it frees it, so a file mapped over one is let go of the same way */
+        arm_base__zzprivate_pagers_let_go((uintptr_t)at - 64u, (uintptr_t)at + (uintptr_t)h->bytes);
+        sys__os__memory_aligned_free((uint8_t*)at - 64u);
+    }
 }
 static inline bool arm_base__memory_zerofill(void* at, size_t bytes) {
     if (at == 0) return false;
@@ -261,22 +274,52 @@ static unsigned        arm_base__zzprivate_pagers = 0u;
 static sys__os__lock arm_base__zzprivate_pager_lock = SYS__OS__LOCK_INIT;
 static sys__os__condition arm_base__zzprivate_pager_work = SYS__OS__CONDITION_INIT;
 static volatile uint64_t arm_base__zzprivate_pager_sink = 0u;
+/* the piece each pager has in hand, [from, to) — both 0 while it has none: what a range being unmapped waits to see */
+static uintptr_t       arm_base__zzprivate_pager_in_hand_from[ARM_BASE__ZZPRIVATE_PAGERS_MAX];
+static uintptr_t       arm_base__zzprivate_pager_in_hand_to[ARM_BASE__ZZPRIVATE_PAGERS_MAX];
 
-static void* arm_base__zzprivate_pager(void* unused) {
-    (void)unused;
+static void* arm_base__zzprivate_pager(void* which) {
+    const unsigned me = (unsigned)(uintptr_t)which;
     for (;;) {
         sys__os__lock_take(&arm_base__zzprivate_pager_lock);
+        arm_base__zzprivate_pager_in_hand_from[me] = 0u; arm_base__zzprivate_pager_in_hand_to[me] = 0u;
         while (arm_base__zzprivate_pager_head == arm_base__zzprivate_pager_tail)
             sys__os__condition_wait(&arm_base__zzprivate_pager_work, &arm_base__zzprivate_pager_lock);
         const unsigned k = arm_base__zzprivate_pager_tail;
         const uintptr_t from = arm_base__zzprivate_pager_from[k], to = arm_base__zzprivate_pager_to[k];
         arm_base__zzprivate_pager_tail = (k + 1u) % ARM_BASE__ZZPRIVATE_PAGER_RING;
+        arm_base__zzprivate_pager_in_hand_from[me] = from; arm_base__zzprivate_pager_in_hand_to[me] = to;
         sys__os__lock_give(&arm_base__zzprivate_pager_lock);
         uint64_t sum = 0u;
         for (uintptr_t a = from; a < to; a += ARM_BASE__ZZPRIVATE_PAGE) sum += *(volatile const uint8_t*)a;
         arm_base__zzprivate_pager_sink += sum;
     }
     return 0;
+}
+
+/* ⛔ BEFORE A RANGE IS UNMAPPED ITS PAGERS LET GO OF IT (⚖ 2026-11-19, the code review's row 9): the pieces of it still
+ *   queued are dropped, and a piece of it a pager has in hand is waited for — a pager that reads a page no longer
+ *   mapped ends the process. A model put down in a living server (a picture drawn, a card lent) unmaps the room its
+ *   experts' file is mapped over, while the last prefetch's pieces may still be queued. Another range's pieces stay. */
+static void arm_base__zzprivate_pagers_let_go(uintptr_t from, uintptr_t to) {
+    for (;;) {
+        bool in_hand = false;
+        sys__os__lock_take(&arm_base__zzprivate_pager_lock);
+        unsigned keep = arm_base__zzprivate_pager_tail;
+        for (unsigned k = arm_base__zzprivate_pager_tail; k != arm_base__zzprivate_pager_head; k = (k + 1u) % ARM_BASE__ZZPRIVATE_PAGER_RING) {
+            if (arm_base__zzprivate_pager_to[k] > from && arm_base__zzprivate_pager_from[k] < to) continue;      /* the range's: dropped */
+            arm_base__zzprivate_pager_from[keep] = arm_base__zzprivate_pager_from[k];
+            arm_base__zzprivate_pager_to[keep] = arm_base__zzprivate_pager_to[k];
+            keep = (keep + 1u) % ARM_BASE__ZZPRIVATE_PAGER_RING;
+        }
+        arm_base__zzprivate_pager_head = keep;
+        for (unsigned p = 0u; p < arm_base__zzprivate_pagers; ++p)
+            if (arm_base__zzprivate_pager_in_hand_to[p] > from && arm_base__zzprivate_pager_in_hand_from[p] < to) in_hand = true;
+        sys__os__lock_give(&arm_base__zzprivate_pager_lock);
+        if (!in_hand) return;
+        const struct timespec nap = { 0, 200000L };      /* a piece is 64 pages: its reader is done in a moment */
+        sys__os__sleep(&nap);
+    }
 }
 
 /* `[from, to)` handed to the pagers, a piece of `ARM_BASE__ZZPRIVATE_PAGE`s each so several share a long range; a full
@@ -291,7 +334,7 @@ static void arm_base__zzprivate_page_in(uintptr_t from, uintptr_t to) {
         if (want > ARM_BASE__ZZPRIVATE_PAGERS_MAX) want = ARM_BASE__ZZPRIVATE_PAGERS_MAX;
         for (unsigned t = 0u; t < want; ++t) {
             sys__os__thread id;
-            if (!sys__os__thread_start(&id, arm_base__zzprivate_pager, 0)) break;
+            if (!sys__os__thread_start(&id, arm_base__zzprivate_pager, (void*)(uintptr_t)t)) break;
             sys__os__thread_detach(id);
             ++arm_base__zzprivate_pagers;
         }

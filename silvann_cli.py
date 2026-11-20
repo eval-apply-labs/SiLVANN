@@ -6,6 +6,9 @@ the prompt.
     silvann_cli [--endpoint http://localhost:8765] [--notools] [--nothink] [--max-tokens N] [--system "…"]
     venv/bin/python silvann_cli.py …                 # the same, from the release's folder
 
+The server asks for a sign-in: the account's name at the prompt or with --sign-in NAME, its password asked for (or
+SILVANN_PASSWORD); --sign-on where the server has a provider.
+
 A new conversation takes the server's defaults — its config's thinking, and the model's tool in the config's mode —
 unless --notools or --nothink says otherwise. An ask stops the answer: y allows it once, f allows the folder (a read),
 n or Enter refuses. In the conversation: /new · /sys <prompt> (a new conversation with it) · /mode ask|chill|full-auto
@@ -234,6 +237,49 @@ def sign_on(http, provider):
     sys.exit("[silvann] the code expired: sign in again")
 
 
+def sign_in(chat, a, again=False):
+    """⭐ THIS CHAT SIGNED IN: the account `--sign-in` names, or the one asked for — its password asked for, or
+    SILVANN_PASSWORD — or the server's provider by a code (`--sign-on`). `again`: the chat's sign-in ended at the
+    prompt — ten minutes with nothing asked — and a refusal is said and answered False, the conversation kept for the
+    next try; at the start a refusal ends the chat."""
+    def refused(text):
+        if again:
+            print("%s[silvann] %s%s" % (RED, text, RESET))
+            return False
+        sys.exit("[silvann] %s" % text)
+
+    chat.http.headers.pop("Authorization", None)
+    provider = chat.http.get("/users/sso").json() if not a.sign_in else {}
+    if a.sign_on and not provider.get("on"):
+        sys.exit("[silvann] this server has no provider to sign on with: --sign-in <name>")
+    name = "" if a.sign_on else a.sign_in or input(
+        "[silvann] sign in — your account's name%s: " % (" (or Enter to sign in with %s)" % provider["label"]
+                                                          if provider.get("device") else "")).strip()
+    if not name and provider.get("device"):
+        got = sign_on(chat.http, provider)
+    else:
+        import getpass
+        password = os.environ.get("SILVANN_PASSWORD") or getpass.getpass("[silvann] %s's password: " % name)
+        r = chat.http.post("/users/sign_in", json={"name": name, "password": password})
+        if r.status_code in (401, 409, 429):        # a wrong password · a single user's machine another account has ·
+            return refused(_detail(r))              #   the minute after a wrong password
+        r.raise_for_status()
+        got = r.json()
+        a.sign_in = name                            # asked for once: the same account signs in again
+    chat.http.headers["Authorization"] = "Bearer " + got["token"]
+    return True
+
+
+def signed_off(http):
+    """This chat's sign-in ended, and no other of its account's (`{"alone": true}`): a browser signed in as the same
+    account stays so, and on a single user's machine the account has it no longer than its last sign-in."""
+    if http.headers.get("Authorization"):
+        try:
+            http.post("/users/sign_out", json={"alone": True}, timeout=10)
+        except httpx.HTTPError:
+            pass
+
+
 def main():
     ap = argparse.ArgumentParser(description="A conversation with a running SiLVANN server, in the terminal.")
     ap.add_argument("--endpoint", default="http://localhost:8765", help="the server (default http://localhost:8765)")
@@ -244,7 +290,8 @@ def main():
     ap.add_argument("--system", default=None, help="a system prompt for the conversation")
     ap.add_argument("--user", default="cli-" + uuid.uuid4().hex[:8], help="the session the conversation belongs to")
     ap.add_argument("--sign-in", dest="sign_in", default=None, metavar="NAME",
-                    help="a server with users: whose conversation it is — the password asked for, or SILVANN_PASSWORD")
+                    help="the account to sign in with — its password asked for, or SILVANN_PASSWORD; the name is "
+                         "asked for without it")
     ap.add_argument("--sign-on", dest="sign_on", action="store_true",
                     help="a server with a provider (single sign-on): sign in with your organisation's account, by a "
                          "code typed at its page")
@@ -254,24 +301,11 @@ def main():
     system = a.system
     try:
         h = chat.http.get("/health").json()
-        if h.get("users"):                              # a server with users (NN-150): signed in before anything
-            provider = chat.http.get("/users/sso").json() if not a.sign_in else {}
-            if a.sign_on and not provider.get("on"):
-                sys.exit("[silvann] this server has no provider to sign on with: --sign-in <name>")
-            name = "" if a.sign_on else a.sign_in or input(
-                "[silvann] this server has users — name%s: " % (" (or Enter to sign in with %s)" % provider["label"]
-                                                                 if provider.get("device") else "")).strip()
-            if not name and provider.get("device"):
-                got = sign_on(chat.http, provider)
-            else:
-                import getpass
-                password = os.environ.get("SILVANN_PASSWORD") or getpass.getpass("[silvann] %s's password: " % name)
-                r = chat.http.post("/users/sign_in", json={"name": name, "password": password})
-                if r.status_code == 401:
-                    sys.exit("[silvann] wrong name or password")
-                r.raise_for_status()
-                got = r.json()
-            chat.http.headers["Authorization"] = "Bearer " + got["token"]
+        if h.get("account") is False:                   # a machine with no account yet (NN-197): nothing to sign in to
+            sys.exit("[silvann] the server's machine has no account yet: `silvann users add <name>` on it makes its "
+                     "first, or the first page of its UI")
+        if h.get("users"):                              # every server asks for a sign-in (NN-150, NN-197)
+            sign_in(chat, a)
         print("%s[silvann] %s at %s, a context of %s — /new · /sys <prompt> · /mode ask|chill|full-auto · /quit%s"
               % (DIM, h.get("model_id"), a.endpoint, h.get("max_context"), RESET))
         if system and not h.get("user_system_prompt"):
@@ -280,6 +314,8 @@ def main():
         chat.new(system)
     except httpx.HTTPError as ex:
         sys.exit("[silvann] %s: %s" % (a.endpoint, ex))
+    import atexit
+    atexit.register(signed_off, chat.http)                # this chat's sign-in over as it closes, however it closes
     while True:
         try:
             line = input("%syou>%s " % (GREEN, RESET)).strip()
@@ -290,27 +326,42 @@ def main():
             continue
         if line in ("/quit", "/exit", "/q"):
             break
-        try:
-            if line == "/new":
-                chat.new(system)
-            elif line.startswith("/sys "):
-                system = line[5:].strip()
-                if not h.get("user_system_prompt"):
-                    print("%s[silvann] the server keeps its own system prompt: a new conversation with it%s" % (DIM, RESET))
-                chat.new(system)
-            elif line.split()[0] == "/mode":
-                m = line.split()[1:2]
-                if m and m[0] in MODES:
-                    chat.mode(m[0])
+        for again in (False, True):
+            try:
+                if line == "/new":
+                    chat.new(system)
+                elif line.startswith("/sys "):
+                    system = line[5:].strip()
+                    if not h.get("user_system_prompt"):
+                        print("%s[silvann] the server keeps its own system prompt: a new conversation with it%s"
+                              % (DIM, RESET))
+                    chat.new(system)
+                elif line.split()[0] == "/mode":
+                    m = line.split()[1:2]
+                    if m and m[0] in MODES:
+                        chat.mode(m[0])
+                    else:
+                        print("%s[/mode %s]%s" % (DIM, "|".join(MODES), RESET))
                 else:
-                    print("%s[/mode %s]%s" % (DIM, "|".join(MODES), RESET))
-            else:
-                print("%ssilvann>%s " % (CYAN, RESET), end="", flush=True)
-                chat.fresh = False
-                chat.say(line)
-        except httpx.HTTPError as ex:
-            chat.line()
-            print("%s[%s]%s" % (RED, _detail(ex.response) if isinstance(ex, httpx.HTTPStatusError) else ex, RESET))
+                    print("%ssilvann>%s " % (CYAN, RESET), end="", flush=True)
+                    chat.fresh = False
+                    chat.say(line)
+            except httpx.HTTPError as ex:
+                chat.line()
+                over = isinstance(ex, httpx.HTTPStatusError) and ex.response.status_code == 401
+                if over and not again and h.get("users"):
+                    # ⭐ the sign-in ended at the prompt — ten minutes with nothing asked, or the account signed out
+                    #   elsewhere: signed in again, and the line asked once more of the same conversation
+                    print("%s[silvann] this chat's sign-in is over — ten minutes with nothing asked, or signed out "
+                          "elsewhere: once more%s" % (DIM, RESET))
+                    try:
+                        if sign_in(chat, a, again=True):
+                            continue
+                    except httpx.HTTPError as ex2:
+                        print("%s[%s]%s" % (RED, ex2, RESET))
+                else:
+                    print("%s[%s]%s" % (RED, _detail(ex.response) if isinstance(ex, httpx.HTTPStatusError) else ex, RESET))
+            break
     try:
         chat.http.post("/cartridges/%s/unbind" % chat.cid)       # saved, and the card free for another
     except httpx.HTTPError:

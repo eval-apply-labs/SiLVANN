@@ -163,6 +163,13 @@ tools file's `fetch` entry's `contact`, an e-mail address or a page of yours —
 an error saying so, not read. A site with no `robots.txt` allows everything; one whose `robots.txt` cannot be served (a
 server error) allows nothing, as RFC 9309 has it.
 
+**`fetch` reads the public internet, and nothing nearer.** A page can name any address, and a model reads what a page
+tells it to: this machine's own services, another machine on your network, a cloud's metadata address. `fetch` refuses
+an address that is not a public one — it asks the connection where it arrived, so a name that answers two ways gains
+nothing, and each hop of a redirect is checked as the first is — and says so before you are asked. The tools file's
+`fetch` entry's `local` lists the hosts and addresses nearer that it may read: `["wiki.lan", "127.0.0.1"]`. Through a
+proxy (`https_proxy` in the server's environment) the page's name is resolved and checked instead.
+
 Both are `net`: asked in "ask first" and "reads unasked" each time — `web search: (search "query")` or `fetch address`
 — and unasked in "full auto".
 
@@ -211,7 +218,7 @@ another with `tools_config` ([`config.md`](config.md)).
 {
   "_note": "What the model's REPL can reach on this machine, an entry a tool. …",
   "image": {"enabled": "auto", "config": {"model": "auto", "card": null, "host": "local"}, "_about": "…"},
-  "fetch": {"enabled": "yes", "config": {"contact": null}, "_about": "…"},
+  "fetch": {"enabled": "yes", "config": {"contact": null, "local": []}, "_about": "…"},
   "files": {"enabled": "yes", "config": {}, "_about": "the files skill: …"},
   "search": {"enabled": "auto", "config": {"searxng": "auto", "brave_key": null}, "_about": "the search skill: …"}
 }
@@ -246,10 +253,12 @@ file.
 | | `card` | `null` | The card it draws on. `null` uses the text model's card: the model is put down while it draws ([`config.md`](config.md#a-picture-from-the-text-model)). A card of its own (`1` …) keeps the text model up. |
 | | `host` | `"local"` | `"local"`: this machine draws. `"http://host:port"`: another SiLVANN server whose model is a picture model draws, and the picture comes back into the conversation; this machine's card is not used. |
 | `fetch` | `contact` | `null` | Who a site writes to about the fetches, in their `User-Agent`: an e-mail address or a page. `null`: the project's page. |
+| | `local` | `[]` | The hosts and addresses of this machine or a private network `(fetch …)` may read — `["wiki.lan", "127.0.0.1"]`. It reads the public internet and, of what is nearer, these alone ([above](#searching-the-web)). |
 | `bash` | `confined` | `"auto"` | Where `(bash …)` — and `(powershell …)` on Windows — reaches ([below](#where-the-models-commands-reach)). Switched `"no"`, the model has no shell. On Windows the entry starts switched `"no"`: the shell is yours to switch on. |
+| | `environment` | `[]` | The names of the server's environment variables a command also gets — `["MY_PROJECT_ROOT"]`. A command gets the few it needs to run and, of the rest, these alone ([below](#what-a-command-is-told-of-the-servers-environment)). |
 | `repos` | `sources` | the project's repository | The repositories of tools the REPL reads, each an `https://` git address the server clones — git's credentials answer for a private one — or a folder ([below](#tools-from-a-repository)). `(add_repo …)` adds one here. |
 | `add_tool` | `ask` | `"mode"` | Whether the model may add tools of its own, and take them away ([below](#a-tool-in-one-file-added-from-the-repl)). Good on a machine of your own; switch it `"no"` where the server serves several people. On Windows it starts `"no"`. `ask`: `"mode"` — adding, replacing and removing are asked of a person as the conversation's mode asks a write, so not in full auto; `"always"` — a person is asked in every mode, full auto too. |
-| `agent` | `registry`, `key`, `offer`, `address` | `null`, `null`, `"yes"`, `"auto"` | The registry of servers this server offers itself to and `(agent …)` reads ([Servers found through a registry](#servers-found-through-a-registry)). Switched `"no"`, the model starts no subagents. |
+| `agent` | `registry`, `key`, `offer`, `address`, `account`, `password` | `null`, `null`, `"yes"`, `"auto"`, `null`, `null` | The registry of servers this server offers itself to and `(agent …)` reads, and the account this server signs in with on another ([Servers found through a registry](#servers-found-through-a-registry)). Switched `"no"`, the model starts no subagents. |
 | `search` | `searxng`, `brave_key` | | [Searching the web](#searching-the-web). |
 
 **The startup check.** As it starts, and on Rebuild the tools, the server checks what each tool needs: the picture
@@ -267,6 +276,18 @@ a key shown only as `(set)`. The same is `POST /tools/rebuild` on the server's H
 program in the environment's `SILVANN_SKILL_CONFIG` (JSON); the model sees neither. No `(help)`, page or answer holds
 them. The REPL does not read, write or list the file's folder, and refuses a command line that names it. A key given in
 the server's environment (below) is not in the environment of the commands the model runs.
+
+#### What a command is told of the server's environment
+
+A command the model runs — `(bash …)`, `(powershell …)`, a skill's program, a tool it added — does not get the server's
+environment. It gets what a command needs to run: `PATH` and `LD_LIBRARY_PATH`, `HOME`, the user's name, the shell, the
+language and locale (`LANG`, `LC_…`), the time zone, the terminal, the temporary folder, the display, the cards a
+program may see (`CUDA_VISIBLE_DEVICES` and AMD's), the certificates' files, the proxy (`http_proxy`, `https_proxy`,
+`no_proxy`), and on Windows the system's own (`SystemRoot`, `USERPROFILE`, `APPDATA` …). Nothing else of the server's:
+a Hugging Face token (`HF_TOKEN`), a cloud's keys, whatever a container was started with (`-e`) are not there for a
+model to print — the jail closes files, and an environment is handed to a command as it starts. The tools file's
+`bash` entry's `environment` names what else your commands are to see (`["MY_PROJECT_ROOT"]`); a tool's own setting
+(`SILVANN_TOOL_…`) is never passed, named or not.
 
 ⚠ **On a direct install that keeps the settings from the model, not from a model that goes looking.** Its commands
 run as the server's user, so a command can reach the file without naming its folder, and the server's environment
@@ -287,7 +308,9 @@ their own search (`search`'s `searxng` and `brave_key`), `fetch`'s `contact`, th
 skill's setting this file leaves `null`, and a tool switched off — what else it asks stays this file's
 ([`users.md`](users.md#several-people-on-one-server-a-user-each)). A user's REPL and commands see the machine as from a
 chroot — their workspace to write; the system's programs, the tools they have on and the runtime to read; the rest
-closed — whatever `bash`'s `confined` says here, and `add_tool` is off for them.
+closed — whatever `bash`'s `confined` says here. `add_tool`, where this file switches it on, puts what a user's model
+adds in their own folder, `users/<name>/skills_added/`: theirs alone, run confined as their commands are, and refused on
+Windows, where a user's commands cannot be confined.
 
 ## Where the model's commands reach
 
@@ -357,7 +380,8 @@ command would be. A subagent cannot start subagents.
    adapter switches: its matrices are written into the model's between conversations.
 2. **Another model another server serves:** one of the config's `workers` ([`config.md`](config.md)), or a server
    the registry of servers lists ([below](#servers-found-through-a-registry)). The subagent runs there, and its REPL
-   reads that server's files.
+   reads that server's files. That server asks for a sign-in as every server does: this one signs in there with the
+   account its tools file's `agent` entry names (`account`, `password`, below).
 3. **Another model with no other server free, or `'self` under a LoRA it does not switch to:** this machine lends its card
    for each exchange. For every message, the model is put down, the subagent's model is loaded (the same model, under
    the LoRA, as it was set up) and answers, and the model is loaded back from the disk. Each way can take minutes.
@@ -398,14 +422,19 @@ The tools file's `agent` entry sets it up on each server, and Rebuild the tools 
   on: started with `--host 0.0.0.0`, it offers the address its route to the registry leaves from; on 127.0.0.1, the
   default, it is offered only to a registry on the same machine, and its log says why not to any other. In a
   container, give the machine's own address and the port published, such as `"http://192.0.2.20:8765"`.
+- **`account`**, **`password`**: the account this server signs in with on another server — a worker, or one the
+  registry lists — before it starts a subagent there or asks whether it is busy. Make that account on the other
+  machine for its callers (`silvann users add agents`, say; not an admin) and make that machine multi user (`silvann
+  users multi`), so the callers' sign-ins and its own people's stand side by side, and a subagent's commands work in
+  that account's folder alone. With none named, the other server refuses the subagent, saying it asks for a sign-in.
+  The model never sees the password.
 - **`enabled`**: `"no"` switches `(agent …)` off on this machine.
 
 In a container's environment, `SILVANN_TOOL_AGENT_REGISTRY` and `SILVANN_TOOL_AGENT_KEY` set the same.
 
 ⚠ **The key decides who may offer a server.** A server in the listing receives the subagents' tasks, and a task carries
 whatever the conversation puts in it. Keep the key as you would a password, and run the registry on a network of your
-own: the servers talk plain HTTP to it and to each other, and a server's API answers whoever reaches its port, as the
-config's `workers` already do.
+own: the servers talk plain HTTP to it and to each other, their sign-ins' passwords with it.
 
 ## Adding a command
 
@@ -473,8 +502,8 @@ conversation; its settings stay in the tools file, should you add it again. Only
 reaching what your commands reach ([above](#where-the-models-commands-reach)), stopped after 60 seconds. It is asked of
 the user as `(bash …)` is, in "ask first" and "reads unasked", whatever it does.
 
-**Where adding is switched off** — the tools file's `add_tool` entry: off where the server serves several people, and on
-Windows until the owner switches it on — `(guide)` says so in its first line, and `(add_tool …)` and `(remove_tool …)`
+**Where adding is switched off** — the tools file's `add_tool` entry: on Windows until the owner switches it on, and
+for a multi user machine's users on Windows always (their commands cannot be confined there) — `(guide)` says so in its first line, and `(add_tool …)` and `(remove_tool …)`
 answer that they are disabled. Adding, replacing and removing are asked of the user as a write is, in "ask first" and
 "reads unasked"; where the owner set the entry's `ask` to `"always"`, in every mode, full auto too.
 

@@ -66,7 +66,10 @@ jobs:
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: evaluator-${{ matrix.python }}
-          path: lib/silvann_engine_cpu*.pyd
+          # its unit key beside it (scripts/unit_key.py): sign_plan.py's, and in no zip — the zips take *.pyd and *.dll
+          path: |
+            lib/silvann_engine_cpu*.pyd
+            lib/silvann_engine_cpu*.pyd.unit
           if-no-files-found: error
 
   families:
@@ -121,7 +124,9 @@ jobs:
           name: families
           path: |
             lib/silicon_families/libsilvann_*.dll
+            lib/silicon_families/libsilvann_*.dll.unit
             lib/SiLVANN.exe
+            lib/SiLVANN.exe.unit
             notices/
           if-no-files-found: error
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -131,13 +136,48 @@ jobs:
           path: lib/**/*.log
 
   # Eval-Apply's certificate, on a release's tag alone and after every build above passed. Only what changed is signed:
-  #   scripts/sign_plan.py keys each file by what it is built from, and a file whose key is the last signed release's is
-  #   taken from that release's zips, its bytes checked against that release's manifest. The rest go through SSL.com's
+  #   scripts/sign_plan.py keys each file by what it is built from — its includes, the build script's recipe, and its
+  #   unit, the build's preprocessed text of this tree (NN-195) — and a file a key of which is the last signed release's
+  #   is taken from that release's zips, its bytes checked against that release's manifest. `plan` above says the same on
+  #   every run, so a release candidate's plan is read before a tag signs by it. The rest go through SSL.com's
   #   CodeSignTool — its release's zip, checked by its hash — in one batch on one TOTP, each scanned for malware first
   #   where the account's malware blocker is on (get_scan_settings). CodeSignTool takes a DLL by its
   #   name, so an evaluator (a .pyd, which is a DLL) is signed as .dll and named back: Authenticode's signature covers the
   #   file's bytes, not its name. The files keep the layout they were built in, as one artifact, `signed`, with the
   #   release's own `signed_manifest.json`.
+  # what a `rel*` tag of this tree would sign, on every run — a release candidate's branch too, where nothing is signed —
+  #   so the plan is read before a tag spends a signature by it (NN-195): each file "sign", or "reuse" and by which key,
+  #   its includes or its unit (scripts/sign_plan.py)
+  plan:
+    needs: [evaluator, families]
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: built
+      - name: What a release of this tree signs, against the last signed release
+        run: |
+          here="${GITHUB_REF#refs/tags/}"
+          prev=-
+          mkdir -p "$RUNNER_TEMP/prev"
+          for t in $(gh release list --limit 30 --json tagName --jq '.[].tagName'); do
+            [ "$t" = "$here" ] && continue
+            if gh release download "$t" --pattern signed_manifest.json --dir "$RUNNER_TEMP/prev" 2> /dev/null; then
+              prev="$RUNNER_TEMP/prev/signed_manifest.json"
+              echo "the last signed release: $t"
+              # its build.py, so an edit of this one that runs no other line re-signs nothing (▶ sign_plan.py)
+              curl -fsSL -o "$RUNNER_TEMP/prev/build.py" "https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$t/scripts/build.py" \
+                || rm -f "$RUNNER_TEMP/prev/build.py"
+              break
+            fi
+          done
+          python3 -m pip install --quiet pybind11                    # the dry runs' import (▶ sign_plan.py)
+          python3 scripts/sign_plan.py plan built "$prev" "$RUNNER_TEMP/plan.json" \
+            $( [ -f "$RUNNER_TEMP/prev/build.py" ] && echo --previous-build "$RUNNER_TEMP/prev/build.py" )
+
   sign:
     needs: [evaluator, families]
     if: startsWith(github.ref, 'refs/tags/rel')
@@ -162,10 +202,15 @@ jobs:
             if gh release download "$t" --pattern signed_manifest.json --dir "$RUNNER_TEMP/prev" 2> /dev/null; then
               prev="$RUNNER_TEMP/prev/signed_manifest.json"
               echo "the last signed release: $t"
+              # its build.py, so an edit of this one that runs no other line re-signs nothing (▶ sign_plan.py)
+              curl -fsSL -o "$RUNNER_TEMP/prev/build.py" "https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$t/scripts/build.py" \
+                || rm -f "$RUNNER_TEMP/prev/build.py"
               break
             fi
           done
-          python3 scripts/sign_plan.py plan built "$prev" "$RUNNER_TEMP/plan.json"
+          python3 -m pip install --quiet pybind11                    # the dry runs' import (▶ sign_plan.py)
+          python3 scripts/sign_plan.py plan built "$prev" "$RUNNER_TEMP/plan.json" \
+            $( [ -f "$RUNNER_TEMP/prev/build.py" ] && echo --previous-build "$RUNNER_TEMP/prev/build.py" )
           if grep -q '"action": "reuse"' "$RUNNER_TEMP/plan.json"; then
             t=$(python3 -c "import json, sys; print(json.load(open(sys.argv[1]))['previous'])" "$RUNNER_TEMP/plan.json")
             gh release download "$t" --pattern silvann_windows_x64.zip --pattern 'silvann_portable*_x64.zip' \

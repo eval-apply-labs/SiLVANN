@@ -32,6 +32,8 @@
  * when a program's answer is collected the engine reads it and raises it ONCE into the machine's channel,
  * which is how a worker's fault cascades to whoever asked. A bare flag of 1 is raised as this. */
 #define SYS__VERB_ABI__FAULT_WORKER  0x53455746ull   /* "SEWF" */
+#define SYS__VERB_ABI__FAULT_WORK    0x5345574Bull   /* "SEWK" — a worker's queued WorK did not complete: a launch its
+                                                        runtime refused, or a wait its runtime failed */
 
 #ifndef SYS__ENGINE__ABI__MAX_ARGV
 #define SYS__ENGINE__ABI__MAX_ARGV 12u

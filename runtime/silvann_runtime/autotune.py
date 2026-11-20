@@ -129,8 +129,16 @@ def refused_by_processor(ex):
     w = refused_worker(ex)
     if not _pool_refused(ex) or w is None or w[1] not in CPU_FAMILIES + ("host",):
         return None
-    return ("the processor's memory refused worker %d's pool (%s device %d): the RAM free, or a container's memory "
+    said = ("the processor's memory refused worker %d's pool (%s device %d): the RAM free, or a container's memory "
             "limit, is short of what the setup asks of it — not the card's room" % w)
+    # ⚖ 2026-11-16 *"the message should say "Remember that on windows you need a page file as big as the GPU to fully use
+    #   your RAM""*: Windows counts what a program puts on an NVIDIA card against the commit limit, the RAM and the page
+    #   file together, so without a page file the RAM it reports free is not all a program may take (users.md, "The page
+    #   file"). The setup's own choice stays as it is.
+    if os.name == "nt":
+        said += (". Remember that on Windows you need a page file as big as the GPU to fully use your RAM (docs/users.md, "
+                 "\"The page file\")")
+    return said
 
 
 def _held(params, workers, mb, machine):

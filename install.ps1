@@ -194,7 +194,7 @@ function Fetch {
         return
     }
     # a folder of its own, or one this installer filled before: never files it did not write
-    $others = Get-ChildItem -Force $Dir | Where-Object { @("models", "venv", "user_sessions") -notcontains $_.Name }
+    $others = Get-ChildItem -Force $Dir | Where-Object { @("models", "venv", "users", "user_sessions") -notcontains $_.Name }
     if (-not (Test-Path (Join-Path $Dir "scripts\build.py")) -and $others) {
         Fail "$Dir already holds other files: install into a folder of its own (the default, .\silvann)"
     }
@@ -522,6 +522,41 @@ if (-not $Build) {
         if ($LASTEXITCODE -ne 0) { Note "not checked now - each model's boot checks its program again" }
         Took $watch
     }
+    # this machine's account: SiLVANN asks for a sign-in, and its first account is made where it is installed - asked
+    # for here in a console, and left to 'silvann users add' or the UI's first page where there is none to ask in
+    if ($data -and (Test-Path -LiteralPath $data)) {
+        $users = [IO.Path]::Combine($data, "users")
+        $made = Test-Path -LiteralPath ([IO.Path]::Combine($data, "sso.json"))
+        if (-not $made -and (Test-Path -LiteralPath $users)) {
+            $made = @(Get-ChildItem -LiteralPath $users -Directory -ErrorAction SilentlyContinue |
+                      Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName "user.json") }).Count -gt 0
+        }
+        if (-not $made) {
+            Say "This machine's account"
+            $later = "'silvann users add <name>' makes it - or the first page of 'silvann ui'"
+            if (-not [Environment]::UserInteractive -or [Console]::IsInputRedirected) {
+                Note "SiLVANN asks for a sign-in, and this machine has no account yet: $later"
+            } else {
+                Note "SiLVANN asks for a sign-in - in the chat, in silvann_cli and from a script. This first account is the"
+                Note "machine's admin: a name and a password of your own, kept in $users."
+                if ((Test-Path -LiteralPath ([IO.Path]::Combine($users, "__local"))) -or
+                    (Test-Path -LiteralPath ([IO.Path]::Combine($data, "user_sessions")))) {
+                    Note "The conversations already here become this account's."
+                }
+                $default = ("$env:USERNAME".ToLower() -replace "[^a-z0-9_-]", "-") -replace "^[-_]+", ""
+                if ($default.Length -gt 32) { $default = $default.Substring(0, 32) }
+                $name = Read-Host "   its name [$default] (- to make it later)"
+                if (-not $name) { $name = $default }
+                if (-not $name -or $name -eq "-") {
+                    Note "later: $later"
+                } else {
+                    $env:SILVANN_DATA = $data
+                    & (Join-Path $Dir "venv\Scripts\python.exe") (Join-Path $Dir "silvann_core.py") users add $name
+                    if ($LASTEXITCODE -ne 0) { Note "the account was not made - later: $later" }
+                }
+            }
+        }
+    }
 }
 Say "done: SiLVANN is in $Dir, and 'silvann' with it"
 if (-not $Build) {
@@ -530,7 +565,7 @@ if (-not $Build) {
    silvann list                                       the models, their sizes, and which are here
    silvann download silvann_tq_D8E4_qwen3.6_35b_a3b   one of them
    silvann serve silvann_tq_D8E4_qwen3.6_35b_a3b      the server
-   silvann ui                                         the chat, at http://localhost:8090
+   silvann ui                                         the chat, at http://localhost:8090 - you sign in with your account
    silvann_cli                                        or the chat in this terminal
    silvann_base_repl, silvann_tools_repl              the Lisp at a prompt, no model: the interpreter's, the tool's
    silvann help                                       every command

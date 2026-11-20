@@ -242,7 +242,10 @@ static inline void nn__silicon__launch(const void* kernel, const char* name, uin
         ok = clEnqueueNDRangeKernel(q, k, 1u, 0, &global, &local, 0u, 0, 0) == CL_SUCCESS;
     }
     sys__os__lock_give(&s->lock);
-    if (!ok) fprintf(stderr, KHRONOS_OPENCL2_BASE__NAME ": %s did not launch\n", name);
+    if (!ok) {
+        fprintf(stderr, KHRONOS_OPENCL2_BASE__NAME ": %s did not launch\n", name);
+        khronos_opencl2_base__zzpackage_launch_refused(card);
+    }
 }
 
 /* ⛳ THE ARITHMETIC IS THE KERNELS' OWN, written into their source by the build (OpenCL's `exp`, `sqrt`,

@@ -536,9 +536,13 @@ static inline uint32_t amd_rocm_base__zzprivate_blocks(const void* kernel, uint6
     const uint32_t most = amd_rocm_base__zzpackage_resident(kernel, AMD_ROCM_BASE__ZZPRIVATE_ROWS * AMD_ROCM_BASE__ZZPRIVATE_WAVE, room);
     return want == 0u ? 1u : want < most ? (uint32_t)want : most;
 }
-/* A row kernel's launch with its room. */
+/* A row kernel's launch with its room; one HIP refuses is said and remembered, as nn's own launch does (▶ ../nn.cuh). */
 static inline void amd_rocm_base__zzprivate_launch_room(const void* kernel, uint32_t blocks, void** args, size_t room) {
-    (void)hipLaunchKernel(kernel, dim3(blocks), dim3(AMD_ROCM_BASE__ZZPRIVATE_ROWS * AMD_ROCM_BASE__ZZPRIVATE_WAVE), args, room, 0);
+    const hipError_t e = hipLaunchKernel(kernel, dim3(blocks), dim3(AMD_ROCM_BASE__ZZPRIVATE_ROWS * AMD_ROCM_BASE__ZZPRIVATE_WAVE), args, room, 0);
+    if (e != hipSuccess) {
+        fprintf(stderr, AMD_ROCM_BASE__NAME ": a row kernel did not launch (%u blocks, a room of %zu): %s\n", blocks, room, hipGetErrorString(e));
+        amd_rocm_base__zzpackage_launch_refused();
+    }
 }
 
 /* One launch of a row kernel: four rows a block, up to the most blocks a wide door starts. */
@@ -699,42 +703,6 @@ static void amd_rocm_base__override_turboquant_gemv_int8(uint16_t* out, const ui
  * and a wave's sum a shuffle. What is new is only which matrix a row belongs to: a wave looks its row up in
  * the table, and the width is that group's. Covers groups at 4 and 8 bits over whole blocks of 32 columns
  * with an `x` the lanes can hold; anything else is the generic door. */
-
-/* A lane's part of one row's product over 32 columns, block `b` of the row, `x` as 16 half pairs. */
-static __device__ inline float amd_rocm_base__zzprivate_block_dot(uint32_t d, const uint8_t* row, uint64_t b,
-                                                                      const uint32_t* low, const uint32_t* high,
-                                                                      const uint16_t* table8, const uint32_t* xw, float part) {
-    if (d == 4u) {
-        const uint64_t* codes = (const uint64_t*)(row + b * 16u);
-#pragma unroll
-        for (uint32_t e = 0u; e < 8u; ++e) {
-            const uint32_t four = (uint32_t)(codes[e / 4u] >> (16u * (e % 4u)));
-            const uint32_t lo = amd_rocm_base__zzpackage_levels4(low, four);
-            const uint32_t hi = amd_rocm_base__zzpackage_levels4(high, four);
-            part = amd_rocm_base__zzpackage_dot2(__builtin_amdgcn_perm(hi, lo, 0x05010400u), xw[2u * e + 0u], part);
-            part = amd_rocm_base__zzpackage_dot2(__builtin_amdgcn_perm(hi, lo, 0x07030602u), xw[2u * e + 1u], part);
-        }
-    } else {
-        const uint64_t* codes = (const uint64_t*)(row + b * 32u);
-#pragma unroll
-        for (uint32_t e = 0u; e < 4u; ++e) {
-            const uint64_t c = codes[e];
-#pragma unroll
-            for (uint32_t p = 0u; p < 4u; ++p) {
-                const uint32_t pair = (uint32_t)table8[(c >> (16u * p)) & 0xFFu]
-                                    | ((uint32_t)table8[(c >> (16u * p + 8u)) & 0xFFu] << 16);
-                part = amd_rocm_base__zzpackage_dot2(pair, xw[4u * e + p], part);
-            }
-        }
-    }
-    return part;
-}
-
-
-static __device__ inline float amd_rocm_base__zzprivate_row_scale(const nn__turboquant__groups* g, uint64_t i, uint64_t r) {
-    const uint8_t* lut = (const uint8_t*)(uintptr_t)g->luts[i];
-    return nn__silicon__half_to_float((uint16_t)((uint32_t)lut[r * 2ull] | ((uint32_t)lut[r * 2ull + 1ull] << 8)));
-}
 
 /* Where a wave's row is among the groups: a wave's rows only rise, so each is found from the last — the matrix it is in
  * (`at`), that matrix's first row and the fields a row needs, read again only when a row is past the matrix. Found from
@@ -1688,7 +1656,11 @@ static void amd_rocm_base__override_gemv_groups_sum(uint16_t* out, nn__turboquan
         const uint8_t* luts = (const uint8_t*)(uintptr_t)g.luts[0];
         uint64_t at = g.out_at[0];
         void* args[] = { &out, &codes, &luts, &w, &at, &x, &residual, &rows, &cols, &over };
-        (void)hipLaunchKernel(kernel, dim3(blocks), dim3(lanes), args, dense_room, 0);
+        const hipError_t e = hipLaunchKernel(kernel, dim3(blocks), dim3(lanes), args, dense_room, 0);
+        if (e != hipSuccess) {
+            fprintf(stderr, AMD_ROCM_BASE__NAME ": the dense sum's kernel did not launch (%u blocks of %u): %s\n", blocks, lanes, hipGetErrorString(e));
+            amd_rocm_base__zzpackage_launch_refused();
+        }
         return;
     }
     /* a row of 16 or 32 blocks, every group's `x` within 32 KB of shared memory and on 16 bytes (the slices stage it 16

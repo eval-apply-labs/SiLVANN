@@ -4,9 +4,10 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/eval-apply-labs/SiLVANN/HEAD/install.sh | bash
 #
-# It installs nothing system-wide and asks for no password: a tool it needs and does not find is named, with the line
-# that installs it, and the installer stops. Run it again to update; models/, user_sessions/, the venv and the folder
-# `silvann data` named stay.
+# It installs nothing system-wide and asks for no system password: a tool it needs and does not find is named, with the
+# line that installs it, and the installer stops. Run it again to update; models/, users/, the venv and the folder
+# `silvann data` named stay. At its end, in a terminal, it asks for this machine's account — SiLVANN's own sign-in,
+# a name and a password of yours; with no terminal to ask in, `silvann users add <name>` or the UI's first page makes it.
 #
 #   SILVANN_DIR      where it installs                         default ./silvann (SILVANN_DIR=. for the current folder)
 #   SILVANN_SOURCE   the repository it fetches                 default https://github.com/eval-apply-labs/SiLVANN
@@ -258,7 +259,8 @@ silvann list                        the models this release can fetch, and which
 silvann download <model>            a model into \$SILVANN_DATA/models — when it is there, what changed in its pack
 silvann check [model]               update or done, each model here — with one, the files its update fetches
 silvann token [--set | --forget]    the Hugging Face token the downloads use (faster than none)
-silvann users [add|passwd|remove|adopt] <name>   the users: each a sign-in, a folder and their own conversations
+silvann users [add|passwd|remove|adopt] <name>   the accounts: each a sign-in, a folder and their own conversations
+silvann users [multi|single]        the accounts signed in side by side, or one at a time (the default)
 silvann serve <model> [config]      the server, on port 8765 (--port to change it)
 silvann ui                          the chat in a browser, on port 8090, talking to the server
 silvann_cli                         the chat in this terminal (--notools, --nothink), talking to the server
@@ -293,14 +295,14 @@ case "\$cmd" in
             [ "\$SILVANN_DATA" = "\$DATA" ] || echo "   (SILVANN_DATA in the environment; silvann data set \$DATA)"
             exit 0
         fi
-        mkdir -p "\$1/models" "\$1/user_sessions" || { echo "silvann: \$1 cannot be written" >&2; exit 1; }
+        mkdir -p "\$1/models" "\$1/users" || { echo "silvann: \$1 cannot be written" >&2; exit 1; }
         to=\$(cd "\$1" && pwd)
         if [ "\$to" = "\$HERE" ]; then rm -f "\$HERE/data_folder"; else echo "\$to" > "\$HERE/data_folder"; fi
         echo "the models, the conversations and the rest are kept in \$to from now on"
         if [ "\$to" != "\$DATA" ]; then
             # what is the user's in the folder left behind, by name: a model's folder, a skill's, the conversations — not
             # the release's own files in models/ and skills/ when that folder is this one (an update needs them here)
-            kept=\$(cd "\$DATA" && for f in models/* skills/* user_sessions workspace tools tools.json tools_library.json \\
+            kept=\$(cd "\$DATA" && for f in models/* skills/* users user_sessions workspace tools tools.json tools_library.json \\
                          .huggingface_token ui_last_start.json; do
                          case \$f in (models/*|skills/*) [ -d "\$f" ] || continue ;;
                                      (*) [ -n "\$(ls -A "\$f" 2>/dev/null)" ] || continue ;; esac
@@ -363,6 +365,35 @@ programs() {
         || note "not checked now — each model's boot checks its program again"
 }
 
+# ── this machine's account: SiLVANN asks for a sign-in, and its first account is made where it is installed ───────────
+account() {
+    local data="$DIR" name default
+    [ -s "$DIR/data_folder" ] && data=$(cat "$DIR/data_folder")
+    data=${SILVANN_DATA:-$data}
+    if [ -f "$data/sso.json" ] || compgen -G "$data/users/*/user.json" >/dev/null; then return 0; fi
+    say "This machine's account"
+    if ! ( : </dev/tty ) 2>/dev/null; then              # no terminal to ask in: a pipe's install, a container's build
+        note "SiLVANN asks for a sign-in, and this machine has no account yet:"
+        note "   silvann users add <name>    makes it — or the first page of \`silvann ui\`"
+        return 0
+    fi
+    note "SiLVANN asks for a sign-in — in the chat, in silvann_cli and from a script. This first account is the"
+    note "machine's admin: a name and a password of your own, kept in $data/users."
+    if [ -d "$data/users/__local" ] || [ -d "$data/user_sessions" ]; then
+        note "The conversations already here become this account's."
+    fi
+    default=$(printf '%s' "${USER:-$(id -un)}" | tr 'A-Z' 'a-z' | tr -c 'a-z0-9_-' '-' | sed 's/^[-_]*//' | cut -c1-32)
+    printf '   its name [%s] (- to make it later): ' "$default" >/dev/tty
+    IFS= read -r name </dev/tty || name=-
+    name=${name:-$default}
+    if [ "$name" = - ] || [ -z "$name" ]; then
+        note "later:   silvann users add <name>    — or the first page of \`silvann ui\`"
+        return 0
+    fi
+    SILVANN_DATA="$data" "$DIR/venv/bin/python" "$DIR/silvann_core.py" users add "$name" </dev/tty \
+        || note "the account was not made — later:   silvann users add <name>    or the first page of \`silvann ui\`"
+}
+
 main() {
     local only_build=0
     [ "${1:-}" = --build ] && only_build=1
@@ -378,6 +409,7 @@ main() {
     timed build
     command_file
     [ $only_build -eq 1 ] || timed programs
+    [ $only_build -eq 1 ] || account
     say "done: SiLVANN is in $DIR, and \`silvann\` in $BIN"
     case ":$PATH:" in
         *":$BIN:"*) ;;
@@ -388,7 +420,7 @@ main() {
    silvann list                                       the models, their sizes, and which are here
    silvann download silvann_tq_D8E4_qwen3.6_35b_a3b   one of them
    silvann serve silvann_tq_D8E4_qwen3.6_35b_a3b      the server
-   silvann ui                                         the chat, at http://localhost:8090
+   silvann ui                                         the chat, at http://localhost:8090 — you sign in with your account
    silvann_cli                                        or the chat in this terminal
    silvann_base_repl · silvann_tools_repl             the Lisp at a prompt, no model: the interpreter's, the tool's
    silvann help                                       every command

@@ -1,13 +1,16 @@
-numpy>=2.0
+# What SiLVANN needs. A floor is the oldest version it runs on; a ceiling, where there is one, is the next major of a
+# package whose API the code leans on — the UI's toolkit, the server's, the Hub's client — so an install made later
+# stays inside what its release was tested with, and takes every fix below that.
+numpy>=2.0,<3
 pybind11>=3.0
 tokenizers>=0.22
-huggingface_hub>=1.0
-fastapi>=0.139
-uvicorn>=0.51
-pydantic>=2.13
-httpx>=0.28
+huggingface_hub>=1.0,<3
+fastapi>=0.139,<1
+uvicorn>=0.51,<1
+pydantic>=2.13,<3
+httpx>=0.28,<1
 PyJWT[crypto]>=2.8
-nicegui>=3.14
+nicegui>=3.14,<4
 pillow>=10.0
 pypdf>=5.0
 safetensors>=0.4

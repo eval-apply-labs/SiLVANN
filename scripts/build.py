@@ -141,6 +141,51 @@ def run(cmd, env, log):
     return r.returncode == 0
 
 
+def _line(cmd):
+    """A compile line as the unit key reads it: the compiler's name and every switch, a path in this tree relative to it,
+    one outside it by what it is (the toolset's, Python's, pybind11's) — so the key follows the flags, not this script's
+    text or the runner's folders."""
+    def word(a):
+        for flag in ("/Tp", "/Fo", "/Fe", "-I"):
+            if a.startswith(flag) and len(a) > len(flag):
+                return flag + word(a[len(flag):])
+        if os.path.isabs(a):
+            rel = os.path.relpath(a, HERE) if os.path.splitdrive(a)[0].lower() == os.path.splitdrive(HERE)[0].lower() else ".."
+            return rel.replace(os.sep, "/") if not rel.startswith("..") else "<outside:%s>" % os.path.basename(a.rstrip("\\/"))
+        return a
+    return [os.path.basename(cmd[0]).lower()] + [word(a) for a in cmd[1:]]
+
+
+def unit(compile_line, env, out, log, keep_dir=None, nvcc_line=None):
+    """`out`.unit beside the binary `out`: the key scripts/sign_plan.py reads it by (▶ unit_key.py, NN-195) — the lines
+    this tree wrote of what the build's own compile line preprocesses: clang-cl's and cl's line, its output and link left
+    out, run again with `/E`; or nvcc's own `.ii` files, which `--keep` left in `keep_dir`. False, said, when it could not
+    be made: the plan then keys the file by its includes alone, as before."""
+    import unit_key
+    if DRY:
+        say("   " + " ".join('"%s"' % c if " " in c else c for c in compile_line + ["/E"]) if compile_line else
+            "   the unit: nvcc's .ii in %s" % keep_dir)
+        return True
+    if keep_dir is not None:
+        files = sorted(os.path.join(keep_dir, f) for f in os.listdir(keep_dir) if f.endswith(".ii"))
+        texts = [open(f, encoding="utf-8", errors="replace").read() for f in files]
+        how = "nvcc --keep: " + ", ".join(os.path.basename(f) for f in files)
+    else:
+        r = subprocess.run(compile_line + ["/E"], env=env, capture_output=True, text=True, errors="replace")
+        if r.returncode != 0:
+            with open(log, "w", encoding="utf-8", errors="replace") as f:
+                f.write(r.stdout[-20000:] + r.stderr[-20000:])
+            say("   ⚠ no unit key for %s: the preprocessor stopped (%s)" % (os.path.basename(out), log))
+            return False
+        texts, how = [r.stdout], "%s /E" % os.path.basename(compile_line[0])
+    if not texts or not any(t.strip() for t in texts):
+        say("   ⚠ no unit key for %s: nothing preprocessed" % os.path.basename(out))
+        return False
+    digest, n = unit_key.write(out + ".unit", texts, HERE, how, _line(compile_line or nvcc_line))
+    say("   the unit: %s over %d of this tree's lines" % (digest[:16], n))
+    return True
+
+
 def smart_app_control():
     """Windows 11's Smart App Control as the registry reports it — "on", "evaluation" or "off" — or None where there is
     none. On, it loads unsigned code only where Microsoft's reputation service knows it: a library built here, or the
@@ -215,11 +260,14 @@ def main():
     module = os.path.join(LIB, "silvann_engine_cpu" + suffix)
     obj = os.path.join(HERE, "engine", "build", "evaluator") + os.sep
     os.makedirs(obj, exist_ok=True)
-    ok &= run([clang_cl] + common + ["/O2", "-DSILVANN_MODULE_NAME=silvann_engine_cpu", "/I", pybind11.get_include(),
-                                     "/I", sysconfig.get_path("include"), "/Tp" + os.path.join(SRC, "manifest.cu"),
-                                     "/LD", "/Fo" + obj, "/Fe" + module, "/link",
-                                     "/LIBPATH:" + os.path.join(sys.base_prefix, "libs")] + builtins,
-              env, os.path.join(LIB, "evaluator.log"))
+    evaluator = [clang_cl] + common + ["/O2", "-DSILVANN_MODULE_NAME=silvann_engine_cpu", "/I", pybind11.get_include(),
+                                       "/I", sysconfig.get_path("include"), "/Tp" + os.path.join(SRC, "manifest.cu")]
+    built_evaluator = run(evaluator + ["/LD", "/Fo" + obj, "/Fe" + module, "/link",
+                                       "/LIBPATH:" + os.path.join(sys.base_prefix, "libs")] + builtins,
+                          env, os.path.join(LIB, "evaluator.log"))
+    ok &= built_evaluator
+    if built_evaluator:
+        unit(evaluator, env, module, os.path.join(LIB, "evaluator_unit.log"))
 
     say("== the silicon families")
     wanted = [f for f in os.environ.get("SILVANN_SILICON_FAMILIES", "x86_avx2 nvidia_cuda12").replace(",", " ").split()
@@ -245,8 +293,9 @@ def main():
             if not DRY:
                 with open(tu, "w", encoding="utf-8") as f:
                     f.write(tu_line % family)
-            done = run([clang_cl] + common + ["/O2", "/clang:-O3", "-mavx2", "-mfma", "-mf16c", "/Tp" + tu, "/LD",
-                                              "/Fo" + WORK + os.sep, "/Fe" + out, "/link"] + builtins, env, log)
+            compile_line = [clang_cl] + common + ["/O2", "/clang:-O3", "-mavx2", "-mfma", "-mf16c", "/Tp" + tu]
+            done = run(compile_line + ["/LD", "/Fo" + WORK + os.sep, "/Fe" + out, "/link"] + builtins, env, log)
+            keep_dir = None
         elif family == "nvidia_cuda12":
             if not nvcc:
                 say("   ⚠ nvidia_cuda12 skipped — no nvcc: CUDA 12's toolkit from developer.nvidia.com/cuda-downloads, "
@@ -266,9 +315,17 @@ def main():
             #   preprocessor (the doors' rows pass argument lists through macros, which the traditional one splits
             #   wrongly), more sections than an object holds by default, and the DLL C runtime. `-cudart static`, as on
             #   Linux: the box needs only the driver. A newer Visual Studio than this CUDA names is let through.
-            done = run([nvcc] + gencode + ["-O2", "-std=c++17", "-cudart", "static", "-allow-unsupported-compiler",
-                                           "-Xcompiler", "/MD,/EHsc,/Zc:preprocessor,/bigobj,/W0",
-                                           "-D_CRT_SECURE_NO_WARNINGS", "-shared", "-I", SRC, tu, "-o", out], env, log)
+            # `--keep` leaves nvcc's own preprocessed files — the host's and each architecture's device side — for the unit
+            #   key (▶ `unit`); it changes no step of the compile
+            keep_dir = os.path.join(WORK, "nvidia_cuda12_keep")
+            if not DRY:
+                shutil.rmtree(keep_dir, ignore_errors=True)
+                os.makedirs(keep_dir)
+            compile_line = None
+            nvcc_line = [nvcc] + gencode + ["-O2", "-std=c++17", "-cudart", "static", "-allow-unsupported-compiler",
+                                            "-Xcompiler", "/MD,/EHsc,/Zc:preprocessor,/bigobj,/W0",
+                                            "-D_CRT_SECURE_NO_WARNINGS", "-shared", "-I", SRC, tu]
+            done = run(nvcc_line[:-1] + ["--keep", "--keep-dir", keep_dir, tu, "-o", out], env, log)
         elif family in ("khronos_opencl2", "intel_opencl2", "nvidia_opencl1", "intel_opencl1_igpu"):
             # ⛳ NO CARD COMPILER, as on Linux: the kernels are OpenCL C, generated from nn's rows and compiled by the
             #   driver for the card it finds. The host side is built against the carried headers and OpenCL.dll.
@@ -282,9 +339,10 @@ def main():
                        dict(env, SILVANN_CPP=clang), os.path.join(FAMILIES_OUT, family + "_kernels.log"))
             if made and opencl_lib is None:
                 opencl_lib = opencl_import_library(env, lib_tool)
+            compile_line = [clang_cl] + common + ["/O2", "/I", CL_HEADERS, "/Tp" + tu, "/Tp" + kernels]
+            keep_dir = None
             done = made and opencl_lib is not None and run(
-                [clang_cl] + common + ["/O2", "/I", CL_HEADERS, "/Tp" + tu, "/Tp" + kernels, "/LD", "/Fo" + WORK + os.sep,
-                                       "/Fe" + out, "/link", opencl_lib] + builtins, env, log)
+                compile_line + ["/LD", "/Fo" + WORK + os.sep, "/Fe" + out, "/link", opencl_lib] + builtins, env, log)
         else:
             say("   ⛔ %s: build.py has no recipe for it on Windows" % family)
             failed.append(family)
@@ -292,6 +350,8 @@ def main():
         if done and exports_entry(out, family):
             built.append(family)
             say("   ✅ %s -> %s" % (family, out))
+            unit(compile_line, env, out, os.path.join(FAMILIES_OUT, family + "_unit.log"), keep_dir,
+                 nvcc_line if family == "nvidia_cuda12" else None)
         else:
             failed.append(family)
 

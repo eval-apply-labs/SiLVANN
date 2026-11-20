@@ -38,7 +38,27 @@ static inline bool amd_rocm_base__memory_write(void* to, const void* from, size_
  * finished" is that stream drained. A side channel's copy is waited for by the thread that issued it (`side_memory_*`), so
  * waiting for the whole device here waited for other threads' copies too — `MEASURED` 2026-10-03 on GLM's card tier
  * (NN-48): each MoE layer's router read stalled behind the promotions on the loader's channels, ~2.5 ms a promotion. */
-static inline bool amd_rocm_base__compute_completed(void) { return hipStreamSynchronize(0) == hipSuccess; }
+/* ⭐ A LAUNCH THE RUNTIME REFUSED IS REMEMBERED UNTIL ITS DEVICE IS WAITED FOR (⚖ 2026-11-19, the code review's row 4).
+ *   The wait after a refused launch reports nothing, and the door's output keeps the bytes it had: a program would go on
+ *   over a buffer no kernel wrote. So the launch raises its device's flag, and the next `compute_completed` on that device
+ *   answers false once, having waited: the engine raises that as a fault (`SYS__VERB_ABI__FAULT_WORK`), the program's
+ *   turn ends in an error, and the machine stays up. A device's flag and not a thread's: the thread that collects a
+ *   program's answer waits for each worker's device, and is not always the thread that launched there. */
+#define AMD_ROCM_BASE__ZZPRIVATE_DEVICES_SEEN 64
+static volatile unsigned int amd_rocm_base__zzprivate_refused[AMD_ROCM_BASE__ZZPRIVATE_DEVICES_SEEN];
+static inline void amd_rocm_base__zzpackage_launch_refused(void) {
+    int d = -1;
+    if (hipGetDevice(&d) == hipSuccess && d >= 0 && d < AMD_ROCM_BASE__ZZPRIVATE_DEVICES_SEEN) amd_rocm_base__zzprivate_refused[d] = 1u;
+}
+static inline bool amd_rocm_base__compute_completed(void) {
+    const bool waited = hipStreamSynchronize(0) == hipSuccess;
+    int d = -1;
+    if (hipGetDevice(&d) == hipSuccess && d >= 0 && d < AMD_ROCM_BASE__ZZPRIVATE_DEVICES_SEEN && amd_rocm_base__zzprivate_refused[d] != 0u) {
+        amd_rocm_base__zzprivate_refused[d] = 0u;
+        return false;
+    }
+    return waited;
+}
 
 static inline bool amd_rocm_base__side_open(void** channel) {
     return hipStreamCreateWithFlags((hipStream_t*)channel, hipStreamNonBlocking) == hipSuccess;

@@ -20,13 +20,17 @@
 /* Start `kernel` on `blocks` blocks of `threads` threads, with `args` holding a pointer to each of its
  * arguments, in order — HIP's own launch by pointer. It returns once the launch is queued; the work is
  * waited for with sys's `compute_completed`. A launch over no blocks has nothing to do and is not made (HIP
- * refuses an empty grid); a launch HIP refuses is named on stderr, since the wait after it does not report it. */
+ * refuses an empty grid); a launch HIP refuses is named on stderr and remembered for its device's next wait, which
+ * then answers that the work did not complete (▶ sys.cuh, `launch_refused`). */
 static inline void nn__silicon__launch(const void* kernel, const char* name, uint32_t blocks, uint32_t threads,
                                        void** args, const size_t* sizes, uint32_t count) {
     (void)sizes; (void)count;   /* a launch by pointer needs only the address */
     if (blocks == 0u) return;
     const hipError_t e = hipLaunchKernel(kernel, dim3(blocks), dim3(threads), args, 0, 0);
-    if (e != hipSuccess) fprintf(stderr, AMD_ROCM_BASE__NAME ": %s did not launch (%u blocks of %u): %s\n", name, blocks, threads, hipGetErrorString(e));
+    if (e != hipSuccess) {
+        fprintf(stderr, AMD_ROCM_BASE__NAME ": %s did not launch (%u blocks of %u): %s\n", name, blocks, threads, hipGetErrorString(e));
+        amd_rocm_base__zzpackage_launch_refused();
+    }
 }
 
 /* The arithmetic, from HIP's device library: the precise functions unless nn's `NN__ARITHMETIC__FAST`

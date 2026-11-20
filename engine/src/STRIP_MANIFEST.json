@@ -9,6 +9,7 @@
   "packages/sys/cpu/list__impl.cuh": 13,
   "packages/sys/cpu/opcodes/opcodes.cuh": 29,
   "pybind.cuh": 14,
+  "silicon_families/amd_rocm_base/nn.cuh": 11,
   "silicon_families/amd_rocm_base/sys.cuh": 11,
   "silicon_families/arm_base/primitives/pool.cuh": 56,
   "silicon_families/arm_base/primitives/sys.cuh": 44,
@@ -18,6 +19,6 @@
   "silicon_families/x86_avx2/primitives/pool.cuh": 56,
   "silicon_families/x86_avx2/primitives/sys.cuh": 44
  },
- "total_lines": 616,
+ "total_lines": 627,
  "waived": []
 }

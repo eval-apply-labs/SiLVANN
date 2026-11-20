@@ -10,7 +10,10 @@ From the top:
 
 - **Dark mode** / **Light mode**: the page's colours. The choice is kept for this browser.
 - **Help**: this guide and the release's documents.
-- **Options**: the models on this machine, their configs, and a server to start and stop.
+- **Options** (an admin's alone): the models on this machine, their configs, a server to start and stop, and whether
+  the machine is single user or multi user ([below](#single-user-or-multi-user)).
+- **Users** (an admin's alone): who signs in, and how.
+- **Account**: your own name on this machine, your password, and **sign out**.
 - **Chat**: the conversations, under the Chat row. Click one to open it.
 
 The dot next to "SiLVANN" is the server's state: **gray** not asked yet, **green** answering, **red** unreachable. Its
@@ -88,6 +91,23 @@ and then streams.
 **A picture model** (Qwen-Image 2.1) makes a picture of each message, shown in the chat and saved with the conversation.
 Its chat has no thinking and no tool switches, and no context meter.
 
+## Single user or multi user
+
+The UI asks for a sign-in before anything else. On a machine with no account yet, its first page asks for one instead
+— a name and a password of your own: the machine's admin, who keeps the conversations the machine already held.
+
+Single user, one account at a time signs in and has the machine until it signs out, ten minutes pass with nothing
+asked of it, or SiLVANN is opened again; another account's sign-in is refused meanwhile, saying who has it. A sign-in
+is over ten minutes after you last touched the page or the model last finished answering, whichever is later, and a
+wrong password costs a minute (▶ [users.md](users.md)). An admin's model reaches the machine as the tools file lets
+it, and the UI is reached from this machine alone. Multi user, the accounts are signed in side by side, each one's model
+works in its own folder, and the UI listens on the network. In both, each account sees only its own conversations, and
+only an admin sees **Options** and **Users**: for anyone else those panels are never built. **Options → Single user or
+multi user** switches, after asking: SiLVANN stops the model and starts again. Multi user, the same place says where
+other machines reach the UI. In **Users** an admin adds and removes users, makes them admins or not, and sets a password
+for one who does not sign in with an organisation's account; in **Account** each user changes their own password and
+signs out. The whole story: [`users.md`](users.md#several-people-on-one-server-a-user-each).
+
 ## Options: a server on this machine
 
 **Send conversations to**, at the bottom, is the server the UI talks to:
@@ -135,7 +155,8 @@ and in the editor — opens [`config.md`](config.md), which says what every key 
 
 ## Where things are
 
-- **The data folder** holds the models and the conversations: `models/<name>/` and `user_sessions/<model>/<id>/`, on
+- **The data folder** holds the models and the conversations: `models/<name>/` and
+  `users/<name>/user_sessions/<model>/<id>/`, each account's own, on
   the server's machine. It is the release's folder, or the one `silvann data <folder>` named (for `silvann ui` and
   `silvann serve`), or `SILVANN_DATA`. In a container built from `docker/` it is `/data`, the folder of yours the
   container is given (`~/SiLVANN` in [`docker/README.md`](../docker/README.md)).

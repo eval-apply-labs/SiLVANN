@@ -5,14 +5,18 @@
 … and the layers used … so you can realistically pull together two gaming pcs and run glm from ram"* · *"ring but first
 is autodetected by starting at layer 0 so the setting is no/yes"*.
 
-Every machine runs the server with the same model and a config naming its run of the layers and the machine after it:
+Every machine runs the server with the same model and a config naming its run of the layers, the machine after it and
+the machine before it:
 ```
-  "pipeline_parallelism": "yes", "pipeline_parallelism_layers": "0-23", "pipeline_parallelism_next": "192.0.2.12:8766"
+  "pipeline_parallelism": "yes", "pipeline_parallelism_layers": "0-23", "pipeline_parallelism_next": "192.0.2.12:8766",
+  "pipeline_parallelism_prev": "192.0.2.10"
 ```
 The machine whose layers begin at 0 is the FIRST: it holds the conversations and answers the UI, and it embeds the token.
 The one whose layers end at the model's last is the LAST: it runs the head and draws the next token — on its card, with
 the sampler the request carries — and hands it to its next, the first, which closes the ring. Each listens on
-`pipeline_parallelism_port` (DEFAULT_PORT) for the machine before it.
+`pipeline_parallelism_port` (DEFAULT_PORT) for the machine before it, and takes that machine alone
+(`pipeline_parallelism_prev`): what comes over the link is run — a residual into the layers, a head on the card — so a
+link is not for whoever reaches the port (⚖ 2026-11-19 *"we should add the previous address/port as well as next"*).
 ```
   a position   token -> first's layers -> its residual -> the next's layers -> … -> the last's -> the token -> the first
   a prompt     the same, a chunk of rows at a time (the smallest chunk any machine reads)
@@ -69,10 +73,14 @@ def chunk_of(model):
 
 
 class Link:
-    """This machine's place in the ring: it listens for the machine before it and connects to the one after."""
+    """This machine's place in the ring: it listens for the machine before it and connects to the one after. `prev` names
+    the machine before it — a host or an address, a port after it read and not asked for (a connection leaves from
+    whichever port its machine gives it) — and a connection from anywhere else is closed unanswered. With none named the
+    link takes the first machine that connects, as a ring's config written before the setting did, and says so."""
 
-    def __init__(self, port, nxt):
+    def __init__(self, port, nxt, prev=None):
         self.nxt = address(nxt)
+        self.prev = address(prev)[0] if prev else None
         self.listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.listener.bind(("0.0.0.0", int(port)))
@@ -89,10 +97,27 @@ class Link:
             except OSError:
                 time.sleep(1)
         self.out.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        say("[pipeline] waiting for the machine before this one, on port %d" % self.listener.getsockname()[1])
-        self.inn, peer = self.listener.accept()
+        say("[pipeline] waiting for the machine before this one%s, on port %d"
+            % (" (%s)" % self.prev if self.prev else "", self.listener.getsockname()[1]))
+        if self.prev is None:
+            say("[pipeline] ⚠ this link takes the first machine that connects: name the one before this one with "
+                "pipeline_parallelism_prev")
+        while self.inn is None:
+            inn, peer = self.listener.accept()
+            if self.prev is not None and peer[0] not in self._previous():
+                inn.close()
+                say("[pipeline] a connection from %s closed: the machine before this one is %s" % (peer[0], self.prev))
+                continue
+            self.inn = inn
         self.inn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         say("[pipeline] the ring is joined: %s before, %s:%d after" % (peer[0], self.nxt[0], self.nxt[1]))
+
+    def _previous(self):
+        """The addresses the machine before this one has now: its name asked again at each connection."""
+        try:
+            return {info[4][0] for info in socket.getaddrinfo(self.prev, None, socket.AF_INET)}
+        except OSError:
+            return set()
 
     def send(self, what, a=0, b=0, c=0, payload=b""):
         self.out.sendall(HEAD.pack(what, a, b, c, len(payload)) + payload)

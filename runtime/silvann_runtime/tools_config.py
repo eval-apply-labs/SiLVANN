@@ -57,7 +57,7 @@ def built_in():
                    "about": "(engine '(form)): a form run by the Eval-Apply Generalized Interpreter in a silvann_base_repl "
                             "the session keeps, with no model and no buffer pools — computing, never a file. seconds: a "
                             "form's time before it is ended (NN-193)"},
-        "bash": {"enabled": on, "config": {"confined": "auto"},
+        "bash": {"enabled": on, "config": {"confined": "auto", "environment": []},
                  "about": "(bash \"command\"), and (powershell \"command\") on Windows: a shell command, as the "
                           "server's user — on Windows switched off until you switch it on. confined: \"auto\" — in a "
                           "container, the container but this file's folder and the server's own process; on a direct "
@@ -65,7 +65,10 @@ def built_in():
                           "\"workspace\" the REPL's workspace alone, and what a link at its top points to — ln -s "
                           "/a/folder <workspace>/name, made from a console, is the model's way to that folder; \"no\" "
                           "all of it. Confined needs Linux's Landlock (5.13 or later): where it is not, the command is "
-                          "refused (▶ docs/tools.md)"},
+                          "refused (▶ docs/tools.md). environment: the names of the server's environment variables a "
+                          "command also gets ([\"MY_PROJECT_ROOT\"]) — it gets the few a command needs to run (PATH, "
+                          "HOME, the locale, the proxy …) and of the rest these alone, so a key the server was started "
+                          "with is not the model's to print"},
         "add_tool": {"enabled": on, "config": {"ask": "mode"},
                      "about": "(add_tool \"path/to/name.py\") and (remove_tool \"name\"): the model adds a tool it "
                               "wrote in one .py — its DOC, its CONFIG, its functions — to the tools added "
@@ -82,7 +85,8 @@ def built_in():
                            "its workspace to read, and adds it with (add_tool …). sources: the repositories read, each "
                            "an https:// git address (the server clones it; git's credentials answer for a private one) "
                            "or a folder; (add_repo …) adds one here (▶ docs/tools.md)"},
-        "agent": {"enabled": "yes", "config": {"registry": None, "key": None, "offer": "yes", "address": "auto"},
+        "agent": {"enabled": "yes", "config": {"registry": None, "key": None, "offer": "yes", "address": "auto",
+                                               "account": None, "password": None},
                   "about": "(agent 'model \"config\" \"task\"): a subagent — this model, another on this machine, or "
                            "one another SiLVANN server serves; \"no\" switches it off. registry: a registry of SiLVANN "
                            "servers (silvann registry), \"http://host:8770\", or null none — (agent …) and (whoami) "
@@ -91,7 +95,9 @@ def built_in():
                            "\"no\", it only reads the listing; address: where the others reach this server — \"auto\" "
                            "from the address it listens on (with --host 0.0.0.0, the one its route to the registry "
                            "leaves from), or \"http://host:port\", a container's: its machine's address and the port "
-                           "published (▶ docs/tools.md)"},
+                           "published; account, password: the account this server signs in with on another server — "
+                           "one made there for its callers (silvann users add), on a multi user machine — the "
+                           "password never shown to the model (▶ docs/tools.md)"},
         "ui": {"enabled": "auto", "config": {"display": "auto"},
                "about": "(ui 'look …), (ui 'move …), (ui 'click …), (ui 'type …), (ui 'key …), (ui 'scroll …): the "
                         "model's hands on this machine's screen — a picture of a share of it around the pointer, the "
@@ -107,9 +113,11 @@ def built_in():
                              "network, ws://silvann-firefox:9222, then ws://127.0.0.1:9222 — or \"ws://host:port\"; robots: "
                              "\"keep\" a page a site's robots.txt asks robots not to read is not opened, as (fetch …) keeps "
                              "to it, or \"ignore\". \"auto\" on where the companion answers"},
-        "fetch": {"enabled": "yes", "config": {"contact": None},
+        "fetch": {"enabled": "yes", "config": {"contact": None, "local": []},
                   "about": "(fetch \"url\"): a web page's words. contact: who a site writes to about the fetches, in "
-                           "their User-Agent — an e-mail address or a page; null the project's page"},
+                           "their User-Agent — an e-mail address or a page; null the project's page. local: the hosts "
+                           "and addresses of this machine or a private network it may read ([\"wiki.lan\", "
+                           "\"127.0.0.1\"]); it reads the public internet and, of what is nearer, these alone"},
     }
 
 
@@ -313,6 +321,10 @@ class Toolbox:
             return False
         root = os.path.realpath(self.added_folder)
         return os.path.realpath(skill.folder).startswith(root.rstrip(os.sep) + os.sep)
+
+    def removable(self, skill):
+        """Whether the model may take this skill away, or replace it (▶ tools' `remove_tool`, `add_tool`): one it added."""
+        return self.added(skill)
 
     def writable_folders(self):
         """The skill folders and the server's own Python (`code_folders`) the server's user can write — the ones a model's

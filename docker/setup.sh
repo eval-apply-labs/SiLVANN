@@ -8,7 +8,7 @@
 # It finds Podman (or Docker) and the card — an AMD card, an NVIDIA card, or none — checks what the host needs and says
 # what is missing, makes the folder SiLVANN keeps everything in (~/SiLVANN), asks for a Brave Search API key for the
 # model's web search (Enter skips) and for a first user (Enter skips), pulls the image and starts it; then the chat is at
-# http://localhost:8080 — and, once it asks for a sign-in, at this machine's address on the network too.
+# http://localhost:8080 — and, once it is multi user, at this machine's address on the network too.
 #
 #   … | bash -s -- update        the newest image, the container made again over the same folder
 #   … | bash -s -- stop | start  stop it (giving it time to save the conversations), or start it again
@@ -19,7 +19,7 @@
 #                           or the first free one after it)
 #   --engine podman|docker  which, where both are installed     --no-search       ask for no search key
 #   --image <image>         an image of your own (docker/advanced.md, "Building an image") in place of the published one
-#   --private               the chat on this machine alone, even once it asks for a sign-in
+#   --private               the chat on this machine alone, even once it is multi user
 #
 # Everything else — SearXNG, names under localhost, a card a container, a model over several machines, building an
 # image — is in docker/advanced.md. Nothing here needs root, but where the host is missing something that does (a
@@ -47,7 +47,7 @@ setup.sh [setup|update|stop|start] [--card amd|nvidia|cpu] [--data <folder>] [--
   setup    (the default) set SiLVANN up in a container and start it; the chat at http://localhost:8080
   update   the newest image, the container made again over the same folder
   stop     stop it, giving it time to save the conversations;  start  start it again
-  --private  the chat on this machine alone, even once it asks for a sign-in
+  --private  the chat on this machine alone, even once it is multi user
 USAGE
             exit 0 ;;
         *) echo "setup.sh: unknown argument '$1' (--help lists them)" >&2; exit 2 ;;
@@ -298,20 +298,37 @@ make_net() {
     fi
 }
 make_net
-# ⭐ WHO REACHES THE CHAT: the network only where it asks for a sign-in — a user in the folder, or a provider to sign on
-#   with (▶ docs/users.md) — else this machine alone: with no sign-in the model's tools act for whoever reaches it.
-#   `--private` keeps it on this machine with users too.
-sign_in_on() { [ -f "$DATA/sso.json" ] || compgen -G "$DATA/users/*/user.json" >/dev/null; }
-if [ $PRIVATE = 0 ] && [ "$ACTION" = setup ] && [ $DRY = 0 ] && ! sign_in_on; then
+# ⭐ THIS MACHINE'S ACCOUNT, AND WHO REACHES THE CHAT (▶ docs/users.md): SiLVANN asks for a sign-in, and its first account —
+#   the machine's admin — is made here, in a terminal, or at the chat's first page. The chat is published to the
+#   network only where the machine is multi user — the accounts signed in side by side, each one's model in its own
+#   folder; a single user's, one account at a time whose admin's model reaches the container as the tools file lets it,
+#   stays this machine's. `--private` keeps a multi user's here too.
+has_account() { [ -f "$DATA/sso.json" ] || compgen -G "$DATA/users/*/user.json" >/dev/null; }
+# users/.mode says which; a folder from before it was written was multi user where it had a user
+multi_user() {
+    if [ -f "$DATA/users/.mode" ]; then [ "$(cat "$DATA/users/.mode")" = multi ]; else has_account; fi
+}
+if [ "$ACTION" = setup ] && [ $DRY = 0 ] && ! has_account; then
     echo
-    note "Other machines on your network can reach the chat once it asks for a sign-in."
-    tty_read "  A user name to make now (Enter keeps the chat on this machine alone): " FIRST_USER
+    note "SiLVANN asks for a sign-in. Its first account is this machine's admin: a name and a password of your own."
+    tty_read "  Its name (Enter to make it at the chat's first page instead): " FIRST_USER
     if [ -n "$FIRST_USER" ]; then
-        "$ENGINE" run --rm -it "${FLAGS[@]}" -v "$VOLUME" "$IMAGE" silvann users add "$FIRST_USER" </dev/tty \
-            || note "The user was not made; the chat stays on this machine (later: $ENGINE exec -it $NAME silvann users add <name>)."
+        if "$ENGINE" run --rm -it "${FLAGS[@]}" -v "$VOLUME" "$IMAGE" silvann users add "$FIRST_USER" </dev/tty; then
+            if [ $PRIVATE = 0 ]; then
+                note "Single user keeps the chat on this machine, one account at a time. Multi user opens it to your"
+                note "network: the accounts signed in side by side, each one's model in its own folder."
+                tty_read "  Multi user, open to your network? [y/N] " OPEN_IT
+                case "$OPEN_IT" in y|Y|yes|YES)
+                    "$ENGINE" run --rm "${FLAGS[@]}" -v "$VOLUME" "$IMAGE" silvann users multi \
+                        || note "Not switched; the chat stays on this machine (later: the chat's Options, then this line with 'update')." ;;
+                esac
+            fi
+        else
+            note "The account was not made: the chat's first page asks for it."
+        fi
     fi
 fi
-if [ $PRIVATE = 0 ] && sign_in_on; then PUBLISH="$PORT:8080"; else PUBLISH="127.0.0.1:$PORT:8080"; fi
+if [ $PRIVATE = 0 ] && multi_user; then PUBLISH="$PORT:8080"; else PUBLISH="127.0.0.1:$PORT:8080"; fi
 say "Starting SiLVANN…"
 run "$ENGINE" run -d --name "$NAME" --network "$NET" "${FLAGS[@]}" -p "$PUBLISH" -v "$VOLUME" "$IMAGE" >/dev/null
 if [ $DRY = 0 ]; then
@@ -327,8 +344,9 @@ if [ "$PUBLISH" = "$PORT:8080" ]; then
     note "From other machines on your network: http://${lan:-$(hostname)}:$PORT — each signs in (docs/users.md)."
     note "Passwords cross the network unencrypted over plain HTTP: fine at home; elsewhere put a TLS proxy in front."
 else
-    note "The chat is this machine's alone. To open it to your network, make a user and update:"
-    note "  $ENGINE exec -it $NAME silvann users add <name>    then this same line with 'bash -s -- update'"
+    has_account || note "Its first page asks for this machine's account: a name and a password of your own."
+    note "The chat is this machine's alone. To open it to your network, switch to multi user in its Options,"
+    note "  then this same line with 'bash -s -- update'"
     if [ $PRIVATE = 1 ]; then note "(--private keeps it here even then)"; fi
 fi
 note "In Options, 'Download models' fetches a model and 'start' runs it."

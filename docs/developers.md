@@ -85,9 +85,9 @@ step what makes the next readable (the lines are 1.0.3's, comments included):
 
 Leave until you need them: the other models, each a package, a runtime file and a program (600-6,000 lines each); the
 other families' overrides (19,000 lines across them), each an architecture's own, worth reading for ideas when writing
-yours; the app around the chat (`silvann_ui.py`, `tools.py`, `browser.py`, `users.py`, `sso.py`, `jail.py`); the
-pictures (`vision*.py`, `qwen_image*.py`); a ring of machines (`pipeline.py`); and `engine/scripts/third_party/`,
-carried code.
+yours; the app around the chat (`silvann_ui.py` and its modules in `silvann_ui_parts/`, `tools.py`, `browser.py`,
+`users.py`, `sso.py`, `jail.py`); the pictures (`vision*.py`, `qwen_image*.py`); a ring of machines (`pipeline.py`);
+and `engine/scripts/third_party/`, carried code.
 
 ## Where the programs are
 

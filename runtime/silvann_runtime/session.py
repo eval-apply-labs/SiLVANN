@@ -547,8 +547,13 @@ class SeatedRuntime(Runtime):
     def _single(self, k, t):
         m, c, tok = self.model, t.cartridge, t.answer[-1]
         h = self._head(t, tok)
+        # ⛳ THE LAG A PICTURE LEFT GOES WITH EVERY STEP OF THE ANSWER, as `Runtime._answer` gives it: a Qwen seat's rotary
+        #   position is its place less the lag (▶ qwen3_5.py `step`, `chain_position`), and a step without it writes the
+        #   answer's rows that far on. Given only where there is one: not every model's `step` takes it.
+        lag = dict(lag=t.how[2]) if t.how[2] else {}
         with m.on_seat(k), t.as_its_process():
-            out = m.step(tok, c.length, greedy=h == "(head)", sample=h if isinstance(h, str) and h != "(head)" else None)
+            out = m.step(tok, c.length, greedy=h == "(head)", sample=h if isinstance(h, str) and h != "(head)" else None,
+                         **lag)
             if not isinstance(h, str):
                 out = h(m.logits())
         c.length += 1

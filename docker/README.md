@@ -122,16 +122,18 @@ No card: either command without its `--device` and `--group-add` flags. To updat
 GPU can do what the processors would — a larger model's experts in RAM, an older card's embedding — and leave them free:
 add `--device /dev/dri --group-add keep-groups -e SILVANN_IGPU_CPU=1` to the NVIDIA command (Docker: `--device /dev/dri
 -e SILVANN_IGPU_CPU=1`). The image holds Intel's OpenCL for it; `igpu_cpu` in [config.md](../docs/config.md) says what
-goes there and when. It has never run on an Intel GPU: what the server's log says as the model starts is the report it
-needs. A Linux machine's — Docker Desktop on Windows reaches a GPU through WSL 2's `/dev/dxg`, which the image's Intel
-OpenCL is not built for (`ASSUMED`); there the native install sees the integrated GPU itself (the same variable).
+goes there and when. It has run on one laptop's Intel GPU — reported, not measured here: the 35B-A3B at 12 tokens a
+second with its experts there, 5 with them on the processors; the processors' load beside the CPU's own is the report it
+still needs. A Linux machine's — Docker Desktop on Windows reaches a GPU through WSL 2's `/dev/dxg`, which the image's
+Intel OpenCL is not built for (`ASSUMED`); there the native install sees the integrated GPU itself (the same variable).
 
 - `--userns=keep-id` runs SiLVANN as you, so the files in `~/SiLVANN` stay yours.
 - `--group-add keep-groups` keeps your `video` and `render` groups, which own the AMD card.
-- `-p 127.0.0.1:8080:8080` keeps the chat to this machine, as it must while it has no login. With a user
-  (`podman exec -it silvann silvann users add <name>`, [docs/users.md](../docs/users.md#several-people-on-one-server-a-user-each))
-  it asks for a sign-in, and `-p 8080:8080` lets other machines on your network reach it; `setup.sh` does so itself,
-  unless `--private`.
+- `-p 127.0.0.1:8080:8080` keeps the chat to this machine: its first page asks for the machine's account (or
+  `podman run --rm -it … silvann users add <name>` before it starts), and a single user's machine is one account's at a
+  time. Made multi user (the UI's Options, or `silvann users multi` while no model runs;
+  [docs/users.md](../docs/users.md#several-people-on-one-server-a-user-each)) the accounts are signed in side by side, and
+  `-p 8080:8080` lets other machines on your network reach it; `setup.sh update` does so itself, unless `--private`.
 - `-v ~/SiLVANN:/data` is the folder SiLVANN keeps everything in. With SELinux (Fedora and the like):
   `-v ~/SiLVANN:/data:Z`.
 

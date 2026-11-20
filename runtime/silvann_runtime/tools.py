@@ -22,12 +22,15 @@ is written back in the reader's syntax, so the model reads what it would write; 
 """
 import ast
 import html.parser
+import http.client
+import ipaddress
 import json
 import os
 import re
 import shlex
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -440,10 +443,37 @@ def _powershell(command):
             "[Console]::OutputEncoding = [Text.Encoding]::UTF8; " + command]
 
 
-def _environment(**more):
-    """The environment a command the REPL runs gets: the server's, less the tools file's settings given in it
-    (`SILVANN_TOOL_…`, ▶ tools_config.py), which are the tools' own and never the model's."""
-    env = {k: v for k, v in os.environ.items() if not k.startswith("SILVANN_TOOL_")}
+# ⛔ WHAT A COMMAND THE MODEL RUNS IS TOLD OF THE SERVER'S ENVIRONMENT: THESE NAMES, AND NO OTHER (⚖ 2026-11-19, the code
+#   review's row 2). An environment is handed to a command as it starts, so the jail — which holds files, the server's own
+#   /proc among them — does not hold it: with the whole of it passed on, `env` printed whatever the server was started
+#   with — a Hugging Face token, a container's `-e` keys — to a model a page had told to look, and on a multi user
+#   machine the operator's to any user's model. What a command needs to run is here: where programs and libraries are,
+#   who and where it is, the language, the display, the cards, the certificates, the proxy. The tools file's `bash`
+#   setting `environment` names what else a machine's commands are to see.
+ENVIRONMENT = (
+    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "PWD", "LANG", "LANGUAGE", "TZ", "TERM", "COLORTERM",
+    "TMPDIR", "TMP", "TEMP", "LD_LIBRARY_PATH", "PYTHONIOENCODING", "PYTHONUTF8", "VIRTUAL_ENV",
+    "DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY", "XDG_RUNTIME_DIR", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME",
+    "CUDA_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES", "GPU_DEVICE_ORDINAL",
+    "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
+    "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+    # Windows': a program there does not start without the system's own
+    "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "SYSTEMDRIVE", "HOMEDRIVE", "HOMEPATH", "USERPROFILE", "USERNAME",
+    "USERDOMAIN", "COMPUTERNAME", "APPDATA", "LOCALAPPDATA", "PROGRAMDATA", "PROGRAMFILES", "PROGRAMFILES(X86)",
+    "PROGRAMW6432", "COMMONPROGRAMFILES", "COMMONPROGRAMFILES(X86)", "COMMONPROGRAMW6432", "PUBLIC", "ALLUSERSPROFILE",
+    "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE", "PROCESSOR_IDENTIFIER", "PROCESSOR_LEVEL", "PROCESSOR_REVISION",
+    "OS", "PSMODULEPATH", "SESSIONNAME",
+)
+
+
+def _environment(also=(), **more):
+    """The environment a command the REPL runs gets: of the server's, the names in `ENVIRONMENT`, the locale's (`LC_…`)
+    and `also` — the tools file's `bash` setting `environment` — whatever their case (Windows' names have none, and a
+    proxy's is written both ways); then `more`, the command's own. Never a tools file's setting given in the environment
+    (`SILVANN_TOOL_…`, ▶ tools_config.py), named or not: those are the tools' own and never the model's."""
+    keep = set(ENVIRONMENT) | {str(n).upper() for n in also or ()}
+    env = {k: v for k, v in os.environ.items()
+           if (k.upper() in keep or k.upper().startswith("LC_")) and not k.upper().startswith("SILVANN_TOOL_")}
     env.update(more)
     return env
 
@@ -532,22 +562,120 @@ def _number(t):
 # ⚖ 2026-10-24: *"i see my models being blocked by search engines"* (NN-121). `fetch` says who it is and keeps to the
 #   sites' robots.txt; the web is searched through the `search` skill (▶ release/skills/search), which asks an engine of
 #   the machine's own, never a search engine's pages.
+def _public(address):
+    """Whether an address is the public internet's — not this machine's, a private network's, a link's own or a carrier's
+    shared range (`ipaddress`'s `is_global`); an IPv4 address written as IPv6 is read as the IPv4 it is."""
+    try:
+        ip = ipaddress.ip_address(str(address).split("%")[0])
+    except ValueError:
+        return False
+    if ip.version == 6 and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    return ip.is_global
+
+
+class NotPublic(OSError):
+    """An address `fetch` does not read: this machine's, or a private network's."""
+
+
 class Web:
     """How `fetch` goes onto the web: its User-Agent names it and who to write to — `contact`, the tools file's `fetch`
-    setting (an e-mail address or a page), else the project's page — and a site's robots.txt is kept to."""
+    setting (an e-mail address or a page), else the project's page — and a site's robots.txt is kept to.
 
-    def __init__(self, contact=None):
+    ⛔ THE PUBLIC INTERNET, AND NOTHING NEARER (⚖ 2026-11-19, the code review's row 3): a model reads what a page tells
+    it to, and a page can name this machine's own services, the network's, or a cloud's metadata address. A connection
+    is refused where the address it reached is not a public one — asked of the socket itself, so a name that answers
+    one address to a check and another to the connection gains nothing, and each hop of a redirect is a connection of
+    its own. `local`, the tools file's `fetch` setting, names the hosts and addresses nearer that it may read (a wiki on
+    the network, a server of the user's on this machine). Through a proxy the socket is the proxy's, and the page's
+    name is resolved and checked instead. Only http and https are opened, a redirect's hop included."""
+
+    def __init__(self, contact=None, local=()):
         self.named(contact)
+        self.reaches(local)
         self.robots, self.lock = {}, threading.Lock()   # a site -> (when it was read, its rules), every conversation's
+        web, made = self, {}
+
+        def guarded(base):
+            """`base`, an HTTP or HTTPS connection, refusing a peer `fetch` does not read before a byte is sent."""
+            if base not in made:
+                class Guarded(base):
+                    def __init__(self, *args, **kwargs):
+                        super().__init__(*args, **kwargs)
+                        self._create_connection = self._connect_checked    # what `connect` makes its socket with
+
+                    def _connect_checked(self, address, *args, **kwargs):
+                        sock = socket.create_connection(address, *args, **kwargs)
+                        why = web.refuses(self.host, sock.getpeername()[0])
+                        if why:
+                            sock.close()
+                            raise NotPublic(why)
+                        return sock
+
+                    def connect(self):
+                        super().connect()
+                        why = web.refuses(self.host, self.sock.getpeername()[0])   # were `connect` to make it otherwise
+                        if why:
+                            self.close()
+                            raise NotPublic(why)
+                made[base] = Guarded
+            return made[base]
+
+        def through(http_class, req):
+            if req.has_proxy() or getattr(req, "_tunnel_host", None):
+                host = getattr(req, "_tunnel_host", None) or urllib.parse.urlsplit(req.full_url).hostname
+                why = web.refuses(host.rsplit(":", 1)[0] if host and host.count(":") == 1 else host)
+                if why:
+                    raise NotPublic(why)
+                return http_class
+            return guarded(http_class)
+
+        class Http(urllib.request.HTTPHandler):
+            def do_open(self, http_class, req, **args):
+                return super().do_open(through(http_class, req), req, **args)
+
+        class Https(urllib.request.HTTPSHandler):
+            def do_open(self, http_class, req, **args):
+                return super().do_open(through(http_class, req), req, **args)
+
+        self.opener = urllib.request.OpenerDirector()
+        for handler in (urllib.request.ProxyHandler(), urllib.request.UnknownHandler(), Http(),
+                        urllib.request.HTTPDefaultErrorHandler(), urllib.request.HTTPRedirectHandler(), Https(),
+                        urllib.request.HTTPErrorProcessor()):
+            self.opener.add_handler(handler)
 
     def named(self, contact):
         """The User-Agent the requests give from now on, naming `contact` (a rebuild of the tools sets it again)."""
         self.agent = "%s/1 (+%s)" % (ROBOT_NAME, contact or HOME_PAGE)
 
+    def reaches(self, local):
+        """The hosts and addresses of this machine or a private network `fetch` may read from now on: the tools file's
+        `fetch` setting `local` (a rebuild of the tools sets it again)."""
+        self.local = {str(h).strip().strip("[]").lower() for h in (local or ()) if str(h).strip()}
+
+    def refuses(self, host, peer=None):
+        """Why `fetch` does not read from `host` — at `peer`, the address a connection reached, or with none the
+        addresses its name answers — or None where it does. A name that does not resolve is left to fail as it does."""
+        host = (host or "").strip("[]").lower()
+        if host in self.local or (peer is not None and str(peer).lower() in self.local):
+            return None
+        if peer is not None:
+            addresses = [peer]
+        else:
+            try:
+                addresses = sorted({info[4][0] for info in socket.getaddrinfo(host, None)})
+            except (OSError, UnicodeError):
+                return None
+        near = [a for a in addresses if not _public(a)]
+        if not near:
+            return None
+        return ("%s is %s, an address of this machine or of a private network: (fetch …) reads the public internet, and "
+                "there only what the tools file's fetch setting `local` lists" % (host, near[0]))
+
     def get(self, url, headers, seconds, most):
         """At most `most` bytes of `url` and its headers, the request naming `fetch` and its contact."""
         req = urllib.request.Request(url, headers=dict({"User-Agent": self.agent}, **headers))
-        with urllib.request.urlopen(req, timeout=seconds) as r:
+        with self.opener.open(req, timeout=seconds) as r:
             return r.read(most), r.headers
 
     def allowed(self, url):
@@ -1153,7 +1281,7 @@ def _commands(session):
     def shell(argv, command, seconds):
         _num(seconds)
         session.classifier.check("run", command)
-        env = _environment()
+        env = session.environment()
         c = session.confinement()
         if c.rules is not None:                       # ⭐ the machine but the tools file, or the workspace alone
             if not _jail.reaches(c.rules, session.cwd):
@@ -1189,6 +1317,12 @@ def _commands(session):
         _text(url, "a URL")
         if not url.startswith(("http://", "https://")):
             raise Fault("fetch reads http:// and https:// addresses, not %s" % url)
+        try:
+            near = session.web.refuses(urllib.parse.urlsplit(url).hostname)
+        except ValueError as ex:
+            raise Fault("%s: %s" % (url, ex))
+        if near:                                       # said before the user is asked: a yes could not open it
+            raise Fault("%s: %s" % (url, near))
         session.classifier.check("net", url)
         if not session.web.allowed(url):
             raise Fault("%s: the site's robots.txt does not let %s read it" % (url, ROBOT_NAME))
@@ -1275,7 +1409,7 @@ def _commands(session):
         lines = []
         for sk in session.skills:
             lines.append("%s — %s%s" % (sk.name, sk.description or "(no description)",
-                                         " (added by you)" if session.toolbox.added(sk) else ""))
+                                         " (added by you)" if session.toolbox.removable(sk) else ""))
             lines += ["  %s   [%s]%s" % (c.usage, c.touches, " — " + session.why_not(c.name) if session.why_not(c.name) else "")
                       for c in sk.commands if getattr(session.skill_commands.get(c.name), "skill", None) == sk.name]
         return Text("\n".join(lines + ["⚠ " + p for p in session.skill_problems]))
@@ -1832,7 +1966,7 @@ def _skill_command(session, skill, cmd):
         else:
             argv = [_bash(), "-c", shlex.join(_skills.program_argv(cmd, skill.folder, args))]
         out, code, said = _run(argv, session.cwd, RUN_SECONDS,
-                               env=_environment(SILVANN_SKILL_CONFIG=json.dumps(session.tool_config(skill))))
+                               env=session.environment(SILVANN_SKILL_CONFIG=json.dumps(session.tool_config(skill))))
         text = out.decode("utf-8", errors="replace")
         if code != 0 or said:
             raise Fault("(%s …) failed%s: %s" % (cmd.name, said.strip() if said else " [exit %d]" % code,
@@ -1870,7 +2004,7 @@ def _added_call(session, skill, cmd, args):
             raise Fault("(%s …) cannot run in %s, outside where your commands reach: (cd \"%s\") first"
                         % (cmd.name, session.cwd, session.home))
         argv = _jail.launch(argv, c.rules)
-    out, code, said = _run(argv, session.cwd, RUN_SECONDS, env=_environment(SILVANN_SKILL_CONFIG=json.dumps(config)))
+    out, code, said = _run(argv, session.cwd, RUN_SECONDS, env=session.environment(SILVANN_SKILL_CONFIG=json.dumps(config)))
     text = out.decode("utf-8", errors="replace")
     if ".py:" in cmd.run:
         _, mark, answer = text.rpartition(RUNNER_MARK)
@@ -1942,7 +2076,7 @@ def _remove_tool(session, name):
     back. A built-in, and a tool of the owner's, are not the model's to remove. Asked as adding is."""
     box = session.toolbox
     sk = next((k for k in box.skills if k.name == name), None)
-    if sk is None or not box.added(sk):
+    if sk is None or not box.removable(sk):
         raise Fault("%s is not a tool you added: %s" % (name, "a built-in command" if name in _tools_config.BUILT_IN
                                                        else "one of the owner's" if sk is not None
                                                        else "(skills) lists the tools, and says which you added"))
@@ -2077,6 +2211,9 @@ def _add_tool(session, src):
     box = session.toolbox
     if not box.added_folder:
         raise Fault("this REPL has no folder for the tools the model adds")
+    c = session.confinement()
+    if c.rules is None and c.wanted:                   # it would run as the commands do, which cannot run here
+        raise Fault("a tool cannot be added here: %s" % c.why)
     if os.path.islink(src):
         raise Fault("%s is a link: a tool is added from its own files" % src)
     session.classifier.check("read", os.path.realpath(src))   # what the model may read, before anything is said of it
@@ -2087,7 +2224,7 @@ def _add_tool(session, src):
                     % name)
     final = os.path.join(box.added_folder, name)
     before = next((sk for sk in box.skills if sk.name == name), None)
-    if name in box.tools and not (before is not None and box.added(before)):
+    if name in box.tools and not (before is not None and box.removable(before)):
         raise Fault("the name %s is taken: %s — name the file otherwise" % (
             name, "a built-in's" if name in _tools_config.BUILT_IN else "a tool installed ((skills) says which)"))
     if os.path.lexists(final) and before is None:
@@ -2161,8 +2298,9 @@ def _add_tool(session, src):
     settings = sorted(box.config(name))
     return Text("%s the tool %s: %s — each asked of the user as (bash …) is, and run as it is. %s" % (
         "replaced" if before is not None else "added", name, ", ".join(c.usage for c in sk.commands),
-        "Its settings, which the machine's owner sets in the tools file: %s." % ", ".join(settings) if settings
-        else "It has no settings."))
+        "Its settings, which %s: %s." % ("its user sets in their tools.json" if getattr(box, "own", None) is not None
+                                         else "the machine's owner sets in the tools file", ", ".join(settings))
+        if settings else "It has no settings."))
 
 
 # ── a session ─────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -2299,6 +2437,11 @@ class Session:
     def confinement(self):
         """Where this session's commands reach (▶ `confinement`)."""
         return confinement(self.toolbox, self.classifier.sealed, self.home)
+
+    def environment(self, **more):
+        """The environment this session's commands get (▶ `_environment`): the named few of the server's, what the tools
+        file's `bash` setting `environment` adds, and `more`."""
+        return _environment(self.toolbox.config("bash").get("environment"), **more)
 
     def confined_said(self, page=False):
         """Where a command reaches, as (help) says it — its line's mark (None where nothing holds it), or its page's

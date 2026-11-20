@@ -38,7 +38,27 @@ static inline bool nvidia_cuda12__memory_write(void* to, const void* from, size_
 }
 
 /* the caller's work on stream 0, not the device's — ▶ amd_rocm6_wave64's own (`REASONED` the same here; not measured) */
-static inline bool nvidia_cuda12__compute_completed(void) { return cudaStreamSynchronize(0) == cudaSuccess; }
+/* ⭐ A LAUNCH THE RUNTIME REFUSED IS REMEMBERED UNTIL ITS DEVICE IS WAITED FOR (⚖ 2026-11-19, the code review's row 4).
+ *   The wait after a refused launch reports nothing, and the door's output keeps the bytes it had: a program would go on
+ *   over a buffer no kernel wrote. So the launch raises its device's flag, and the next `compute_completed` on that device
+ *   answers false once, having waited: the engine raises that as a fault (`SYS__VERB_ABI__FAULT_WORK`), the program's
+ *   turn ends in an error, and the machine stays up. A device's flag and not a thread's: the thread that collects a
+ *   program's answer waits for each worker's device, and is not always the thread that launched there. */
+#define NVIDIA_CUDA12__ZZPRIVATE_DEVICES_SEEN 64
+static volatile unsigned int nvidia_cuda12__zzprivate_refused[NVIDIA_CUDA12__ZZPRIVATE_DEVICES_SEEN];
+static inline void nvidia_cuda12__zzpackage_launch_refused(void) {
+    int d = -1;
+    if (cudaGetDevice(&d) == cudaSuccess && d >= 0 && d < NVIDIA_CUDA12__ZZPRIVATE_DEVICES_SEEN) nvidia_cuda12__zzprivate_refused[d] = 1u;
+}
+static inline bool nvidia_cuda12__compute_completed(void) {
+    const bool waited = cudaStreamSynchronize(0) == cudaSuccess;
+    int d = -1;
+    if (cudaGetDevice(&d) == cudaSuccess && d >= 0 && d < NVIDIA_CUDA12__ZZPRIVATE_DEVICES_SEEN && nvidia_cuda12__zzprivate_refused[d] != 0u) {
+        nvidia_cuda12__zzprivate_refused[d] = 0u;
+        return false;
+    }
+    return waited;
+}
 
 static inline bool nvidia_cuda12__side_open(void** channel) {
     return cudaStreamCreateWithFlags((cudaStream_t*)channel, cudaStreamNonBlocking) == cudaSuccess;

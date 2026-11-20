@@ -40,9 +40,10 @@ at http://silvann.localhost:8080 — or the first free port after 8080 — and p
 reaches the container and `~/SiLVANN`, and nothing else of the machine ([`local_ai.md`](local_ai.md#container-first));
 the models run as fast as an install runs them.
 
-**`~/SiLVANN` is the data folder** this guide speaks of — `/data` inside the container: the models (`models/`), the
-conversations (`user_sessions/`), your skills (`skills/`), the tools file (`tools/`) and the model's workspace
-(`workspace/`), where you put the files it should read and find the ones it makes. The rest of this guide holds in the
+**`~/SiLVANN` is the data folder** this guide speaks of — `/data` inside the container: the models (`models/`), your
+skills (`skills/`), the tools file (`tools/`), and in your account's folder, `users/<name>/`, the conversations
+(`user_sessions/`) and the model's workspace (`workspace/`), where you put the files it should read and find the ones it
+makes. The rest of this guide holds in the
 container — the UI, the model's tool, a model's settings (§4) — with these differences:
 
 - The UI is the way in, and it starts the model's server itself: §3's `silvann serve` and `silvann ui` are not needed.
@@ -87,9 +88,9 @@ through OpenCL 1.2 instead, with nothing to install but the card's driver — no
 **Keeping the data on another drive.** `silvann data <folder>` keeps everything SiLVANN keeps for you in that folder
 from then on — SiLVANN on a USB drive, say, and its models on the machine's own disk. That is:
 
-- the models (`models/`) and the conversations (`user_sessions/`);
-- your skills (`skills/`), the tools file (`tools/`), the model's workspace (`workspace/`), the folders it was allowed
-  and the definitions it kept (`tools.json`, `tools_library.json`);
+- the models (`models/`) and the accounts' folders (`users/<name>/`): the conversations, the model's workspace, the
+  folders it was allowed and the definitions it kept;
+- your skills (`skills/`) and the tools file (`tools/`);
 - the Hugging Face token (`.huggingface_token`) and the UI's last start (`ui_last_start.json`).
 
 What the old folder holds stays there, and the command names what to move across. Where the folder is gone — its disk
@@ -121,6 +122,12 @@ One folder, nothing installed, that runs on both systems: `silvann_portable_x64.
 - `linux/` — `SiLVANN.sh`, a standalone Python with the runtime's packages, the evaluator and the families for Linux on
   64-bit x86 with glibc 2.28 or later (RHEL 8, Debian 10, Ubuntu 20.04 and on), and the release's tree;
 - `data/` — the models, the conversations and the logs (`data/logs/ui.log`), the two systems' together.
+
+The app's window shows the UI at `http://127.0.0.1:8080` (`SILVANN_PORT` another port; if the port is taken, the app
+says so). Its first page asks for the computer's account — a name and a password of your own. It is single user, on
+that computer alone, until Options makes it multi user: then the accounts are signed in side by side and it listens on
+the network too, where the computer's firewall decides who gets through
+([below](#several-people-on-one-server-a-user-each)).
 
 Unzip it anywhere you can write to — a folder of yours, or a USB drive formatted exFAT, which both systems read and
 write — and start it: on Windows double-click `windows\SiLVANN.exe`; on Linux run `linux/SiLVANN.sh`, from a terminal
@@ -300,7 +307,8 @@ silvann serve silvann_tq_D8E4_qwen3.6_35b_a3b       # the server, on port 8765; 
 silvann ui                                          # in another terminal: the chat, at http://localhost:8090
 ```
 
-Or `silvann ui` alone, and start the model from its Options. Installed by hand, the same from the release's folder:
+Or `silvann ui` alone, and start the model from its Options. The chat asks you to sign in with the account the
+installer made — or makes it at its first page ([below](#several-people-on-one-server-a-user-each)). Installed by hand, the same from the release's folder:
 `venv/bin/python start_silvann_server.py --model models/<model> [--port 8765]`, `venv/bin/python silvann_ui.py --port
 8090`, and `venv/bin/python silvann_cli.py [--notools] [--nothink]` for the chat in the terminal.
 
@@ -310,7 +318,8 @@ server's defaults, its thinking and its tool in the config's mode, unless `--not
 ask stops the answer at a prompt — `y` allows it once, `f` the folder (a read), `n` or Enter refuses. In the
 conversation: `/new`, `/sys <prompt>` (a new conversation with it, where the server's `user_system_prompt` allows
 one), `/mode ask|chill|full-auto`, `/quit`; Ctrl-C stops
-an answer. `--endpoint` names another server (`http://localhost:8765` by default).
+an answer. `--endpoint` names another server (`http://localhost:8765` by default). It signs in first: your account's
+name at its prompt or with `--sign-in <name>`, the password asked for (or `SILVANN_PASSWORD`).
 
 **In the browser** ([`ui.md`](ui.md) goes through the UI, view by view; it is the first document in its Help), a model
 with no conversation saved opens one as its server starts, and a message typed brings the
@@ -357,7 +366,7 @@ into the message before what you type, as `<file name="…">…</file>` — cut,
 context still holds. The server takes them at the same `POST /cartridges/<id>/images` (it answers `kind: "document"`),
 and `/health` says `files`.
 
-The UI is a web page on port 8090 (`silvann ui`; `silvann_ui.py` alone takes 8080 unless `--port` says) that talks to the server on port 8765; it can also start a server itself (Options). Conversations are saved under `user_sessions/` and
+The UI is a web page on port 8090 (`silvann ui`; `silvann_ui.py` alone takes 8080 unless `--port` says) that talks to the server on port 8765; it can also start a server itself (Options). Conversations are saved under your account's `users/<name>/user_sessions/` and
 can be exported and imported. One conversation runs at a time; a second request while one is running is
 answered `503` with `Retry-After: 5`, and the UI retries. The card holds one conversation's cache: when another takes
 the card, the one on it is kept in RAM — or, when RAM has no room for two conversations at the full context beside 500
@@ -388,34 +397,108 @@ same within the noise. `SILVANN_CPU_VNNI=0` keeps AVX-512's.
 
 ### Several people on one server: a user each
 
-`silvann users add <name>` makes a user: a folder of their own, `users/<name>/` in the data folder, and a password
-(asked twice, without echoing it). From then on every server on that data folder asks for a sign-in — the UI before
-anything else, `silvann_cli --sign-in <name>` in a terminal (the password asked, or `SILVANN_PASSWORD`), and any other
-client with `POST /users/sign_in` `{"name", "password"}` and the token it answers in `Authorization: Bearer <token>`. A
-sign-in lasts while it is used: twelve hours unused, a new password or the server's restart ends it. With no user, a
-server asks no one.
+**SiLVANN asks for a sign-in, from its first run.** A machine's first account is made where SiLVANN is installed: the
+installer asks for its name and password in the terminal; the container's setup does; and where neither had a terminal
+to ask in — or you skipped it — the UI's first page asks, before anything else of SiLVANN is shown. `silvann users add
+<name>` makes it from the command line. That first account is the machine's **admin**. Until it is made, the chat shows
+only that page (answered under this machine's address and names alone, see below) and the server answers only
+`/health`.
 
-Where the chat can be reached follows the sign-in: with none, on this machine alone; once it asks for one, from the
-network too — `silvann ui` listens on every address (it says so as it starts), and the container's setup publishes its
-port on them (`setup.sh update` after the first user). `--private` keeps either on this machine. The passwords cross
-the network as plain HTTP: fine on a network you trust; elsewhere, put a TLS proxy in front.
+An update from 1.2.0 or before keeps your conversations: what the single user had — `users/__local/`, and before 1.2.0
+the top of the data folder: the conversations, the model's workspace, the folders it was allowed, the definitions it
+kept — becomes the first account's folder, `users/<name>/`, the first time an account is made.
 
-A user sees and opens only the conversations in their folder; another's answers as one that is not there. The
-conversations made before the first user are nobody's until `silvann users adopt <name>` moves them into a folder.
-A user's model has a REPL of its own, and it sees the machine as from a chroot, with no root asked for: it writes in the
-user's workspace (`users/<name>/workspace/`) alone, and reads, besides, the system's programs (`/usr`, `/etc` and the
-like), the folders of the tools the user has switched on, and the runtime it runs from. The rest is closed in every
-mode — of the data folder every other user's folder, the user's own password, settings and conversations, the
-conversations made before the users, the Hugging Face token, a file made there later; of the machine its other disks,
-`/home`, `/tmp`. A user's `(bash …)` is held to the same by Linux's Landlock (where the machine has none, the command is
-refused); a link at the workspace's top is not followed for a user, as the model could make one itself; `add_tool` is
-off, since what it adds every conversation would run.
+Everyone signs in: the UI before anything else, `silvann_cli --sign-in <name>` in a terminal (the password asked, or
+`SILVANN_PASSWORD`), and any other client with `POST /users/sign_in` `{"name", "password"}` and the token it answers
+in `Authorization: Bearer <token>`. It is every process's on that data folder (the UI checks it itself), so stopping
+or switching the model signs no one out, and the UI asks for it with no model running.
+
+**A sign-in is over ten minutes after its last use.** A use is something you did: a message, a click or a key in the
+page, a request of your script's. While the model answers, the sign-in is held, however long the answer and the tools
+it runs take, and its ten minutes begin when the response ends — so a long run of the model's goes on by itself, and
+what you ask within ten minutes of its end is still signed in. A page left open keeps no one signed in: what it asks
+the server by itself does not count (those requests carry `X-Silvann-Unattended: 1`, and a client of your own that
+polls may send the same), and ten minutes after you last touched it, it is the sign-in page again. The terminal chat
+asks for the password again when its ten minutes ran out at the prompt, and goes on with the same conversation.
+Signing out, or a new password, ends a sign-in at once.
+
+**A wrong password costs a minute.** After one, that name is refused from that address for 60 seconds — the right
+password too, saying how many seconds are left (`429`, with `Retry-After`) — and the wait is fixed: a try made during
+it is not looked at and does not lengthen it. Each wrong password is written to the system's log with the name asked
+for and the address it came from, `wrong password for ann from 192.0.2.20` — syslog's auth facility on Linux and macOS
+(`journalctl -t silvann`, `/var/log/auth.log`), and the server's and the UI's own output everywhere, which is the log a
+container and Windows keep. Behind a proxy the address is the proxy's.
+
+A machine is **single user** until an admin makes it **multi user**:
+
+| | single user (the default) | multi user |
+|---|---|---|
+| who is signed in | **one account at a time.** The first to sign in has the machine; another account's sign-in is refused, saying who has it, until that account signs out, ten minutes pass with nothing asked of it, or SiLVANN is closed and opened again. The same account signs in again freely — a second browser, the terminal chat, a script | the accounts side by side |
+| what ends a sign-in, besides the above | signing out ends the account's every sign-in, on every browser and terminal; opening SiLVANN again — the UI or the server started while neither was running — ends everyone's | signing out ends that browser's |
+| what a model reaches | an **admin's** model reaches the machine as the tools file lets it (§ The model's tool). Any other account's works in its own folder, as below | every account's works in its own folder, an admin's too |
+| where the chat listens | this machine alone (`--host` names another address) | the network (`--private` keeps it here) |
+
+**The switch** is in the UI's **Options**, under **Single user or multi user**, an admin's; `silvann users multi` and
+`silvann users single` do the same from the command line. The model stops and SiLVANN starts again; switching to multi
+user you stay signed in, and switching back signs everyone out. The accounts and their folders are the same in both.
+Stop the server first if something other than the UI started it: a server running on that data folder holds it, and the
+switch waits for it.
+
+- **Options** (the models, their configs, starting and stopping the server, the tools) and **Users** belong to the admins
+  alone. They are not hidden from anyone else; they are never built for them.
+- **Users** lists who signs in and how. An admin adds a user (with a password, and as an admin or not), makes a user an
+  admin or not, sets a password for a user who does not sign in through your organisation's account, and removes a user
+  with their folder. The last admin can be neither removed nor made a user.
+- **Account** is each user's own: who they are signed in as, their password, which they change by giving the one they
+  have, and **sign out**.
+
+Whether another computer gets through to a multi user machine is up to its firewall: Options says the address and port
+to let in. `silvann ui` and the portable app say where they listen as they start. The container's setup publishes its
+port on the network once the machine is multi user (`setup.sh update` after the switch). The passwords cross the
+network as plain HTTP: fine on a network you trust; elsewhere, put a TLS proxy in front.
+
+**Where it answers with no sign-in, the chat answers under this machine's address and names alone** — the page that
+makes the first account, and a UI that only talks to a server on another machine (whose sign-in is that server's). A
+browser on this machine reaches them for any page it has open, and a page of another site can have its own name answer
+`127.0.0.1` (DNS rebinding) and then ask them anything — make the machine's first account its own, say. So such a
+request is answered when the address in the browser's bar is this machine's: numbers (`127.0.0.1:8090`,
+`192.0.2.7:8090`), `localhost`, the machine's own name, the name `--host` gave — and refused otherwise, in words. A name
+of your own for the machine is listed in the environment: `SILVANN_HOSTS=chat.example.org,silvann`. Once the machine has
+its account the sign-in is what is asked, under whatever name a proxy gives. Make the account before you open a machine
+to its network yourself (`--host 0.0.0.0`, a container's port published by hand): until it has one, whoever reaches
+its first page makes it.
+
+A user sees and opens only the conversations in their folder; another's answers as one that is not there. On a machine
+that had users before 1.2.0, the conversations made before the first user are at the top of the data folder, nobody's
+until `silvann users adopt <name>` moves them into a folder.
+A model that works in its account's folder — every account's on a multi user machine, every account's but an admin's on
+a single user's — has a REPL of its own, and it sees the machine as from a chroot, with no root asked for:
+it writes in the user's workspace (`users/<name>/workspace/`) alone, and reads, besides, the system's programs (`/usr`,
+`/etc` and the like), the folders of the tools the user has switched on, and the runtime it runs from. The rest is
+closed in every mode: of the data folder every other user's folder, the user's own password, settings and
+conversations, the conversations made before the users, the Hugging Face token, a file made there later; of the
+machine its other disks, `/home`, `/tmp`. Such a model's `(bash …)` is held to the same by Linux's Landlock; where the
+machine has none, the command is refused. **On Windows**, which has no Landlock, such a model therefore runs no commands
+at all — `(powershell …)`, `(bash …)`, and the tools it adds; an admin's model on a single user's machine runs them. A
+link at the workspace's top is not followed for it, as the model could make one itself.
+
+**A user's own tools.** `(add_tool …)`, where the machine's tools file switches it on, puts what such a model adds in
+its account's own folder (`users/<name>/skills_added/`): their conversations have it, no one else's do, and it runs
+confined as their commands do. The machine's tools are every user's to run and no user's to change; what an admin's
+model adds on a single user's machine is the machine's.
 
 `users/<name>/tools.json` is the user's own settings over the machine's tools file: their search —
 `{"search": {"config": {"brave_key": "…", "searxng": "…"}}}` — `fetch`'s `contact`, the agent registry's `registry` and
-`key`, a setting a skill's entry leaves `null`, and a tool switched off (`"enabled": "no"`). What else it asks stays the
-machine's, and the UI's list of the tools says which. `silvann users` lists the users and their conversations;
-`silvann users passwd <name>`, `silvann users remove <name> [--with-conversations]`.
+`key`, a setting a skill's entry leaves `null`, their own tools' settings, and a tool switched off
+(`"enabled": "no"`). What else it asks stays the machine's, and the UI's list of the tools says which. An admin on a
+single user's machine has the machine's tools file itself, in Options.
+
+From the command line, for scripts and for getting back in: `silvann users` says the machine's mode and lists the
+accounts, their conversations and the admins; `silvann users add <name> [--admin]`, `silvann users admin <name>
+on|off`, `silvann users passwd <name>` (an admin who forgot their password sets a new one here), `silvann users remove
+<name> [--with-conversations]`, `silvann users multi`, `silvann users single`. A machine that had users before 1.2.0 has
+no admin until `silvann users admin <name> on` names one. `silvann_tools_repl` works over an account's files
+(`--user <name>` where the machine has several) and asks for no password: it reads them as the person who runs it.
 
 #### Signing in with your organisation's account (single sign-on)
 
@@ -437,7 +520,10 @@ code" or "limited input device"). Then write `sso.json` in the data folder, besi
 }
 ```
 
-From the next request every server on that data folder asks for a sign-in, even before it has a user. The UI's sign-in
+From the next request the provider's accounts sign in too. A machine keeps the mode it has: on a single user's, the
+provider's accounts sign in one at a time like any other, so make it multi user for an organisation (`silvann users
+multi`, or Options) — a data folder given its `sso.json` before SiLVANN first starts there is multi user from the
+start, and has no admin until `silvann users add <name>` makes one. The UI's sign-in
 shows **Sign in with Acme** beside the password form; `silvann_cli --sign-on` (or Enter at its name prompt) prints a
 page and a code to type there, on this machine or a phone. The server checks the provider's answer itself: the ID token's
 signature against the provider's published keys, its issuer, that it was given to this client, that it has not expired,
@@ -635,6 +721,7 @@ its server the same way; its config (`configs/default.json`) says its part:
 | `pipeline_parallelism` | `"no"` (the default) or `"yes"` |
 | `pipeline_parallelism_layers` | this machine's run of the layers, first-last — GLM has 45 (0-44), the 122B 48, the 35B 40, the 27B 64 |
 | `pipeline_parallelism_next` | the machine after this one, `host:port`; the last machine names the first |
+| `pipeline_parallelism_prev` | the machine before this one, a host or an address; the first machine names the last. A machine's link takes that machine alone |
 | `pipeline_parallelism_port` | where this machine listens for the one before it, 8766 by default |
 | `max_context` | the same number on every machine, or `"auto"` on every machine: each then holds what its card holds beside its layers, and the ring holds the least of them |
 | `card` | which of the machine's cards to run on (`0`, `1`, …), `"auto"` the first, `"cpu"` none — its CPU and RAM. Two cards in one PC are two machines of the ring, on ports of their own; so are a card and the CPU beside it. Two on one card boot one after the other, and the first takes what its setup chooses of it: give each its share, `card_experts_gb` in its options |
@@ -645,8 +732,10 @@ own setup for its layers (▶ section 4) — where its experts sit, its card's t
 its layers keeps them all there (GLM's `experts_on` `"card"`, chosen at boot): seven of GLM's MoE layers are 24 GB, which
 a 32 GB card holds, so six such cards hold the whole model with nothing of it in RAM. For GLM over two machines:
 ```
-  PC A (192.0.2.2):  "pipeline_parallelism": "yes", "pipeline_parallelism_layers": "0-22",  "pipeline_parallelism_next": "192.0.2.3:8766"
-  PC B (192.0.2.3):  "pipeline_parallelism": "yes", "pipeline_parallelism_layers": "23-44", "pipeline_parallelism_next": "192.0.2.2:8766"
+  PC A (192.0.2.2):  "pipeline_parallelism": "yes", "pipeline_parallelism_layers": "0-22",
+                     "pipeline_parallelism_next": "192.0.2.3:8766", "pipeline_parallelism_prev": "192.0.2.3"
+  PC B (192.0.2.3):  "pipeline_parallelism": "yes", "pipeline_parallelism_layers": "23-44",
+                     "pipeline_parallelism_next": "192.0.2.2:8766", "pipeline_parallelism_prev": "192.0.2.2"
 ```
 Start both servers (in either order: each waits for the other); the UI talks to PC A. What crosses the network is one row
 of numbers a position (GLM's 32 KB) — a gigabit link is enough. Text, files and GLM's pictures and videos go round the
