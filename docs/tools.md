@@ -20,6 +20,7 @@ beside each conversation ([`users.md`](users.md#the-models-tool)).
 | `(tools)` | The commands that answer in this conversation and the skills', a line each — the tool's description names it, so a model reaches for it first. A command that cannot answer here is left out; `(help)` keeps it as a comment saying why. |
 | `(ls "folder")` | The names in a folder; a folder's name ends in `/`. |
 | `(read "file")`, `(read "file" from count)` | A file's first 200 lines, or `count` of its lines from line `from`; a last line says how to read on. |
+| `(grep "pattern" "file")`, `(grep "pattern" "file" from)` | The lines of a file that hold the pattern, each as `number: line` — a regular expression, capitals and small letters alike; 50 at once, then a last element says how to go on from line `from`. With `(read "file" number count)` it is how a long file is looked into without reading it whole: [a document you attach](#a-document-you-attach), a log, a book. A skill the release ships, `files`, with `(find "folder" "pattern")`, the names under a folder. |
 | `(write "file" "text")`, `(write "file" "text" 'append)` | Writes the file, or adds to its end, making the folders it needs. |
 | `(bash "command")`, `(bash "command" seconds)` | Runs a shell command in the working folder. It is stopped after 60 seconds, or after `seconds` (at most 600). On Windows it is Git for Windows' bash, where it is installed — never WSL's. |
 | `(powershell "command")`, `(powershell "command" seconds)` | On Windows: runs a PowerShell command in the working folder, stopped as `bash` is. `(help)` then opens by saying the machine runs Windows, so the model picks it. |
@@ -172,6 +173,27 @@ proxy (`https_proxy` in the server's environment) the page's name is resolved an
 
 Both are `net`: asked in "ask first" and "reads unasked" each time — `web search: (search "query")` or `fetch address`
 — and unasked in "full auto".
+
+### A document you attach
+
+A document attached to a message is not read whole unless it is small or you ask. One of at most about 4,000 tokens —
+a few pages — goes into the message as its text, since reading it there costs no more than a call would. A larger one
+is kept as a text file in your workspace, `attached/<its name>` (a Word document's or a PDF's text as
+`<its name>.txt`), and the message carries a line in its place: the file's name, where it is kept, how many lines it
+has, how it begins, and that `(grep "words" "file")` finds its lines and `(read "file" from count)` reads them. The
+model then looks for what you asked: send an encyclopedia and ask for one entry, and it searches for the entry and
+reads those lines — the conversation grows by what it read, not by the book. Both commands read inside the workspace,
+so nothing is asked of you in any mode.
+
+You ask for the whole in words — "read all of it" has the model read it through, 200 lines a call — or, in the UI, by
+clicking the attachment's chip before you send: all of it then goes into the message, as much as the conversation has
+room for, cut with a note where it does not fit. A conversation whose tool is switched off, and an account's model
+that has no `(read …)`, get the document in the message that way too: there is no other way for the model to reach it.
+
+The file stays in `attached/` until you or the model remove it: the same text sent again is the same file, another
+text under the same name is numbered. A client of your own sends the document at `POST /cartridges/<id>/images` — the
+answer's `carried` says how the next message would take it, `"text"`, `"cut"` or `"named"` — and names the documents
+it wants whole in the message's `whole`, a list of their ids.
 
 ### The library
 
@@ -359,7 +381,7 @@ answers its answer to the task:
   `"{\"lora\": \"research\"}"`. A config sets the LoRA, a `system` prompt (where the subagent's server lets a
   conversation have its own: its config's `user_system_prompt`), and `tools_allowed`, the commands the
   subagent's REPL has. By default it gets the read-only commands: `help`, `ls`, `read`, `pwd`, `cd`, `library`,
-  `import`, `skills`, `guide` and `find`. A config's name comes before a LoRA's of the same name.
+  `import`, `skills`, `guide`, `find` and `grep`. A config's name comes before a LoRA's of the same name.
 - **`"task"`** is its first message. The subagent starts with nothing of the caller's conversation, so a task that
   continues it under a LoRA carries what it needs: the conversation, or a summary of it.
 

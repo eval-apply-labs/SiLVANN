@@ -98,6 +98,7 @@ class MessageReq(BaseModel):
     text: str
     max_new_tokens: Optional[int] = None    # the most tokens the answer runs; none: until it ends, is stopped or fills the context
     images: list[str] = []
+    whole: list[str] = []                   # of `images`, the documents the user asked for whole in the message
 
 
 class UpdateReq(BaseModel):
@@ -1845,7 +1846,8 @@ async def kill_cartridge(cid: str, x_cart_password: Optional[str] = Header(defau
 async def upload_image(cid: str, file: UploadFile = File(...), x_cart_password: Optional[str] = Header(default=None)):
     """An attachment for the conversation's next message, kept under the id this answers until a message names it —
     `{image_id, kind, merged_thw, n_placeholders}`: a picture or a video read through the model's vision
-    tower; or a document — Word, PDF, text — whose text the message carries, for any model (▶ silvann_runtime/documents.py)."""
+    tower; or a document — Word, PDF, text — for any model, which the message carries as its text or by name
+    (▶ silvann_runtime/documents.py): `carried` says which as things stand — "text", "cut" or "named"."""
     _check_password(cid, x_cart_password)
     if S.runtime.cartridges.get(cid) is None:
         raise HTTPException(409, "not bound — call /bind first")
@@ -1865,7 +1867,11 @@ async def upload_image(cid: str, file: UploadFile = File(...), x_cart_password: 
             raise HTTPException(415, str(ex))
         image_id = uuid.uuid4().hex[:12]
         S.images.setdefault(cid, {})[image_id] = doc
-        return {"image_id": image_id, "kind": "document", "merged_thw": [], "n_placeholders": 0, "chars": len(doc.text)}
+        c = S.runtime.cartridges.get(cid)
+        how, _ = await asyncio.to_thread(lambda: documents.fitted(
+            doc, max(0, S.model.max_context - len(c.tokens) - 512), _reads_files(cid), False, S.chat.encode, S.chat.tok.decode))
+        return {"image_id": image_id, "kind": "document", "merged_thw": [], "n_placeholders": 0, "chars": len(doc.text),
+                "carried": how}
     if not hasattr(S.model, "vision"):
         raise HTTPException(415, "%s reads no pictures" % S.model_id)
     def read(data):
@@ -1931,20 +1937,26 @@ async def post_message(cid: str, req: MessageReq, x_cart_password: Optional[str]
         raise HTTPException(404, "a picture this message names was not uploaded to this conversation")
     items = [waiting[i] for i in req.images]
     # the message's pictures before its videos, as the chat frames them; a video's pairs of frames each a picture's pads;
-    # its documents' text before its own, each cut to what the context has room for
+    # its documents before its own text — a small one's text, a larger one kept in the account's workspace and named for
+    # the tool to look into, and the text cut to the context's room where the user asked for the whole or the
+    # conversation has no tool to read a file with (▶ documents.carried)
     docs = [im for im in items if hasattr(im, "framed")]
+    asked_whole = {id(waiting[i]) for i in req.whole if i in waiting}
     pics = [im for im in items if not hasattr(im, "pairs") and not hasattr(im, "framed")]
     vids = [im for im in items if hasattr(im, "pairs")]
     text = req.text
     if docs:
         room = S.model.max_context - len(c.tokens) - len(S.chat.encode(req.text)) - sum(im.tokens for im in pics + vids) - 512
-        framed = []
+        from silvann_runtime import documents
+        framed, tool, share = [], _reads_files(cid), max(0, room // len(docs))
         for d in docs:
-            ids = S.chat.encode(d.text)
-            share = max(0, room // len(docs))
-            body = d.text if len(ids) <= share else (
-                S.chat.tok.decode(ids[:share]) + "\n[… the rest of %s did not fit the conversation]" % d.name)
-            framed.append(d.framed(body))
+            how, body = documents.fitted(d, share, tool, id(d) in asked_whole, S.chat.encode, S.chat.tok.decode)
+            if how == "named":
+                session = _tool_session(cid)
+                framed.append(d.named(d.saved(session.home), grep=_answers(session, "grep")))
+            else:
+                framed.append(d.framed(body if how == "text" else
+                                       body + "\n[… the rest of %s did not fit the conversation]" % d.name))
         text = "".join(framed) + req.text
     first = not c.tokens
     if first:                                                 # the tool is declared in the first turn, or never
@@ -2089,6 +2101,20 @@ def _tools_on(extra):
     if S.tools == "no" or extra.get("history") and not extra.get("tools_declared"):
         return False
     return bool(extra.get("tools", True))
+
+
+def _answers(session, name):
+    """Whether a tool session has the command `name` and it answers there."""
+    return (name in session.commands or name in session.skill_commands) and not session.why_not(name)
+
+
+def _reads_files(cid):
+    """Whether a conversation has a tool that reads a file: its switch on — and declared, once it has begun — and
+    `(read …)` among its commands. A document its message cannot carry whole is then kept as a file for it."""
+    try:
+        return _tools_on(_sidecar(cid).get("extra", {})) and _answers(_tool_session(cid), "read")
+    except HTTPException:                             # a conversation with no REPL: nobody's
+        return False
 
 
 def _tools_mode(extra):

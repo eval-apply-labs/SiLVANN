@@ -12,7 +12,7 @@ import json
 import httpx
 
 # what a subagent's REPL has when its config names nothing: reading, and Lisp
-READ_ONLY = ("help", "ls", "read", "pwd", "cd", "library", "import", "skills", "guide", "find")
+READ_ONLY = ("help", "ls", "read", "pwd", "cd", "library", "import", "skills", "guide", "find", "grep")
 ANSWER_TOKENS = 4096          # a reply's tokens at most, its thinking and its calls with it
 
 

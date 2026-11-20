@@ -81,6 +81,10 @@ Below the messages:
 - **📎** attaches a file to the next message. A document (PDF, Word, text, Markdown, CSV, JSON) is read as text by any
   model. A picture or a video needs a model that reads them: the Qwen models and GLM 5.3 Flash. The server reads it when
   it is attached, a chip shows it, and the message carries it. It stays in the conversation and is saved with it.
+  A document's chip says how the message will carry it: **in the message**, a small one's text; or **kept as a file
+  for the model to look into**, a larger one's — not read whole, the model searches it and reads the lines it needs.
+  Click that chip to put all of it in the message instead, as much as the conversation has room for; click again to
+  keep it as a file ([`tools.md`](tools.md#a-document-you-attach)).
 - **The message box**: **Enter** sends, **Shift+Enter** is a new line.
 - **The send button** becomes a stop button while an answer streams, and stops it. An answer runs until the model is
   done, you stop it, or the conversation reaches its context.

@@ -179,12 +179,35 @@ class ChatView(Part):
             return
         self.pending_images_row.set_visibility(True)
         with self.pending_images_row:
-            ui.icon("image", size="sm").classes("opacity-70")
+            ui.icon("attach_file", size="sm").classes("opacity-70")
             for idx, ent in enumerate(entries):
-                chip = ui.chip(
-                    f"{ent['filename']} · {ent['n_pads']} pads",
-                    icon="image", removable=True,
-                ).props("dense color=blue-2 text-color=blue-9")
+                if ent.get("kind") == "document":
+                    # ⭐ A DOCUMENT IS NOT READ WHOLE UNLESS IT IS SMALL OR ASKED FOR (⚖ 2026-11-20): the chip says how the
+                    #   next message carries it — the server's own word, `carried` — and one kept as a file is put in
+                    #   the message whole by a click, and back by another
+                    how = "whole in the message" if ent.get("whole") else {
+                        "text": "in the message", "cut": "what fits of it",
+                        "named": "kept as a file for the model to look into"}.get(ent.get("carried"), "in the message")
+                    chip = ui.chip(f"{ent['filename']} · {how}", icon="description", removable=True
+                                   ).props("dense color=blue-2 text-color=blue-9")
+                    if ent.get("carried") == "named":
+                        chip.props("clickable")
+                        chip.tooltip("Not read whole: the model searches it and reads the lines it needs. Click to put all of "
+                                     "it in the message instead — as much as the conversation has room for."
+                                     if not ent.get("whole") else
+                                     "All of it goes in the message, as much as the conversation has room for. Click to keep "
+                                     "it as a file the model looks into.")
+                        def _on_whole(idx=idx):
+                            cur = self._cart_pending()
+                            if 0 <= idx < len(cur):
+                                cur[idx]["whole"] = not cur[idx].get("whole")
+                                self.render_pending_images()
+                        chip.on("click", _on_whole)
+                else:
+                    chip = ui.chip(
+                        f"{ent['filename']} · {ent['n_pads']} pads",
+                        icon="image", removable=True,
+                    ).props("dense color=blue-2 text-color=blue-9")
                 def _on_remove(idx=idx):
                     cur = self._cart_pending()
                     if 0 <= idx < len(cur):
@@ -214,10 +237,16 @@ class ChatView(Part):
                 "filename": filename,
                 "n_pads": int(resp.get("n_placeholders", 0)),
                 "merged_thw": resp.get("merged_thw", []),
+                "kind": resp.get("kind"), "carried": resp.get("carried"), "whole": False,
             })
             self.render_pending_images()
-            self.safe_notify(f"attached {filename} ({resp.get('n_placeholders')} placeholders)",
-                             type="positive")
+            if resp.get("kind") == "document":
+                self.safe_notify(f"attached {filename} ({int(resp.get('chars', 0)):,} characters)" + (
+                    " — kept as a file for the model to look into, not read whole; click its chip to put it in the message"
+                    if resp.get("carried") == "named" else ""), type="positive")
+            else:
+                self.safe_notify(f"attached {filename} ({resp.get('n_placeholders')} placeholders)",
+                                 type="positive")
         except httpx.HTTPStatusError as ex:
             self.safe_notify(f"image upload refused: {ex.response.status_code} "
                              f"{ex.response.text}", type="negative")

@@ -361,10 +361,14 @@ it within 25 megapixels over all its frames, as their processor does — and eve
 `max_tokens_per_video` (8,192 by default, below).
 
 **Files**, for every model: a Word document (`.docx`), a PDF (its text, through pypdf, which `install.sh` installs) or
-a text file (Markdown, CSV, JSON, code) attached with the same button is read when it is attached, and its text goes
-into the message before what you type, as `<file name="…">…</file>` — cut, with a note, to what the conversation's
-context still holds. The server takes them at the same `POST /cartridges/<id>/images` (it answers `kind: "document"`),
-and `/health` says `files`.
+a text file (Markdown, CSV, JSON, code) attached with the same button is read into its text when it is attached. A
+small one — a few pages — goes into the message before what you type, as `<file name="…">…</file>`. A larger one is
+not read whole: it is kept as a text file in your workspace, `attached/`, the message names it, and the model's tool
+searches it and reads the lines it needs — so a book costs the conversation the pages that answer your question. Click
+its chip before you send to put all of it in the message instead, cut with a note to what the conversation's context
+still holds; a conversation with the tool switched off gets it that way always
+([`tools.md`](tools.md#a-document-you-attach)). The server takes them at the same `POST /cartridges/<id>/images` (it
+answers `kind: "document"`), and `/health` says `files`.
 
 The UI is a web page on port 8090 (`silvann ui`; `silvann_ui.py` alone takes 8080 unless `--port` says) that talks to the server on port 8765; it can also start a server itself (Options). Conversations are saved under your account's `users/<name>/user_sessions/` and
 can be exported and imported. One conversation runs at a time; a second request while one is running is

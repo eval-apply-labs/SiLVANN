@@ -276,17 +276,20 @@ class Client:
         async for kind, payload in self._stream(f"{self.endpoint}/cartridges/{cart_id}/tools/answer", {"choice": choice}, cart_id):
             yield kind, payload
 
-    async def stream_message(self, cart_id: str, text: str, images: Optional[list] = None):
+    async def stream_message(self, cart_id: str, text: str, images: Optional[list] = None, whole: Optional[list] = None):
         """Yield (event_kind, payload_dict) tuples from the server's SSE stream until done|error.
 
         `images` is an optional list of image_ids previously uploaded via
         `upload_image`; the server splices their cached embeddings into the prefill
-        stream and pops them after a successful turn. The answer runs until it ends, the
-        stop button stops it, or it fills the conversation's context."""
+        stream and pops them after a successful turn. `whole` names the documents among them
+        the user asked for whole in the message, where the server would keep them as files.
+        The answer runs until it ends, the stop button stops it, or it fills the conversation's context."""
         url = f"{self.endpoint}/cartridges/{cart_id}/messages"
         body = {"text": text}
         if images:
             body["images"] = list(images)
+        if whole:
+            body["whole"] = list(whole)
         async for kind, payload in self._stream(url, body, cart_id):
             yield kind, payload
 

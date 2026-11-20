@@ -87,10 +87,13 @@ class Turn(Part):
         self.state["streaming"] = True
         self.set_send_btn(True)
         image_ids = [a["image_id"] for a in attached]
+        whole = [a["image_id"] for a in attached if a.get("whole")]
         display_user = txt
         if attached:
-            display_user = "📎 " + ", ".join(a["filename"] for a in attached) + (
-                f"\n\n{txt}" if txt else "")
+            # a document the server keeps as a file for the model to look into is said so beside its name
+            display_user = "📎 " + ", ".join(
+                a["filename"] + (" (kept as a file, not read whole)" if a.get("carried") == "named" and not a.get("whole") else "")
+                for a in attached) + (f"\n\n{txt}" if txt else "")
         before = [dict(m) for m in self.state["history"]]
         self.state["history"].append({"role": "user", "content": display_user})
         self.state["history"].append({"role": "assistant", "content": ""})
@@ -119,7 +122,8 @@ class Turn(Part):
         self.chat.speed_label.text = "queued…" if waiting else "…"
         held = self.hold()
         try:
-            async for kind, payload in self.client.stream_message(self.state["active_id"], txt, images=image_ids):
+            async for kind, payload in self.client.stream_message(self.state["active_id"], txt, images=image_ids,
+                                                                    whole=whole):
                 if kind == "waiting":                      # the card is serving another turn; asked again in 5 s
                     if not waiting:
                         waiting = True
