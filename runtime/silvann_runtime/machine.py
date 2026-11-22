@@ -663,11 +663,13 @@ class Machine:
         there is none (NN-142)."""
         if self.silicon == "host" or self.silicon in CPU_FAMILIES:
             return None
+        cards = self.e.cards()
+        beside = [(family, [c["card"] for c in cards if c.get("silicon_family") == family])
+                  for family in OPENCL_FAMILIES if family != self.silicon]
+        if not any(names for _, names in beside):
+            return None                    # no OpenCL family's GPU beside the card: OpenCL's loader is not asked
         own = opencl_own_memory()
-        for family in OPENCL_FAMILIES:
-            if family == self.silicon:
-                continue
-            names = [c["card"] for c in self.e.cards() if c.get("silicon_family") == family]
+        for family, names in beside:
             for device, name in enumerate(names):
                 if any(seen.startswith(name) and not mine for seen, mine in own.items()):
                     return (family, device)

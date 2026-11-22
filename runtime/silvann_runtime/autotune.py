@@ -56,11 +56,12 @@ import os
 import re
 import shutil
 import subprocess
+import time
 
 from . import experts_file
-from .machine import CPU_FAMILIES, Machine, own_memory
+from .machine import CPU_FAMILIES, OPENCL_FAMILIES, Machine, own_memory
 from .model_folder import ModelFolder, Refused
-from .system import LIBRARY_SUFFIX, memory
+from .system import LIBRARY_SUFFIX, card_budgets, cards_held, memory, past_the_card, spilled
 from .vision import video_ram
 
 PLACEMENT = ("experts_on", "experts_from", "card_experts_gb")
@@ -80,7 +81,7 @@ NOT_A_CARD = CPU_FAMILIES + ("host", "intel_opencl1_igpu")   # silicon whose poo
 TIER_MAX_GB = 128        # the binary search's ceiling, past any card's memory
 DISK_CHUNK = 1024        # GLM's prompt rows a step with its experts on the disk (Qwen's chunk is at most 256)
 FREED_GB = 1             # a card this much emptier than when a kept choice was made chooses again (`_freed`)
-RULES = 10               # the rules' version, in what a kept choice was made for: a change to them chooses again
+RULES = 11               # the rules' version, in what a kept choice was made for: a change to them chooses again
 REGISTER_TABLES = 512    # registered RAM over the card memory that maps it: an 8-byte page-table entry a 4 KiB page.
                          # MEASURED node03 2026-10-26: GLM's 142 GiB registered took 281 MiB more of the MI50 at its peak
                          # (measurements/2026-10-26_v0200_r730_rows_node03.md, vram_register.sh); held beside the margin,
@@ -88,6 +89,8 @@ REGISTER_TABLES = 512    # registered RAM over the card memory that maps it: an 
                          # took 1,036 s against 251 s unregistered, and registered nothing in the end
 CARD_CONTEXT = 32768     # growing, the experts stay on the card where it holds this much context beside them (NN-93)
 FILES_SHARE = experts_file.FILES_SHARE   # what DeepSeek's experts in RAM leave of what this process may hold (▶ there)
+SPILL_MB = 256           # a trial boot Windows gave this much of the PC's RAM in a card's place is the card's refusal
+                         # (▶ `_Prober.boots`)
 
 
 def _a_card(silicon, machine):
@@ -167,6 +170,10 @@ class _Prober:
         self.tried = 0
         self.video_tokens = None
         self.answer = None
+        # Windows' cards (▶ `_past`): what a boot that fits holds of its cards beyond the pools asked of them, and
+        #   the least Windows budgets this process on a card it boots on; None until a boot has shown them
+        self.beside = None
+        self.budget = None
 
     def model(self, max_context, options):
         """The architecture's model for these options, unbooted: what it plans, and refuses, before the card."""
@@ -179,12 +186,21 @@ class _Prober:
         model = self.model(max_context, options)
         machine = model.m
         params = _held(model.device_params(), model.workers(), self.margin_mb + _tables_mb(model), machine)
+        asked = _pools(params, model.workers(), machine)
+        pools = [bytes_ for bytes_, _ in asked]
+        if pools and self.beside is not None and self.budget and max(pools) + self.beside > self.budget:
+            return False                                # past Windows' budget before it is booted (▶ `_past`)
         self.tried += 1
+        before = _spilled()
         try:
             if isinstance(params, dict):
                 machine.boot(params[0], workers=model.workers(), worker_params=params)
             else:
                 machine.boot(params)
+            why = self._past(before, asked)
+            if why:
+                self.log("[autotune] Windows keeps part of this setup off the card (%s): taken as the card's refusal" % why)
+                return False
             self.answer = then(model) if then is not None else None
             return True
         except Exception as ex:                                       # noqa: BLE001 — the engine's refusal is a plain error
@@ -196,6 +212,62 @@ class _Prober:
             raise
         finally:
             machine.shutdown()
+
+    def _past(self, before, asked):
+        """Why the boot just made holds more than its cards keep, as Windows counts it, or None — None on another
+        system, where a card refuses what it cannot hold. `before` is what `_spilled` said before the boot, `asked`
+        each card's (bytes asked of it, its family) (▶ `_pools`).
+        ⭐ ON WINDOWS A CARD DOES NOT REFUSE WHAT IT CANNOT HOLD. Short of the card's whole size the request is taken,
+        and what does not fit is kept in the PC's RAM and brought to the card and back at every use: as "shared GPU
+        memory" where the driver gives it so, and where NVIDIA's OpenCL keeps it itself in no counter at all. So a
+        setup past the card's memory boots, and one that tries setups until one is refused settles a little past the
+        card. `MEASURED` on a GTX 1080 Ti through `nvidia_opencl1` (Windows 10 19045, driver 582.28; Windows' budget for
+        the process 10,338 MB of the card's 11,106), the 35B with its whole context: a 3.5 GB tier holds 10,570 MB of
+        the card, 1,813 MB beside its pool, and answers at 11.6 tokens/s; a 4.0 GB tier — which the card takes, and
+        which this once chose — holds 10,074 MB, 804 MB beside its pool, a GiB of it in RAM, at 0.36 tokens/s. Three
+        signs, each the card's refusal here:
+          · RAM given it as shared GPU memory (`SPILL_MB`);
+          · a card's memory in use past Windows' budget for the process, which the system moves to RAM as another
+            program wants the card;
+          · less of a card in use beside the pool than a boot that fits holds there (`beside`, the most a boot has
+            shown; `calibrate` boots the smallest setup first for it): the difference is in RAM already.
+        And a setup whose pool and `beside` are past the budget is not booted at all (▶ `boots`)."""
+        held = _settled()
+        if held is None:
+            return None
+        given = spilled(held) - (before or 0)
+        if given > SPILL_MB << 20:
+            return "%.0f MB of the PC's RAM given it as shared GPU memory" % (given / 2**20)
+        budgets = card_budgets() or {}
+        pools = [bytes_ for bytes_, _ in asked]
+        # an OpenCL family fills a pool as it makes it, so the card counts it at once; another's may not be counted yet
+        filled = all(family in OPENCL_FAMILIES for _, family in asked)
+        why = past_the_card(held, budgets, pools if filled else [])
+        if why:
+            return why
+        on_cards = sorted(((d, a) for a, (d, _, _) in held.items()), reverse=True)[:len(pools)]
+        if not pools or len(on_cards) < len(pools):
+            return None
+        beside = min(d - p for p, (d, _) in zip(sorted(pools, reverse=True), on_cards))
+        if self.beside is not None and beside < self.beside - (SPILL_MB << 20):
+            return ("%.0f MB of a card in use beside the pool asked of it, where a setup that fits holds %.0f MB: the "
+                    "rest is in the PC's RAM" % (beside / 2**20, self.beside / 2**20))
+        self.beside = max(self.beside or 0, beside)
+        known = [budgets[a][1] for _, a in on_cards if budgets.get(a, (0, 0))[1]]
+        self.budget = min(known) if known else None
+        return None
+
+    def calibrate(self, options, takes):
+        """On Windows, the smallest setup booted once before any other, for what a boot that fits holds of its card
+        beside the pool asked of it (▶ `_past`). Nothing on another system; a setup that does not boot shows nothing,
+        and the first that fits then does."""
+        if cards_held() is None:
+            return
+        small = dict(options, experts_on="cpu") if "experts_on" in takes and "experts_on" not in options else options
+        try:
+            self.boots(MIN_CONTEXT, small)
+        except Exception:                                   # noqa: BLE001 — a setup wrong in itself is said where it is chosen
+            pass
 
     def duplex(self, max_context, options):
         """The card's duplex ratio ×1000 for this setup's tier — a copy of an expert to the card and one back run at once,
@@ -213,6 +285,48 @@ class _Prober:
         zeros = collections.defaultdict(int)
         size = lambda n: sum(b for _, b in model.state_regions(n, zeros))          # noqa: E731
         return (size(max_context) - size(max_context - CTX_STEP)) / CTX_STEP
+
+
+def _spilled():
+    """The bytes of the PC's RAM this process holds in a card's place, as Windows counts them (▶ `system.spilled`);
+    None where the system does not say — another system, where a card refuses what it cannot hold."""
+    held = cards_held()
+    return None if held is None else spilled(held)
+
+
+def _settled(wait=0.5, tries=6):
+    """`cards_held`, read again until two readings a moment apart agree: Windows counts an allocation a moment after
+    it is made (`MEASURED` through CUDA's driver API on a GTX 1080 Ti: a GiB allocated and written showed at the next
+    reading; NVIDIA's OpenCL, waited for, at once). None on another system, at once."""
+    held = cards_held()
+    for _ in range(tries if held is not None else 0):
+        time.sleep(wait)
+        again = cards_held()
+        if again == held:
+            break
+        held = again
+    return held
+
+
+def past_cards():
+    """Why this process, a model booted in it, holds more than its cards keep as Windows counts it — RAM given it as
+    shared GPU memory, or a card's memory in use past Windows' budget for the process (▶ `_Prober._past`) — or None;
+    None on another system. What a config that names its own placement is told of, where no setup was tried."""
+    held = _settled()
+    if held is None:
+        return None
+    if spilled(held) > SPILL_MB << 20:
+        return "%.0f MB of the PC's RAM given it as shared GPU memory" % (spilled(held) / 2**20)
+    return past_the_card(held, card_budgets() or {}, [])
+
+
+def _pools(params, workers, machine):
+    """What a boot's sections ask of each card — (the bytes of its pool, its family) for every worker that is a card of
+    its own memory (▶ `POOL`); `params` one section (the card's) or {worker: section}, `workers` (silicon, device) a
+    worker."""
+    sections = params if isinstance(params, dict) else {0: params}
+    return [(int(m.group(1)) << 20, workers[w][0]) for w, text in sorted(sections.items())
+            if w < len(workers) and _a_card(workers[w][0], machine) for m in [POOL.search(text)] if m]
 
 
 def _vendor_cards():
@@ -401,6 +515,7 @@ def choose(path, max_context, options=None, silicon=None, fresh=False, log=print
         return got["options"], got["max_context"], "%s — as chosen %s, kept in autotune.json" % (got["why"], got["chosen"])
     p = _Prober(folder, arch, silicon, log, margin_mb)
     p.video_tokens = video_tokens
+    p.calibrate(options, takes)
     # ⭐ A NUMBER IS "max" UP TO IT (⚖ 2026-11-09 *"i thought auto would give you all of the context possible by
     #   shrinking the temporary expert block"*): the context as much as the card holds beside the model up to the number,
     #   and a tier only once the context is the whole number — or, lent the cache's rows a conversation has not reached,

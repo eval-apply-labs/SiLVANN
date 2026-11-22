@@ -121,8 +121,8 @@ No card: either command without its `--device` and `--group-add` flags. To updat
 ⚗ **An integrated GPU beside the card — experimental.** On a laptop whose Intel GPU sits beside its NVIDIA card, the Intel
 GPU can do what the processors would — a larger model's experts in RAM, an older card's embedding — and leave them free:
 add `--device /dev/dri --group-add keep-groups -e SILVANN_IGPU_CPU=1` to the NVIDIA command (Docker: `--device /dev/dri
--e SILVANN_IGPU_CPU=1`). The image holds Intel's OpenCL for it; `igpu_cpu` in [config.md](../docs/config.md) says what
-goes there and when. It has run on one laptop's Intel GPU — reported, not measured here: the 35B-A3B at 12 tokens a
+-e SILVANN_IGPU_CPU=1`), which has Linux name the Intel GPU. The image holds Intel's OpenCL for it; `igpu_cpu` in
+[config.md](../docs/config.md) says what goes there and when. It has run on one laptop's Intel GPU — reported, not measured here: the 35B-A3B at 12 tokens a
 second with its experts there, 5 with them on the processors; the processors' load beside the CPU's own is the report it
 still needs. A Linux machine's — Docker Desktop on Windows reaches a GPU through WSL 2's `/dev/dxg`, which the image's
 Intel OpenCL is not built for (`ASSUMED`); there the native install sees the integrated GPU itself (the same variable).

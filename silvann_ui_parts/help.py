@@ -45,6 +45,7 @@ HELP_DOCS = [
     ("Licences", "The contributor licence agreement", LICENCE_DIR / "CLA.md"),
 ]
 HELP_FIRST = "Using SiLVANN · The UI"
+USERS_GUIDE_DOC = "Using SiLVANN · Running SiLVANN"       # the guide to installing and running it, Windows' page too
 
 
 # ⭐ THE DOCUMENTS' PICTURES: docs/images/, served to the Help view under a path of its own — the release's public files,
@@ -163,12 +164,16 @@ class HelpView(Part):
         self.help_shown["path"] = path
         self.help_doc_md.set_content(help_doc(path, bool(self.state.get("dark", False))))
 
-    def open_config_guide(self):
-        """Help, at the guide to a config's keys and every model's options."""
-        self.help_doc_select.set_value(CONFIG_GUIDE_DOC)
-        self.show_help(self.help_paths[CONFIG_GUIDE_DOC])
+    def open_doc(self, listed: str):
+        """Help, at the document the picker lists as `listed`."""
+        self.help_doc_select.set_value(listed)
+        self.show_help(self.help_paths[listed])
         self.state["view"] = "help"
         self.shell.update_view()
+
+    def open_config_guide(self):
+        """Help, at the guide to a config's keys and every model's options."""
+        self.open_doc(CONFIG_GUIDE_DOC)
 
     def on_help_link(self, e):
         """A link between the documents: the one it names, in the picker where it is listed."""

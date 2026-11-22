@@ -78,6 +78,8 @@ take (rented)
 
 **Windows with an NVIDIA card, natively** (an RTX 5070 Ti, a Ryzen 7 5800X)
 - built from source with CUDA 13.4, Ministral 3 14B `D4` on the card ([`users.md`](users.md#on-windows))
+- a GTX 1080 Ti through OpenCL 1.2 (the portable app, two Xeon E5-2620 v4; rented): Qwen 3.6 35B-A3B `D8E4`, its
+  experts in RAM and a 3 GB tier of them on the card, at 11 tokens a second after a 2,000-word prompt
 
 ## Not yet tested
 

@@ -207,16 +207,26 @@ tokens a second (v0.12.0); with v0.21.2, Qwen 3.6 35B-A3B `D8E4` — its experts
 CPU alone, the experts read from the disk, and AMD's and Intel's GPUs have not run on Windows yet: tell us in Discussions
 how they do.
 
-**A model larger than the card, on Windows.** NVIDIA's Windows driver lets a program use more memory than the card has,
-the rest in the PC's RAM ("shared GPU memory" in Task Manager), so a model too large for the card starts on it all the
-same and then reads that rest over PCIe at every token. On one PC (an RTX 4060 Ti 16 GB) the Qwen 3.6 35B-A3B `D8E4`
-started with all its experts on the card, 4 GB of them in shared memory, and answered at 6 tokens a second (under
-Docker Desktop, which v0.11 ran on Windows). The CUDA family
-refuses an allocation past the card's free memory, which has not been checked on Windows yet; until it is, name the placement in the model's config (the Options view): the experts on the CPU, and a tier
-of them on the card that leaves Task Manager's shared GPU memory near 0 —
-`"options": {"kv": "tiered", "tiers": [256, 4096, "rest"], "experts_on": "cpu", "experts_from": "ram",
-"card_experts_gb": 6}` answered at 16 tokens a second there. The driver's "CUDA - Sysmem Fallback Policy" set to
-"Prefer No Sysmem Fallback" left CUDA in WSL 2 without the card on that PC: keep it at its default.
+**A model larger than the card, on Windows.** On Linux a card refuses what it cannot hold, and the setup SiLVANN
+chooses for a machine stops there. On Windows a card takes it: short of the card's whole size the request is accepted,
+and what does not fit is kept in the PC's RAM and brought to the card and back at every token — as "shared GPU memory"
+in Task Manager where NVIDIA's driver gives it so, and in no counter at all where it does not. A model set up a little
+past the card then starts, and answers many times slower. On one PC (a GTX 1080 Ti, 11 GB) the Qwen 3.6 35B-A3B `D8E4`
+with its whole context and a 4.5 GB tier of experts on the card answered at 0.5 tokens a second, a GiB of it in RAM, and
+at 11 with a 3 GB tier; on another (an RTX 4060 Ti 16 GB, under Docker Desktop, which v0.11 ran on Windows) it started
+with all its experts on the card, 4 GB of them in shared memory, at 6 tokens a second against 16 with them on the CPU.
+
+The setup SiLVANN chooses (`max_context` and the placement `"auto"`, as a model's first config has them) keeps to what
+Windows itself budgets the program on the card, and to what it finds on the card after each trial: on that GTX 1080 Ti
+it chose the 3 GB tier. A config that names its own placement is taken as it is; if it passes the card the server's
+log says so — lower `max_context` or `card_experts_gb`, or set them to `"auto"`. A card that also drives the screen
+has less to give: the other programs' share is theirs.
+
+NVIDIA's driver has a setting for the shared memory — *NVIDIA Control Panel* → *Manage 3D settings* → *Global
+Settings* → *CUDA - Sysmem Fallback Policy* → *Prefer No Sysmem Fallback* — which makes the card refuse instead: turn
+it off, and the UI says so to the machine's admin when a page opens for as long as it is on, as the server does in its
+log. A driver without the setting (a GTX 1080 Ti's) takes none of the RAM that way, and is told nothing. Under WSL 2
+the setting left CUDA without the card on one PC: there, keep it at its default.
 
 **The page file.** Windows counts what a program puts on an NVIDIA card against the PC's commit limit — the RAM and the
 page file together — as it counts the program's own memory, though the card's share takes none of the RAM: Windows
@@ -227,7 +237,8 @@ RTX PRO 6000, no page file), Qwen 3.8 Flash-Next with its 57 GB of experts in RA
 had Task Manager's *Committed* at 133 of 137 GB, with half the memory *Available*. Give such a PC a page file at least
 the size of what the model puts on the card — *Advanced system settings* → *Performance: Settings* → *Advanced* →
 *Virtual memory: Change*, then *System managed size* or a custom size — and restart. Nothing of the card's is written
-to it unless the card's memory runs out.
+to it unless the card's memory runs out. The UI says so to the machine's admin, and the server in its log, on a PC with
+no page file or with one whose largest size is under its NVIDIA card's memory.
 
 ### On Windows: a container
 

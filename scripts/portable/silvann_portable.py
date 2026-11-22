@@ -57,6 +57,7 @@ CREATE_NO_WINDOW = 0x08000000 if WINDOWS else 0
 STOP_SECONDS = 660                                  # the UI's stop without a window to cut it short: the server's save
                                                     # (its 600 s) and its end
 HANDED_OVER = 5                                     # seconds: a browser back sooner gave its window to one already running
+GONE_AT_ONCE = 10                                   # seconds: Edge back sooner did not have its window closed by a person
 PORT = 8080                                         # the UI's, as an install's and the container's (SILVANN_PORT another)
 RESTART = 75                                        # the UI's exit asking to be started again (▶ silvann_ui_parts/run.py's
                                                     #   SILVANN_RESTART_EXIT): single user or multi user switched
@@ -153,6 +154,37 @@ def edge():
     except ImportError:
         pass
     return None
+
+
+def held(profile):
+    """Whether Edge holds the profile: it keeps `lockfile` in it open, to itself, for as long as it runs there
+    (`MEASURED` Windows 10 19045: held while the window is open, gone once it is closed)."""
+    try:
+        os.close(os.open(str(Path(profile) / "lockfile"), os.O_RDWR))
+        return False
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+
+
+def edge_window(open_once, profile, clock=time.time, sleep=time.sleep, tries=2):
+    """Edge's window on Windows, until a person closes it — True then; False where it would not stay open.
+    ⛔ THE PROCESS THAT WAS STARTED IS NOT ALWAYS THE WINDOW'S. ⚖ 2026-11-22 *"when i first open a freshly downloaded
+    portable app version on windows the first time it opens and closes immediately, and i need to reopen it manually"*:
+    `MEASURED` once on a new copy's first opening (Windows 10 19045): Edge's process was back within two seconds, the
+    profile just made, and the app — which took that for its window closed — ended; three more openings of the same
+    folder, each as never opened, stayed. So an Edge back within GONE_AT_ONCE seconds was not closed by a person:
+    where Edge still holds the profile it gave the window to another of its processes, and the window is waited for
+    there; where nothing holds it the window is opened again, as a person does by hand."""
+    for _ in range(tries):
+        started = clock()
+        open_once().wait()
+        while held(profile):                          # the window is another Edge process's: closed when it lets go
+            sleep(0.5)
+        if clock() - started >= GONE_AT_ONCE:
+            return True
+    return False
 
 
 def app_browser():
@@ -403,15 +435,21 @@ def main():
             #   holds — its lock is a symbolic link, which a drive formatted for both systems (exFAT) cannot make
             profile = (data / ".edge") if WINDOWS else (
                 Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "silvann_portable" / "browser")
-            started = time.time()
-            window = subprocess.Popen([str(browser), "--app=" + url, "--user-data-dir=" + str(profile),
-                                       "--no-first-run", "--no-default-browser-check", "--disable-features=Translate"],
-                                      **(dict(creationflags=CREATE_NO_WINDOW) if WINDOWS else
-                                         dict(stdout=log, stderr=subprocess.STDOUT)))
-            code = window.wait()                      # the window closed: the app is over
-            if WINDOWS or time.time() - started >= HANDED_OVER:
-                return 0
-            handed_over = code == 0                   # back at once: its window given to a browser already running
+            def open_once():
+                return subprocess.Popen([str(browser), "--app=" + url, "--user-data-dir=" + str(profile),
+                                         "--no-first-run", "--no-default-browser-check", "--disable-features=Translate"],
+                                        **(dict(creationflags=CREATE_NO_WINDOW) if WINDOWS else
+                                           dict(stdout=log, stderr=subprocess.STDOUT)))
+            if WINDOWS:
+                if edge_window(open_once, profile):   # the window closed: the app is over
+                    return 0
+            else:
+                started = time.time()
+                window = open_once()
+                code = window.wait()                  # the window closed: the app is over
+                if time.time() - started >= HANDED_OVER:
+                    return 0
+                handed_over = code == 0               # back at once: its window given to a browser already running
         if WINDOWS:
             os.startfile(url)
         elif not handed_over and (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):

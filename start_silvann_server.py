@@ -67,7 +67,7 @@ from silvann_core import default_config                                   # noqa
 sys.path.insert(0, str(RUNTIME))
 import silvann_runtime as SR                                              # noqa: E402
 from silvann_runtime import autotune, experts_file, registry, skills, tools, tools_config     # noqa: E402
-from silvann_runtime import space, sso, users                             # noqa: E402
+from silvann_runtime import space, sso, system, users                     # noqa: E402
 from silvann_runtime.chat import Chat, ToolMarkup                         # noqa: E402
 from silvann_runtime.fetch import ensure_model                            # noqa: E402
 from silvann_runtime.machine import CPU_FAMILIES                         # noqa: E402
@@ -539,6 +539,15 @@ def _boot(args):
             S.why = why
             print("[silvann_server] the card refused the setup kept for it; chosen again: %s" % why, flush=True)
             S.model = SR.open_model(str(folder), lora=cfg.get("lora"), max_context=max_context, progress=_loading(), **options)
+    # ⛔ ON WINDOWS A CARD TAKES WHAT IT CANNOT HOLD, and keeps the rest in the PC's RAM: a config that names its own
+    #   placement is told so in the log (the setup chosen for the machine stays within the card, ▶ autotune.py)
+    try:
+        past = autotune.past_cards()
+    except Exception:                                         # noqa: BLE001 — a reading that fails says nothing
+        past = None
+    if past:
+        print("[silvann_server] ⚠ Windows keeps part of the model off the card (%s): every token waits for it. In the "
+              "config, lower max_context or card_experts_gb, or set them and the placement to \"auto\"" % past, flush=True)
     if ring:
         if not hasattr(S.model, "forward"):
             raise SR.Refused("%s runs on one machine only: its model has no stages" % folder.name)
@@ -2560,6 +2569,14 @@ def main():
     USERS.open()                                              # the app opened, where no UI nor server of it was running
     if not USERS.ready():
         print("[silvann_server] %s — until then every request but /health is refused" % NO_ACCOUNT, flush=True)
+    # what this PC's settings cost a model on its card (Windows' — the UI says the same to its admin), before the boot
+    #   they may refuse
+    try:
+        for notice in system.notices():
+            print("[silvann_server] ⚠ %s. %s%s" % (notice["title"], notice["text"].replace("\n\n", " "),
+                                                   " (%s)" % notice["link"] if notice["link"] else ""), flush=True)
+    except Exception as ex:                                   # noqa: BLE001 — a reading that fails says nothing
+        print("[silvann_server] this machine's settings not read (%s)" % ex, flush=True)
     # ⛔ A BOOT THAT CANNOT BE MADE IS SAID IN ONE LINE, `⛔ not started:` and why — the UI that started this server shows
     #   it in its status (▶ silvann_ui_parts/server_process.py, `ServerProcess.failure`)
     try:

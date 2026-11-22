@@ -1,6 +1,6 @@
 # SiLVANN
 
-> **Public beta, v1.4.1.** The normal path has been tested on a reasonable sample of cards, but a bug-free experience is
+> **Public beta, v1.4.2.** The normal path has been tested on a reasonable sample of cards, but a bug-free experience is
 > not expected yet. It is shared for enthusiasts with patience, who can follow a guide and do some troubleshooting. The
 > cards it has run on — NVIDIA's from a GTX 1080 Ti to a B200, AMD's MI50, MI355X and RDNA4 Radeons, and Windows natively
 > on one PC — are in [`docs/platforms.md`](docs/platforms.md); less common setups may not behave as expected, and a
@@ -70,7 +70,7 @@ every machine one model was measured on, its packs and its notes: [`docs/models.
 names no setup chooses its own when the server starts, by trying it on the card: where its experts go, how much of the
 card holds the ones used most, the context the card has room for ([`docs/config.md`](docs/config.md)).
 
-**New in v1.4.1**: [`docs/release_logs/v1.md`](docs/release_logs/v1.md); every 0.x release before it:
+**New in v1.4.2**: [`docs/release_logs/v1.md`](docs/release_logs/v1.md); every 0.x release before it:
 [`docs/release_logs/v0.md`](docs/release_logs/v0.md).
 
 ## Platforms

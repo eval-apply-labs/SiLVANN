@@ -15,6 +15,7 @@ from .conversations import Conversations
 from .help import HelpView
 from .local import LOCAL_APP
 from .models_panel import ModelsPanel
+from .notices import Notices
 from .options import OptionsView
 from .remote_sign_in import RemoteSignIn
 from .run import _this_address
@@ -53,7 +54,8 @@ class Page:
         self.conversations = Conversations(self)
         self.turn = Turn(self)
         self.remote = RemoteSignIn(self)
-        for part in (self.shell, self.chat, self.options, self.models, self.users_mode, self.users, self.account, self.help, self.connection, self.conversations, self.turn, self.remote):
+        self.notices = Notices(self)
+        for part in (self.shell, self.chat, self.options, self.models, self.users_mode, self.users, self.account, self.help, self.connection, self.conversations, self.turn, self.remote, self.notices):
             part.meet()
 
     async def setup(self):
@@ -145,6 +147,7 @@ class Page:
 
         self.page_client.on_delete(self._page_gone)
         ui.timer(0.5, lambda: self.chat.follow_chat(force=True), once=True)   # the conversation opened at its bottom, once drawn
+        ui.timer(1.0, self.notices.show, once=True)                 # what this machine's settings cost a model, to its admin
 
     def token_for(self, endpoint: str) -> Optional[str]:
         """The token a request to `endpoint` carries: one that server gave this browser (another machine's, whose accounts

@@ -358,13 +358,14 @@ class Qwen35(Generates):
         #   2026-11-09 *"so we can let the cpu cores free during gemv"* · *"make it an experimental flag as igpu_cpu"*): the
         #   worker the experts in RAM and an OpenCL 1.2 card's embedding go to an integrated GPU where the machine has one
         #   beside its card (`Machine.integrated`: an OpenCL family's GPU whose memory is the host's) — the RAM both read, the
-        #   card's kernels their arithmetic, the CPU left free. `"auto"` it where there is one, `"yes"` refused where there
-        #   is none, `"no"` the CPU's own; by default `"no"`, and `"auto"` where `SILVANN_IGPU_CPU=1` (which also has Linux
-        #   name Intel's GPUs, ▶ cards_present.cuh). Its slots are its family's addresses, not the host's: a card's tier
-        #   copying from them, their registration with the card or their lock in RAM, the CPU's int8 arithmetic, the disk's
-        #   cache and a group of cards are refused beside it.
+        #   card's kernels their arithmetic, the CPU left free. `"auto"`, the default, it where there is one (⚖ 2026-11-22
+        #   *"we should set the igpu_cpu as auto, as it doubled the tps there even on a 6 core cpu"*), `"yes"` refused
+        #   where there is none, `"no"` the CPU's own. Windows names an integrated GPU itself; Linux names Intel's only
+        #   where `SILVANN_IGPU_CPU=1` (▶ cards_present.cuh), so there `"auto"` finds one only with it. Its slots are its
+        #   family's addresses, not the host's: a card's tier copying from them, their registration with the card or
+        #   their lock in RAM, the CPU's int8 arithmetic, the disk's cache and a group of cards are refused beside it.
         if igpu_cpu is None:
-            igpu_cpu = "auto" if os.environ.get("SILVANN_IGPU_CPU") == "1" else "no"
+            igpu_cpu = "auto"
         if igpu_cpu not in ("auto", "yes", "no", True, False):
             raise Refused("igpu_cpu is 'auto', 'yes' or 'no', not %r" % (igpu_cpu,))
         self.IGPU = machine.integrated() if self.CPU_WORKER and igpu_cpu not in ("no", False) else None
