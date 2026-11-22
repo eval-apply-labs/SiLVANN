@@ -57,7 +57,9 @@ CREATE_NO_WINDOW = 0x08000000 if WINDOWS else 0
 STOP_SECONDS = 660                                  # the UI's stop without a window to cut it short: the server's save
                                                     # (its 600 s) and its end
 HANDED_OVER = 5                                     # seconds: a browser back sooner gave its window to one already running
-GONE_AT_ONCE = 10                                   # seconds: Edge back sooner did not have its window closed by a person
+GONE_AT_ONCE = 10                                   # seconds: Edge back sooner may have given its window to another of its processes
+TAKEN_WITHIN = 10                                   # seconds such a process has to take the profile; none by then, no window
+SHOWN = 3                                           # seconds: Edge back sooner never had a window a person could close
 PORT = 8080                                         # the UI's, as an install's and the container's (SILVANN_PORT another)
 RESTART = 75                                        # the UI's exit asking to be started again (▶ silvann_ui_parts/run.py's
                                                     #   SILVANN_RESTART_EXIT): single user or multi user switched
@@ -169,20 +171,31 @@ def held(profile):
 
 
 def edge_window(open_once, profile, clock=time.time, sleep=time.sleep, tries=2):
-    """Edge's window on Windows, until a person closes it — True then; False where it would not stay open.
+    """Edge's window on Windows, until a person closes it — True then; False where no window came.
     ⛔ THE PROCESS THAT WAS STARTED IS NOT ALWAYS THE WINDOW'S. ⚖ 2026-11-22 *"when i first open a freshly downloaded
-    portable app version on windows the first time it opens and closes immediately, and i need to reopen it manually"*:
-    `MEASURED` once on a new copy's first opening (Windows 10 19045): Edge's process was back within two seconds, the
-    profile just made, and the app — which took that for its window closed — ended; three more openings of the same
-    folder, each as never opened, stayed. So an Edge back within GONE_AT_ONCE seconds was not closed by a person:
-    where Edge still holds the profile it gave the window to another of its processes, and the window is waited for
-    there; where nothing holds it the window is opened again, as a person does by hand."""
+    portable app version on windows the first time it opens and closes immediately, and i need to reopen it manually"*
+    · *"for some reason the first launch keeps that and it is confusing for a new user"*.
+    `MEASURED` (Windows 10 19045, Edge 158.0.4370.33, measurements/2026-11-22_first_opening_windows.md): on a profile
+    not yet made, the msedge.exe that was started is back within a tenth of a second (0.09 s, then 0.03 s), having
+    started the browser as a process of its own, which takes the profile about a second later. An app that reads the
+    first as its window closed ends with the window open; one that looks for the profile's holder at that instant
+    finds none, opens the window again, finds none again, and gives a window that is there up for lost.
+    So an Edge back within GONE_AT_ONCE seconds is given TAKEN_WITHIN seconds for another of its processes to take the
+    profile, and the window is waited for there — closed when that process lets go. Where none takes it there is no
+    window: a person closed the one the started process had, where it lived long enough to show one (SHOWN); else it
+    never came, and it is opened again, as a person does by hand."""
     for _ in range(tries):
         started = clock()
         open_once().wait()
+        back = clock() - started
+        taken = held(profile)
+        until = clock() + TAKEN_WITHIN
+        while not taken and back < GONE_AT_ONCE and clock() < until:
+            sleep(0.25)
+            taken = held(profile)
         while held(profile):                          # the window is another Edge process's: closed when it lets go
             sleep(0.5)
-        if clock() - started >= GONE_AT_ONCE:
+        if taken or back >= SHOWN:
             return True
     return False
 
@@ -435,9 +448,17 @@ def main():
             #   holds — its lock is a symbolic link, which a drive formatted for both systems (exFAT) cannot make
             profile = (data / ".edge") if WINDOWS else (
                 Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "silvann_portable" / "browser")
+            # ⭐ EDGE IS STARTED WITHOUT WINDOWS' MARK ON A PROGRAM IT HAS NOT RUN BEFORE. The first time SiLVANN.exe
+            #   runs from a path, Windows puts its compatibility assistant's layer in the environment
+            #   (`__COMPAT_LAYER`, "DetectorsAppHealth"), and an Edge started under it starts itself again without it
+            #   and ends at once: on a folder's first opening the window was another process's (▶ edge_window;
+            #   `MEASURED`, measurements/2026-11-22_first_opening_windows.md). Without the mark Edge is the window's own.
+            unmarked = {name: value for name, value in os.environ.items() if name.upper() != "__COMPAT_LAYER"}
+
             def open_once():
                 return subprocess.Popen([str(browser), "--app=" + url, "--user-data-dir=" + str(profile),
                                          "--no-first-run", "--no-default-browser-check", "--disable-features=Translate"],
+                                        env=unmarked,
                                         **(dict(creationflags=CREATE_NO_WINDOW) if WINDOWS else
                                            dict(stdout=log, stderr=subprocess.STDOUT)))
             if WINDOWS:

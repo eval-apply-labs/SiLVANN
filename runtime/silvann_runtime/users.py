@@ -914,28 +914,32 @@ def _closed(root, keep):
 class Fence:
     """⭐ WHAT A USER'S REPL REACHES — A CHROOT'S VIEW WITHOUT ROOT (⚖ 2026-11-06 *"maybe the model's repl is simply blind
     to the whole folder with the exception of the current user?"* · *"chroooted in the user's folder space … so it can
-    access only the tools that the system allows them to access"*): it writes in the user's workspace alone; it reads
-    there, in the system's programs (▶ jail's SYSTEM, READABLE), the folders of the tools the user has switched on, and
+    access only the tools that the system allows them to access"*): it writes in the user's workspace alone — and
+    among its own conversation's files (▶ `opened`), by `(write …)` and by its commands; it reads there, in the
+    system's programs (▶ jail's SYSTEM, READABLE), the folders of the tools the user has switched on, and
     the runtime and the venv it runs from; the rest is closed — of the data folder everything else (every other user's
     folder, the user's own password, settings and conversations, the Hugging Face token, a file made later), and of the
     machine everything else (its other disks, /home, /tmp). The commands' Landlock rules are the same view (▶
     UserToolbox, tools.confinement). Looked at afresh at each command: a tool switched off since is closed at once.
     It stands where a classifier keeps its `sealed` list (▶ tools.Classifier's `closed_to`)."""
 
-    def __init__(self, users, me, machine_sealed=(), keep=(), tools=None, own=()):
+    def __init__(self, users, me, machine_sealed=(), keep=(), tools=None, own=(), written=()):
         self.users, self.me = users, me
         self.machine = [os.path.realpath(p) for p in machine_sealed]
         self.keep = [os.path.realpath(k) for k in keep]       # the runtime and the venv: read and run
         self.tools = tools or (lambda: [])                     # the folders of the user's tools switched on, asked now
         self.own = [os.path.realpath(p) for p in own]          # a conversation's own files: read, by its REPL alone
+        self.written = [os.path.realpath(p) for p in written]  # those of them its model writes in (▶ space.Made)
 
-    def opened(self, *folders):
+    def opened(self, *folders, written=()):
         """⭐ THIS FENCE WITH A DOOR — `folders` read as well: a conversation's own attachments and pictures, for that
         conversation's REPL and no other's (⚖ 2026-11-20: *"uploads to the per chat folder and says "uploaded <filename>
-        from the chat" to the model, so the model can read it himself ... those remain private"*). Read, never written;
-        the rest of the conversation — its state, its transcript, its password — stays closed, and every other
+        from the chat" to the model, so the model can read it himself ... those remain private"*). `written`: those
+        of them the conversation's model writes in — its attachments' folder, where what it makes is kept beside what
+        was sent (NN-202); which file there it may write is the classifier's to say (▶ tools.Classifier.check). The
+        rest of the conversation — its state, its transcript, its password — stays closed, and every other
         conversation whole."""
-        return Fence(self.users, self.me, self.machine, self.keep, self.tools, own=folders)
+        return Fence(self.users, self.me, self.machine, self.keep, self.tools, own=folders, written=written)
 
     def home(self):
         return os.path.realpath(self.users.workspace(self.me))
@@ -957,8 +961,8 @@ class Fence:
             return True
         if under(real, self.home()):
             return False
-        if touches == "write":
-            return True                                    # a user's REPL writes in their workspace alone
+        if touches == "write":                             # a user's REPL writes in their workspace — and, its
+            return not any(under(real, w) for w in self.written)   # conversation's, among that conversation's files
         readable = self.readable()
         if under(real, os.path.realpath(self.users.data)):  # the data folder's own: what is kept of it, and no more —
             return not any(under(real, r) for r in readable if under(r, os.path.realpath(self.users.data)))
@@ -980,8 +984,9 @@ class Conversations:
     a single user's machine reaches the machine as the tools file lets it (▶ `Users.reaches_machine`) — and a file sent
     to one of its conversations would then be every conversation's to read. So every account's conversations are
     closed to it: their transcripts, their states, the files sent to them. Its own conversation's files are its door
-    (▶ `opened`), read and never written. It stands where a classifier keeps its `sealed` list, beside what the
-    machine seals — the tools file's folder, the server's own process.
+    (▶ `opened`): read, and written where the classifier lets its model write among them (▶ space.Made). It stands
+    where a classifier keeps its `sealed` list, beside what the machine seals — the tools file's folder, the server's
+    own process.
     ⛔ What holds it: the commands that run inside the server — (read …), (grep …), (ls …) — and a command line that
     names a closed path, everywhere; a shell command that reaches one by a path the classifier does not see, where the
     machine's commands are confined (a container, or the tools file's `bash` setting `confined`) — on a direct
@@ -992,8 +997,10 @@ class Conversations:
         self.machine = [os.path.realpath(p) for p in machine_sealed]
         self.own = [os.path.realpath(p) for p in own]
 
-    def opened(self, *folders):
-        """This seal with a door: `folders`, a conversation's own files, read by its REPL alone."""
+    def opened(self, *folders, written=()):
+        """This seal with a door: `folders`, a conversation's own files, read by its REPL alone. `written`, those of
+        them its model writes in, is the classifier's to hold (▶ tools.Classifier.check): this seal closes none of
+        `folders` to the conversation."""
         return Conversations(self.users, self.machine, own=folders)
 
     def roots(self):
@@ -1019,7 +1026,7 @@ class Conversations:
         if any(under(real, a) for a in self.machine):
             return True
         if any(under(real, o) for o in self.own):
-            return False                                   # its own files: read (a write is the classifier's to refuse)
+            return False                                   # its own files: which of them it writes is the classifier's
         return any(under(real, r) for r in self.roots())
 
     def __iter__(self):

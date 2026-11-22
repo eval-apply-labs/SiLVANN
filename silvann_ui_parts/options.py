@@ -133,6 +133,7 @@ class OptionsView(Part):
                 self.tools_lbl = ui.label("").classes("text-xs font-mono whitespace-pre-wrap")
 
                 self.users_mode.build()
+                self.updates.build()                              # the version this copy runs, and the one after it
 
     def wire(self):
         """The server's status, start, stop and log."""

@@ -207,10 +207,33 @@ class Client:
         r.raise_for_status()
         return r.json()
 
+    async def files(self, cart_id: str) -> list:
+        """A conversation's own files as the server lists them — what was sent to it, what its model made beside it,
+        the pictures made in it: [{"path", "name", "bytes", "modified", "made"}] (▶ the server's /cartridges/<id>/files)."""
+        r = await self.http.get(f"{self.endpoint}/cartridges/{cart_id}/files", headers=self._hdr(cart_id))
+        r.raise_for_status()
+        return r.json().get("files", [])
+
+    def _ticket_hdr(self, cart_id: str) -> dict:
+        """What a one-time address asks the server with (▶ `_file_download`, `_export_download`): this page's headers
+        for the conversation and its sign-in — the request is made by the UI in a client of its own, and the server
+        answers a conversation to its own account alone."""
+        headers = dict(self._hdr(cart_id))
+        if self.http.headers.get("Authorization"):
+            headers["Authorization"] = self.http.headers["Authorization"]
+        return headers
+
+    def file_ticket(self, cart_id: str, path: str) -> str:
+        """A one-time path the browser downloads one of a conversation's files from — `path` as the server lists it,
+        `attached/report.md` — ▶ `_file_download`."""
+        token = secrets.token_urlsafe(16)
+        _FILES[token] = (self.endpoint, cart_id, path, self._ticket_hdr(cart_id), time.time())
+        return "/silvann-file/%s" % token
+
     def export_ticket(self, cart_id: str) -> str:
         """A one-time path the browser downloads a conversation's archive from — ▶ `_export_download`."""
         token = secrets.token_urlsafe(16)
-        _EXPORTS[token] = (self.endpoint, cart_id, self._hdr(cart_id), time.time())
+        _EXPORTS[token] = (self.endpoint, cart_id, self._ticket_hdr(cart_id), time.time())
         return "/silvann-export/%s" % token
 
     async def export(self, cart_id: str) -> bytes:
@@ -371,3 +394,39 @@ async def _export_download(token: str):
             await resp.aclose(); await http.aclose()
     return StreamingResponse(body(), media_type="application/x-tar",
                              headers={"Content-Disposition": f'attachment; filename="{cart_id}.silvann.tar"'})
+
+
+# ---------- A conversation's file: streamed from the server to the browser over HTTP, as an export is ----------
+# token -> (endpoint, conversation, the file's path in it, headers, when) — one use each, and gone after ten minutes unused
+_FILES: dict = {}
+
+
+@app.get("/silvann-file/{token}")
+async def _file_download(token: str):
+    from urllib.parse import quote
+    from fastapi import HTTPException
+    from fastapi.responses import StreamingResponse
+    for t, ticket in list(_FILES.items()):
+        if time.time() - ticket[-1] > 600:
+            _FILES.pop(t, None)
+    ticket = _FILES.pop(token, None)
+    if ticket is None:
+        raise HTTPException(404, "this download link was used already, or has expired")
+    endpoint, cart_id, path, headers, _ = ticket
+    http = httpx.AsyncClient(timeout=None)
+    req = http.build_request("GET", f"{endpoint}/cartridges/{cart_id}/files/{quote(path)}", headers=headers)
+    resp = await http.send(req, stream=True)
+    if resp.status_code != 200:
+        body = (await resp.aread()).decode(errors="replace")[:300]
+        await resp.aclose(); await http.aclose()
+        raise HTTPException(resp.status_code, body)
+
+    async def body():
+        try:
+            async for chunk in resp.aiter_bytes(1 << 20):
+                yield chunk
+        finally:
+            await resp.aclose(); await http.aclose()
+    name = path.split("/")[-1]
+    return StreamingResponse(body(), media_type="application/octet-stream",
+                             headers={"Content-Disposition": "attachment; filename*=UTF-8''%s" % quote(name)})

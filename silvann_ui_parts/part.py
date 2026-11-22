@@ -31,6 +31,7 @@ class Part:
         self.conversations = page.conversations
         self.turn = page.turn
         self.remote = page.remote
+        self.updates = page.updates
 
     def safe_notify(self, *args, **kwargs):
         return self.page.safe_notify(*args, **kwargs)

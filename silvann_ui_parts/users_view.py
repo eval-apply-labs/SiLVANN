@@ -336,8 +336,9 @@ class AccountView(Part):
         ui.separator().classes("mt-3")
         ui.label("Your space").classes("font-bold")
         ui.label("What your account keeps on this machine. A conversation holds its transcript, its state — what the "
-                 "model holds of it, the larger part — and its own files: what you sent to it and the pictures made in it, "
-                 "private to it and deleted with it. Archiving a conversation gives up its state and keeps the rest: it "
+                 "model holds of it, the larger part — and its own files: what you sent to it, what its model made "
+                 "beside it and the pictures made in it, private to it and deleted with it. Archiving a conversation "
+                 "gives up its state and keeps the rest: it "
                  "is still shown, no more is sent to it, and it is not opened again. The shared folder is attached/ in your workspace: what you "
                  "put there every conversation of yours can read.").classes("text-xs opacity-70 max-w-2xl whitespace-normal")
 
@@ -401,6 +402,7 @@ class AccountView(Part):
                         where, "/".join(path.split("/")[:-1]), title)).props("dense flat size=sm")
                 ui.button("close", on_click=lambda _: self.close_files()).props("dense flat size=sm")
             entries = self.files_listed(where, path)
+            made = self.made_in(where)
             if not entries:
                 ui.label("nothing here").classes("text-xs opacity-60")
             with ui.grid(columns="auto auto auto").classes("items-center gap-x-5 gap-y-0"):
@@ -409,7 +411,10 @@ class AccountView(Part):
                         ui.button(e["name"] + "/", icon="folder", on_click=lambda _, e=e: self.open_files(where, e["path"], title)
                                   ).props("dense flat no-caps size=sm align=left")
                     else:
-                        ui.label(e["name"]).classes("text-sm font-mono")
+                        with ui.row().classes("items-center gap-2 no-wrap"):
+                            ui.label(e["name"]).classes("text-sm font-mono")
+                            if e["path"] in made:           # the model's, among what was sent (NN-202)
+                                ui.label("made by the model").classes("text-xs text-green-800 border rounded px-1")
                     ui.label(SPACE.said(e["bytes"])).classes("text-xs font-mono")
                     with ui.row().classes("gap-1 no-wrap"):
                         if not e["folder"]:
@@ -425,8 +430,8 @@ class AccountView(Part):
                     self.new_folder = ui.input("a new folder").props("dense").classes("w-48")
                     ui.button("make", on_click=self.make_folder).props("dense outline size=sm")
             else:
-                ui.label("A conversation's files are sent to it in its chat, with the 📎; here they are downloaded and "
-                         "deleted.").classes("text-xs opacity-60")
+                ui.label("A conversation's files are sent to it in its chat, with the 📎, or made in it by its model — "
+                         "those are marked; here they are downloaded and deleted.").classes("text-xs opacity-60")
         self.files_panel = files_panel
         files_panel()
 
@@ -455,6 +460,16 @@ class AccountView(Part):
         except Exception as ex:                             # noqa: BLE001 — said, not raised into the page
             self.space_said.text = str(ex)
             return []
+
+    def made_in(self, where):
+        """The files of a conversation its model made, by their paths in its folder (▶ space.files): what the
+        conversation's record names of its attached/, and its pictures. None of the shared folder's."""
+        if where == "shared":
+            return set()
+        try:
+            return {f["path"] for f in SPACE.files(self.roots(where)) if f["made"]}
+        except Exception:                                   # noqa: BLE001 — a conversation gone meanwhile: nothing marked
+            return set()
 
     def deletable(self, where, path):
         """A file or a folder of the shared folder; of a conversation, what is under its attached/ or pictures/."""

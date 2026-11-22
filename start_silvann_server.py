@@ -46,7 +46,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, File, Header, HTTPException, Request, UploadFile
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
 ROOT = Path(__file__).resolve().parent
@@ -68,7 +68,7 @@ sys.path.insert(0, str(RUNTIME))
 import silvann_runtime as SR                                              # noqa: E402
 from silvann_runtime import autotune, experts_file, registry, skills, tools, tools_config     # noqa: E402
 from silvann_runtime import space, sso, system, users                     # noqa: E402
-from silvann_runtime.chat import Chat, ToolMarkup                         # noqa: E402
+from silvann_runtime.chat import Chat, ToolMarkup, files_said             # noqa: E402
 from silvann_runtime.fetch import ensure_model                            # noqa: E402
 from silvann_runtime.machine import CPU_FAMILIES                         # noqa: E402
 from silvann_runtime.session import Busy, Cartridge, Runtime, SeatedRuntime, _state_read, sampler, state_bytes     # noqa: E402
@@ -1951,7 +1951,9 @@ async def upload_image(cid: str, file: UploadFile = File(...), x_cart_password: 
 
     def keep(name, data):                            # in the conversation's own files, where the account has room
         _full("the file %s" % name, len(data), owner)
-        return space.keep(folder, name, data)
+        path = space.keep(folder, name, data)
+        _made(cid).sent(path)                        # the person's from here on, whatever the model made under its name
+        return path
 
     if documents.is_document(data, name):
         try:
@@ -2065,11 +2067,16 @@ async def post_message(cid: str, req: MessageReq, x_cart_password: Optional[str]
     if first:                                                 # the tool is declared in the first turn, or never
         extra["tools_declared"] = _tools_on(extra)
         _write_sidecar(cid, side)
+    # ⭐ A CONVERSATION BEGUN WITH THE TOOL IS TOLD WHERE A FILE FOR THE USER GOES, IN ITS SYSTEM PROMPT (NN-202, ⚖
+    #   2026-11-22: *"a system prompt that says "save the files you download or generate into the conversation's
+    #   attached folder""*): its own attached/, by its path, which its REPL and the commands it runs write in — said in
+    #   its first turn, as the tool is declared there, so a conversation begun before keeps the prompt it has
     try:
         new = S.chat.turn(c.tokens, text, _system(cid),
                           extra.get("enable_thinking", S.config.get("thinking", True)), images=[im.tokens for im in pics],
                           videos=[[(im.tokens, t) for im, t in v.pairs] for v in vids],
-                          tools=first and extra["tools_declared"])
+                          tools=first and extra["tools_declared"],
+                          files=files_said(_cdir(cid) / space.ATTACHED) if first and extra["tools_declared"] else None)
     except SR.Refused as ex:
         raise HTTPException(415, str(ex))
     images = pics + [im for v in vids for im, _ in v.pairs]
@@ -2187,6 +2194,34 @@ async def get_picture(cid: str, name: str, format: str = "png", x_cart_password:
     return Response(content=p.read_bytes(), media_type="image/png")
 
 
+# ── a conversation's own files (NN-200, NN-202) ─────────────────────────────────────────────────────────────
+@app.get("/cartridges/{cid}/files")
+async def list_files(cid: str, x_cart_password: Optional[str] = Header(default=None)):
+    """A conversation's own files — what was sent to it, what its model made beside it, the pictures made in it:
+    `{"files": [{"path", "name", "bytes", "modified", "made"}]}`, `path` from the conversation's folder
+    (`attached/report.md`), `made` whether the model made it (▶ space.files)."""
+    _check_password(cid, x_cart_password)
+    return {"files": await asyncio.to_thread(space.files, _cdir(cid))}
+
+
+@app.get("/cartridges/{cid}/files/{path:path}")
+async def get_file(cid: str, path: str, x_cart_password: Optional[str] = Header(default=None)):
+    """One of a conversation's own files, as it is kept: `path` as `/files` lists it — under the conversation's
+    `attached/` or `pictures/`. ⛔ The signed-in account's own conversation alone (▶ `_UsersGate`), and no path that
+    leaves those two folders, by `..`, by its own beginning or by a link on the way (▶ space.within)."""
+    _check_password(cid, x_cart_password)
+    parts = path.replace("\\", "/").strip("/").split("/")
+    if len(parts) < 2 or parts[0] not in (space.ATTACHED, space.PICTURES):
+        raise HTTPException(404, "no file %r in this conversation" % path)
+    try:
+        full = space.within(str(_cdir(cid) / parts[0]), "/".join(parts[1:]))
+    except space.Refused:
+        raise HTTPException(404, "no file %r in this conversation" % path)
+    if not os.path.isfile(full):
+        raise HTTPException(404, "no file %r in this conversation" % path)
+    return FileResponse(full, media_type="application/octet-stream", filename=os.path.basename(full))
+
+
 # ── the model's tool (NN-88) ────────────────────────────────────────────────────────────────────────────────
 # ⭐ A CONVERSATION BEGUN WITH THE TOOL (the config's "tools" anything but "no", or the conversation's own switch
 #   before its first message) has a Lisp REPL (▶ silvann_runtime/tools.py): the answer stops where the model calls it,
@@ -2261,6 +2296,13 @@ def _repl_place(cid):
     return home, kept[1], library, box
 
 
+def _made(cid):
+    """A conversation's record of what its model made among its files (▶ space.Made) — its REPL's own, where it has
+    one: what is sent while a form runs is then not taken for the model's."""
+    s = S.tool_sessions.get(cid)
+    return s.classifier.made if s is not None and s.classifier.made is not None else space.Made(_cdir(cid))
+
+
 def _tool_session(cid):
     s = S.tool_sessions.get(cid)
     if s is None:
@@ -2276,8 +2318,13 @@ def _tool_session(cid):
             except space.Full as ex:
                 return str(ex)
         # ⭐ THE CONVERSATION'S OWN FILES ARE ITS REPL'S TO READ (NN-200): what was sent to it and the pictures made in
-        #   it — a door in its account's fence for this conversation alone, never written through
-        s = S.tool_sessions[cid] = tools.Session(str(home), classifier.conversation(mode, own=own), room=room,
+        #   it — a door in its account's fence for this conversation alone.
+        # ⭐ AND WHAT ITS MODEL MAKES IS KEPT AMONG THEM (NN-202, ⚖ 2026-11-22: *"generated things should be in the same
+        #   attached folder as the uploaded ones, so you can download them from the ui"*): the conversation's
+        #   attached/ is its REPL's to write — (write …), a new file or one it made, never over what was sent, and the
+        #   commands it runs, confined ones too (▶ space.Made, tools.Session.confinement)
+        fence = classifier.conversation(mode, own=own, made=space.Made(_cdir(cid)))
+        s = S.tool_sessions[cid] = tools.Session(str(home), fence, room=room,
                                                  library=str(library),
                                                  guide=str(TOOLS_GUIDE),
                                                  image=lambda text: _tool_picture(cid, text),
@@ -2307,6 +2354,7 @@ class _Answer:
         self.calls = 0
         self.forms, self.answers = [], []      # the stretch's calls, and the values of those run
         self.pictures = []                     # what each answered call showed the model ((ui 'look …)), read as pictures
+        self.made = []                         # what its calls made or replaced among the conversation's files (NN-202)
         self.ask = None
         self.queue = self.loop = None
 
@@ -2452,7 +2500,11 @@ class _Answer:
     def _answered(self, value):
         self.answers.append(value)
         self.pictures.append(self._pictures())
-        self._show("tool", "<tool_response>%s</tool_response>" % value, answer=value)
+        # what the call made or replaced among the conversation's files, said with its answer and kept with the turn:
+        #   the chat shows each as a chip the user downloads it by
+        made = _tool_session(self.cid).take_made()
+        self.made += [m for m in made if m not in self.made]
+        self._show("tool", "<tool_response>%s</tool_response>" % value, answer=value, **({"made": made} if made else {}))
 
     def _pictures(self):
         """What the call just answered showed the model — `(ui 'look …)`'s pictures — read through its vision tower."""
@@ -2479,6 +2531,8 @@ class _Answer:
             self.written = True
         elif history and history[-1].get("role") == "assistant":
             history[-1]["content"] = self.text
+        if self.made and history and history[-1].get("role") == "assistant":
+            history[-1]["made"] = list(self.made)
         _write_sidecar(self.cid, side)
 
 

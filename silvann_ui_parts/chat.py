@@ -413,7 +413,51 @@ class ChatView(Part):
                 drawn.append(self.draw_part(parts[i], (index, i)))
             if not drawn and not live:
                 drawn.append({"kind": "empty", "el": ui.markdown("_(empty)_"), "md": None})
+        self.draw_made(index)
         self.follow_chat()
+
+    # ⭐ WHAT THE MODEL MADE IN A TURN, A CHIP EACH (NN-202, ⚖ 2026-11-22: *"generated things should be in the same
+    #   attached folder as the uploaded ones, so you can download them from the ui"*): a file the turn's calls made or
+    #   replaced among the conversation's files — the server says which, with the call's answer and in the
+    #   conversation's history — is a chip under the answer, as an attachment's is above the message box, and a click
+    #   downloads it.
+    def draw_made(self, index: int):
+        """The chips of what an answer's turn made, under its parts: drawn where the files changed, and put back at the
+        answer's end where parts were drawn after them."""
+        held = self.answers[index]
+        made = tuple(self.state["history"][index].get("made") or ())
+        row = held.get("chips")
+        if made == held.get("made", ()):
+            if row is not None and held["slot"].default_slot.children[-1] is not row:
+                row.move(held["slot"])
+            return
+        if row is not None:
+            row.delete()
+        held["made"], held["chips"] = made, None
+        if not made:
+            return
+        with held["slot"]:
+            with ui.row().classes("items-center gap-1 flex-wrap mt-1") as held["chips"]:
+                for path in made:
+                    chip = ui.chip(path.split("/")[-1], icon="download").props(
+                        "dense clickable color=green-2 text-color=green-9")
+                    chip.tooltip("The model made %s in this turn. It is kept with this conversation's files, beside what "
+                                 "you sent: click to download it." % path)
+                    chip.on("click", lambda _, p=path: self.download_made(p))
+
+    async def download_made(self, path: str):
+        """A file the model made among the conversation's files, downloaded: by a one-time address of this UI's, which
+        streams it from the server (▶ client.py's `file_ticket`) — said, where the file is there no more."""
+        cid = self.state.get("active_id")
+        if not cid:
+            return
+        try:
+            if not any(f["path"] == "attached/" + path for f in await self.client.files(cid)):
+                self.safe_notify("%s is no longer among this conversation's files" % path.split("/")[-1], type="warning")
+                return
+            self.page_client.download(self.client.file_ticket(cid, "attached/" + path), path.split("/")[-1])
+        except Exception as ex:                             # noqa: BLE001 — said, not raised into the page
+            self.safe_notify(f"the download failed: {ex}", type="negative")
 
     def follow_chat(self, force: bool = False):
         """The chat's view to its bottom where it is at the bottom already, or `force`d: a reader scrolled up stays put."""
@@ -448,6 +492,9 @@ class ChatView(Part):
         text = live["turn"][-1]["content"]
         if h[-1]["content"] != text:
             h[-1]["content"] = text
+        made = live["turn"][-1].get("made")                  # what the turn's calls made, for its chips (▶ `draw_made`)
+        if made and h[-1].get("made") != made:
+            h[-1]["made"] = list(made)
 
     def live_tick(self):
         """Ten times a second: the streaming answer copied and drawn where it grew; on a page that followed an answer
@@ -490,6 +537,7 @@ class ChatView(Part):
             else:
                 live = bool(self.state["streaming"]) and index == len(self.state["history"]) - 1
                 self.answers[index] = {"slot": msg, "drawn": self.draw_answer(m["content"] or "", index, live)}
+                self.draw_made(index)
                 if live:
                     self.live_answer["index"] = index
 

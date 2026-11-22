@@ -21,7 +21,7 @@ beside each conversation ([`users.md`](users.md#the-models-tool)).
 | `(ls "folder")` | The names in a folder; a folder's name ends in `/`. |
 | `(read "file")`, `(read "file" from count)` | A file's first 200 lines, or `count` of its lines from line `from`; a last line says how to read on. |
 | `(grep "pattern" "file")`, `(grep "pattern" "file" from)` | The lines of a file that hold the pattern, each as `number: line` — a regular expression, capitals and small letters alike; 50 at once, then a last element says how to go on from line `from`. With `(read "file" number count)` it is how a long file is looked into without reading it whole: [a document you attach](#a-document-you-attach), a log, a book. A skill the release ships, `files`, with `(find "folder" "pattern")`, the names under a folder. |
-| `(write "file" "text")`, `(write "file" "text" 'append)` | Writes the file, or adds to its end, making the folders it needs. |
+| `(write "file" "text")`, `(write "file" "text" 'append)` | Writes the file, or adds to its end, making the folders it needs. A file written in the conversation's attached folder is one you download ([below](#a-file-the-model-makes)). |
 | `(bash "command")`, `(bash "command" seconds)` | Runs a shell command in the working folder. It is stopped after 60 seconds, or after `seconds` (at most 600). On Windows it is Git for Windows' bash, where it is installed — never WSL's. |
 | `(powershell "command")`, `(powershell "command" seconds)` | On Windows: runs a PowerShell command in the working folder, stopped as `bash` is. `(help)` then opens by saying the machine runs Windows, so the model picks it. |
 | `(fetch "https://…")` | A web page's words, without its markup. It names itself to the site and keeps to the site's `robots.txt` ([below](#searching-the-web)). |
@@ -178,7 +178,8 @@ Both are `net`: asked in "ask first" and "reads unasked" each time — `web sear
 
 **A file you send to a conversation is the conversation's own.** Whatever it is, it is kept as you sent it in the
 conversation's folder, `attached/`, and the model is told its name and where it is. That conversation's tool reads it
-there — `(read …)`, `(grep …)`, a command — unasked in every mode, and never writes there. It is private to the
+there — `(read …)`, `(grep …)`, a command — unasked in every mode — and writes what it makes for you beside it,
+`(write …)` under a name of its own ([below](#a-file-the-model-makes)). It is private to the
 conversation: no other conversation's model reaches it, your own others included, and no model reads a conversation's
 transcript or state at all — an admin's model that reaches the machine neither. It is exported with the conversation
 and deleted with it, so a confidential file sent to a chat is gone when the chat is. You see a conversation's files,
@@ -209,6 +210,51 @@ hand: download it there, upload it here.
 A client of your own sends a file at `POST /cartridges/<id>/images`: the answer's `kind` is `"document"`, `"picture"`,
 `"video"` or `"file"`, `kept` the name it is kept under, and for a document `carried` says how the next message would
 take it — `"text"`, `"cut"` or `"named"`. A message's `whole` names the documents it wants in the message whole.
+
+### A file the model makes
+
+**A conversation's folder is its model's to write in, and the model is told so.** A conversation begun with the tool
+is told, in its system prompt, where a file for you goes: *"Save the files you download or generate for the user into
+this conversation's attached folder, `<its path>`: the user sees and downloads them from there."* That folder is the
+conversation's `attached/`, where what you send is kept. The model's tool writes there —
+`(write "<that folder>/report.md" "…")` — and so do the commands it runs: a download with `curl`, a script's chart,
+a spreadsheet. The chat shows each file a turn made or replaced as a chip under that turn's answer, and a click
+downloads it; **Account** lists it with what you sent, marked *made by the model*, and downloads it there too. It
+counts in your space as a file you sent does, is exported and imported with the conversation, and is deleted with it.
+A `(write …)` there is asked of you as any write is, and a command as any command, in "ask first" and "reads
+unasked"; neither is in "full auto". What `(write …)` writes is refused in words where your space is full; what a
+command writes is counted when the folder is next measured.
+
+**In a container too.** Where the model's commands are confined — a container, the tools file's `bash` setting, every
+account that works in its own folder — the kernel's rule opens that one folder to them, to read and to write
+([below](#where-the-models-commands-reach)). The rest of the conversation stays as it was: its pictures read and not
+written, its transcript, its state and its password closed; and every other conversation closed, to this one's
+commands as to its `(write …)`.
+
+**`(write …)` makes new files there and replaces its own, never yours.** A name that is a file you sent — or the text
+the server keeps beside a document — is refused in words that tell the model to choose another name. The conversation
+keeps the record that tells the two apart: `made` in its `server_meta.json`, which no model reads and which is
+exported and imported with it; a file a command leaves in the folder is the model's in it too. A file of the model's
+that you send back to the conversation unchanged is yours from then on. ⚠ **A command is held to the folder, not to a
+file of it:** `rm`, a redirect or a script the model runs can replace or remove a file you sent — as it always could
+wherever the model's commands are not confined. In "ask first" and "reads unasked" you see each command before it
+runs. An archived conversation is written to by nobody: its files are read, by `(write …)` and by a command alike.
+
+**A path without the folder is in the workspace.** `(write "notes.txt" "…")` is in the model's workspace, as it
+always was — its own working folder, one for all your conversations, `users/<name>/workspace/` in your account's
+folder — and says only that: the chat shows no chip for it. A conversation begun before 1.4.3 keeps the system prompt
+it has, which does not name the folder; say it in words there: *"save it in this conversation's attached folder"*,
+which `(help 'write)` names.
+
+Asked in plain words for a file to download — a new conversation each, the sentence in its system prompt — Qwen 3.6
+35B-A3B saved it in the conversation's folder in 7 answers of 7, and a file it was to download from an address in 4
+of 4; Qwen 3.5 4B in 17 of 17, and the download in 13 of 14 — though in 4 of those 13 the file held something other
+than what was served, the address or the command, and once the model made no call. None was left in the workspace
+alone (`MEASURED`, measurements/2026-11-22_nn202_made_files_node03.md).
+
+A client of your own lists a conversation's files at `GET /cartridges/<id>/files` — each with its `path`, its `bytes`
+and `made`, whether the model made it — and fetches one at `GET /cartridges/<id>/files/attached/<name>`. An answer's
+stream names what a call made in its `tool` event's `made`, and the conversation's history keeps it with the answer.
 
 ### The library
 
@@ -344,8 +390,8 @@ edit it there, and press Rebuild the tools.
 their own search (`search`'s `searxng` and `brave_key`), `fetch`'s `contact`, the registry's `registry` and `key`, a
 skill's setting this file leaves `null`, and a tool switched off — what else it asks stays this file's
 ([`users.md`](users.md#several-people-on-one-server-a-user-each)). A user's REPL and commands see the machine as from a
-chroot — their workspace to write; the system's programs, the tools they have on and the runtime to read; the rest
-closed — whatever `bash`'s `confined` says here. `add_tool`, where this file switches it on, puts what a user's model
+chroot — their workspace to write, and their conversation's attached folder; the system's programs, the tools they
+have on and the runtime to read; the rest closed — whatever `bash`'s `confined` says here. `add_tool`, where this file switches it on, puts what a user's model
 adds in their own folder, `users/<name>/skills_added/`: theirs alone, run confined as their commands are, and refused on
 Windows, where a user's commands cannot be confined.
 
@@ -362,6 +408,11 @@ user reaches. The tools file's `bash` entry, `confined`, says which:
 | `"machine"` | Everything but the tools file's folder and the server's own process (its `/proc`, where its environment and memory are; a few of `/proc`'s files that describe the machine stay readable). The folders on the way down to the tools file (in a container `/` and `/data`) cannot be listed, and nothing can be made directly in them; a link that leads into the tools folder, or above it, is not followed. |
 | `"workspace"` | The REPL's workspace alone, and what a link at its top points to, besides the system's programs and libraries and the devices a program writes to harmlessly; HOME and TMPDIR are the workspace's. To give the model a folder, link it from a console: `ln -s /data/photos <workspace>/photos`. The link is the consent; removing it takes the folder back. |
 | `"no"` | Everything the server's user reaches. |
+
+**A conversation's own files, in every row.** Whatever `confined` says, the commands of a conversation's tool read
+and write that conversation's `attached/` folder — what you sent to it, and where the model saves what it downloads
+or generates for you ([above](#a-file-the-model-makes)) — and read its `pictures/`. The conversations are otherwise
+closed to a confined command: this one's transcript, state and password, and every other conversation whole.
 
 The kernel holds it: Linux's Landlock (5.13 or later), which a process uses to give up access for good, needs no root,
 and is what a chroot would need root for. A command runs through a small launcher that makes the rules, restricts

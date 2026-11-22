@@ -106,11 +106,12 @@ def in_container():
     return os.path.exists("/run/.containerenv") or os.path.exists("/.dockerenv") or bool(os.environ.get("container"))
 
 
-def spec_except(closed, abi, read_only=()):
+def spec_except(closed, abi, read_only=(), write_also=()):
     """The rules for a command that reaches the whole machine but `closed` (and /proc, but READABLE's), and only reads
     and runs what is in `read_only` (the skill folders: ▶ tools' `add_tool`): every entry beside each folder on the way
     down to one of those, all of it — made at each launch, so what was made since is in. A link found on the way is
-    followed only where it leads neither into nor above one."""
+    followed only where it leads neither into nor above one. `write_also`: folders it reads and writes whatever lies
+    around them — a conversation's own files, among what is closed of the conversations (▶ tools.confinement)."""
     read_only = sorted({os.path.realpath(r) for r in read_only})
     closed = sorted({os.path.realpath(c) for c in closed} | {"/proc"} | set(read_only))
     under = lambda p, c: p == c or p.startswith(c.rstrip(os.sep) + os.sep)        # noqa: E731
@@ -134,6 +135,7 @@ def spec_except(closed, abi, read_only=()):
             rules.append((real, EVERYTHING))
     walk(os.sep)
     rules += [(p, READ | READ_DIR) for p in READABLE if p.startswith("/proc")] + [(p, RUN) for p in read_only]
+    rules += [(os.path.realpath(p), EVERYTHING) for p in write_also]
     return {"abi": abi, "rules": rules, "closed": [c for c in closed if c not in read_only], "read_only": read_only}
 
 
@@ -157,12 +159,14 @@ def _granted_but(root, closed, rights):
     return out
 
 
-def spec(workspace, abi, read_only=(), run_also=(), follow_links=True, closed=()):
+def spec(workspace, abi, read_only=(), run_also=(), follow_links=True, closed=(), write_also=()):
     """The rules for a command confined to `workspace`: [(path, rights)], and the ABI they are made under — besides,
     what it reads and runs: the skill folders (`read_only`) and what a tool the model added needs to run (`run_also`).
     With `follow_links` false, a link at the workspace's top is not followed (a user's: ▶ users.py — a link the model
     made would be its way out); `closed`, folders the system's folders are granted without (a user's data folder, where
-    it lies under one of them, /opt say): what is granted besides, the workspace and the tools, stays granted."""
+    it lies under one of them, /opt say): what is granted besides, the workspace and the tools, stays granted.
+    `write_also`: folders it reads and writes as it does its workspace — a conversation's own files
+    (▶ tools.confinement)."""
     closed = [os.path.realpath(c) for c in closed]
     rules = [(os.path.realpath(workspace), EVERYTHING)]
     if follow_links:
@@ -172,11 +176,13 @@ def spec(workspace, abi, read_only=(), run_also=(), follow_links=True, closed=()
     rules += [(p, READ | READ_DIR) for p in READABLE]
     rules += [(p, READ | WRITE | IOCTL_DEV) for p in DEVICES]
     rules += [(os.path.realpath(p), RUN) for p in list(read_only) + list(run_also)]
+    rules += [(os.path.realpath(p), EVERYTHING) for p in write_also]
     return {"abi": abi, "rules": rules, "read_only": [os.path.realpath(p) for p in read_only]}
 
 
 def reaches(spec_, path):
-    """Whether a confined command reaches `path`: inside the workspace or what a link there points to."""
+    """Whether a confined command reaches `path`: inside the workspace, what a link there points to, or a folder it
+    writes besides."""
     path = os.path.realpath(path)
     return any(path == p or path.startswith(p.rstrip(os.sep) + os.sep) for p, rights in spec_["rules"]
                if rights == EVERYTHING)

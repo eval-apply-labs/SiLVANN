@@ -24,6 +24,7 @@ from .session import PAGES, _session_default, _streaming, _with_turn
 from .shell import Shell
 from .sign_in import LOCAL_USERS, first_account_page, gate, sign_in_page
 from .turn import Turn
+from .updates import Updates
 from .users_view import AccountView, UsersMode, UsersView
 
 
@@ -55,7 +56,8 @@ class Page:
         self.turn = Turn(self)
         self.remote = RemoteSignIn(self)
         self.notices = Notices(self)
-        for part in (self.shell, self.chat, self.options, self.models, self.users_mode, self.users, self.account, self.help, self.connection, self.conversations, self.turn, self.remote, self.notices):
+        self.updates = Updates(self)
+        for part in (self.shell, self.chat, self.options, self.models, self.users_mode, self.users, self.account, self.help, self.connection, self.conversations, self.turn, self.remote, self.notices, self.updates):
             part.meet()
 
     async def setup(self):

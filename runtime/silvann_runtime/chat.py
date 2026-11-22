@@ -69,6 +69,25 @@ REPL = ("A Lisp REPL on the user's machine, in a working folder the user gave it
         "stays for later conversations, (guide) says how. (whoami) says which model you are.")
 
 
+# ⭐ WHERE A FILE FOR THE USER GOES, SAID IN THE SYSTEM PROMPT OF A CONVERSATION BEGUN WITH THE TOOL (NN-202, ⚖
+#   2026-11-22: *"the most sensible setup, with a system prompt that says "save the files you download or generate into
+#   the conversation's attached folder""*). `%s` is the folder, the conversation's own `attached/`, which its REPL and
+#   the commands it runs write in (▶ tools.Session.confinement) and the UI lists and downloads from.
+#   Where it stands in the prompt (▶ `Chat.turn`'s `files`): last in the system block wherever the family's template
+#   lets it — after the tool's declaration and the system prompt's own text — so that all a conversation's first turn
+#   shares with every other's comes before the one thing that is its own, the path.
+FILES = ("Save the files you download or generate for the user into this conversation's attached folder, %s: the user "
+         "sees and downloads them from there. Give that folder in the file's path — (write \"%s/notes.txt\" \"…\"), "
+         "or the same path in a command — as a path without it lands in your working folder, which the user does not "
+         "see.")
+
+
+def files_said(folder):
+    """`FILES` for a conversation whose attached folder is `folder`."""
+    at = str(folder).replace("\\", "/")
+    return FILES % (at, at)
+
+
 TOOL = {"type": "function", "function": {
     "name": "lisp",
     "description": REPL,
@@ -147,12 +166,16 @@ class Chat:
         at = tail.rfind("<think>")
         return tail[at:] if at >= 0 and "</think>" not in tail[at:] else ""
 
-    def turn(self, seen, text, system=None, thinking=True, images=(), videos=(), tools=False):
+    def turn(self, seen, text, system=None, thinking=True, images=(), videos=(), tools=False, files=None):
         """The tokens a turn adds to a conversation that has seen `seen`; `images` the token counts of the pictures the
         user's message carries before its text, `videos` its videos after them, each a list of (tokens, time in seconds)
-        a pair of frames; `tools`, in a first turn, declares the model's tool."""
+        a pair of frames; `tools`, in a first turn, declares the model's tool. `files`, with the tool: where a file for
+        the user goes (▶ `files_said`), the last words of the system block — a Qwen's and GLM's after the system
+        prompt's own text, DeepSeek's after its tools; Mistral's template has the tools after the system prompt, so
+        there it ends the system prompt."""
         first = not seen
         tools = tools and first
+        files = files if tools else None
         if tools and self.call_start is None:
             raise Refused("a %r model's tokenizer has no tool call" % self.arch)
         if images and not self.arch.startswith(("qwen3_5", "glm5", "deepseek_v41")):
@@ -173,6 +196,8 @@ class Chat:
         if self.arch.startswith(QWEN):
             if first:
                 system = system or "You are a helpful AI assistant."
+                if files:
+                    system += "\n\n" + files
                 if tools:
                     system = _QWEN_TOOLS % json.dumps(TOOL, ensure_ascii=False) + "\n\n" + system
                 if thinking and self.reasoning:
@@ -195,6 +220,8 @@ class Chat:
                     s += "<｜System｜>" + effort + (system or "")
                     if tools:
                         s += "\n\n" + _DS_TOOLS % json.dumps(TOOL["function"], ensure_ascii=False)
+                    if files:
+                        s += "\n" + files
                 elif effort:
                     s += "<｜System｜>" + effort
             return self.encode(s + "<｜User｜>" + text + "<｜Assistant｜>" + ("<think>" if thinking else "</think>"))
@@ -205,6 +232,8 @@ class Chat:
                     today = datetime.date.today()
                     system = self.default_system.replace("{today}", today.isoformat()).replace(
                         "{yesterday}", (today - datetime.timedelta(days=1)).isoformat())
+                if files:
+                    system = (system + "\n\n" if system else "") + files
                 s = "<s>" + ("[SYSTEM_PROMPT]%s[/SYSTEM_PROMPT]" % system if system else "")
                 if tools:
                     s += "[AVAILABLE_TOOLS]%s[/AVAILABLE_TOOLS]" % json.dumps([TOOL], ensure_ascii=False)
@@ -215,6 +244,8 @@ class Chat:
             s = "[gMASK]<sop><|system|>Reasoning Effort: %s" % ("Max" if thinking else "Low")
             if tools:
                 s += _GLM_TOOLS % json.dumps(TOOL["function"], ensure_ascii=False)
+            if files:
+                system = (system + "\n\n" if system else "") + files
             if system:
                 s += "<|system|>" + system
         if first or seen[-1] != self.user:

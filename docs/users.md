@@ -115,12 +115,14 @@ to the family that includes it when the server starts; a model's config only pic
 ### The portable app, on Windows and Linux
 
 One folder, nothing installed, that runs on both systems: `silvann_portable_x64.zip`, attached to each
-[release](https://github.com/eval-apply-labs/SiLVANN/releases), unzips to `SiLVANN` and three folders in it:
+[release](https://github.com/eval-apply-labs/SiLVANN/releases), unzips to `SiLVANN` and four folders in it:
 
 - `windows\` — `SiLVANN.exe`, Python's embeddable build with the runtime's packages, the evaluator and every silicon
   family the Windows build makes, Microsoft's C++ runtime, and the release's tree;
 - `linux/` — `SiLVANN.sh`, a standalone Python with the runtime's packages, the evaluator and the families for Linux on
   64-bit x86 with glibc 2.28 or later (RHEL 8, Debian 10, Ubuntu 20.04 and on), and the release's tree;
+- `update\` — the updater, `windows.exe` and `linux.sh`, which puts a newer release in the two folders above
+  ([Updating](#updating-the-portable-app), below);
 - `data/` — the models, the conversations and the logs (`data/logs/ui.log`), the two systems' together.
 
 The app's window shows the UI at `http://127.0.0.1:8080` (`SILVANN_PORT` another port; if the port is taken, the app
@@ -150,8 +152,18 @@ desktop's applications menu. A model downloaded on one system is there on the ot
   saved and the model's server stops, then everything the app started has ended. Closing that small window stops at once,
   without saving; the conversations' files stay readable either way. On Linux the app ended another way — a `kill`, the
   session closing — stops the same way.
-- **Updating:** unzip the new release's folder and move the old one's `data` into it. Before v1.1.0 the app was
-  Windows' alone and its `data\` was beside `SiLVANN.exe`: it goes beside `windows\` now.
+- <a id="updating-the-portable-app"></a>**Updating:** close SiLVANN and open `update\windows.exe`; on Linux run
+  `update/linux.sh`. The updater says the version the folder runs and asks before it contacts GitHub, the one site it
+  asks. Where a newer release is out it downloads it — both systems' parts, about 220 MB — and asks **Remove the
+  current version?** Then `windows\` and `linux/` are the new version, and the one you had is either deleted or kept
+  beside them under its number (`windows-1.4.2`, `linux-1.4.2`), yours to delete when you no longer want it. `data\`
+  is never touched: the models, the conversations and the accounts stay. Nothing is changed until the download is
+  whole, and with SiLVANN still open the updater says so and changes nothing.
+  SiLVANN itself never asks the internet whether a newer release is out: **Options → Version** says the version it
+  runs, and asks GitHub only when you press **check for a newer release**.
+  A folder from v1.4.2 or before has no `update\`: unzip the new release's zip over it once (or unzip it beside and
+  move the old one's `data` into it), and from then on the updater does it. Before v1.1.0 the app was Windows' alone
+  and its `data\` was beside `SiLVANN.exe`: it goes beside `windows\` now.
 - **A drive Linux will not run programs from** (mounted `noexec`, or giving its files no right to run): `SiLVANN.sh`
   says so, and the folder runs from your own disk. A desktop mounts a USB drive so that it can.
 
@@ -489,12 +501,15 @@ that had users before 1.2.0, the conversations made before the first user are at
 until `silvann users adopt <name>` moves them into a folder.
 A model that works in its account's folder — every account's on a multi user machine, every account's but an admin's on
 a single user's — has a REPL of its own, and it sees the machine as from a chroot, with no root asked for:
-it writes in the user's workspace (`users/<name>/workspace/`) alone, and reads, besides, the system's programs (`/usr`,
-`/etc` and the like), the folders of the tools the user has switched on, the runtime it runs from, and its own
-conversation's files — what was sent to that conversation and the pictures made in it, which no other conversation's
-model reaches. The rest is closed in every mode: of the data folder every other user's folder, the user's own password, settings and
+it writes in the user's workspace (`users/<name>/workspace/`) and in its own conversation's attached folder — what it
+downloads or generates for the user, beside what was sent ([`tools.md`](tools.md#a-file-the-model-makes)) — and reads,
+besides, the system's programs (`/usr`, `/etc` and the like), the folders of the tools the user has switched on, the
+runtime it runs from, and its own conversation's files — what was sent to that conversation, what its model made
+beside it and the pictures made in it, which no other conversation's model reaches. The rest is closed in every mode:
+of the data folder every other user's folder, the user's own password, settings and
 conversations, the conversations made before the users, the Hugging Face token, a file made there later; of the
-machine its other disks, `/home`, `/tmp`. Such a model's `(bash …)` is held to the same by Linux's Landlock; where the
+machine its other disks, `/home`, `/tmp`. Such a model's `(bash …)` is held to the same by Linux's Landlock — its
+conversation's attached folder read and written, its pictures read; where the
 machine has none, the command is refused. **On Windows**, which has no Landlock, such a model therefore runs no commands
 at all — `(powershell …)`, `(bash …)`, and the tools it adds; an admin's model on a single user's machine runs them. A
 link at the workspace's top is not followed for it, as the model could make one itself.
@@ -505,9 +520,11 @@ confined as their commands do. The machine's tools are every user's to run and n
 model adds on a single user's machine is the machine's.
 
 **Your space.** **Account** shows what your account keeps on the machine and what occupies it: each conversation — its
-transcript, its state (what the model holds of it, the larger part) and its own files — your workspace, and in it the
-shared folder, `attached/`, which every conversation of yours reads. There you delete a conversation or one of its
-files, download a file, upload to the shared folder and make folders in it. **Archiving** a conversation gives up its
+transcript, its state (what the model holds of it, the larger part) and its own files: what you sent to it, what its
+model made beside it (marked *made by the model*), and the pictures made in it — your workspace,
+and in it the shared folder, `attached/`, which every conversation of yours reads. There you delete a conversation or
+one of its files, download a file, upload to the shared folder and make folders in it. **Archiving** a conversation
+gives up its
 state and keeps its transcript and files: it is still shown, saying it is archived, and no more is sent to it. It is
 final: an archived conversation is not opened again. An
 admin may set the most an account's folder holds — in **Users**, or `silvann users space <name> 5GB` (`none` for no
@@ -517,7 +534,8 @@ is still read, deleted and archived, and a conversation's state is always put aw
 A shell command the model runs writes without passing the server: it is counted when the folder is next measured,
 and the saves after it are refused until space is freed. Account shows the data folder this UI runs on; a script asks
 the server — `GET /account/space` for what the signed-in account holds, `POST /cartridges/<id>/archive` to archive a
-conversation.
+conversation, `GET /cartridges/<id>/files` for a conversation's files, each saying whether the model made it, and
+`GET /cartridges/<id>/files/attached/<name>` for one of them.
 
 `users/<name>/tools.json` is the user's own settings over the machine's tools file: their search —
 `{"search": {"config": {"brave_key": "…", "searxng": "…"}}}` — `fetch`'s `contact`, the agent registry's `registry` and

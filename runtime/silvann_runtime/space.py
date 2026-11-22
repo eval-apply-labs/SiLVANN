@@ -31,11 +31,13 @@ except ImportError:                   # loaded alone, as a check loads it: its r
 
 ATTACHED = "attached"             # a conversation's own files, and in a workspace the account's shared ones
 PICTURES = "pictures"             # what a conversation's model drew
+MADE = "made"                     # in a conversation's sidecar: what its model made in its `attached/` (▶ `Made`)
 FRESH = 15.0                      # seconds a folder's measured size is taken as it was: a walk is not made per save
 UNITS = {"b": 1, "kb": 10**3, "mb": 10**6, "gb": 10**9, "tb": 10**12, "kib": 2**10, "mib": 2**20, "gib": 2**30, "tib": 2**40}
 
 _lock = threading.Lock()
 _measured = {}                    # an account's folder -> (when it was measured, its bytes then, bytes saved since)
+_made_lock = threading.Lock()     # a conversation's record of what its model made, read and written at once (▶ `Made`)
 
 
 class Full(Refused):
@@ -229,6 +231,150 @@ def keep(folder, name, data):
                 if f.read() == data:
                     return path
         n += 1
+
+
+class Made:
+    """⭐ WHAT A CONVERSATION'S MODEL MADE AMONG ITS OWN FILES (NN-202, ⚖ 2026-11-22: *"generated things should be in the
+    same attached folder as the uploaded ones, so you can download them from the ui"*). The model writes in the
+    conversation's `attached/`, beside what was sent to it: a new file, or one it made itself in this conversation —
+    never one the person sent.
+    ⭐ THE FOLDER IS THE TOOL FRAMEWORK'S TO WRITE (⚖ 2026-11-22: *"when i tried from the container the model was not
+    able to write in that folder due to permissions of the tool framework (which would be the most sensible setup, with
+    a system prompt that says "save the files you download or generate into the conversation's attached folder"), the
+    way you describe feels like a patch rather than a structural fix"*): `(write …)` writes there, the commands the
+    REPL runs do — confined ones too (▶ tools.confinement) — and the conversation's system prompt says so
+    (▶ chat.FILES). What `(write …)` holds is here (▶ `refuses`); a command is held by the kernel to the folder, not
+    to a file of it.
+    ⭐ THE RECORD THAT TELLS THE TWO APART is one key of the conversation's sidecar, `made` in `server_meta.json`: the
+    paths, from `attached/`, of what the model made. A file there that the record does not name was sent, or is the
+    server's own beside one (a document's text). The sidecar is closed to the model, is on the disk across a restart,
+    and is exported and imported with the conversation.
+
+        made = Made(conversation's folder)
+        made.refuses(path)      nothing where the model may write `path`; else why not, in words for the model
+        made.add(path)          `path` is the model's from now on
+        made.sent(path)         `path` is the person's from now on: they sent it
+        before = made.seen()    … a form runs …    made.noticed(before)    what a command left there is the model's
+        made.take()             what was made or replaced since last taken, for the turn that made it"""
+
+    def __init__(self, conversation):
+        self.conversation = os.path.realpath(str(conversation))
+        self.folder = os.path.join(self.conversation, ATTACHED)
+        self.side = os.path.join(self.conversation, "server_meta.json")
+        self.fresh = []                # made or replaced since last taken
+        self.given = set()             # sent while this stood: a look at the folder does not take them for the model's
+
+    def _read(self):
+        try:
+            with open(self.side) as f:
+                got = json.load(f)
+            return got if isinstance(got, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def names(self):
+        """The paths, from `attached/`, of what the model made."""
+        return set(self._read().get(MADE) or [])
+
+    def archived(self):
+        return bool(self._read().get("archived"))
+
+    def _record(self, add=(), drop=()):
+        """The record with `add` and without `drop` — read and written at once, whole or not at all."""
+        with _made_lock:
+            side = self._read()
+            now = (set(side.get(MADE) or []) | set(add)) - set(drop)
+            if now == set(side.get(MADE) or []):
+                return
+            side[MADE] = sorted(now)
+            os.makedirs(self.conversation, exist_ok=True)
+            part = self.side + ".made.part"
+            with open(part, "w") as f:
+                json.dump(side, f, indent=2)
+            os.replace(part, self.side)
+
+    def rel(self, path):
+        """`path` as the record names it — from `attached/`, with `/` between its parts — or None where it is not a
+        path under that folder."""
+        real = os.path.realpath(str(path))
+        if not real.startswith(self.folder.rstrip(os.sep) + os.sep):
+            return None
+        return os.path.relpath(real, self.folder).replace(os.sep, "/")
+
+    def refuses(self, path):
+        """Why the model does not write `path`, in words for it — or None where it may: a new file among the
+        conversation's files, or one it made there. ⛔ An archived conversation is written to by nobody, and what the
+        person sent is never replaced."""
+        if self.archived():
+            return "this conversation is archived: nothing is written among its files"
+        rel = self.rel(path)
+        if rel is None:
+            return ("%s is not yours to write: of this conversation's own files you write in %s, beside what was sent "
+                    "to it" % (path, self.folder))
+        real = os.path.realpath(str(path))
+        if os.path.lexists(real) and not os.path.isdir(real) and rel not in self.names():
+            return ("%s was sent to this conversation, and what the user sent is not replaced: choose another name for "
+                    "your file" % path)
+        return None
+
+    def add(self, path):
+        rel = self.rel(path)
+        if rel is not None:
+            self._record(add=[rel])
+
+    def sent(self, path):
+        rel = self.rel(path)
+        if rel is not None:
+            self.given.add(rel)
+            self._record(drop=[rel])
+
+    def seen(self):
+        """The files under `attached/` as they are now: {path: (bytes, when written)}."""
+        out = {}
+        for at, _, files in os.walk(self.folder):
+            for name in files:
+                p = os.path.join(at, name)
+                try:
+                    st = os.lstat(p)
+                except OSError:
+                    continue
+                out[os.path.relpath(p, self.folder).replace(os.sep, "/")] = (st.st_size, st.st_mtime_ns)
+        return out
+
+    def noticed(self, before):
+        """After a form ran: a file that is there and was not in `before` is the model's — what a command of its left
+        among the conversation's files — and it, and each of the model's files written since, is said to the turn
+        (▶ `take`). A file the person sent meanwhile is theirs."""
+        now, mine = self.seen(), self.names()
+        new = [rel for rel in now if rel not in before and rel not in self.given]
+        self._record(add=[rel for rel in new if rel not in mine])
+        for rel in sorted(now):
+            if (rel in new or rel in mine and now[rel] != before.get(rel)) and rel not in self.fresh:
+                self.fresh.append(rel)
+
+    def take(self):
+        got, self.fresh = self.fresh, []
+        return got
+
+
+def files(conversation):
+    """A conversation's own files, for a list of them: [{"path" — from the conversation's folder, `attached/report.md`
+    —, "name", "bytes", "modified", "made" — the model made it: what the record of `attached/` names (▶ `Made`), and
+    every picture}], by path."""
+    conversation, mine, out = os.path.realpath(str(conversation)), Made(conversation).names(), []
+    for top in (ATTACHED, PICTURES):
+        root = os.path.join(conversation, top)
+        for at, _, names in os.walk(root):
+            for name in names:
+                p = os.path.join(at, name)
+                try:
+                    st = os.lstat(p)
+                except OSError:
+                    continue
+                rel = os.path.relpath(p, root).replace(os.sep, "/")
+                out.append({"path": top + "/" + rel, "name": name, "bytes": st.st_size, "modified": int(st.st_mtime),
+                            "made": top == PICTURES or rel in mine})
+    return sorted(out, key=lambda e: e["path"])
 
 
 def archive(path):

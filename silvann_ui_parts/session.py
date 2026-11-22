@@ -20,7 +20,7 @@ def _session_default():
         # Whether the active cart is currently bound to VRAM. False after a lazy /activate
         # (metadata only) — flips True after the user clicks the Activate banner.
         "active_bound": False,
-        "history": [],     # [{"role": "user"|"assistant", "content": str}]
+        "history": [],     # [{"role": "user"|"assistant", "content": str}] — an answer's "made": what its turn made
         "streaming": False,
         # Which conversation's inline-actions drawer is currently open (one at a time).
         "expanded_cart_id": None,

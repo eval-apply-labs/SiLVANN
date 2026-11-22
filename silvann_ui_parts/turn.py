@@ -210,6 +210,8 @@ class Turn(Part):
         answer = record["turn"][-1]
         if kind == "tool":
             answer["content"] += payload.get("text", "")
+            if payload.get("made"):                        # what the call made among the conversation's files: its chips
+                answer["made"] = answer.get("made", []) + [m for m in payload["made"] if m not in answer.get("made", [])]
             self.chat.mark_live()
         elif kind == "progress":                          # a picture model's, as the picture is made: said beside the box
             self.chat.speed_label.text = payload.get("text", "")

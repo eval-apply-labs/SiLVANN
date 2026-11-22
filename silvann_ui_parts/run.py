@@ -182,6 +182,8 @@ def main():
         app.on_shutdown(_stop_all)
         if os.environ.get("SILVANN_QUIT_TOKEN"):
             _quit_route(os.environ["SILVANN_QUIT_TOKEN"])
+        from .updates import settle                       # a portable app: its `_latest` link, and the version before
+        settle()                                          #   this one removed where its admin said so (▶ updates.py)
 
     host, why = listen_host(args.host, args.private)
     LISTEN.update(host=host, private=args.private, named=args.host, port=args.port, argv=list(sys.argv))

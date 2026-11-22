@@ -1,6 +1,6 @@
 # SiLVANN
 
-> **Public beta, v1.4.2.** The normal path has been tested on a reasonable sample of cards, but a bug-free experience is
+> **Public beta, v1.4.3.** The normal path has been tested on a reasonable sample of cards, but a bug-free experience is
 > not expected yet. It is shared for enthusiasts with patience, who can follow a guide and do some troubleshooting. The
 > cards it has run on — NVIDIA's from a GTX 1080 Ti to a B200, AMD's MI50, MI355X and RDNA4 Radeons, and Windows natively
 > on one PC — are in [`docs/platforms.md`](docs/platforms.md); less common setups may not behave as expected, and a
@@ -70,7 +70,7 @@ every machine one model was measured on, its packs and its notes: [`docs/models.
 names no setup chooses its own when the server starts, by trying it on the card: where its experts go, how much of the
 card holds the ones used most, the context the card has room for ([`docs/config.md`](docs/config.md)).
 
-**New in v1.4.2**: [`docs/release_logs/v1.md`](docs/release_logs/v1.md); every 0.x release before it:
+**New in v1.4.3**: [`docs/release_logs/v1.md`](docs/release_logs/v1.md); every 0.x release before it:
 [`docs/release_logs/v0.md`](docs/release_logs/v0.md).
 
 ## Platforms
@@ -115,9 +115,9 @@ the conversations, and the workspace where you put what it should read — and n
 ### Windows and Linux: the portable app
 
 No installer and no command line: from the [latest release](https://github.com/eval-apply-labs/SiLVANN/releases/latest),
-download `silvann_portable_x64.zip` and unzip it anywhere — a folder of yours, a USB drive. It holds three folders:
-`windows\`, `linux/` and `data/`. On Windows double-click `windows\SiLVANN.exe`; on Linux (64-bit x86) run
-`linux/SiLVANN.sh`. The chat opens in a window of its own and asks, the first time, for this machine's account — a
+download `silvann_portable_x64.zip` and unzip it anywhere — a folder of yours, a USB drive. It holds four folders:
+`windows\`, `linux/`, `data/` and `update\`, whose `windows.exe` and `linux.sh` put a newer release in place. On
+Windows double-click `windows\SiLVANN.exe`; on Linux (64-bit x86) run `linux/SiLVANN.sh`. The chat opens in a window of its own and asks, the first time, for this machine's account — a
 name and a password of your own, which you then sign in with; in **Options**, **Download models** fetches a model and
 **start** runs it. Each system's folder carries its own Python and the libraries for every card the families list, so a
 card needs only its driver, and without one the CPU runs the models. The models and conversations stay in `data/`, the

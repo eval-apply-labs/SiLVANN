@@ -737,6 +737,7 @@ class Classifier:
                                                                 if os.path.isdir("/proc/self") else [])
         self.read_only = []           # the skill folders: the model reads them, and only (add_tool …) writes there
         self.own = []                 # a conversation's own files (▶ `conversation`): read unasked, by its REPL alone
+        self.made = None              # where among them its model writes, and what it made there (▶ space.Made)
         if path and os.path.isfile(path):
             import json
             with open(path) as f:
@@ -745,19 +746,22 @@ class Classifier:
         if self.mode not in MODES:
             raise Fault("the mode is one of %s, not %r" % (", ".join(MODES), self.mode))
 
-    def conversation(self, mode, own=()):
+    def conversation(self, mode, own=(), made=None):
         """A conversation's classifier: its own mode and what it allowed once; the folders this one's, shared. `own`:
         the conversation's own folders — its attachments, its pictures — which its REPL reads unasked and no other
-        conversation's reaches: a door in the account's fence where it has one (▶ users.Fence.opened), read and never
-        written."""
+        conversation's reaches: a door in the account's fence where it has one (▶ users.Fence.opened). `made`: where
+        among them the conversation's model writes — its attachments' folder, beside what was sent to it — and the
+        record of what it made there (▶ space.Made): a new file, or one of its own, asked of the user as any write is;
+        never a file that was sent. Its commands write there too (▶ `Session.confinement`). With none, nothing of
+        `own` is written."""
         if mode not in MODES:
             raise Fault("the mode is one of %s, not %r" % (", ".join(MODES), mode))
         k = Classifier.__new__(Classifier)
         k.path, k.mode, k.allowed, k.once, k.sealed = self.path, mode, self.allowed, set(), self.sealed
         k.read_only = list(self.read_only)
-        k.own = [os.path.realpath(str(p)) for p in own]
+        k.own, k.made = [os.path.realpath(str(p)) for p in own], made
         if k.own and hasattr(self.sealed, "opened"):
-            k.sealed = self.sealed.opened(*k.own)
+            k.sealed = self.sealed.opened(*k.own, written=[made.folder] if made is not None else ())
         return k
 
     def save(self):
@@ -785,8 +789,11 @@ class Classifier:
             raise Fault("%s is closed to the model: the machine's tools file, the server's own process and the "
                         "conversations — but for this one's own files — are not its to %s" % (target, touches))
         if touches == "write" and any(target == a or target.startswith(a.rstrip(os.sep) + os.sep) for a in self.own):
-            raise Fault("%s is among this conversation's own files, which the server keeps: the model reads them, and "
-                        "writes in its workspace" % target)
+            kept = self.made.refuses(target) if self.made is not None else (
+                "%s is among this conversation's own files, which the server keeps: the model reads them, and writes in "
+                "its workspace" % target)
+            if kept:
+                raise Fault(kept)
         if touches == "write" and any(target == a or target.startswith(a.rstrip(os.sep) + os.sep)
                                       for a in self.read_only):
             raise Fault("%s is in the tools' folders, the code the server runs, which the model reads and does not write: "
@@ -883,13 +890,18 @@ class Confinement:
         self.rules, self.shape, self.wanted, self.why = rules, shape, wanted, why
 
 
-def confinement(toolbox, closed, home, read_also=()):
+def confinement(toolbox, closed, home, read_also=(), write_also=()):
     """⭐ WHERE THE MODEL'S COMMANDS REACH — the tools file's `bash` entry, `confined` (⚖ 2026-10-26 *"we only secure the
     docker as that is the intended usage of the tool"*): "auto", in a container the machine but its tools file and the
     server's own process (`closed`), on a direct install — a developer's machine — everything the server's user reaches;
     "machine" that anywhere; "workspace" the workspace alone and what is linked at its top; "no" everything. Where the
     setting asks for rules the kernel cannot make (no Landlock; a container's seccomp profile without its calls; Windows),
-    a command is refused, and why said."""
+    a command is refused, and why said.
+    ⭐ A CONVERSATION'S OWN FILES ARE ITS COMMANDS' TO WRITE, in every shape (NN-202, ⚖ 2026-11-22 *"when i tried from
+    the container the model was not able to write in that folder due to permissions of the tool framework (which would
+    be the most sensible setup …)"*): `write_also`, the conversation's attached/ — read and written as the workspace
+    is; `read_also`, its pictures, read alone. The rest of the conversation, and every other, stays as `closed` and
+    the workspace's bounds leave it."""
     said = str(toolbox.config("bash").get("confined", "auto")).lower()
     shape = {"auto": "machine" if _jail.in_container() and not WINDOWS else None}.get(said, said)
     if shape not in ("machine", "workspace"):
@@ -901,11 +913,13 @@ def confinement(toolbox, closed, home, read_also=()):
             " — the container's seccomp profile must let Landlock's calls through (docs/tools.md)"
             if _jail.in_container() else ""))
     read_only = toolbox.writable_folders()             # the tools' folders: read and run, written by (add_tool …) alone
-    read_only = list(read_only) + [str(p) for p in read_also]    # and the conversation's own files, read alone
+    read_only = list(read_only) + [str(p) for p in read_also]    # and the conversation's pictures, read alone
+    write_also = [str(p) for p in write_also]
     # a user's toolbox (▶ users.UserToolbox) follows no link the model could make, and closes its data folder
     rules = (_jail.spec(home, abi, read_only, run_also=[sys.prefix, RUNNER],
-                        follow_links=getattr(toolbox, "follows_links", True), closed=getattr(toolbox, "closed", ()))
-             if shape == "workspace" else _jail.spec_except(closed, abi, read_only))
+                        follow_links=getattr(toolbox, "follows_links", True), closed=getattr(toolbox, "closed", ()),
+                        write_also=write_also)
+             if shape == "workspace" else _jail.spec_except(closed, abi, read_only, write_also))
     return Confinement(rules, shape, True)
 # what each mode asks of the user, as (help) ends by saying it (▶ the classifier)
 MODE_SAID = {"ask": "a read outside your workspace and the folders allowed, a write, a command and the web are asked of the "
@@ -1290,7 +1304,12 @@ def _commands(session):
         os.makedirs(os.path.dirname(p), exist_ok=True)
         with open(p, "a" if how is not None else "w", encoding="utf-8") as f:
             f.write(text)
-        return Text("%s: %d characters %s" % (path, len(text), "added" if how is not None else "written"))
+        made = session.classifier.made                # among the conversation's files, it is the model's from here on
+        where = ""
+        if made is not None and made.rel(p) is not None:
+            made.add(p)
+            where = " — among this conversation's files, where the user downloads it"
+        return Text("%s: %d characters %s%s" % (path, len(text), "added" if how is not None else "written", where))
 
     def shell(argv, command, seconds):
         _num(seconds)
@@ -1746,6 +1765,9 @@ def _commands(session):
         _engine_defines(read, session.engine.defined)
         return answer
 
+    # the conversation's own files, as (help 'write) names them: where a file for the user goes, as the conversation's
+    #   system prompt says (▶ chat.FILES), and where its model writes among what was sent (▶ space.Made)
+    files = session.classifier.made.folder.replace("\\", "/") if session.classifier.made is not None else None
     table = [
         Command("help", help_, "the commands, or one of them: (help 'read)", "(help) lists every command a line each;"
                 " (help 'name) says one in full."),
@@ -1758,8 +1780,13 @@ def _commands(session):
         Command("read", read_, "a file's lines: (read \"path\" [first-line] [count])", "(read \"path\") the first %d "
                 "lines; (read \"path\" 140 20) twenty from line 140. A file longer says how to read on." % READ_LINES,
                 "read"),
-        Command("write", write_, "a file written: (write \"path\" \"text\" ['append])", "(write \"path\" \"text\") "
-                "makes or replaces the file; with 'append it adds to the end. Folders it needs are made.", "write"),
+        Command("write", write_, "a file written: (write \"path\" \"text\" ['append])",
+                "(write \"path\" \"text\") makes or replaces the file; with 'append it adds to the end. Folders it needs "
+                "are made.%s" % (
+                    " A file for the user goes in this conversation's attached folder, %s, by its full path: the "
+                    "user sees and downloads what is there, and not what is in your workspace, where a path without "
+                    "the folder lands. What the user sent there you read and do not replace: choose another name." % files
+                    if files else ""), "write"),
         Command("bash", bash, "a shell command run in the working folder: (bash \"ls -la\" [seconds])",
                 "(bash \"command\") runs it with bash in the working folder and answers what it printed, its errors "
                 "too, and [exit N] when it fails; it is stopped after %d seconds, or (bash \"command\" 300) after 300 "
@@ -2451,8 +2478,17 @@ class Session:
         return why
 
     def confinement(self):
-        """Where this session's commands reach (▶ `confinement`)."""
-        return confinement(self.toolbox, self.classifier.sealed, self.home, read_also=self.classifier.own)
+        """Where this session's commands reach (▶ `confinement`) — with its conversation's own files: the folder its
+        model writes in theirs to write too, made where it is not there yet, as the kernel's rule is placed on a
+        folder that is; an archived conversation's read alone, as the rest of them is. A conversation that is there
+        no more is given no folder again."""
+        made = self.classifier.made
+        written = [made.folder] if made is not None and not made.archived() else []
+        for folder in written:
+            if os.path.isdir(made.conversation):
+                os.makedirs(folder, exist_ok=True)
+        return confinement(self.toolbox, self.classifier.sealed, self.home,
+                           read_also=[p for p in self.classifier.own if p not in written], write_also=written)
 
     def environment(self, **more):
         """The environment this session's commands get (▶ `_environment`): the named few of the server's, what the tools
@@ -2597,6 +2633,11 @@ class Session:
         got, self.pictures = self.pictures, []
         return got
 
+    def take_made(self):
+        """What the forms run since last taken made or replaced among the conversation's files — their paths from its
+        attachments' folder — for the turn that made them (▶ space.Made)."""
+        return self.classifier.made.take() if self.classifier.made is not None else []
+
     def tool_config(self, skill):
         """A skill's settings — the tools file's, as the server last read them, over its SKILL.md's — for its Python and
         its programs, never the model."""
@@ -2676,6 +2717,8 @@ class Session:
             return got
         if self.toolbox.generation != self.generation:   # skills installed, or the tools rebuilt, since: bound again
             self._bind_skills()
+        made = self.classifier.made                       # the conversation's files before the form: what is there
+        before = made.seen() if made is not None else None    # after it and was not is what the form left (▶ space.Made)
         try:
             if self.inside is not None and not user:
                 value = self._inside(text)
@@ -2693,6 +2736,8 @@ class Session:
             got = write([Sym("error"), Text("the form recursed too deep")])
         except Exception as ex:                           # noqa: BLE001 — a builtin's arity, a file it may not open:
             got = write([Sym("error"), Text("%s: %s" % (type(ex).__name__, ex))])   # said, and the session lives on
+        if made is not None:
+            made.noticed(before)
         if len(got) > ANSWER_MAX:
             got = got[:ANSWER_MAX] + "\n[… cut: %d more characters]" % (len(got) - ANSWER_MAX)
         return got
