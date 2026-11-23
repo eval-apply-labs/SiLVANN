@@ -6,7 +6,7 @@ built from: the engine's files its compile includes (its translation unit's quot
 includes each family's `includes.cuh` through the roster, and nothing else of theirs), for an OpenCL family every file of
 the packages, of the folders it reaches and of the carried OpenCL headers as well (its kernels are generated from them),
 the script that builds it, and
-what it is built with (the Python, CUDA's version, an OpenCL family's kernel generator). A file whose key is the last signed release's is taken from that release's zips, its bytes
+what it is built with (the Python, CUDA's version, AMD's HIP's version, an OpenCL family's kernel generator). A file whose key is the last signed release's is taken from that release's zips, its bytes
 checked against that release's manifest; the rest are signed. The release carries its own manifest, `signed_manifest.json`,
 for the next one.
 
@@ -148,7 +148,7 @@ def _dry_lines(script):
         return None
     out = []
     for line in r.stdout.splitlines():
-        if not any(w in line for w in ("<clang-cl>", "<nvcc>", "<lib>", "kernel_source.py")) or DRY_LEAVES_OUT[1].search(line):
+        if not any(w in line for w in ("<clang-cl>", "<nvcc>", "<amd-clang++>", "<lib>", "kernel_source.py")) or DRY_LEAVES_OUT[1].search(line):
             continue
         if DRY_LEAVES_OUT[0].search(line):
             continue
@@ -171,6 +171,9 @@ def files_of(built, previous_build=None):
     swap = {BUILD_PY: previous_build} if previous_build else None
     out = []
     cuda = os.environ.get("CUDA_VERSION", "")
+    # AMD's compiler is whichever of AMD's two distributions the families' job could install: the job says its HIP's version
+    hip_said = os.path.join(built, "families", "notices", "HIP_VERSION.txt")
+    hip = open(hip_said, encoding="utf-8-sig", errors="replace").read().split("\n")[0].strip() if os.path.isfile(hip_said) else ""
     for d in sorted(os.listdir(built)):
         if not d.startswith("evaluator-"):
             continue
@@ -193,7 +196,7 @@ def files_of(built, previous_build=None):
             folders = {family_of(f) for f in files if not f.endswith("includes.cuh")} - {None}   # its own and its base
             files |= {f for f in engine_files() if f.startswith(os.path.join(SRC, "packages") + os.sep)
                       or (family_of(f) in folders and not f.endswith("includes.cuh"))}
-        words = ["family", fam] + (["cuda " + cuda] if fam == "nvidia_cuda12" else [])
+        words = ["family", fam] + (["cuda " + cuda] if fam == "nvidia_cuda12" else []) + (["hip " + hip] if fam == "amd_rocm10" else [])
         fid = "families/lib/silicon_families/" + n
         out.append((fid, key(files, extra, words), swap and key(files, extra, words, swap), unit_of(built, fid, words),
                     (WINDOWS_ZIP, "lib/silicon_families/" + n)))

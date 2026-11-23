@@ -144,8 +144,9 @@ desktop's applications menu. A model downloaded on one system is there on the ot
   On Linux with no display at all (over ssh) it says the address and runs until Ctrl-C.
 - **The cards:** an NVIDIA card through CUDA (its driver from CUDA 12's line on), an AMD or Intel GPU through OpenCL with
   its own driver, and the CPU alone (AVX2) where there is neither. On Windows these are the libraries `install.ps1`
-  takes; on Linux an AMD card goes through OpenCL too, as ROCm's own families open the ROCm a system has installed and
-  are built by [`install.sh`](#on-linux-installed) and the AMD images instead.
+  takes — with them, from 1.6.0, AMD's own family for a Radeon RX 9060 or 9070, not yet run on a card
+  ([below](#on-windows)); on Linux an AMD card goes through OpenCL too, as ROCm's own families open the ROCm a system
+  has installed and are built by [`install.sh`](#on-linux-installed) and the AMD images instead.
 - **Your data** is in `data\`, beside `windows\` and `linux/`; where the folder cannot be written to (Program Files), in
   `Documents\SiLVANN` (on Linux `~/Documents/SiLVANN`). The model started last starts again with the app.
 - **Closing the window** ends the app: a small window says *SiLVANN is shutting down* while the conversations are
@@ -200,7 +201,18 @@ Microsoft.VisualStudio.Component.VC.Llvm.Clang --add Microsoft.VisualStudio.Comp
 an NVIDIA card CUDA's toolkit, 12 or 13 (13 needs driver 580 or newer). The evaluator and the CPU's family are built
 with clang-cl, NVIDIA's family with nvcc over MSVC for the compute capability `nvidia-smi` reports, and an AMD or Intel
 GPU's OpenCL families against its driver's `OpenCL.dll`; the build's output goes to `build.log`, each library's to its
-`.log` under `lib\`.
+`.log` under `lib\`. With AMD's HIP SDK for Windows installed (it sets `HIP_PATH`), AMD's family for the Radeon RX 9060
+and 9070 is built too, with the SDK's `clang++`.
+
+**A Radeon RX 9060 or 9070, through AMD's HIP — built, not yet run.** From 1.6.0 the libraries hold
+`libsilvann_amd_rocm10.dll`, the family these cards run on Linux, built for Windows by AMD's compiler. It opens where
+the PC has AMD's HIP runtime, `amdhip64_7.dll` (HIP 7, which AMD offers for Windows 11): AMD's HIP SDK and its ROCm for
+Windows install it; whether the Radeon driver alone does we could not check — `dir C:\Windows\System32\amdhip64*.dll`
+says. Where it is not there, the card goes through OpenCL 2.0 as before, with nothing to do. ⚠ No card has run this
+family on Windows: GitHub's runners, which build it, have none, and no such PC was at hand. If a model does not start
+or answers wrongly on it, delete `lib\silicon_families\libsilvann_amd_rocm10.dll` — the card is then OpenCL 2.0's
+again — and tell us in Discussions either way. A model over two AMD cards is refused there for now: nothing reads the
+cards' memory on Windows.
 
 **Smart App Control.** The libraries GitHub builds for a release are signed by Eval Apply Consulting LTD from v1.0.0,
 the portable app's too, and Windows 11's Smart App Control lets them load: on a PC with it on, both the portable app and

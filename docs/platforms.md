@@ -93,6 +93,9 @@ take (rented)
 - the prebuilt libraries on a PC (GitHub's runners, which build them, have no card)
 - the CPU alone, a model's experts on the CPU or read from the disk
 - AMD's and Intel's GPUs through OpenCL
+- a Radeon RX 9060 or 9070 through AMD's HIP (`amd_rocm10`, in the libraries from 1.6.0): built by a runner with no
+  card, from the source that runs these cards on Linux and inside WSL2 (above); it needs AMD's HIP runtime for Windows,
+  `amdhip64_7.dll`, and the card goes through OpenCL 2.0 where the PC has none
 
 **On Linux**
 - booted from a USB SSD

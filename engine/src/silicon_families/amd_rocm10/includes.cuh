@@ -43,19 +43,21 @@
  *   OpenCL 2.0. */
 #define AMD_ROCM10__TARGETS(X)  X(gfx906) X(gfx908) X(gfx90a) X(gfx942) X(gfx950) X(gfx1200) X(gfx1201)
 
-/* ⛳ A WINDOWS BUILD READS THE LIST WITHOUT `gfx906` (⚖ 2026-11-23 *"go with the linux-only list for now, and the next
- *   release will need to work on adding that card on windows through hip"*). No ROCm family is built for Windows, where
- *   an AMD card goes to OpenCL 2.0, and AMD's requirements for ROCm on Windows name no MI card (the HIP SDK 7.2.0's and
- *   ROCm 10.2's pages, read 2026-11-23). Yet every Windows library compiles the function below through the roster, and
- *   a line of it that changes is a signature paid for each of them (`release/scripts/sign_plan.py`, the unit key): the
- *   row below is the one those libraries are signed with, to the token. The release that builds this family for Windows
- *   gives a Windows build its own cards' row. */
-#define AMD_ROCM10__ZZPRIVATE_TARGETS_ON_WINDOWS(X)  X(gfx908) X(gfx90a) X(gfx942) X(gfx950) X(gfx1200) X(gfx1201)
+/* ⛳ A WINDOWS BUILD HAS A ROW OF ITS OWN, WITHOUT `gfx906` (⚖ 2026-11-23 *"go with the linux-only list for now, and the
+ *   next release will need to work on adding that card on windows through hip, even if it is untested"*). Every Windows
+ *   library compiles the function below through the roster, and a line of it that changes is a signature paid for each
+ *   of them (`release/scripts/sign_plan.py`, the unit key): the row is the one those libraries are signed with, to the
+ *   token. ⭐ AND IT IS WHAT THE FAMILY IS BUILT FOR ON WINDOWS: `release/scripts/build.py` reads its targets from it —
+ *   one list there too. AMD's requirements for ROCm on Windows name the Radeons and no MI card (the HIP SDK 7.2.0's
+ *   and ROCm 10.2's pages, read 2026-11-23): `gfx1200` and `gfx1201` are the cards a Windows PC can hold, and the
+ *   other four are built and never met. `ASSUMED`, no card of them has run it on Windows: what a Linux build of the
+ *   same source does on the same cards, a Windows build does. A card says. */
+#define AMD_ROCM10__TARGETS_ON_WINDOWS(X)  X(gfx908) X(gfx90a) X(gfx942) X(gfx950) X(gfx1200) X(gfx1201)
 
 static inline bool amd_rocm10__includes(const char* card) {
 #define AMD_ROCM10__ZZPRIVATE_IS(T)  if (silicon_families__card_is(card, #T)) return true;
 #if defined(_WIN32)
-    AMD_ROCM10__ZZPRIVATE_TARGETS_ON_WINDOWS(AMD_ROCM10__ZZPRIVATE_IS)
+    AMD_ROCM10__TARGETS_ON_WINDOWS(AMD_ROCM10__ZZPRIVATE_IS)
 #else
     AMD_ROCM10__TARGETS(AMD_ROCM10__ZZPRIVATE_IS)
 #endif

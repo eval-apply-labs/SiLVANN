@@ -41,6 +41,10 @@ concurrency:
 env:
   CUDA_VERSION: "12.9.1"
   CUDA_SHORT: "12.9"
+  # AMD's compiler for Windows, which builds amd_rocm10 there: the HIP SDK's installer (ROCm 7.2, the compiler line the
+  #   family is measured with on Linux), and ROCm's own archive for the Radeon RX 9000s where that will not install
+  HIP_SDK_INSTALLER: "AMD-Software-PRO-Edition-26.Q3-Win11-For-HIP.exe"
+  ROCM_ARCHIVE: "therock-dist-windows-gfx120X-all-10.2.0.tar.gz"
   PYTHONUTF8: "1"
 
 jobs:
@@ -92,15 +96,69 @@ jobs:
           & "$root\bin\nvcc.exe" --version
           "SILVANN_NVCC=$root\bin\nvcc.exe" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
           "CUDA_ROOT=$root" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+      # ⛳ AMD's COMPILER IS TRIED, NEVER REQUIRED: amd_rocm10 on Windows has run on no card, and a run that cannot fetch
+      #   or install AMD's compiler still builds every other library — the step says which of the two it took, or that
+      #   it took none. ① The HIP SDK's installer, unattended as AMD documents it (`-install -log <file>`): it is a
+      #   window's program even so, and made for Windows 11, so it is given fifteen minutes on this runner. ② ROCm's own
+      #   archive: its compiler, HIP's headers and import library, nothing of its math libraries. Neither needs a card.
+      - name: AMD's compiler, for the ROCm family
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Continue"
+          function Rooted($root) {
+            (Test-Path "$root\include\hip\hip_runtime.h") -and (Test-Path "$root\lib\amdhip64.lib") -and
+              ((Test-Path "$root\bin\clang++.exe") -or (Test-Path "$root\lib\llvm\bin\clang++.exe"))
+          }
+          $root = $null; $from = $null
+          $exe = Join-Path $env:RUNNER_TEMP "hip_sdk.exe"
+          curl.exe -fsSL -e "https://www.amd.com/" -o $exe "https://download.amd.com/developer/eula/rocm-hub/$env:HIP_SDK_INSTALLER"
+          if ($LASTEXITCODE -eq 0) {
+            $log = Join-Path $env:RUNNER_TEMP "hip_sdk_install.log"
+            # in a job, so the wait is for the installer and every program it starts, and has an end
+            $job = Start-Job -ArgumentList $exe, $log -ScriptBlock { param($exe, $log)
+              (Start-Process -FilePath $exe -ArgumentList @("-install", "-log", $log) -Wait -PassThru).ExitCode }
+            if (Wait-Job $job -Timeout 900) { "the HIP SDK's installer: exit $(Receive-Job $job)" }
+            else { "the HIP SDK's installer had not ended after 15 minutes: stopped"; Stop-Job $job; taskkill.exe /F /T /IM hip_sdk.exe 2>&1 | Out-Null }
+            if (Test-Path $log) { Get-Content $log -Tail 20 }
+            $root = Get-ChildItem "C:\Program Files\AMD\ROCm" -Directory -ErrorAction SilentlyContinue |
+              Where-Object { Rooted $_.FullName } | Sort-Object Name | Select-Object -Last 1 | ForEach-Object { $_.FullName }
+            if ($root) { $from = "the HIP SDK, $env:HIP_SDK_INSTALLER" } else { "no ROCm under C:\Program Files\AMD after it" }
+          } else { "the HIP SDK's installer was not fetched (curl $LASTEXITCODE)" }
+          if (-not $root) {
+            $tar = Join-Path $env:RUNNER_TEMP "rocm.tar.gz"; $to = Join-Path $env:RUNNER_TEMP "rocm"
+            curl.exe -fsSL -o $tar "https://stable.repo.amd.com/rocm/core/tarball/$env:ROCM_ARCHIVE"
+            if ($LASTEXITCODE -eq 0) {
+              New-Item -ItemType Directory -Force $to | Out-Null
+              tar.exe -xzf $tar -C $to ./.info ./include ./lib/llvm ./lib/amdhip64.lib ./share/doc/hip ./share/doc/hipcc
+              "ROCm's archive: tar exit $LASTEXITCODE"
+              if (Rooted $to) { $root = $to; $from = "ROCm's archive, $env:ROCM_ARCHIVE" }
+            } else { "ROCm's archive was not fetched (curl $LASTEXITCODE)" }
+          }
+          if (-not $root) { "::warning::no AMD compiler on this runner: amd_rocm10 is not built for Windows in this run"; exit 0 }
+          $clang = if (Test-Path "$root\bin\clang++.exe") { "$root\bin\clang++.exe" } else { "$root\lib\llvm\bin\clang++.exe" }
+          & $clang --version
+          $v = @("MAJOR", "MINOR", "PATCH") | ForEach-Object {
+            (Select-String -Path "$root\include\hip\hip_version.h" -Pattern "#define\s+HIP_VERSION_$_\s+(\d+)").Matches[0].Groups[1].Value }
+          $said = "HIP $($v -join '.'), from $from"
+          $said
+          "SILVANN_HIP_ROOT=$root" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "SILVANN_AMD_CLANG=$clang" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "HIP_SAID=$said" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
       - name: The families
         shell: pwsh
         env:
           SILVANN_SILICON_FAMILIES: x86_avx2 nvidia_cuda12 khronos_opencl2 intel_opencl2 nvidia_opencl1 intel_opencl1_igpu
         run: |
+          if ($env:SILVANN_HIP_ROOT) { $env:SILVANN_SILICON_FAMILIES = "$env:SILVANN_SILICON_FAMILIES amd_rocm10" }
           python -m pip install --quiet -r scripts/requirements.txt
           python scripts/build.py
           $built = Get-ChildItem lib\silicon_families -Filter "libsilvann_*.dll" | ForEach-Object { $_.Name }
           $missing = $env:SILVANN_SILICON_FAMILIES.Split(" ") | Where-Object { $built -notcontains "libsilvann_$_.dll" }
+          if ($missing -contains "amd_rocm10") {       # said, and the run goes on without it (▶ the step above)
+            "::warning::amd_rocm10 did not build for Windows in this run: its log's end follows"
+            Get-Content lib\silicon_families\amd_rocm10.log -Tail 60 -ErrorAction SilentlyContinue
+            $missing = $missing | Where-Object { $_ -ne "amd_rocm10" }
+          }
           if ($missing) {
             Get-ChildItem lib\silicon_families -Filter "*.log" | ForEach-Object { "== $($_.Name)"; Get-Content $_.FullName -Tail 40 }
             throw "not built: $missing"
@@ -115,6 +173,14 @@ jobs:
           if (-not $eula) { throw "no EULA.txt in CUDA's folder or its installer" }
           Copy-Item $eula.FullName notices\CUDA_EULA.txt
           (& $env:SILVANN_NVCC --version | Select-Object -Last 2) | Out-File -Encoding utf8 notices\CUDA_VERSION.txt
+          # AMD's: which HIP the family was built against — the signing plan keys the file by this line — and HIP's licence
+          if (Test-Path lib\silicon_families\libsilvann_amd_rocm10.dll) {
+            $env:HIP_SAID | Out-File -Encoding utf8 notices\HIP_VERSION.txt
+            (& $env:SILVANN_AMD_CLANG --version | Select-Object -First 2) | Out-File -Append -Encoding utf8 notices\HIP_VERSION.txt
+            $licence = Get-ChildItem "$env:SILVANN_HIP_ROOT\share\doc\hip" -Filter "LICENSE*" -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($licence) { Copy-Item $licence.FullName notices\HIP_LICENSE.txt }
+            else { Copy-Item scripts\third_party\HIP\LICENSE.md notices\HIP_LICENSE.txt }   # the SDK's folder holds none: ROCm 7.2.4's own, carried
+          }
           python -c "import importlib.metadata as m, shutil; d = m.distribution('pybind11'); f = [p for p in d.files if p.name.upper().startswith('LICENSE')][0]; shutil.copy(d.locate_file(f), r'notices\PYBIND11_LICENSE.txt')"
       - name: SiLVANN.exe, the portable app's launcher, signed with the libraries
         shell: pwsh
@@ -466,6 +532,9 @@ jobs:
           | pybind11, compiled into the evaluator | BSD-3-Clause | \`notices/PYBIND11_LICENSE.txt\` |
           | LLVM's compiler-rt builtins, linked into each library | Apache-2.0 WITH LLVM-exception | ATTRIBUTION.md §7 |
           EOF
+          if [ -f out/lib/silicon_families/libsilvann_amd_rocm10.dll ]; then
+            echo "| AMD's HIP, its headers compiled into \`libsilvann_amd_rocm10.dll\` — which asks for AMD's own runtime, \`amdhip64_7.dll\`, and holds none of it | MIT | \`notices/HIP_LICENSE.txt\`, \`notices/HIP_VERSION.txt\` |" >> out/lib/NOTICES.md
+          fi
           (cd out && zip -qr ../silvann_windows_x64.zip lib)
           unzip -l silvann_windows_x64.zip
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

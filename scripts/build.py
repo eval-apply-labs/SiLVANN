@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """Build the engine into lib/ on Windows — build.sh's counterpart there: the evaluator, a Python module compiled with
-clang-cl, and one library a silicon family — x86_avx2 with clang-cl, nvidia_cuda12 with nvcc over MSVC — each built
-where its toolchain is installed and skipped where it is not.
+clang-cl, and one library a silicon family — x86_avx2 with clang-cl, nvidia_cuda12 with nvcc over MSVC, amd_rocm10 with
+AMD's clang++ — each built where its toolchain is installed and skipped where it is not.
 
-  SILVANN_SILICON_FAMILIES  which families to build, e.g. "x86_avx2 nvidia_cuda12"   default those two; the OpenCL
-                            ones, khronos_opencl2, intel_opencl2, nvidia_opencl1 and intel_opencl1_igpu, when named;
-                            "none" for the evaluator alone
+  SILVANN_SILICON_FAMILIES  which families to build, e.g. "x86_avx2 nvidia_cuda12"   default those two, and amd_rocm10
+                            where AMD's compiler is found; the OpenCL ones, khronos_opencl2, intel_opencl2,
+                            nvidia_opencl1 and intel_opencl1_igpu, when named; "none" for the evaluator alone
   SILVANN_CUDA_ARCHES       the NVIDIA cards to build for, e.g. 120                   default every one the family lists
   SILVANN_NVCC              CUDA's compiler            default %CUDA_PATH%\\bin\\nvcc.exe, else nvcc on the PATH
+  SILVANN_HIP_ROOT          AMD's ROCm for Windows     default %HIP_PATH%, which the HIP SDK's installer sets: the folder
+                            that holds include\\hip and lib\\amdhip64.lib, its clang++ in bin or in lib\\llvm\\bin
+  SILVANN_HIP_ARCHES        the AMD cards to build for, e.g. gfx1200                  default every one the family lists
   SILVANN_CLANG_CL          clang-cl                   default Visual Studio's "C++ Clang tools", else on the PATH
 
   python scripts/build.py     build (install.ps1 runs it with the release's own Python and keeps what it says)
@@ -19,6 +22,10 @@ can run this. MEASURED on one PC (an RTX 5070 Ti beside a Ryzen 7 5800X), throug
 and x86_avx2 built with clang-cl and nvidia_cuda12 with nvcc 13.4; 2026-10-28 v0.21.2 served Qwen 3.6 35B-A3B at 48
 tokens/s (measurements/2026-10-28_nn94_windows_5070ti.md). A release's libraries are this file's on GitHub's Windows
 runners, every family (.github/workflows/windows-libraries.yml).
+
+⚠ amd_rocm10 ON WINDOWS HAS RUN ON NO CARD (⚖ 2026-11-23 *"the next release will need to work on adding that card on
+windows through hip, even if it is untested"*): it is built here as scripts/build_silicon_families.sh builds it on Linux —
+the same source, the same switches — by a runner with no card, and what it does on a Radeon is a card's to say.
 """
 import glob
 import os
@@ -80,6 +87,22 @@ def find(env, name, override, *candidates):
         if c and os.path.isfile(c):
             return c
     return shutil.which(name, path=env.get("PATH", env.get("Path"))) or ("<%s>" % name if DRY else None)
+
+
+def amd_toolchain():
+    """AMD's ROCm for Windows — (its folder, its clang++) — or (None, None): the folder SILVANN_HIP_ROOT names, else
+    HIP_PATH (the HIP SDK's installer sets it), where it holds HIP's header and its import library; the compiler in its
+    `bin` (the HIP SDK's layout) or its `lib\\llvm\\bin` (ROCm's own archive's)."""
+    for root in (os.environ.get("SILVANN_HIP_ROOT"), os.environ.get("HIP_PATH")):
+        root = (root or "").rstrip("\\/")
+        if not root or not os.path.isfile(os.path.join(root, "include", "hip", "hip_runtime.h")) \
+                or not os.path.isfile(os.path.join(root, "lib", "amdhip64.lib")):
+            continue
+        for sub in (("bin",), ("lib", "llvm", "bin")):
+            compiler = os.path.join(root, *sub, "clang++.exe")
+            if os.path.isfile(compiler):
+                return root, compiler
+    return ("<hip>", "<amd-clang++>") if DRY else (None, None)
 
 
 def clang_builtins(clang_cl):
@@ -156,17 +179,30 @@ def _line(cmd):
     return [os.path.basename(cmd[0]).lower()] + [word(a) for a in cmd[1:]]
 
 
-def unit(compile_line, env, out, log, keep_dir=None, nvcc_line=None):
+def unit(compile_line, env, out, log, keep_dir=None, nvcc_line=None, sides=None):
     """`out`.unit beside the binary `out`: the key scripts/sign_plan.py reads it by (▶ unit_key.py, NN-195) — the lines
     this tree wrote of what the build's own compile line preprocesses: clang-cl's and cl's line, its output and link left
-    out, run again with `/E`; or nvcc's own `.ii` files, which `--keep` left in `keep_dir`. False, said, when it could not
-    be made: the plan then keys the file by its includes alone, as before."""
+    out, run again with `/E`; or nvcc's own `.ii` files, which `--keep` left in `keep_dir`; or, for AMD's clang++, each
+    of `sides` run — the host's side and every card's, `-E` a line — with `nvcc_line` the line the key names. False,
+    said, when it could not be made: the plan then keys the file by its includes alone, as before."""
     import unit_key
     if DRY:
-        say("   " + " ".join('"%s"' % c if " " in c else c for c in compile_line + ["/E"]) if compile_line else
+        say("   the unit: %d sides, each its line with -E" % len(sides) if sides else
+            "   " + " ".join('"%s"' % c if " " in c else c for c in compile_line + ["/E"]) if compile_line else
             "   the unit: nvcc's .ii in %s" % keep_dir)
         return True
-    if keep_dir is not None:
+    if sides is not None:
+        texts = []
+        for line in sides:
+            r = subprocess.run(line, env=env, capture_output=True, text=True, errors="replace")
+            if r.returncode != 0:
+                with open(log, "w", encoding="utf-8", errors="replace") as f:
+                    f.write(" ".join(line) + "\n" + r.stdout[-20000:] + r.stderr[-20000:])
+                say("   ⚠ no unit key for %s: the preprocessor stopped (%s)" % (os.path.basename(out), log))
+                return False
+            texts.append(r.stdout)
+        how = "%s -E, the host's side and %d cards'" % (os.path.basename(sides[0][0]), len(sides) - 1)
+    elif keep_dir is not None:
         files = sorted(os.path.join(keep_dir, f) for f in os.listdir(keep_dir) if f.endswith(".ii"))
         texts = [open(f, encoding="utf-8", errors="replace").read() for f in files]
         how = "nvcc --keep: " + ", ".join(os.path.basename(f) for f in files)
@@ -204,11 +240,63 @@ def smart_app_control():
 SMART_APP_CONTROL = ("Windows' Smart App Control refuses libraries that are not signed, as SiLVANN's are for now: turn it off (Windows Security > App & browser control > Smart App Control settings > Off; on most PCs it cannot be turned on again without resetting Windows), or run SiLVANN on Linux (docs/users.md)")
 
 
+def pe_names(path):
+    """(the names a Windows library exports, the libraries it asks for), read from the file itself — its export table
+    and its import table — so a library this PC cannot load is still read. ([], []) where the file is not one."""
+    import struct
+    with open(path, "rb") as f:
+        d = f.read()
+    try:
+        pe = struct.unpack_from("<I", d, 0x3C)[0]
+        if d[:2] != b"MZ" or d[pe:pe + 4] != b"PE\0\0":
+            return [], []
+        sections, optional_size = struct.unpack_from("<H", d, pe + 6)[0], struct.unpack_from("<H", d, pe + 20)[0]
+        optional = pe + 24
+        if struct.unpack_from("<H", d, optional)[0] != 0x20B:             # a 64-bit library's header
+            return [], []
+        table = [struct.unpack_from("<IIII", d, optional + optional_size + 40 * k + 8) for k in range(sections)]
+
+        def at(rva):                                                      # where in the file an address is
+            for size, start, raw_size, raw in table:
+                if start <= rva < start + max(size, raw_size):
+                    return raw + rva - start
+            raise ValueError(rva)
+
+        def text(rva):
+            o = at(rva)
+            return d[o:d.index(b"\0", o)].decode("ascii", "replace")
+        export_rva, _, import_rva, _ = struct.unpack_from("<IIII", d, optional + 112)
+        exports, imports = [], []
+        if export_rva:
+            e = at(export_rva)
+            count, names = struct.unpack_from("<I", d, e + 24)[0], struct.unpack_from("<I", d, e + 32)[0]
+            exports = [text(struct.unpack_from("<I", d, at(names) + 4 * k)[0]) for k in range(count)]
+        if import_rva:
+            o = at(import_rva)
+            while struct.unpack_from("<IIIII", d, o) != (0, 0, 0, 0, 0):
+                imports.append(text(struct.unpack_from("<I", d, o + 12)[0]))
+                o += 20
+        return exports, imports
+    except (struct.error, ValueError, IndexError):
+        return [], []
+
+
 def exports_entry(path, family):
     """Whether the family's library offers `silvann_silicon_family_get` by name. An OpenCL family is linked to
-    OpenCL.dll, which only a GPU's driver installs: on a PC without it (a build machine) it is said, not checked."""
+    OpenCL.dll, which only a GPU's driver installs: on a PC without it (a build machine) it is said, not checked. AMD's
+    is linked to HIP's runtime, which a build machine does not hold either: its export table is read instead, and the
+    runtime it asks for said."""
     if DRY:
         return True
+    if family == "amd_rocm10":
+        exports, imports = pe_names(path)
+        say("   it asks for: %s" % (", ".join(imports) or "(nothing read)"))
+        if not exports:
+            say("   ⚠ %s's export table was not read: its entry point is not checked here" % family)
+            return True
+        if "silvann_silicon_family_get" not in exports:
+            say("   ⛔ %s does not export silvann_silicon_family_get (it exports %s)" % (path, ", ".join(exports[:6])))
+        return "silvann_silicon_family_get" in exports
     if family.startswith("khronos_") and not os.path.isfile(os.path.join(os.environ.get("SystemRoot", r"C:\Windows"),
                                                                          "System32", "OpenCL.dll")):
         say("   ⚠ %s is not loaded here to check it: this PC has no OpenCL.dll" % family)
@@ -235,8 +323,9 @@ def main():
     clang_cl = find(env, "clang-cl", "SILVANN_CLANG_CL", llvm)
     nvcc = find(env, "nvcc", "SILVANN_NVCC",
                 os.path.join(os.environ["CUDA_PATH"], "bin", "nvcc.exe") if os.environ.get("CUDA_PATH") else None)
-    say("== the toolchains: Visual Studio %s · clang-cl %s · nvcc %s" % (vs or "not found", clang_cl or "not found",
-                                                                         nvcc or "not found"))
+    hip_root, amd_clang = amd_toolchain()
+    say("== the toolchains: Visual Studio %s · clang-cl %s · nvcc %s · AMD's clang++ %s"
+        % (vs or "not found", clang_cl or "not found", nvcc or "not found", amd_clang or "not found"))
     if not clang_cl:
         sys.exit("⛔ no clang-cl: Visual Studio's installer, \"Desktop development with C++\", and in it \"C++ Clang tools "
                  "for Windows\" — then run this again")
@@ -270,8 +359,8 @@ def main():
         unit(evaluator, env, module, os.path.join(LIB, "evaluator_unit.log"))
 
     say("== the silicon families")
-    wanted = [f for f in os.environ.get("SILVANN_SILICON_FAMILIES", "x86_avx2 nvidia_cuda12").replace(",", " ").split()
-              if f != "none"]
+    default = "x86_avx2 nvidia_cuda12" + (" amd_rocm10" if amd_clang and not DRY else "")
+    wanted = [f for f in os.environ.get("SILVANN_SILICON_FAMILIES", default).replace(",", " ").split() if f != "none"]
     built, failed = [], []
     for family in wanted:
         out = os.path.join(FAMILIES_OUT, "libsilvann_%s.dll" % family)
@@ -326,6 +415,40 @@ def main():
                                             "-Xcompiler", "/MD,/EHsc,/Zc:preprocessor,/bigobj,/W0",
                                             "-D_CRT_SECURE_NO_WARNINGS", "-shared", "-I", SRC, tu]
             done = run(nvcc_line[:-1] + ["--keep", "--keep-dir", keep_dir, tu, "-o", out], env, log)
+        elif family == "amd_rocm10":
+            if not amd_clang:
+                say("   ⚠ amd_rocm10 skipped — no AMD compiler: the HIP SDK for Windows from amd.com (its installer sets "
+                    "HIP_PATH), then `silvann build`")
+                continue
+            tu = os.path.join(WORK, "amd_rocm10.cpp")
+            if not DRY:
+                with open(tu, "w", encoding="utf-8") as f:
+                    f.write(tu_line % family)
+            want = targets("amd_rocm10", "AMD_ROCM10__TARGETS_ON_WINDOWS")
+            arches = [a for a in os.environ.get("SILVANN_HIP_ARCHES", ",".join(want)).replace(",", " ").split() if a in want]
+            if not arches:
+                say("   ⚠ amd_rocm10 skipped — none of SILVANN_HIP_ARCHES is its (%s)" % ", ".join(want))
+                continue
+            # ⛳ AS build_silicon_families.sh BUILDS IT ON LINUX, by AMD's clang++ itself where Linux goes through hipcc,
+            #   which adds `-x hip` and the runtime's library: a code object for every card of the row a Windows build
+            #   reads, 64 lanes to a wavefront (a Radeon runs 32 unless built so), every device function inlined into
+            #   its kernel. MSVC's is the host's C++ library here, and the DLL C runtime, as every library of this
+            #   build. The compiler finds its ROCm by ROCM_PATH and HIP_PATH, so no line names the PC's folders.
+            # the unit: clang++ preprocesses a side at a time — the host's, then each card's (▶ `unit`)
+            amd_env = dict(env, ROCM_PATH=hip_root, HIP_PATH=hip_root)
+            flags = ["-x", "hip", "-mwavefrontsize64", "-mllvm", "-amdgpu-early-inline-all=true",
+                     "-mllvm", "-amdgpu-function-calls=false", "-O2", "-std=c++17", "-fms-runtime-lib=dll", "-w",
+                     "-D_CRT_SECURE_NO_WARNINGS", "-I", os.path.join(hip_root, "include"), "-I", SRC]
+            offload = ["--offload-arch=" + a for a in arches]
+            compile_line, keep_dir = None, None
+            amd_line = [amd_clang] + offload + flags + [tu]
+            # ⛳ THE DLL C RUNTIME AT THE LINK TOO: clang++, where it is not clang-cl, hands the linker the static one
+            #   (`libcmt`) whatever the objects were compiled for, and the two do not mix — the objects' own, `msvcrt`,
+            #   is left as the only one
+            done = run(amd_line + ["-shared", "-o", out, "-L", os.path.join(hip_root, "lib"), "-lamdhip64",
+                                   "-Xlinker", "/NODEFAULTLIB:libcmt"], amd_env, log)
+            sides = [[amd_clang] + offload + flags + ["--cuda-host-only", "-E", tu]] + \
+                    [[amd_clang, "--offload-arch=" + a] + flags + ["--cuda-device-only", "-E", tu] for a in arches]
         elif family in ("khronos_opencl2", "intel_opencl2", "nvidia_opencl1", "intel_opencl1_igpu"):
             # ⛳ NO CARD COMPILER, as on Linux: the kernels are OpenCL C, generated from nn's rows and compiled by the
             #   driver for the card it finds. The host side is built against the carried headers and OpenCL.dll.
@@ -350,8 +473,11 @@ def main():
         if done and exports_entry(out, family):
             built.append(family)
             say("   ✅ %s -> %s" % (family, out))
-            unit(compile_line, env, out, os.path.join(FAMILIES_OUT, family + "_unit.log"), keep_dir,
-                 nvcc_line if family == "nvidia_cuda12" else None)
+            if family == "amd_rocm10":
+                unit(None, amd_env, out, os.path.join(FAMILIES_OUT, family + "_unit.log"), None, amd_line, sides)
+            else:
+                unit(compile_line, env, out, os.path.join(FAMILIES_OUT, family + "_unit.log"), keep_dir,
+                     nvcc_line if family == "nvidia_cuda12" else None)
         else:
             failed.append(family)
 
