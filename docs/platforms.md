@@ -12,6 +12,12 @@ The README's short table, in full. A platform not listed here may well work; one
 **Linux with an NVIDIA GeForce RTX 5060 Ti (sm_120), CUDA 12.9, driver 595**
 - every pack but GLM's checked against Hugging Face, the 35B's tier of experts included
 
+**Linux with AMD Instinct MI50 (gfx906), ROCm 7.2.4, in the container** — `amd_rocm10`
+- Qwen 3.5 2B and 4B `D4`, Ministral 3 14B `D4` and Qwen 3.6 35B-A3B `D8E4` (its experts on the CPU) checked against
+  Hugging Face on one card, the 4B over two (tensor parallelism); the same tokens as ROCm 6's family on the same card,
+  a 2,000-word prompt read as fast or 3 to 4 % faster and the answer 2 to 5 % slower: the 2B 167 tokens a second against
+  176, read at 1,918 positions a second against 1,850
+
 **Linux with an AMD Instinct MI355X (gfx950), TheRock's ROCm 7.14** — `amd_rocm10` (rented)
 - nn's verbs and the family's doors on the card; Qwen 3.6 35B-A3B checked against Hugging Face; GLM 5.3 Flash whole on the
   card, 66-69 tokens a second, its prompt 304-307 positions a second with the matrix cores against 127 without
@@ -97,12 +103,12 @@ take (rented)
   run (above); Kepler and Maxwell, which go to OpenCL 1.2 as Pascal and Volta do
 
 **AMD**
-- the MI100, the MI200s and the MI300s — gfx908, gfx90a, gfx942 — which `amd_rocm10` is built for with ROCm 7 or later
-  (the MI50 stays on ROCm 6, which builds it), its prompt's GEMM tiles on their matrix cores; it has run on an MI355X
-  (above), and none of the three was found to rent for a test
-- the ROCm 7 container image (`:1-amd-rocm7`) on a card of its own — built, and run on a machine of MI50s, where its
-  family takes no card ([`docker/README.md`](../docker/README.md#the-images)); and a machine that holds an MI50 beside a
-  card of ROCm 7's, each kind in its container
+- the MI100, the MI200s and the MI300s — gfx908, gfx90a, gfx942 — which `amd_rocm10` is built for with ROCm 7 or later,
+  its prompt's GEMM tiles on their matrix cores; it has run on an MI355X and, in the container, on the MI50 (above), and
+  none of the three was found to rent for a test
+- the AMD container image on a card other than the MI50 — an MI100 or later, a Radeon RX 9060 or 9070 — and an MI50
+  beside one of them in one container ([`docker/README.md`](../docker/README.md#the-images)); an MI50, MI60 or Radeon
+  VII on ROCm 7 under a kernel newer than 5.15
 - a Radeon on Linux outside WSL2; RDNA4's matrix instructions (WMMA) are not used yet, the prompt's GEMM taking the plain
   tiles there. Any other Radeon goes to OpenCL 2.0 — RDNA3 too: built in wave64, an RX 7900 XTX answered wrongly (a
   shuffle reaches half its wave there); through OpenCL 2.0 the same card ran the 4B correctly

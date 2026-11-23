@@ -11,10 +11,20 @@
  * 11-08 *"the legacy amd on rocm6 and the modern one on rocm7"*. AMD's data-centre line from the MI100 on, built with ROCm 7
  * and later (HIP 7 — TheRock's and ROCm Core SDK 10's), 64 lanes to a wavefront: the MI100 (`gfx908`), the MI200s
  * (`gfx90a`), the MI300s (`gfx942`) and the MI350s (`gfx950`) — the cards with matrix cores, which the prompt's GEMM tiles
- * use (▶ amd_rocm_base/overrides/expert.cuh). The MI50 (`gfx906`) is `amd_rocm6_wave64`'s; both are built from
- * `amd_rocm_base`. ROCm Core SDK 10's matrix lists gfx908 to gfx950 and not gfx906 (`MEASURED` node03, compile only,
- * 2026-10-29: today's source builds for gfx90a, gfx942 and gfx950); gfx950 runs here (`MEASURED` a Daytona MI355X,
- * TheRock's ROCm 7.14, measurements/2026-11-08_amd_mfma_tiles_mi355x.md).
+ * use (▶ amd_rocm_base/overrides/expert.cuh). Both AMD families are built from `amd_rocm_base`. ROCm Core SDK 10's
+ * matrix lists gfx908 to gfx950 (`MEASURED` node03, compile only, 2026-10-29: today's source builds for gfx90a, gfx942
+ * and gfx950); gfx950 runs here (`MEASURED` a Daytona MI355X, TheRock's ROCm 7.14,
+ * measurements/2026-11-08_amd_mfma_tiles_mi355x.md).
+ *
+ * ⭐ AND THE MI50, BESIDE ROCm 6's FAMILY (⚖ 2026-11-23 *"yes i'd add 906 to rocm7 and maintain the rocm6 version"*):
+ *   `gfx906` — the MI50 and MI60, the Radeon VII — is a target of this family and of `amd_rocm6_wave64` both. AMD's
+ *   matrix for ROCm 7 does not list the card; ROCm 7.2.4's compiler builds for it and its runtime drives it all the
+ *   same, with no override of the card's name. `MEASURED` node03, two MI50, 2026-11-23
+ *   (measurements/2026-11-23_nn206_gfx906_rocm7_node03.md): this family's build against ROCm 6.1.3's of
+ *   `amd_rocm6_wave64` — the door bench 467 checks with either and 279 of its 280 outputs the same bytes, a model's
+ *   logits the same to the bit, the same tokens at the rates there. A card that two families include goes to the
+ *   higher one whose runtime is installed (▶ ../choose.cuh): this one where the machine has ROCm 7, ROCm 6's where it
+ *   has ROCm 6 — so a machine whose kernel ROCm 6.1.3's runtime does not take has a family for the card.
  *
  * ⭐ AND THE RADEONS OF RDNA4, IN WAVE64 (⚖ 2026-11-10 *"maybe we can use it to build the home user amd setup … recycling the
  *   amdmi355x in wave64 mode"*): a consumer card runs 32 lanes to a wavefront by default and 64 when built with
@@ -31,11 +41,24 @@
  * ⭐ THE LIST IS ALSO WHAT THE FAMILY IS BUILT FOR. `scripts/build_silicon_families.sh` reads its targets from the row
  *   below. ⛳ A CARD NOT NAMED HERE IS NOT TAKEN: AMD code is built for exact targets — an RDNA3 or RDNA2 card goes to
  *   OpenCL 2.0. */
-#define AMD_ROCM10__TARGETS(X)  X(gfx908) X(gfx90a) X(gfx942) X(gfx950) X(gfx1200) X(gfx1201)
+#define AMD_ROCM10__TARGETS(X)  X(gfx906) X(gfx908) X(gfx90a) X(gfx942) X(gfx950) X(gfx1200) X(gfx1201)
+
+/* ⛳ A WINDOWS BUILD READS THE LIST WITHOUT `gfx906` (⚖ 2026-11-23 *"go with the linux-only list for now, and the next
+ *   release will need to work on adding that card on windows through hip"*). No ROCm family is built for Windows, where
+ *   an AMD card goes to OpenCL 2.0, and AMD's requirements for ROCm on Windows name no MI card (the HIP SDK 7.2.0's and
+ *   ROCm 10.2's pages, read 2026-11-23). Yet every Windows library compiles the function below through the roster, and
+ *   a line of it that changes is a signature paid for each of them (`release/scripts/sign_plan.py`, the unit key): the
+ *   row below is the one those libraries are signed with, to the token. The release that builds this family for Windows
+ *   gives a Windows build its own cards' row. */
+#define AMD_ROCM10__ZZPRIVATE_TARGETS_ON_WINDOWS(X)  X(gfx908) X(gfx90a) X(gfx942) X(gfx950) X(gfx1200) X(gfx1201)
 
 static inline bool amd_rocm10__includes(const char* card) {
 #define AMD_ROCM10__ZZPRIVATE_IS(T)  if (silicon_families__card_is(card, #T)) return true;
+#if defined(_WIN32)
+    AMD_ROCM10__ZZPRIVATE_TARGETS_ON_WINDOWS(AMD_ROCM10__ZZPRIVATE_IS)
+#else
     AMD_ROCM10__TARGETS(AMD_ROCM10__ZZPRIVATE_IS)
+#endif
 #undef AMD_ROCM10__ZZPRIVATE_IS
     return false;
 }

@@ -104,7 +104,8 @@ for P in $(echo "${SILVANN_SILICON_FAMILIES:-$ALL}" | tr ',' ' '); do
     amd_rocm6_wave64|amd_rocm10)
         # ⭐ THE TWO AMD FAMILIES, ONE SOURCE (`amd_rocm_base`), EACH ITS OWN ROCm (⚖ 2026-11-08 *"the legacy amd on rocm6
         #   and the modern one on rocm7"*): amd_rocm6_wave64 the MI50 with ROCm 6's hipcc — SILVANN_ROCM6, else /opt/rocm —
-        #   and amd_rocm10 gfx908 on with ROCm 7's or later — SILVANN_ROCM10, else /opt/rocm where its HIP is 7 or later.
+        #   and amd_rocm10 gfx908 on — and the MI50 again — with ROCm 7's or later — SILVANN_ROCM10, else /opt/rocm where
+        #   its HIP is 7 or later.
         #   A family whose ROCm is not here is skipped and says so; so is one none of whose targets SILVANN_HIP_ARCHES names.
         if [ "$P" = amd_rocm6_wave64 ]; then ROOT=${SILVANN_ROCM6:-/opt/rocm}; ROW=AMD_ROCM6_WAVE64__TARGETS; NEED="6"
         else ROOT=${SILVANN_ROCM10:-/opt/rocm}; ROW=AMD_ROCM10__TARGETS; NEED="7 or later"; fi
@@ -131,9 +132,16 @@ for P in $(echo "${SILVANN_SILICON_FAMILIES:-$ALL}" | tr ',' ' '); do
         # ⛳ amd_rocm10 IS BUILT IN WAVE64: amd_rocm_base's kernels are written for 64 lanes to a wavefront, which a Radeon
         #   (RDNA4) runs only when built so — the MI cards run 64 alone (▶ amd_rocm10/includes.cuh)
         WAVE=""; [ "$P" = amd_rocm10 ] && WAVE="-mwavefrontsize64"
+        # ⛳ amd_rocm10 IS BUILT WITH EVERY DEVICE FUNCTION INLINED INTO ITS KERNEL: ROCm 6's hipcc gives clang these two
+        #   options by itself and ROCm 7's does not, and without them the recurrences' state kernels (DeltaNet's steps,
+        #   GLM's KDA) call their helpers. `MEASURED` node03, an MI50, ROCm 7.2.4, the door bench against ROCm 6.1.3's
+        #   build (measurements/2026-11-23_nn206_gfx906_rocm7_node03.md): those kernels 1.53 times ROCm 6's time without
+        #   the options and 0.98 with them, every dumped output the same bytes either way. Given twice — a hipcc that
+        #   adds them too — clang takes them (`MEASURED`, clang 22).
+        INLINE=""; [ "$P" = amd_rocm10 ] && INLINE="-mllvm -amdgpu-early-inline-all=true -mllvm -amdgpu-function-calls=false"
         rm -f "$OUT/libsilvann_$P.so"
         # shellcheck disable=SC2086
-        "$ROOT/bin/hipcc" ${GCC:+--gcc-install-dir=$GCC} $ARCHES $WAVE $NNDIAL -O2 -std=c++17 -fPIC -shared -fvisibility=hidden $RPATH -I src \
+        "$ROOT/bin/hipcc" ${GCC:+--gcc-install-dir=$GCC} $ARCHES $WAVE $INLINE $NNDIAL -O2 -std=c++17 -fPIC -shared -fvisibility=hidden $RPATH -I src \
             "$OUT/$P.cu" -o "$OUT/libsilvann_$P.so" > "$OUT/$P.log" 2>&1 \
             || { echo "⛔ $P:"; reason "$OUT/$P.log"; }
         built "$P" "$OUT/libsilvann_$P.so" ;;

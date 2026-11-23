@@ -1,6 +1,6 @@
 # SiLVANN
 
-> **Public beta, v1.4.4.** The normal path has been tested on a reasonable sample of cards, but a bug-free experience is
+> **Public beta, v1.5.0.** The normal path has been tested on a reasonable sample of cards, but a bug-free experience is
 > not expected yet. It is shared for enthusiasts with patience, who can follow a guide and do some troubleshooting. The
 > cards it has run on — NVIDIA's from a GTX 1080 Ti to a B200, AMD's MI50, MI355X and RDNA4 Radeons, and Windows natively
 > on one PC — are in [`docs/platforms.md`](docs/platforms.md); less common setups may not behave as expected, and a
@@ -70,13 +70,13 @@ every machine one model was measured on, its packs and its notes: [`docs/models.
 names no setup chooses its own when the server starts, by trying it on the card: where its experts go, how much of the
 card holds the ones used most, the context the card has room for ([`docs/config.md`](docs/config.md)).
 
-**New in v1.4.4**: [`docs/release_logs/v1.md`](docs/release_logs/v1.md); every 0.x release before it:
+**New in v1.5.0**: [`docs/release_logs/v1.md`](docs/release_logs/v1.md); every 0.x release before it:
 [`docs/release_logs/v0.md`](docs/release_logs/v0.md).
 
 ## Platforms
 
-- **Runs on:** Linux with an AMD card (ROCm 6 for the MI50, ROCm 7 or later from the MI100 on and for the Radeons of
-  RDNA4), an NVIDIA card (CUDA 12)
+- **Runs on:** Linux with an AMD card (ROCm 7 or later: the MI50, the MI100 on and the Radeons of RDNA4; ROCm 6 for
+  the MI50 too), an NVIDIA card (CUDA 12)
   or OpenCL, or the CPU alone (AVX2 or
   AVX-512); Windows with an NVIDIA card; and, experimentally, an Android phone's Arm cores
   ([`docs/android.md`](docs/android.md)). Each machine it was measured on is in the table above.

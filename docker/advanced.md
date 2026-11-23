@@ -35,7 +35,7 @@ podman pod create --name silvann --userns=keep-id -p 127.0.0.1:8080:8080
 podman run -d --pod silvann --name searxng -e SEARXNG_PORT=8888 -v ~/.config/silvann/searxng:/etc/searxng \
        docker.io/searxng/searxng
 podman run -d --pod silvann --name silvann --group-add keep-groups --device /dev/kfd --device /dev/dri \
-       -v ~/SiLVANN:/data ghcr.io/eval-apply-labs/silvann:1-amd-rocm6
+       -v ~/SiLVANN:/data ghcr.io/eval-apply-labs/silvann:1-amd
 ```
 
 In a pod, `--userns=keep-id` and the port go on the pod; an NVIDIA card's container takes `--device nvidia.com/gpu=all`
@@ -81,7 +81,7 @@ podman pod create --name silvann --userns=keep-id -p 127.0.0.1:8000:8000
 podman run -d --pod silvann --name searxng -e SEARXNG_PORT=8888 -v ~/.config/silvann/searxng:/etc/searxng \
        docker.io/searxng/searxng
 podman run -d --pod silvann --name silvann --group-add keep-groups --device /dev/kfd --device /dev/dri \
-       -v ~/SiLVANN:/data ghcr.io/eval-apply-labs/silvann:1-amd-rocm6
+       -v ~/SiLVANN:/data ghcr.io/eval-apply-labs/silvann:1-amd
 podman run -d --pod silvann --name caddy -v ~/.config/silvann/caddy/Caddyfile:/etc/caddy/Caddyfile:ro \
        docker.io/library/caddy:2.8.4
 ```
@@ -112,10 +112,9 @@ Each container can be given its own card, so two models — or two parts of one 
   `--device /dev/kfd --device /dev/dri -e ROCR_VISIBLE_DEVICES=1`. The container sees that card alone, as its card 0.
   A card's render node alone (`--device /dev/dri/renderD129`) is not enough: ROCm 6.1 then sees no card at all
   (`MEASURED` on node03). The numbers follow the kernel driver's own list of cards, and several are named with commas
-  (`0,2`). An image runs one kind of AMD card — `:1-amd-rocm6` the gfx906 generation, `:1-amd-rocm7` the MI100 and later and
-  the Radeons of RDNA4 — so on a machine with both kinds each container names the cards of its image's kind this way,
-  as `setup.sh` does for the one it sets up ([`README.md`](README.md#what-the-machine-needs)). The other kind's cards
-  would run in a second container of the other image, and the two share the machine's RAM: a model's experts held
+  (`0,2`). A card the image holds no family for — an older Radeon, a processor's own graphics — is left out of the
+  list in the same way, as `setup.sh` does for the container it sets up
+  ([`README.md`](README.md#what-the-machine-needs)). Two containers share the machine's RAM: a model's experts held
   there by one are not the other's to use.
 - **NVIDIA:** `--device nvidia.com/gpu=1` hands in that card alone (`ASSUMED` for a second card; `gpu=0` gave the
   Dell Precision's one card, `MEASURED`).
@@ -133,11 +132,11 @@ serves the conversations; each runs the server itself:
 ```bash
 podman pod create --name ring --userns=keep-id -p 127.0.0.1:8765:8765
 podman run -d --pod ring --name ring-cpu -v ~/SiLVANN-cpu:/data \
-       ghcr.io/eval-apply-labs/silvann:1-amd-rocm6 /opt/silvann/venv/bin/python /opt/silvann/start_silvann_server.py \
+       ghcr.io/eval-apply-labs/silvann:1-amd /opt/silvann/venv/bin/python /opt/silvann/start_silvann_server.py \
        --model /data/models/<model> /data/ring.json --host 127.0.0.1 --port 8081
 podman run -d --pod ring --name ring-card -v ~/SiLVANN:/data --group-add keep-groups \
        --device /dev/kfd --device /dev/dri -e ROCR_VISIBLE_DEVICES=0 \
-       ghcr.io/eval-apply-labs/silvann:1-amd-rocm6 /opt/silvann/venv/bin/python /opt/silvann/start_silvann_server.py \
+       ghcr.io/eval-apply-labs/silvann:1-amd /opt/silvann/venv/bin/python /opt/silvann/start_silvann_server.py \
        --model /data/models/<model> /data/ring.json --host 0.0.0.0 --port 8765
 ```
 
@@ -166,7 +165,7 @@ On the machine that keeps it:
 mkdir -p ~/SiLVANN-registry
 podman pod create --name silvann-registry --userns=keep-id -p 8770:8770
 podman run -d --pod silvann-registry --name registry -v ~/SiLVANN-registry:/data \
-       ghcr.io/eval-apply-labs/silvann:1-amd-rocm6 silvann registry
+       ghcr.io/eval-apply-labs/silvann:1-amd silvann registry
 ```
 
 It writes its key into `~/SiLVANN-registry/registry/key` when it first starts; copy that file to each machine as `key`.
@@ -179,7 +178,7 @@ podman run -d --pod silvann-server --name server -v ~/SiLVANN:/data --group-add 
        --device /dev/kfd --device /dev/dri \
        -e SILVANN_TOOL_AGENT_REGISTRY=http://192.0.2.10:8770 -e SILVANN_TOOL_AGENT_KEY="$(cat key)" \
        -e SILVANN_TOOL_AGENT_ADDRESS=http://192.0.2.20:8765 \
-       ghcr.io/eval-apply-labs/silvann:1-amd-rocm6 silvann serve <model> --host 0.0.0.0
+       ghcr.io/eval-apply-labs/silvann:1-amd silvann serve <model> --host 0.0.0.0
 ```
 
 `SILVANN_TOOL_AGENT_ADDRESS` is the machine's address and published port: inside a container the server's own address
@@ -198,7 +197,7 @@ PyAV into the folder, under `python/`, where it stays through a new image —
 
 ```bash
 podman run --rm --userns=keep-id -v ~/SiLVANN:/data --entrypoint /opt/silvann/venv/bin/python \
-       ghcr.io/eval-apply-labs/silvann:1-amd-rocm6 -c "import subprocess, sys; \
+       ghcr.io/eval-apply-labs/silvann:1-amd -c "import subprocess, sys; \
   sys.exit(subprocess.call([sys.executable, '-m', 'pip', 'install', '--upgrade', '--target', '/data/python/%d.%d' % sys.version_info[:2], \
   '-r', '/opt/silvann/scripts/requirements-nonfree.txt']))"
 ```
@@ -212,9 +211,8 @@ From the release's folder. A build takes `install.sh` and the image's two script
 from a repository, as `install.sh` fetches it — GitHub's by default:
 
 ```bash
-podman build -f docker/Dockerfile.amd-rocm6 -t silvann:amd-rocm6 .                      # AMD, gfx906 (ROCm 6)
-podman build -f docker/Dockerfile.amd-rocm7 -t silvann:amd-rocm7 .                      # AMD, the MI100 on and RDNA4 (ROCm 7)
-podman build -f docker/Dockerfile.amd-rocm7 --build-arg AMD_ARCHES=gfx1200 -t silvann:amd-rocm7 .   # one architecture of them
+podman build -f docker/Dockerfile.amd -t silvann:amd .                                  # AMD (ROCm 7)
+podman build -f docker/Dockerfile.amd --build-arg AMD_ARCHES=gfx906 -t silvann:amd .    # one AMD architecture, a shorter build
 podman build -f docker/Dockerfile -t silvann:nvidia .                                   # NVIDIA
 podman build -f docker/Dockerfile --build-arg SILVANN_SOURCE=<a repository> --build-arg SILVANN_REF=<branch> \
              -t silvann:nvidia .                                                        # another repository or branch
@@ -222,5 +220,5 @@ podman build -f docker/Dockerfile --build-arg SILVANN_SOURCE=<a repository> --bu
 
 A checkout with changes of its own goes in through a repository it is pushed to: the build mounts nothing from the
 machine, which Ubuntu 22.04's Podman (3.4) does not support. The published images are built by
-`.github/workflows/images.yml` on a release's tag. `setup.sh --image silvann:amd-rocm6` sets up a container of an image of
+`.github/workflows/images.yml` on a release's tag. `setup.sh --image silvann:amd` sets up a container of an image of
 your own, as it does the published one.

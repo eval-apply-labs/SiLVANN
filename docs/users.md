@@ -271,7 +271,7 @@ from the PC's boot menu, the Windows disk untouched:
    Rufus), boot from it, and install onto the SSD — choosing the SSD as the installation disk, and its boot loader.
 3. **The card's driver:** NVIDIA's from Ubuntu's *Additional Drivers* (570 or newer for an RTX 50 card), then CUDA 12's
    toolkit from developer.nvidia.com/cuda-downloads; for an MI50, ROCm 6.1.3 with `amdgpu-dkms` (and the README's note
-   on kernel updates). The CPU alone needs neither.
+   on kernel updates) — or ROCm 7.2, which builds and runs the card too. The CPU alone needs neither.
 4. **SiLVANN:** the container's line [above](#on-linux-a-container-recommended), or the install's.
 
 **WSL2 — possible, and untested.** WSL2, the Linux that runs inside Windows 10 (21H2 or later) and 11, should run it on

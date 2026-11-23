@@ -12,7 +12,9 @@
  * are `amd_rocm10`'s, ROCm 7 and later's, their matrix cores its own; both are built from `amd_rocm_base`. So are the
  * Radeons of RDNA4, which ROCm 7.2 builds in wave64 (▶ amd_rocm10/includes.cuh): ROCm 6.1's HIP refuses 64 lanes
  * on a consumer card (`gfx1100`, "HIP is not supported on the specified GPU ARCH with wavefront size 64" — `MEASURED`
- * node03, hipcc 6.1.3, 2026-10-29), so this family takes none.
+ * node03, hipcc 6.1.3, 2026-10-29), so this family takes none. `gfx906` is `amd_rocm10`'s target too (⚖ 2026-11-23
+ * *"yes i'd add 906 to rocm7 and maintain the rocm6 version"*): where a machine has ROCm 7 the card goes there, and
+ * here where it has ROCm 6 (▶ ../choose.cuh).
  *
  * ⭐ THE LIST IS ALSO WHAT THE FAMILY IS BUILT FOR. `scripts/build_silicon_families.sh` reads its targets
  *   from the row below, so the family cannot say it takes a card its binary has no code for.

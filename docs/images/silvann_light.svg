@@ -69,7 +69,7 @@
 <rect x="276" y="606" width="208" height="52" rx="8" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="1"/>
 <text x="290" y="628" class="mono" font-size="13.5"><tspan fill="#1f2328" font-weight="600">amd_rocm10</tspan></text>
 <text x="472" y="627" class="sans" font-size="11.5" text-anchor="end"><tspan fill="#59636e">GPU</tspan></text>
-<text x="290" y="647" class="sans" font-size="13"><tspan fill="#59636e">ROCm 7: MI100 on, RDNA4</tspan></text>
+<text x="290" y="647" class="sans" font-size="13"><tspan fill="#59636e">ROCm 7: MI50 on, RDNA4</tspan></text>
 <rect x="496" y="606" width="208" height="52" rx="8" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="1"/>
 <text x="510" y="628" class="mono" font-size="13.5"><tspan fill="#1f2328" font-weight="600">nvidia_cuda12</tspan></text>
 <text x="692" y="627" class="sans" font-size="11.5" text-anchor="end"><tspan fill="#59636e">GPU</tspan></text>

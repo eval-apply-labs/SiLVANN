@@ -144,7 +144,8 @@ find_cards() {
             gfx=$( (/opt/rocm/bin/rocminfo 2>/dev/null || true) | awk '$1 == "Name:" && $2 ~ /^gfx[0-9a-f]+$/ {print $2}' \
                 | sort -u | paste -sd ',' || true)
             # ⭐ TWO AMD FAMILIES, BY THE ROCm HERE: HIP 7 and later build the MI100 on (amd_rocm10, their matrix cores),
-            #   HIP 6 the MI50 (amd_rocm6_wave64) — each builds only the targets of its own (build_silicon_families.sh)
+            #   HIP 6 the MI50 (amd_rocm6_wave64) — each builds only the targets of its own (build_silicon_families.sh);
+            #   the MI50 is a target of both, so with ROCm 7 here it is amd_rocm10's
             local hipv fam
             hipv=$( (/opt/rocm/bin/hipcc --version 2>/dev/null || true) | grep -oE 'HIP version: [0-9]+' | grep -oE '[0-9]+$' || true)
             if [ "${hipv:-0}" -ge 7 ]; then fam=amd_rocm10; else fam=amd_rocm6_wave64; fi
@@ -152,7 +153,6 @@ find_cards() {
             case "$fam,$gfx" in
                 amd_rocm6_wave64,*gfx9[0-9][0-9a-f]*) echo "$gfx" | tr ',' '\n' | grep -qvx gfx906 \
                     && note "   ⚠ ROCm 6 builds the MI50 (gfx906) alone: a card from the MI100 on needs ROCm 7 or later (amd_rocm10)" ;;
-                amd_rocm10,*gfx906*) note "   ⚠ the MI50 (gfx906) needs ROCm 6 (amd_rocm6_wave64): ROCm 7 does not build it" ;;
             esac
             # ⭐ A RADEON OF RDNA4 IS amd_rocm10's, IN WAVE64 — the targets its row lists
             #   (src/silicon_families/amd_rocm10/includes.cuh); any other Radeon, or one beside ROCm 6, runs OpenCL 2.0's

@@ -51,15 +51,13 @@ The script checks each of these and says what to run where one is missing.
 - **Podman**, run as you. On Ubuntu and Debian: `sudo apt install podman crun uidmap slirp4netns fuse-overlayfs`.
   Docker works too.
 - **An AMD card**, and you in the `video` and `render` groups: `sudo usermod -aG video,render $USER`, then log out and
-  in again. The card's driver is the machine's: ROCm 6's `amdgpu-dkms` for the gfx906 generation (Instinct MI50, MI60);
-  the `amdgpu` driver ROCm 7.2 names for the card for an Instinct MI100 or later, or a Radeon RX 9060 or 9070 (RDNA4).
-  Each of the two kinds has its image ([below](#the-images)), and a container takes one kind. Where a machine holds
-  both — an MI50 beside an RX 9060 XT — the script takes the newer cards and hides the others from the container;
-  `--card amd-rocm6` takes the MI50's instead. An AMD card one of the two images runs comes before an NVIDIA card in
-  the same machine, as it does where SiLVANN is installed: `--card nvidia` takes the NVIDIA card. A card neither image
-  is built for (an older Radeon, a processor's own graphics) is hidden beside one that is, comes after an NVIDIA
-  card, and alone it runs no image: `--card cpu`, or an image of your own
-  ([`advanced.md`](advanced.md#building-an-image)).
+  in again. The image holds ROCm 7's runtime; the card's driver is the machine's — the `amdgpu` driver your system
+  has, or AMD's `amdgpu-dkms`. It runs the Instinct MI50 and MI60 and the Radeon VII (gfx906), the Instinct MI100 and
+  later, and the Radeon RX 9060 and 9070 (RDNA4), and every such card of the machine is the container's. An AMD card
+  the image runs comes before an NVIDIA card in the same machine, as it does where SiLVANN is installed: `--card
+  nvidia` takes the NVIDIA card. A card the image is not built for (an older Radeon, a processor's own graphics) is
+  hidden beside one that is, comes after an NVIDIA card, and alone it runs no image: `--card cpu`, or an image of your
+  own ([`advanced.md`](advanced.md#building-an-image)).
 - **An NVIDIA card:** its driver and NVIDIA's container toolkit, then
   `sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml` — once, and again after every driver update. Podman needs
   to be 4.1 or later for this (Ubuntu 24.04, Debian 12 and later); on Ubuntu 22.04 use Docker. A card older than the CUDA
@@ -113,11 +111,11 @@ An AMD card:
 
 ```bash
 podman run -d --name silvann --userns=keep-id --group-add keep-groups --device /dev/kfd --device /dev/dri \
-       -p 127.0.0.1:8080:8080 -v ~/SiLVANN:/data ghcr.io/eval-apply-labs/silvann:1-amd-rocm6
+       -p 127.0.0.1:8080:8080 -v ~/SiLVANN:/data ghcr.io/eval-apply-labs/silvann:1-amd
 ```
 
-(`:1-amd-rocm7` in its place for the cards ROCm 7 drives. Where the machine holds AMD cards the image is not built for, hide them:
-`-e ROCR_VISIBLE_DEVICES=<the numbers of the image's cards>` — [`advanced.md`](advanced.md#a-card-for-each-container).)
+(Where the machine holds AMD cards the image is not built for, hide them: `-e ROCR_VISIBLE_DEVICES=<the numbers of
+the image's cards>` — [`advanced.md`](advanced.md#a-card-for-each-container).)
 
 An NVIDIA card:
 
@@ -187,13 +185,13 @@ server imports what is there as it starts.
 
 | image | for |
 |---|---|
-| `ghcr.io/eval-apply-labs/silvann:1-amd-rocm6` | AMD cards of the gfx906 generation (Instinct MI50 and MI60), with ROCm 6.1.3's runtime; and the CPU |
-| `ghcr.io/eval-apply-labs/silvann:1-amd-rocm7` | AMD's Instinct MI100 and later (gfx908, gfx90a, gfx942, gfx950) and Radeon RX 9060 and 9070 (gfx1200, gfx1201), with ROCm 7.2.4's runtime; and the CPU |
+| `ghcr.io/eval-apply-labs/silvann:1-amd` | AMD's Instinct MI50 and MI60 and Radeon VII (gfx906), Instinct MI100 and later (gfx908, gfx90a, gfx942, gfx950) and Radeon RX 9060 and 9070 (gfx1200, gfx1201), with ROCm 7.2.4's runtime; and the CPU |
 | `ghcr.io/eval-apply-labs/silvann:1-nvidia` | NVIDIA cards CUDA 12.9 builds for (the GeForce RTX 20 to 50 series among them); and the CPU |
 
-`:1-amd-rocm6`, `:1-amd-rocm7` and `:1-nvidia` are the newest release of major version 1; `:1.4.3-nvidia` and the like
-stay that release. Through 1.4.3 the gfx906 image was `:1-amd` (`:1.4.3-amd`): that name stays, and follows
-`:1-amd-rocm6`, so a container made with it keeps updating.
+`:1-amd` and `:1-nvidia` are the newest release of major version 1; `:1.5.0-amd` and the like stay that release.
+1.4.4 had two AMD images, `:1-amd-rocm6` and `:1-amd-rocm7`: both names stay and follow `:1-amd`, so a container made
+with either keeps updating. The image with ROCm 6's runtime ended with 1.4.4 (`:1.4.4-amd-rocm6`): the MI50 and MI60
+run on ROCm 7's from 1.5.0.
 `:0-amd` and `:0-nvidia` stay 0.29.1, the last of major version 0.
 `/opt/silvann/IMAGE_NOTICES.md` in each lists what it holds, each part's licence, and the commit it was built from.
 On Windows, install SiLVANN instead (the README's quick start): under Docker Desktop the models run well below what
@@ -208,8 +206,9 @@ the folder, restarted SiLVANN, and the container imported it. In a container wit
 container run as the user (the 2B 212.8 tokens a second against 211.5), and a model's commands stayed fenced, 95
 checks of 95 (`MEASURED`, measurements/2026-11-23_amd_rocm7_image_node03.md). With the script of 0.21.0 there: a search
 key kept in the tools file (which the server's own reading of the file keeps) through a second run and an update, and
-PyAV still imported after an update (`MEASURED` then). The companions themselves with SiLVANN run this way: not yet
-run — another container on their network was reached by its name from SiLVANN's. On the Dell
+PyAV still imported after an update (`MEASURED` then). The search companion beside a container run this way, set up
+by `install_companion_searxng.sh`, answered a search from inside SiLVANN's container (`MEASURED`,
+measurements/2026-11-23_v144_candidate.md); the browser companion so: not yet run. On the Dell
 Precision (Ubuntu 22.04, an RTX 5060 Ti) under rootless Docker: the NVIDIA card found and handed in, a search key kept,
 the Qwen 3.8 27B started from Options and answering at 24.3 tokens a second, `update`, `stop` and `start` with the model
 started again by itself, the model's shell on under Docker's own profile (`MEASURED`,
@@ -223,15 +222,16 @@ through since v0.49. Under rootless Docker 29.9 the model's commands were fenced
 (`MEASURED`, measurements/2026-10-26_nn119_nvidia_image_precision.md). Under Docker Desktop on Windows, Ministral 3 14B
 `D4` answered at 37 tokens a second on an RTX 5070 Ti, where the same version installed on Linux gave 46.
 
-**The ROCm 7 image has not run a card of its own.** Built on node03 from `Dockerfile.amd-rocm7` (ROCm 7.2.4, 722 MB):
-its family holds code for each of gfx908, gfx90a, gfx942, gfx950, gfx1200 and gfx1201; its ROCm, with no compiler in
-the image, launched a kernel compiled ahead of time on both of node03's MI50s; on that machine, whose cards are not its
-family's, it ran on the CPU — Qwen 3.5 2B `D4` against Hugging Face, 6 checks of 6 — and its chat answered from the
-command above (`MEASURED`, measurements/2026-11-23_amd_rocm7_image_node03.md). `setup.sh`'s choice of image and of
-cards, over made-up lists of a machine's cards — one kind, both, a card no image runs — and the numbers ROCm gives the
-cards: `MEASURED` in the same record. An Instinct MI100 or later, or a Radeon RX 9060 or 9070, in the container, and a
-machine that holds both kinds: `ASSUMED`, not yet run — the family itself has run on an MI355X, an RX 9070 XT and an RX
-9060 XT outside a container ([`docs/platforms.md`](../docs/platforms.md)).
+**The AMD image, on ROCm 7.** Built on node03 from `Dockerfile.amd` (ROCm 7.2.4, 730 MB), its family holding code for
+gfx906, gfx908, gfx90a, gfx942, gfx950, gfx1200 and gfx1201, and run on that machine's two MI50s: `setup.sh` started it
+with the chat answering and both cards in it; in a container with its flags the Qwen 3.5 2B and 4B `D4`, Ministral 3
+14B `D4` and the Qwen 3.6 35B-A3B `D8E4` (its experts in RAM) passed against Hugging Face, the 4B over both cards too,
+and a model's commands stayed fenced, 95 checks of 95. Against 1.4.4's image for the MI50, which held ROCm 6.1.3, on
+the same card: the same tokens, a prompt read as fast or 3 to 4 % faster, the answer 2 to 5 % slower — the 2B 167
+tokens a second where it gave 176 (`MEASURED`, measurements/2026-11-23_nn206_gfx906_rocm7_node03.md). An Instinct
+MI100 or later, a Radeon RX 9060 or 9070, an MI50 beside one of them in the container, and an MI50 under a kernel
+newer than 5.15: `ASSUMED`, not yet run — the family has run on an MI355X, an RX 9070 XT and an RX 9060 XT outside a
+container ([`docs/platforms.md`](../docs/platforms.md)).
 
 ## More
 

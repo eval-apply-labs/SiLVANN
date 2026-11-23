@@ -1,14 +1,12 @@
-# The container images, prebuilt: NVIDIA's (with the CPU's family) and AMD's two — gfx906 on ROCm 6, and the MI100 and
-# later with the Radeons of RDNA4 on ROCm 7 (each with the CPU's) — each the release a tag names installed by install.sh
-# inside its Dockerfile, pushed to GitHub's registry as ghcr.io/<owner>/silvann — `:<version>-nvidia` and
-# `:<major>-nvidia`, `:<version>-amd-rocm6` and `:<major>-amd-rocm6`, `:<version>-amd-rocm7` and `:<major>-amd-rocm7`,
-# the major's tags moved to each of its releases (CLAUDE.md's lines: a major's image updated in place). `:<major>-amd`,
-# the gfx906 image's name through 1.4.3, moves with `:<major>-amd-rocm6`, so a container made with it keeps updating.
-# The runners have no GPU:
-# each image is built and its libraries listed, no model is run. The images hold binaries: IMAGE_NOTICES.md in each
-# says which, and each one's licence (ATTRIBUTION.md §6). Plain docker commands, so no action but checkout's runs with
-# the job's token, which may write the registry's packages. A first push makes a package private: its visibility is
-# set to public once, by hand.
+# The container images, prebuilt: NVIDIA's and AMD's — AMD's on ROCm 7, for the MI50 and MI60, the MI100 and later and
+# the Radeons of RDNA4 — each with the CPU's family, each the release a tag names installed by install.sh inside its
+# Dockerfile, pushed to GitHub's registry as ghcr.io/<owner>/silvann — `:<version>-nvidia` and `:<major>-nvidia`,
+# `:<version>-amd` and `:<major>-amd`, the major's tags moved to each of its releases (CLAUDE.md's lines: a major's
+# image updated in place). `:<major>-amd-rocm6` and `:<major>-amd-rocm7`, the names 1.4.4 gave its two AMD images, move
+# with `:<major>-amd`, so a container made with either keeps updating. The runners have no GPU: each image is built and
+# its libraries listed, no model is run. The images hold binaries: IMAGE_NOTICES.md in each says which, and each one's
+# licence (ATTRIBUTION.md §6). Plain docker commands, so no action but checkout's runs with the job's token, which may
+# write the registry's packages. A first push makes a package private: its visibility is set to public once, by hand.
 name: "images"
 on:
   push:
@@ -31,11 +29,9 @@ jobs:
         include:
           - variant: nvidia
             dockerfile: docker/Dockerfile
-          - variant: amd-rocm6
-            dockerfile: docker/Dockerfile.amd-rocm6
-            also: amd
-          - variant: amd-rocm7
-            dockerfile: docker/Dockerfile.amd-rocm7
+          - variant: amd
+            dockerfile: docker/Dockerfile.amd
+            also: amd-rocm6 amd-rocm7
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -57,7 +53,7 @@ jobs:
           docker build --network=host -f "$DOCKERFILE" \
             --build-arg SILVANN_SOURCE="https://github.com/${GITHUB_REPOSITORY}" \
             --build-arg SILVANN_REF="${GITHUB_REF_NAME}" --build-arg SILVANN_COMMIT="${GITHUB_SHA}" \
-            -t "$image:$version-$VARIANT" -t "$image:$major-$VARIANT" ${ALSO:+-t "$image:$major-$ALSO"} .
+            -t "$image:$version-$VARIANT" -t "$image:$major-$VARIANT" $(for a in $ALSO; do printf -- '-t %s ' "$image:$major-$a"; done) .
           docker run --rm --entrypoint sh "$image:$version-$VARIANT" \
             -c 'ls -l /opt/silvann/lib/silicon_families; head -2 /opt/silvann/SOURCE_COMMIT'
           echo "IMAGE=$image" >> "$GITHUB_ENV"; echo "VERSION=$version" >> "$GITHUB_ENV"; echo "MAJOR=$major" >> "$GITHUB_ENV"
@@ -72,4 +68,4 @@ jobs:
           echo "$TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
           docker push "$IMAGE:$VERSION-$VARIANT"
           docker push "$IMAGE:$MAJOR-$VARIANT"
-          [ -z "$ALSO" ] || docker push "$IMAGE:$MAJOR-$ALSO"
+          for a in $ALSO; do docker push "$IMAGE:$MAJOR-$a"; done

@@ -255,8 +255,8 @@ engine with `(engine '(form))`, and `,tools FORM` at `silvann_base_repl`'s promp
 `engine/src/silicon_families/add_a_family.md`. A family answers a small contract: memory and copies, a launch, and a
 handful of arithmetic primitives (the lanes' sums, a half to a float, the tile it likes its GEMM in). The library's
 kernels are written once against those answers; a family may also override a door with its own code, as
-the AMD families (`amd_rocm6_wave64` for the MI50 on ROCm 6, `amd_rocm10` from the MI100 on with ROCm 7 and later, and
-for the Radeons of RDNA4 in wave64, one source), `nvidia_cuda12`, the OpenCL families, the Arm families (`arm_neon`
+the AMD families (`amd_rocm6_wave64` for the MI50 on ROCm 6, `amd_rocm10` with ROCm 7 and later for the MI50, the
+MI100 on and the Radeons of RDNA4, in wave64, one source), `nvidia_cuda12`, the OpenCL families, the Arm families (`arm_neon`
 and `arm_gb10`) and `x86_avx2` do for the hottest ones — `amd_rocm10` the prompt's GEMM
 tiles on the matrix cores (`v_mfma`), `nvidia_cuda12`
 the GEMMs, the gemvs and the attention's scores on the tensor cores (`mma.sync`), and `x86_avx2` its matrix products
