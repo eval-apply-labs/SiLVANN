@@ -57,10 +57,11 @@ def main():
     if rocm:
         version = read("/opt/rocm/.info/version", "unknown").strip()
         print("## AMD's ROCm, its HIP runtime\n")
-        print("`libsilvann_amd_rocm6_wave64.so` is linked against ROCm's HIP runtime (%s), installed from AMD's repository "
+        linked = " and ".join("`%s`" % f for f in families if f.startswith("libsilvann_amd_")) or "The AMD family"
+        print("%s is linked against ROCm's HIP runtime (%s), installed from AMD's repository "
               "(repo.radeon.com) as the packages below. Each one's licence is in `/opt/rocm/share/doc/<component>/` "
               "(and `/usr/share/doc/<package>/` where it has one); their source is published by AMD at "
-              "https://github.com/ROCm. The card's kernel driver is the host's.\n" % version)
+              "https://github.com/ROCm. The card's kernel driver is the host's.\n" % (linked, version))
         print("| package | version |\n|---|---|")
         for r in sorted(rocm):
             print("| %s | %s |" % (r[0], r[1]))

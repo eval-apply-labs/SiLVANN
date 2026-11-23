@@ -37,7 +37,7 @@ make_net() {
     "$ENGINE" network create "$NET" >/dev/null
     if [ "$ENGINE" = podman ] && [ "$(podman version -f '{{.Client.Version}}' 2>/dev/null | cut -d. -f1)" = 3 ]; then
         for f in "${XDG_CONFIG_HOME:-$HOME/.config}/cni/net.d/$NET.conflist" "/etc/cni/net.d/$NET.conflist"; do
-            [ -w "$f" ] && sed -i 's/"cniVersion": "1.0.0"/"cniVersion": "0.4.0"/' "$f"
+            [ ! -w "$f" ] || sed -i 's/"cniVersion": "1.0.0"/"cniVersion": "0.4.0"/' "$f"
         done
     fi
 }

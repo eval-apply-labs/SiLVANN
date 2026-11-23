@@ -5,15 +5,15 @@
 # live in a folder of yours at /data; the UI is the app, on port 8080.
 #
 #   from the release's folder:
-#   podman build -f docker/Dockerfile.amd -t silvann:amd .                           GitHub's default branch
-#   podman build -f docker/Dockerfile.amd --build-arg SILVANN_SOURCE=<a repository> --build-arg SILVANN_REF=<branch> \
-#                -t silvann:amd .                                                    another repository or branch
-#   ⛳ the MI100 on (gfx908 … gfx950) are amd_rocm10's, built with ROCm 7 or later: an image of their own, not this one
+#   podman build -f docker/Dockerfile.amd-rocm6 -t silvann:amd-rocm6 .               GitHub's default branch
+#   podman build -f docker/Dockerfile.amd-rocm6 --build-arg SILVANN_SOURCE=<a repository> \
+#                --build-arg SILVANN_REF=<branch> -t silvann:amd-rocm6 .             another repository or branch
+#   ⛳ the MI100 on (gfx908 … gfx950) and the Radeons of RDNA4 are amd_rocm10's, built with ROCm 7: Dockerfile.amd-rocm7
 #
 # The release comes from a repository's URL, as install.sh fetches it — no mount of the build's own, which Ubuntu 22.04's
 # Podman (3.4, buildah 1.23) does not take: a checkout with changes of its own goes in by a repository it is pushed to.
 #   podman run -d --userns=keep-id --group-add keep-groups --device /dev/kfd --device /dev/dri \
-#              -p 127.0.0.1:8080:8080 -v ~/SiLVANN:/data silvann:amd                ▶ docker/README.md
+#              -p 127.0.0.1:8080:8080 -v ~/SiLVANN:/data silvann:amd-rocm6          ▶ docker/README.md
 #
 # The card is the host's: its kernel driver (amdgpu) on the host, its device nodes handed in, and ROCm's userspace —
 # the HIP runtime the family is linked against — in the image, at ROCM_VERSION, which the host's driver must take.
@@ -101,11 +101,12 @@ ENV PATH=/opt/rocm/bin:${PATH} \
     PYTHONUNBUFFERED=1 \
     HOME=/home/silvann
 # no USER: started as root (rootful), the entrypoint gives what /data holds to silvann and runs the app as it;
-# started as uid 1000 (rootless Podman's --userns=keep-id), it runs as it is, the host user's groups kept for the card
+# started as uid 1000 (rootless Podman's --userns=keep-id), it runs as it is, the host user's groups kept for the card;
+# started as a root that is the user outside (rootless Docker; rootless Podman 3 as setup.sh starts it), as that root
 WORKDIR /opt/silvann
 VOLUME /data
 EXPOSE 8080
-LABEL org.opencontainers.image.title="SiLVANN for AMD cards" \
+LABEL org.opencontainers.image.title="SiLVANN for AMD cards on ROCm 6" \
       org.opencontainers.image.description="The Eval-Apply Generalized Interpreter and its Neural Network library, with the chat UI" \
       org.opencontainers.image.source="https://github.com/eval-apply-labs/SiLVANN" \
       org.opencontainers.image.licenses="AGPL-3.0-only"

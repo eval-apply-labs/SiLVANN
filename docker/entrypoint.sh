@@ -3,7 +3,8 @@
 # pasted in through Windows' Explorer (the scripts' open_data) comes in as root's, and a model reading its experts from
 # the disk writes beside them — then the app runs as that user. A container started as another user runs as it is, and
 # so does a root that is a user outside (rootless Docker maps the container's root to the user who started it, and its
-# uid 1000 to one of that user's subordinate ids): the folder stays the user's, unchanged.
+# uid 1000 to one of that user's subordinate ids; so does rootless Podman without --userns=keep-id, which is how
+# setup.sh starts it under Podman 3): the folder stays the user's, unchanged.
 # A GPU handed in through /dev/dri (an integrated GPU, `--device /dev/dri`) belongs to the host's render group, by number:
 # the app's user joins a group of that number, so it may open the GPU as the host's users in that group do.
 if [ "$(id -u)" = 0 ] && [ "$(awk '$1 == 0 { print $2 }' /proc/self/uid_map)" = 0 ]; then

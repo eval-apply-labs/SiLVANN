@@ -50,8 +50,16 @@ The script checks each of these and says what to run where one is missing.
 
 - **Podman**, run as you. On Ubuntu and Debian: `sudo apt install podman crun uidmap slirp4netns fuse-overlayfs`.
   Docker works too.
-- **An AMD card** of the gfx906 generation (Instinct MI50, MI60): its driver (ROCm 6's `amdgpu-dkms`), and you in the
-  `video` and `render` groups: `sudo usermod -aG video,render $USER`, then log out and in again.
+- **An AMD card**, and you in the `video` and `render` groups: `sudo usermod -aG video,render $USER`, then log out and
+  in again. The card's driver is the machine's: ROCm 6's `amdgpu-dkms` for the gfx906 generation (Instinct MI50, MI60);
+  the `amdgpu` driver ROCm 7.2 names for the card for an Instinct MI100 or later, or a Radeon RX 9060 or 9070 (RDNA4).
+  Each of the two kinds has its image ([below](#the-images)), and a container takes one kind. Where a machine holds
+  both — an MI50 beside an RX 9060 XT — the script takes the newer cards and hides the others from the container;
+  `--card amd-rocm6` takes the MI50's instead. An AMD card one of the two images runs comes before an NVIDIA card in
+  the same machine, as it does where SiLVANN is installed: `--card nvidia` takes the NVIDIA card. A card neither image
+  is built for (an older Radeon, a processor's own graphics) is hidden beside one that is, comes after an NVIDIA
+  card, and alone it runs no image: `--card cpu`, or an image of your own
+  ([`advanced.md`](advanced.md#building-an-image)).
 - **An NVIDIA card:** its driver and NVIDIA's container toolkit, then
   `sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml` — once, and again after every driver update. Podman needs
   to be 4.1 or later for this (Ubuntu 24.04, Debian 12 and later); on Ubuntu 22.04 use Docker. A card older than the CUDA
@@ -105,8 +113,11 @@ An AMD card:
 
 ```bash
 podman run -d --name silvann --userns=keep-id --group-add keep-groups --device /dev/kfd --device /dev/dri \
-       -p 127.0.0.1:8080:8080 -v ~/SiLVANN:/data ghcr.io/eval-apply-labs/silvann:1-amd
+       -p 127.0.0.1:8080:8080 -v ~/SiLVANN:/data ghcr.io/eval-apply-labs/silvann:1-amd-rocm6
 ```
+
+(`:1-amd-rocm7` in its place for the cards ROCm 7 drives. Where the machine holds AMD cards the image is not built for, hide them:
+`-e ROCR_VISIBLE_DEVICES=<the numbers of the image's cards>` — [`advanced.md`](advanced.md#a-card-for-each-container).)
 
 An NVIDIA card:
 
@@ -127,7 +138,8 @@ second with its experts there, 5 with them on the processors; the processors' lo
 still needs. A Linux machine's — Docker Desktop on Windows reaches a GPU through WSL 2's `/dev/dxg`, which the image's
 Intel OpenCL is not built for (`ASSUMED`); there the native install sees the integrated GPU itself (the same variable).
 
-- `--userns=keep-id` runs SiLVANN as you, so the files in `~/SiLVANN` stay yours.
+- `--userns=keep-id` runs SiLVANN as you, so the files in `~/SiLVANN` stay yours (`setup.sh` runs it another way
+  under Ubuntu 22.04's Podman: below).
 - `--group-add keep-groups` keeps your `video` and `render` groups, which own the AMD card.
 - `-p 127.0.0.1:8080:8080` keeps the chat to this machine: its first page asks for the machine's account (or
   `podman run --rm -it … silvann users add <name>` before it starts), and a single user's machine is one account's at a
@@ -152,6 +164,13 @@ then `--security-opt seccomp=$HOME/.config/containers/silvann-seccomp.json` in t
 server's secrets with the kernel's Landlock, and 22.04's security profile refuses Landlock's calls — without the
 profile above the model has no shell, and its `(help)` says why. Handing in the AMD card needs the `crun` runtime.
 
+That Podman also opens no port for a container that runs as you on a network of the containers' own, and `setup.sh`
+puts SiLVANN on one, the companions': the chat answers inside the container and nothing listens outside it
+(`MEASURED`). So under Podman 3 `setup.sh` leaves `--userns=keep-id` out and gives `--cap-drop=all --read-only --tmpfs
+/tmp` in its place: SiLVANN runs as the container's root — whom rootless Podman maps to you, so the files in
+`~/SiLVANN` stay yours — with none of root's capabilities, and the image's own files read-only. The command above, by
+hand, keeps its port as it is: it is on Podman's own network, where the companions do not find it.
+
 **Docker** instead of Podman: leave out `--userns=keep-id` and `--group-add keep-groups`; an NVIDIA card is
 `--gpus all`, an AMD card `--device /dev/kfd --device /dev/dri --group-add video --group-add render`. Under rootless
 Docker, add `--read-only --tmpfs /tmp`. Docker needs no security profile.
@@ -168,20 +187,29 @@ server imports what is there as it starts.
 
 | image | for |
 |---|---|
-| `ghcr.io/eval-apply-labs/silvann:1-amd` | AMD cards of the gfx906 generation (Instinct MI50 and MI60), with ROCm 6.1.3's runtime; and the CPU |
+| `ghcr.io/eval-apply-labs/silvann:1-amd-rocm6` | AMD cards of the gfx906 generation (Instinct MI50 and MI60), with ROCm 6.1.3's runtime; and the CPU |
+| `ghcr.io/eval-apply-labs/silvann:1-amd-rocm7` | AMD's Instinct MI100 and later (gfx908, gfx90a, gfx942, gfx950) and Radeon RX 9060 and 9070 (gfx1200, gfx1201), with ROCm 7.2.4's runtime; and the CPU |
 | `ghcr.io/eval-apply-labs/silvann:1-nvidia` | NVIDIA cards CUDA 12.9 builds for (the GeForce RTX 20 to 50 series among them); and the CPU |
 
-`:1-amd` and `:1-nvidia` are the newest release of major version 1; `:1.0.0-amd` and the like stay that release.
+`:1-amd-rocm6`, `:1-amd-rocm7` and `:1-nvidia` are the newest release of major version 1; `:1.4.3-nvidia` and the like
+stay that release. Through 1.4.3 the gfx906 image was `:1-amd` (`:1.4.3-amd`): that name stays, and follows
+`:1-amd-rocm6`, so a container made with it keeps updating.
 `:0-amd` and `:0-nvidia` stay 0.29.1, the last of major version 0.
 `/opt/silvann/IMAGE_NOTICES.md` in each lists what it holds, each part's licence, and the commit it was built from.
 On Windows, install SiLVANN instead (the README's quick start): under Docker Desktop the models run well below what
 the PC gives.
 
-**Tested:** `setup.sh` on node03 (Ubuntu 22.04, Podman 3.4, an MI50): it found the AMD card, wrote the 22.04 profile,
-started the container with the chat answering, kept a search key in the tools file (which the server's own reading
-of the file keeps), and was run again, stopped, started and updated, the key kept; with 8080 taken it took 8081, a
-`--port` named busy was refused, and the chat answered at `silvann.localhost` on both; `install_nonfree.sh` put PyAV
-17.1 in the folder, restarted SiLVANN, and the container imported it, after an update too (`MEASURED`). On the Dell
+**Tested:** `setup.sh` as it is on node03 (Ubuntu 22.04, rootless Podman 3.4, two MI50s), with the 1.4.3 image: a
+first run made the companions' network and started the container with the chat answering at `silvann.localhost`, both
+cards in it and the folder's files the user's; run again it said so; it was stopped, started and updated, the port
+kept; a `--port` named busy was refused, and with 8080 taken it would take 8081; `install_nonfree.sh` put PyAV 17.1 in
+the folder, restarted SiLVANN, and the container imported it. In a container with the same flags the Qwen 3.6 35B-A3B
+`D8E4` (its experts in RAM) and the Qwen 3.5 2B `D4` passed against Hugging Face on an MI50, at the rates of a
+container run as the user (the 2B 212.8 tokens a second against 211.5), and a model's commands stayed fenced, 95
+checks of 95 (`MEASURED`, measurements/2026-11-23_amd_rocm7_image_node03.md). With the script of 0.21.0 there: a search
+key kept in the tools file (which the server's own reading of the file keeps) through a second run and an update, and
+PyAV still imported after an update (`MEASURED` then). The companions themselves with SiLVANN run this way: not yet
+run — another container on their network was reached by its name from SiLVANN's. On the Dell
 Precision (Ubuntu 22.04, an RTX 5060 Ti) under rootless Docker: the NVIDIA card found and handed in, a search key kept,
 the Qwen 3.8 27B started from Options and answering at 24.3 tokens a second, `update`, `stop` and `start` with the model
 started again by itself, the model's shell on under Docker's own profile (`MEASURED`,
@@ -194,6 +222,16 @@ on node03; the newer distributions letting it through: `REASONED` from container
 through since v0.49. Under rootless Docker 29.9 the model's commands were fenced off from the tools file
 (`MEASURED`, measurements/2026-10-26_nn119_nvidia_image_precision.md). Under Docker Desktop on Windows, Ministral 3 14B
 `D4` answered at 37 tokens a second on an RTX 5070 Ti, where the same version installed on Linux gave 46.
+
+**The ROCm 7 image has not run a card of its own.** Built on node03 from `Dockerfile.amd-rocm7` (ROCm 7.2.4, 722 MB):
+its family holds code for each of gfx908, gfx90a, gfx942, gfx950, gfx1200 and gfx1201; its ROCm, with no compiler in
+the image, launched a kernel compiled ahead of time on both of node03's MI50s; on that machine, whose cards are not its
+family's, it ran on the CPU — Qwen 3.5 2B `D4` against Hugging Face, 6 checks of 6 — and its chat answered from the
+command above (`MEASURED`, measurements/2026-11-23_amd_rocm7_image_node03.md). `setup.sh`'s choice of image and of
+cards, over made-up lists of a machine's cards — one kind, both, a card no image runs — and the numbers ROCm gives the
+cards: `MEASURED` in the same record. An Instinct MI100 or later, or a Radeon RX 9060 or 9070, in the container, and a
+machine that holds both kinds: `ASSUMED`, not yet run — the family itself has run on an MI355X, an RX 9070 XT and an RX
+9060 XT outside a container ([`docs/platforms.md`](../docs/platforms.md)).
 
 ## More
 

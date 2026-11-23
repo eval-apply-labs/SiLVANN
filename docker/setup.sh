@@ -15,6 +15,8 @@
 #   … | bash -s -- --dry-run     say what it would run, and run nothing
 #
 #   --card amd|nvidia|cpu   which, where it guesses wrong       --data <folder>   another folder than ~/SiLVANN
+#   --card amd-rocm6|amd-rocm7   which AMD cards, where the machine holds both kinds: the MI50's (ROCm 6) or the newer
+#                                ones (ROCm 7) — one container takes one kind
 #   --port <port>           a port of your own (by default 8080,  --name <name>     another container name than silvann
 #                           or the first free one after it)
 #   --engine podman|docker  which, where both are installed     --no-search       ask for no search key
@@ -28,7 +30,7 @@ set -euo pipefail
 
 ACTION=setup; CARD=""; DATA="$HOME/SiLVANN"; PORT=""; NAME=silvann; ENGINE=""; DRY=0; SEARCH=1; OWN_IMAGE=""; PRIVATE=0
 IMAGE_BASE=ghcr.io/eval-apply-labs/silvann
-MAJOR=1                 # the major version whose newest release the images follow (:1-amd, :1-nvidia)
+MAJOR=1                 # the major version whose newest release the images follow (:1-amd-rocm6, :1-amd-rocm7, :1-nvidia)
 while [ $# -gt 0 ]; do
     case "$1" in
         setup|update|stop|start) ACTION=$1 ;;
@@ -42,12 +44,14 @@ while [ $# -gt 0 ]; do
         --no-search) SEARCH=0 ;;
         --private) PRIVATE=1 ;;
         -h|--help) cat <<'USAGE'
-setup.sh [setup|update|stop|start] [--card amd|nvidia|cpu] [--data <folder>] [--port <port>] [--name <name>]
-         [--engine podman|docker] [--image <an image of your own>] [--no-search] [--private] [--dry-run]
+setup.sh [setup|update|stop|start] [--card amd|amd-rocm6|amd-rocm7|nvidia|cpu] [--data <folder>] [--port <port>]
+         [--name <name>] [--engine podman|docker] [--image <an image of your own>] [--no-search] [--private] [--dry-run]
   setup    (the default) set SiLVANN up in a container and start it; the chat at http://localhost:8080
   update   the newest image, the container made again over the same folder
   stop     stop it, giving it time to save the conversations;  start  start it again
   --private  the chat on this machine alone, even once it is multi user
+  --card amd-rocm6 | amd-rocm7   where the machine holds AMD cards of both kinds, which the container takes: the
+             Instinct MI50 and MI60 (ROCm 6), or the MI100 and later and the Radeon RX 9060 and 9070 (ROCm 7)
 USAGE
             exit 0 ;;
         *) echo "setup.sh: unknown argument '$1' (--help lists them)" >&2; exit 2 ;;
@@ -143,27 +147,92 @@ else
 fi
 
 # ── the card ──────────────────────────────────────────────────────────────────────────────────────────────────────
+# AMD's cards as the kernel driver lists them, a line a card: its number as ROCm counts the cards, its architecture, and
+# the image built for it — `amd-rocm6` (gfx906, the Instinct MI50 and MI60), `amd-rocm7` (the MI100 and later, and the
+# Radeons of RDNA4) or `-`, a card no image holds a family for. ROCm numbers the driver's card nodes in their
+# order, the processors' nodes left out. SILVANN_KFD_NODES names another folder of the driver's nodes.
+KFD=${SILVANN_KFD_NODES:-/sys/class/kfd/kfd/topology/nodes}
+gfx_name() { printf 'gfx%d%d%x' $(($1 / 10000)) $(($1 / 100 % 100)) $(($1 % 100)); }
+amd_cards() {
+    local n=0 node v
+    for node in $(ls "$KFD" 2>/dev/null | sort -n); do
+        v=$(awk '$1 == "gfx_target_version" {print $2}' "$KFD/$node/properties" 2>/dev/null || true)
+        [ -n "$v" ] && [ "$v" != 0 ] || continue
+        case "$v" in
+            90006) echo "$n $(gfx_name "$v") amd-rocm6" ;;
+            90008|90010|90402|90500|120000|120001) echo "$n $(gfx_name "$v") amd-rocm7" ;;
+            *) echo "$n $(gfx_name "$v") -" ;;
+        esac
+        n=$((n + 1))
+    done
+}
+numbers_for() { echo "$AMD_CARDS" | awk -v image="$1" '$3 == image {print $1}' | paste -sd, -; }     # an image's cards
+named() { echo "$AMD_CARDS" | awk -v image="$1" '$3 == image {print $2 " (card " $1 ")"}' | paste -sd, - | sed 's/,/, /g'; }
+
+# ⭐ THE ORDER IS THE ONE SiLVANN TAKES THE FAMILIES IN ON AN INSTALL (runtime/silvann_runtime/machine.py): an AMD card
+#   one of ROCm's families runs, then an NVIDIA card, then what is left. An AMD card no image runs — a processor's own
+#   graphics beside an NVIDIA card — does not come before the NVIDIA card.
+AMD_CARDS=$(amd_cards)
+nvidia_here() { command -v nvidia-smi >/dev/null && nvidia-smi -L >/dev/null 2>&1; }
+# an update keeps its container's vendor: one made for the NVIDIA card stays NVIDIA's while the card answers
+if [ -z "$CARD" ] && [ "$ACTION" = update ] && exists && nvidia_here; then
+    case "$("$ENGINE" container inspect -f '{{.Config.Image}}' "$NAME" 2>/dev/null || true)" in *-nvidia) CARD=nvidia ;; esac
+fi
 if [ -z "$CARD" ]; then
-    if command -v nvidia-smi >/dev/null && nvidia-smi -L >/dev/null 2>&1; then CARD=nvidia
+    if [ -n "$(numbers_for amd-rocm7)$(numbers_for amd-rocm6)" ]; then CARD=amd
+    elif nvidia_here; then CARD=nvidia
     elif [ -e /dev/kfd ]; then CARD=amd
     else CARD=cpu
     fi
 fi
-case "$CARD" in amd|nvidia|cpu) ;; *) stop_here "--card is amd, nvidia or cpu, not '$CARD'." ;; esac
-say "SiLVANN in a container: $ENGINE, $([ $CARD = cpu ] && echo 'no card — the CPU runs the models' || echo "an $(echo $CARD | sed 's/amd/AMD/;s/nvidia/NVIDIA/') card")"
+case "$CARD" in amd|amd-rocm6|amd-rocm7|nvidia|cpu) ;; *) stop_here "--card is amd, amd-rocm6, amd-rocm7, nvidia or cpu, not '$CARD'." ;; esac
+case "$CARD" in amd*) WHAT="an AMD card" ;; nvidia) WHAT="an NVIDIA card" ;; *) WHAT="no card — the CPU runs the models" ;; esac
+say "SiLVANN in a container: $ENGINE, $WHAT"
 
 FLAGS=()
-if [ "$CARD" = amd ]; then
-    # the image is built for the gfx906 generation (Instinct MI50, MI60): another card has no family in it
-    other=""
-    for p in /sys/class/kfd/kfd/topology/nodes/*/properties; do
-        v=$(awk '/gfx_target_version/ {print $2}' "$p" 2>/dev/null || true)
-        [ -n "$v" ] && [ "$v" != 0 ] && [ "$v" != 90006 ] && other=$v
-    done
-    if [ -n "$other" ] && [ -z "$OWN_IMAGE" ]; then
-        stop_here "This AMD card (gfx target $other) is not one the published image is built for (gfx906: MI50, MI60)." \
+if [ "${CARD#amd}" != "$CARD" ]; then
+    # ⭐ ONE CONTAINER, ONE KIND OF AMD CARD: an image holds one ROCm and the family built with it — ROCm 6's for the
+    #   gfx906 generation, ROCm 7's for the MI100 and later and the Radeons of RDNA4 — and a family counts only the cards
+    #   it lists. Where the machine holds both kinds, the container takes ROCm 7's, as SiLVANN installed on the machine
+    #   does, unless --card names the other; an update keeps the kind its container has. A card that is not the image's
+    #   — the other kind's, or one no image is built for, a processor's own graphics among them — is hidden from the
+    #   container (ROCR_VISIBLE_DEVICES), so its ROCm opens only the cards its family runs.
+    WANT=""
+    [ "$CARD" = amd ] || WANT=$CARD
+    NAMED=$WANT
+    if [ -z "$WANT" ] && [ "$ACTION" = update ] && exists; then
+        case "$("$ENGINE" container inspect -f '{{.Config.Image}}' "$NAME" 2>/dev/null || true)" in
+            *-amd-rocm7) WANT=amd-rocm7 ;; *-amd-rocm6|*-amd) WANT=amd-rocm6 ;;     # `-amd`: the gfx906 image's name through 1.4.3
+        esac
+        [ -z "$WANT" ] || [ -n "$(numbers_for "$WANT")" ] || WANT=""
+    fi
+    if [ -z "$WANT" ]; then
+        if [ -n "$(numbers_for amd-rocm7)" ]; then WANT=amd-rocm7; else WANT=amd-rocm6; fi
+    fi
+    if [ -n "$AMD_CARDS" ] && [ -z "$(numbers_for "$WANT")" ] && [ -z "$OWN_IMAGE" ]; then
+        found=$(echo "$AMD_CARDS" | awk '{print $2}' | sort -u | paste -sd, - | sed 's/,/, /g')
+        if [ -n "$NAMED" ]; then
+            stop_here "No AMD card here is one the $WANT image is built for (this machine's: $found)." \
+                "$IMAGE_BASE:$MAJOR-amd-rocm6 is built for gfx906 (Instinct MI50, MI60);" \
+                "$IMAGE_BASE:$MAJOR-amd-rocm7 for gfx908, gfx90a, gfx942, gfx950 (Instinct MI100 and later), gfx1200 and gfx1201 (Radeon RX 9060, 9070)." \
+                "Leave --card out and the script chooses, or run on the CPU: --card cpu."
+        fi
+        stop_here "This machine's AMD card ($found) is not one a published image is built for." \
+            "$IMAGE_BASE:$MAJOR-amd-rocm6 is built for gfx906 (Instinct MI50, MI60);" \
+            "$IMAGE_BASE:$MAJOR-amd-rocm7 for gfx908, gfx90a, gfx942, gfx950 (Instinct MI100 and later), gfx1200 and gfx1201 (Radeon RX 9060, 9070)." \
             "Build an image for it (docker/advanced.md, 'Building an image') and add --image <its name>," \
             "or run on the CPU: add --card cpu."
+    fi
+    mine=$(numbers_for "$WANT")
+    if [ -n "$mine" ] && [ "$(echo "$AMD_CARDS" | grep -c .)" != "$(echo "$mine" | tr ',' '\n' | grep -c .)" ] \
+            && { [ -z "$OWN_IMAGE" ] || [ -n "$NAMED" ]; }; then
+        FLAGS+=(-e "ROCR_VISIBLE_DEVICES=$mine")
+        note "This container takes $(named "$WANT"), through ROCm ${WANT#amd-rocm}."
+        for other in amd-rocm6 amd-rocm7; do
+            [ "$other" = "$WANT" ] || [ -z "$(numbers_for "$other")" ] ||
+                note "Left out of it: $(named "$other"), which another image runs. For those instead: --card $other"
+        done
+        [ -z "$(numbers_for -)" ] || note "Left out of it: $(named -), which no image is built for."
     fi
     missing=""
     for g in video render; do id -nG | tr ' ' '\n' | grep -qx "$g" || missing="$missing $g"; done
@@ -188,7 +257,7 @@ if [ "$CARD" = amd ]; then
         for g in video render; do gid=$(getent group "$g" | cut -d: -f3); [ -n "$gid" ] && FLAGS+=(--group-add "$gid"); done
     fi
     FLAGS+=(--device /dev/kfd --device /dev/dri)
-    IMAGE=$IMAGE_BASE:$MAJOR-amd
+    IMAGE=$IMAGE_BASE:$MAJOR-$WANT
 elif [ "$CARD" = nvidia ]; then
     if [ "$ENGINE" = podman ]; then
         pv=$(podman version --format '{{.Client.Version}}' 2>/dev/null || echo 0)
@@ -210,7 +279,7 @@ elif [ "$CARD" = nvidia ]; then
     [ -n "$old" ] && note "compute capability $old: older than CUDA's family takes (7.5 and newer) — that card runs through OpenCL 1.2"
     IMAGE=$IMAGE_BASE:$MAJOR-nvidia
 else
-    IMAGE=$IMAGE_BASE:$MAJOR-amd      # either image runs on the CPU alone
+    IMAGE=$IMAGE_BASE:$MAJOR-amd-rocm6      # any image runs on the CPU alone
 fi
 
 [ -z "$OWN_IMAGE" ] || IMAGE=$OWN_IMAGE
@@ -219,7 +288,17 @@ fi
 # Podman's own seccomp profile lets the kernel's Landlock through from containers/common v0.49; an older one (Ubuntu
 # 22.04's) refuses it, and the model's shell is then off: the profile is made again with Landlock's three calls added
 if [ "$ENGINE" = podman ]; then
-    FLAGS+=(--userns=keep-id)
+    # ⭐ WHO THE APP IS INSIDE. `--userns=keep-id` makes the app's user in the container the one who runs this script, so
+    #   the folder's files stay theirs. ⛔ Podman 3 opens no published port for such a container on a network of the
+    #   containers' own, and the companions' is one (`MEASURED`, Ubuntu 22.04's 3.4.4: the chat answers inside the
+    #   container and nothing listens outside it). There the app runs as the container's root instead — whom rootless
+    #   Podman maps to the same user outside, so the folder's files stay theirs too — with none of root's capabilities
+    #   and the image's own files read-only: what rootless Docker's container is given below, the capabilities aside.
+    if [ "$(id -u)" != 0 ] && [ "$(podman version -f '{{.Client.Version}}' 2>/dev/null | cut -d. -f1)" = 3 ]; then
+        FLAGS+=(--cap-drop=all --read-only --tmpfs /tmp)
+    else
+        FLAGS+=(--userns=keep-id)
+    fi
     host_profile=/usr/share/containers/seccomp.json
     if [ -f "$host_profile" ] && ! grep -q landlock_create_ruleset "$host_profile"; then
         command -v python3 >/dev/null || stop_here "python3 is needed once, to write Podman's security profile." "Run:  sudo apt install python3" "then run this again."
@@ -293,7 +372,7 @@ make_net() {
     run "$ENGINE" network create "$NET" >/dev/null
     if [ $DRY = 0 ] && [ "$ENGINE" = podman ] && [ "$(podman version -f '{{.Client.Version}}' 2>/dev/null | cut -d. -f1)" = 3 ]; then
         for f in "${XDG_CONFIG_HOME:-$HOME/.config}/cni/net.d/$NET.conflist" "/etc/cni/net.d/$NET.conflist"; do
-            [ -w "$f" ] && sed -i 's/"cniVersion": "1.0.0"/"cniVersion": "0.4.0"/' "$f"
+            [ ! -w "$f" ] || sed -i 's/"cniVersion": "1.0.0"/"cniVersion": "0.4.0"/' "$f"
         done
     fi
 }

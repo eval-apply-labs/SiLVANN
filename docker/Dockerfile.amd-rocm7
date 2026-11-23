@@ -1,0 +1,123 @@
+# syntax=docker/dockerfile:1.7
+# SiLVANN's image for the AMD cards ROCm 7 drives — the Instinct MI100 and later (gfx908, gfx90a, gfx942, gfx950) and the
+# Radeons of RDNA4 (gfx1200, the RX 9060s; gfx1201, the RX 9070s): the release installed by install.sh with the family
+# for them (amd_rocm10, built for every architecture it lists unless `AMD_ARCHES` names fewer) and for the CPU
+# (x86_avx2), built with ROCm 7's compiler and copied onto a plain Ubuntu 22.04 that holds ROCm's HIP runtime and no
+# compiler. The MI50 and MI60 (gfx906) are Dockerfile.amd-rocm6's, on ROCm 6. The models and the conversations live in a
+# folder of yours at /data; the UI is the app, on port 8080.
+#
+#   from the release's folder:
+#   podman build -f docker/Dockerfile.amd-rocm7 -t silvann:amd-rocm7 .               GitHub's default branch
+#   podman build -f docker/Dockerfile.amd-rocm7 --build-arg AMD_ARCHES=gfx1200 -t silvann:amd-rocm7 .
+#                                                                                    one architecture, a shorter build
+#   podman build -f docker/Dockerfile.amd-rocm7 --build-arg SILVANN_SOURCE=<a repository> \
+#                --build-arg SILVANN_REF=<branch> -t silvann:amd-rocm7 .             another repository or branch
+#
+# The release comes from a repository's URL, as install.sh fetches it — no mount of the build's own, which Ubuntu 22.04's
+# Podman (3.4, buildah 1.23) does not take: a checkout with changes of its own goes in by a repository it is pushed to.
+#   podman run -d --userns=keep-id --group-add keep-groups --device /dev/kfd --device /dev/dri \
+#              -p 127.0.0.1:8080:8080 -v ~/SiLVANN:/data silvann:amd-rocm7          ▶ docker/README.md
+#
+# The card is the host's: its kernel driver (amdgpu) on the host, its device nodes handed in, and ROCm's userspace —
+# the HIP runtime the family is linked against — in the image, at ROCM_VERSION, which the host's driver must take.
+# A card of another family in the same machine is not this image's: the family counts only the cards it lists.
+# What it holds, and each part's licence: /opt/silvann/IMAGE_NOTICES.md.
+
+ARG UBUNTU=ubuntu:22.04
+ARG ROCM_VERSION=7.2.4
+
+# ── the build: install.sh with ROCm's compiler, from AMD's repository at ROCM_VERSION ─────────────────────────────────
+# (libxml2: ROCm's linker, lld, loads it and its package does not ask for it)
+FROM ${UBUNTU} AS build
+ARG DEBIAN_FRONTEND=noninteractive
+ARG ROCM_VERSION
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates curl gnupg git g++ python3 python3-venv python3-dev \
+        libxml2 \
+ && mkdir -p /etc/apt/keyrings \
+ && curl -fsSL https://repo.radeon.com/rocm/rocm.gpg.key | gpg --dearmor -o /etc/apt/keyrings/rocm.gpg \
+ && echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/rocm.gpg] https://repo.radeon.com/rocm/apt/${ROCM_VERSION} jammy main" \
+        > /etc/apt/sources.list.d/rocm.list \
+ && printf 'Package: *\nPin: release o=repo.radeon.com\nPin-Priority: 600\n' > /etc/apt/preferences.d/rocm-pin-600 \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends rocm-hip-runtime-dev \
+ && rm -rf /var/lib/apt/lists/*
+
+ARG SILVANN_SOURCE=https://github.com/eval-apply-labs/SiLVANN
+ARG SILVANN_REF=
+# the commit SILVANN_REF must be at, when the caller knows it (a workflow does): the build fails on any other
+ARG SILVANN_COMMIT=
+# the family's architectures to build, comma-separated; empty for every one it lists, which is what a published image
+#   holds — a family built for fewer still counts the others' cards as its own, and fails at their first launch
+ARG AMD_ARCHES=
+COPY install.sh /tmp/install.sh
+RUN SILVANN_DIR=/opt/silvann SILVANN_BIN=/usr/local/bin \
+    SILVANN_SOURCE=${SILVANN_SOURCE} SILVANN_REF=${SILVANN_REF} \
+    SILVANN_SILICON_FAMILIES="x86_avx2 amd_rocm10" SILVANN_HIP_ARCHES=${AMD_ARCHES} SILVANN_NONFREE=0 \
+    bash /tmp/install.sh \
+ && cd /opt/silvann \
+ && test -f lib/silicon_families/libsilvann_amd_rocm10.so \
+ && test -f lib/silicon_families/libsilvann_x86_avx2.so \
+ && commit=$(git rev-parse HEAD) \
+ && { [ -z "${SILVANN_COMMIT}" ] || [ "$commit" = "${SILVANN_COMMIT}" ] \
+      || { echo "SILVANN_REF is at $commit, not SILVANN_COMMIT ${SILVANN_COMMIT}"; exit 1; }; } \
+ && printf '%s\n%s\n' "$commit" "${SILVANN_SOURCE}" > SOURCE_COMMIT \
+ && rm -rf .git engine/build build.log \
+ && find . -path ./venv -prune -o -name __pycache__ -prune -exec rm -rf {} +
+
+# ── the image: Python, ROCm's HIP runtime, the release, no compiler ──────────────────────────────────────────────────
+FROM ${UBUNTU}
+ARG DEBIAN_FRONTEND=noninteractive
+ARG ROCM_VERSION
+# ROCm's HIP runtime from AMD's repository, at the version the family was built against — pinned above Ubuntu's own
+# archive, whose ROCm packages are older (AMD's instructions do the same). `hip-runtime-amd` is the runtime alone,
+# with what it loads (ROCr, the code object manager, the profiler's register): AMD's wider `rocm-hip-runtime` adds
+# ROCm's compilers (rocm-llvm, 549 MB to fetch), which a family compiled ahead of time never runs.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates curl gnupg git python3 tini \
+ && mkdir -p /etc/apt/keyrings \
+ && curl -fsSL https://repo.radeon.com/rocm/rocm.gpg.key | gpg --dearmor -o /etc/apt/keyrings/rocm.gpg \
+ && echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/rocm.gpg] https://repo.radeon.com/rocm/apt/${ROCM_VERSION} jammy main" \
+        > /etc/apt/sources.list.d/rocm.list \
+ && printf 'Package: *\nPin: release o=repo.radeon.com\nPin-Priority: 600\n' > /etc/apt/preferences.d/rocm-pin-600 \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends hip-runtime-amd \
+ && apt-get purge -y curl gnupg && apt-get autoremove -y \
+ && rm -rf /var/lib/apt/lists/* \
+ && useradd --uid 1000 --create-home --shell /bin/bash silvann \
+ && mkdir -p /data && chown silvann:silvann /data
+COPY --from=build /opt/silvann /opt/silvann
+COPY docker/image_notices.py /opt/silvann/docker/image_notices.py
+COPY docker/entrypoint.sh /opt/silvann/docker/entrypoint.sh
+# requirements-nonfree.txt is not in the image: docker/README.md's command installs it from PyPI into the data folder, under
+# /data/python/<the image's Python version>, which silvann-data.pth puts on the environment's path when it exists.
+# The family is loaded once here, so an image whose runtime lacks a library it is linked against fails as it is built.
+RUN ln -s /opt/silvann/silvann /usr/local/bin/silvann \
+ && ln -s /opt/silvann/silvann_cli /usr/local/bin/silvann_cli \
+ && ln -s /opt/silvann/silvann_base_repl /usr/local/bin/silvann_base_repl \
+ && ln -s /opt/silvann/silvann_tools_repl /usr/local/bin/silvann_tools_repl \
+ && chmod 755 /opt/silvann/docker/entrypoint.sh \
+ && LD_LIBRARY_PATH=/opt/rocm/lib /opt/silvann/venv/bin/python -c "import ctypes; ctypes.CDLL('/opt/silvann/lib/silicon_families/libsilvann_amd_rocm10.so')" \
+ && /opt/silvann/venv/bin/python /opt/silvann/docker/image_notices.py > /opt/silvann/IMAGE_NOTICES.md \
+ && /opt/silvann/venv/bin/python -c "import site, sys; open(site.getsitepackages()[0] + '/silvann-data.pth', 'w').write('/data/python/%d.%d\n' % sys.version_info[:2])"
+
+ENV PATH=/opt/rocm/bin:${PATH} \
+    LD_LIBRARY_PATH=/opt/rocm/lib \
+    SILVANN_DATA=/data \
+    NICEGUI_STORAGE_PATH=/data/.nicegui \
+    PYTHONUNBUFFERED=1 \
+    HOME=/home/silvann
+# no USER: started as root (rootful), the entrypoint gives what /data holds to silvann and runs the app as it;
+# started as uid 1000 (rootless Podman's --userns=keep-id), it runs as it is, the host user's groups kept for the card;
+# started as a root that is the user outside (rootless Docker; rootless Podman 3 as setup.sh starts it), as that root
+WORKDIR /opt/silvann
+VOLUME /data
+EXPOSE 8080
+LABEL org.opencontainers.image.title="SiLVANN for AMD cards on ROCm 7" \
+      org.opencontainers.image.description="The Eval-Apply Generalized Interpreter and its Neural Network library, with the chat UI" \
+      org.opencontainers.image.source="https://github.com/eval-apply-labs/SiLVANN" \
+      org.opencontainers.image.licenses="AGPL-3.0-only"
+# tini passes a stop's SIGTERM to the UI, which saves the conversations and stops the server before it exits
+ENTRYPOINT ["/usr/bin/tini", "--", "/opt/silvann/docker/entrypoint.sh"]
+CMD ["/opt/silvann/venv/bin/python", "/opt/silvann/silvann_ui.py", "--local", "--host", "0.0.0.0", "--port", "8080", \
+     "--no-browser"]

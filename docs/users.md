@@ -145,7 +145,7 @@ desktop's applications menu. A model downloaded on one system is there on the ot
 - **The cards:** an NVIDIA card through CUDA (its driver from CUDA 12's line on), an AMD or Intel GPU through OpenCL with
   its own driver, and the CPU alone (AVX2) where there is neither. On Windows these are the libraries `install.ps1`
   takes; on Linux an AMD card goes through OpenCL too, as ROCm's own families open the ROCm a system has installed and
-  are built by [`install.sh`](#on-linux-installed) and the AMD image instead.
+  are built by [`install.sh`](#on-linux-installed) and the AMD images instead.
 - **Your data** is in `data\`, beside `windows\` and `linux/`; where the folder cannot be written to (Program Files), in
   `Documents\SiLVANN` (on Linux `~/Documents/SiLVANN`). The model started last starts again with the app.
 - **Closing the window** ends the app: a small window says *SiLVANN is shutting down* while the conversations are
