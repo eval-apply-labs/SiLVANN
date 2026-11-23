@@ -189,9 +189,10 @@ server imports what is there as it starts.
 | `ghcr.io/eval-apply-labs/silvann:1-nvidia` | NVIDIA cards CUDA 12.9 builds for (the GeForce RTX 20 to 50 series among them); and the CPU |
 
 `:1-amd` and `:1-nvidia` are the newest release of major version 1; `:1.5.0-amd` and the like stay that release.
-1.4.4 had two AMD images, `:1-amd-rocm6` and `:1-amd-rocm7`: both names stay and follow `:1-amd`, so a container made
-with either keeps updating. The image with ROCm 6's runtime ended with 1.4.4 (`:1.4.4-amd-rocm6`): the MI50 and MI60
-run on ROCm 7's from 1.5.0.
+1.4.4 had two AMD images, `:1-amd-rocm6` and `:1-amd-rocm7`: there is one AMD image from 1.5.0 and those two names
+ended with 1.6.0 — [`setup.sh`](setup.sh)'s `update` moves a container made with either to `:1-amd`, and a command of
+your own names `:1-amd` in their place. The image with ROCm 6's runtime ended with 1.4.4 (`:1.4.4-amd-rocm6`): the
+MI50 and MI60 run on ROCm 7's from 1.5.0.
 `:0-amd` and `:0-nvidia` stay 0.29.1, the last of major version 0.
 `/opt/silvann/IMAGE_NOTICES.md` in each lists what it holds, each part's licence, and the commit it was built from.
 On Windows, install SiLVANN instead (the README's quick start): under Docker Desktop the models run well below what

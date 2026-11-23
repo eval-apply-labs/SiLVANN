@@ -1,0 +1,55 @@
+# A name of the container images, removed from GitHub's registry — run by hand, when a name ends (⚖ 2026-11-23 *"you can
+# also remove the amd-rocm6 and amd-rocm7 tags, since we settled on a single rocm version"*). The registry removes a
+# version — a manifest, with every name on it — and never a name alone, and `:1-amd-rocm6` shared its manifest with
+# `:1-amd`. So each name asked for is first moved onto an image of its own, with nothing in it but a note, and then
+# that version is removed. ⛔ A version is removed only where every name on it is one that was asked for: an image a
+# release's name still points at is never touched. The job's own token, which may write the registry's packages.
+name: "images: a name removed"
+on:
+  workflow_dispatch:
+    inputs:
+      names:
+        description: "the names to remove, a space between them — e.g. 1-amd-rocm6 1-amd-rocm7"
+        required: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  remove:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Each name onto an image of its own, and that image removed
+        env:
+          NAMES: ${{ inputs.names }}
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          set -eu
+          owner=${GITHUB_REPOSITORY_OWNER,,}; image=ghcr.io/$owner/silvann
+          case "$NAMES" in *[!A-Za-z0-9._\ -]*|"") echo "the names: letters, digits, dots, dashes and underscores, a space between them"; exit 1 ;; esac
+          echo "$TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+          for n in $NAMES; do echo "before: $n -> $(docker manifest inspect "$image:$n" > /dev/null 2>&1 && echo there || echo "not there")"; done
+          mkdir ended && echo "a name of SiLVANN's images that has ended: $NAMES" > ended/NAME_ENDED.txt
+          printf 'FROM scratch\nCOPY NAME_ENDED.txt /NAME_ENDED.txt\n' > ended/Dockerfile
+          docker build -t "$image:name-ended" ended
+          for n in $NAMES; do docker tag "$image:name-ended" "$image:$n"; docker push "$image:$n"; done
+          kind=orgs; gh api "/orgs/$owner" > /dev/null 2>&1 || kind=users
+          gh api --paginate "/$kind/$owner/packages/container/silvann/versions?per_page=100" \
+            --jq '.[] | select((.metadata.container.tags | length) > 0) | "\(.id) \(.metadata.container.tags | join(" "))"' > versions.txt
+          echo "the registry's named versions: $(wc -l < versions.txt)"
+          removed=0
+          while read -r id tags; do
+            only=1; for t in $tags; do case " $NAMES " in *" $t "*) ;; *) only=0 ;; esac; done
+            if [ "$only" = 1 ]; then
+              echo "version $id holds only: $tags — removed"
+              gh api -X DELETE "/$kind/$owner/packages/container/silvann/versions/$id"
+              removed=$((removed + 1))
+            fi
+          done < versions.txt
+          [ "$removed" -ge 1 ] || { echo "no version held only the names asked for: nothing removed"; exit 1; }
+          for n in $NAMES; do
+            if docker manifest inspect "$image:$n" > /dev/null 2>&1; then echo "$n is still there"; exit 1; else echo "after: $n -> gone"; fi
+          done

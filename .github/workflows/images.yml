@@ -2,9 +2,9 @@
 # the Radeons of RDNA4 — each with the CPU's family, each the release a tag names installed by install.sh inside its
 # Dockerfile, pushed to GitHub's registry as ghcr.io/<owner>/silvann — `:<version>-nvidia` and `:<major>-nvidia`,
 # `:<version>-amd` and `:<major>-amd`, the major's tags moved to each of its releases (CLAUDE.md's lines: a major's
-# image updated in place). `:<major>-amd-rocm6` and `:<major>-amd-rocm7`, the names 1.4.4 gave its two AMD images, move
-# with `:<major>-amd`, so a container made with either keeps updating. The runners have no GPU: each image is built and
-# its libraries listed, no model is run. The images hold binaries: IMAGE_NOTICES.md in each says which, and each one's
+# image updated in place). One AMD image, one name: `:<major>-amd-rocm6` and `:<major>-amd-rocm7`, which 1.4.4 gave its
+# two, ended with 1.6.0 (▶ image-names.yml). The runners have no GPU: each image is built and its libraries listed, no
+# model is run. The images hold binaries: IMAGE_NOTICES.md in each says which, and each one's
 # licence (ATTRIBUTION.md §6). Plain docker commands, so no action but checkout's runs with the job's token, which may
 # write the registry's packages. A first push makes a package private: its visibility is set to public once, by hand.
 name: "images"
@@ -31,7 +31,6 @@ jobs:
             dockerfile: docker/Dockerfile
           - variant: amd
             dockerfile: docker/Dockerfile.amd
-            also: amd-rocm6 amd-rocm7
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -43,7 +42,6 @@ jobs:
         env:
           VARIANT: ${{ matrix.variant }}
           DOCKERFILE: ${{ matrix.dockerfile }}
-          ALSO: ${{ matrix.also }}
         # the tag's version without its prefix — `rel` a signed release's, `n` an unsigned one's, `v` the tags before
         #   them — so `n0.28.0` is `:0.28.0-…` and its major `:0-…`. The build's RUN steps use the runner's own network:
         #   in the default one they could not resolve Ubuntu's archive (n0.28.0's run, 2026-11-11)
@@ -53,7 +51,7 @@ jobs:
           docker build --network=host -f "$DOCKERFILE" \
             --build-arg SILVANN_SOURCE="https://github.com/${GITHUB_REPOSITORY}" \
             --build-arg SILVANN_REF="${GITHUB_REF_NAME}" --build-arg SILVANN_COMMIT="${GITHUB_SHA}" \
-            -t "$image:$version-$VARIANT" -t "$image:$major-$VARIANT" $(for a in $ALSO; do printf -- '-t %s ' "$image:$major-$a"; done) .
+            -t "$image:$version-$VARIANT" -t "$image:$major-$VARIANT" .
           docker run --rm --entrypoint sh "$image:$version-$VARIANT" \
             -c 'ls -l /opt/silvann/lib/silicon_families; head -2 /opt/silvann/SOURCE_COMMIT'
           echo "IMAGE=$image" >> "$GITHUB_ENV"; echo "VERSION=$version" >> "$GITHUB_ENV"; echo "MAJOR=$major" >> "$GITHUB_ENV"
@@ -61,11 +59,9 @@ jobs:
         if: github.event_name == 'push'
         env:
           VARIANT: ${{ matrix.variant }}
-          ALSO: ${{ matrix.also }}
           TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ACTOR: ${{ github.actor }}
         run: |
           echo "$TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
           docker push "$IMAGE:$VERSION-$VARIANT"
           docker push "$IMAGE:$MAJOR-$VARIANT"
-          for a in $ALSO; do docker push "$IMAGE:$MAJOR-$a"; done
