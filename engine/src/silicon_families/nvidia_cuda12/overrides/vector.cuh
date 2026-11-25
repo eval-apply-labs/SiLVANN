@@ -365,6 +365,18 @@ static void nvidia_cuda12__override_vector_top_k_scored(uint64_t* values, uint64
     nn__silicon__launch(kernel, "nvidia_cuda12__zzprivate_top_k_scored", 1u, (uint32_t)W, args, sizes, 9u);
 }
 
+/* ⭐ THE BIASED ROUTER IS THE SCORED ONE WITH ITS SIGMOID — nn's `top_k_biased` and `top_k_scored` at
+ *   `NN__VECTOR__SCORE_SIGMOID` make the same picks and weights (amd_rocm_base answers it so, node03's ecf96bc4); Inkling
+ *   2's router was nn's body, 11.8 µs a call (nsys on the 5060 Ti). The scored kernel's fit; anything else is nn's. */
+static void nvidia_cuda12__override_vector_top_k_biased(uint64_t* values, uint64_t stride, uint16_t* weights, const uint16_t* x,
+                                                        const uint16_t* bias, uint64_t n, uint64_t k, float scale) {
+    if (n == 0u || n > 32u * NVIDIA_CUDA12__ZZPACKAGE_WARP || k == 0u || k > NN__VECTOR__ROUTER_K_MAX || stride == 0u) {
+        nn__vector__zzabi_launch_top_k_biased(values, stride, weights, x, bias, n, k, scale);
+        return;
+    }
+    nvidia_cuda12__override_vector_top_k_scored(values, stride, weights, x, bias, n, k, scale, NN__VECTOR__SCORE_SIGMOID);
+}
+
 static void nvidia_cuda12__override_vector_sum(uint16_t* out, nn__vector__parts parts, uint64_t n, unsigned int* over) {
     bool fit = n != 0u && n % 8u == 0u && parts.count != 0u && parts.count <= NN__VECTOR__PARTS_MAX && ((uint64_t)(uintptr_t)out) % 16u == 0u;
     for (uint64_t k = 0u; fit && k < parts.count; ++k) fit = parts.at[k] % 16u == 0u;

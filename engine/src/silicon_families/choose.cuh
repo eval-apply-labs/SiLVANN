@@ -21,6 +21,12 @@
  * ⛔ AN OPEN FAMILY THAT SEES NONE IS A FAILURE, NOT A REASON TO MOVE ON. Opening it started its runtime;
  *   asking the next family of the same vendor would start a second one in the same process. The card is
  *   reported, by name, with the family that could not see it — a driver older than the runtime, most often.
+ * ⭐ EXCEPT THE OPENCL FAMILIES THAT SHARE ONE LOADER (`khronos`, ▶ roster.cuh): opening one starts no runtime of its
+ *   own — every OpenCL family reaches its devices through the one loader — so one that opens and sees none passes the
+ *   card to the next family down, and does not hold the vendor. ⚖ 2026-11-25 the architect: OpenCL 1.2 *"is supposed to
+ *   be the catch-all mode"*. `MEASURED` (measurements/2026-11-25_nn214_intel_opencl_phoenixnap.md): Intel's compute
+ *   runtime on a Gen12 GPU is OpenCL 3.0 with coarse-grained SVM alone, which neither 2.0 family takes, so the card
+ *   reaches `intel_opencl1_igpu` through them.
  *
  * ⛔⛔ AND TWO FAMILIES OF ONE VENDOR ARE NEVER OPEN IN ONE PROCESS. `REASONED` from the libraries on
  *   node03: HIP (`libamdhip64.so.6`) needs `libhsa-runtime64.so.1`, and the loader matches libraries by
@@ -63,7 +69,8 @@ typedef struct silicon_families__attempt {
 /* What a process remembers from one card to the next: which families it has opened, and which would not
  * open, so a binary is opened once whatever number of cards it takes. Zero-initialised is "nothing yet". */
 typedef struct silicon_families__session {
-    uint8_t state[SYS__SILICON_FAMILY__SLOTS];     /* by position in the roster: 0 not asked · 1 open · 2 would not open */
+    uint8_t state[SYS__SILICON_FAMILY__SLOTS];     /* by position in the roster: 0 not asked · 1 open · 2 would not open ·
+                                                      3 open, an OpenCL family of one loader that saw none of its cards */
 } silicon_families__session;
 
 typedef bool     (*silicon_families__open_fn)(const char* family, void* context);
@@ -72,6 +79,10 @@ typedef uint32_t (*silicon_families__count_fn)(const char* family, void* context
 static inline bool silicon_families__zzprivate_same(const char* a, const char* b) {
     while (*a && *a == *b) { ++a; ++b; }
     return *a == *b;
+}
+/* Whether a vendor's families share one loader, so one that sees none of its cards started nothing of its own. */
+static inline bool silicon_families__zzprivate_one_loader(const char* vendor) {
+    return silicon_families__zzprivate_same(vendor, "khronos");
 }
 
 /* The number of the family `card` goes to, or `SYS__SILICON_FAMILY__NONE` — which, with no attempts
@@ -99,7 +110,10 @@ static inline sys__silicon_family__id silicon_families__choose(const silicon_fam
                                                                : SILICON_FAMILIES__SEES_NONE;
         if (*made < most) { attempts[*made].family = rows[i].id; attempts[*made].outcome = outcome; ++*made; }
         if (outcome == SILICON_FAMILIES__TAKEN) return rows[i].id;
-        if (outcome == SILICON_FAMILIES__SEES_NONE) return SYS__SILICON_FAMILY__NONE;
+        if (outcome == SILICON_FAMILIES__SEES_NONE) {
+            if (!silicon_families__zzprivate_one_loader(rows[i].vendor)) return SYS__SILICON_FAMILY__NONE;
+            session->state[i] = 3u;                 /* open, and no longer the vendor's: the next family down is asked */
+        }
     }
     return SYS__SILICON_FAMILY__NONE;
 }

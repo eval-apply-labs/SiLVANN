@@ -60,7 +60,8 @@ ROOT = Path(__file__).resolve().parent
 # the runtime beside this file in a release, or the development tree's
 _HERE = ROOT / "runtime" if (ROOT / "runtime").is_dir() else ROOT.parent / "python"
 sys.path.insert(0, os.environ.get("SILVANN_RUNTIME", str(_HERE)))
-from silvann_runtime.fetch import KNOWN, differences, ensure_model, present, said, state, update_program  # noqa: E402
+from silvann_runtime.fetch import (KNOWN, PACKS_PAGE, differences, ensure_model, offered, present, said, state,  # noqa: E402
+                                   update_program)
 from silvann_runtime.fetch import size as fetch_size                                # noqa: E402
 from silvann_runtime.model_folder import Refused                   # noqa: E402
 from silvann_runtime import users as _users                         # noqa: E402
@@ -356,14 +357,17 @@ def main(argv):
         return experts_split.main([argv[0].split("-")[0]] + argv[1:], models=MODELS)
     if argv[:1] == ["list-models"]:
         if argv[1:] == ["--json"]:
-            print(json.dumps([{"name": name, "repo": repo, "size": size, "base": base, "here": present(str(MODELS / name))}
-                              for name, (repo, size, base) in sorted(KNOWN.items())]))
+            print(json.dumps([{"name": name, "repo": KNOWN[name][0], "size": KNOWN[name][1], "base": KNOWN[name][2],
+                               "here": present(str(MODELS / name))} for name in offered(MODELS)]))
             return 0
-        wide = max(len(name) for name in KNOWN)
-        for name, (repo, size, base) in sorted(KNOWN.items()):
+        shown = offered(MODELS)                    # the packs a user is offered, and any other that is here
+        wide = max(len(name) for name in shown)
+        for name in shown:
+            repo, size, base = KNOWN[name]
             here = present(str(MODELS / name))
             print("%-*s %-8s %s  huggingface.co/%s, made from huggingface.co/%s"
                   % (wide, name, size, "here" if here else "     ", repo, base))
+        print("to see all available packs go to %s — `silvann download <name>` fetches any of them" % PACKS_PAGE)
         return 0
     print(__doc__.strip())
     return 2

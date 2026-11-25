@@ -184,7 +184,8 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
 It fetches the release into `.\silvann` (a git clone), makes its Python environment and takes the libraries GitHub built
-for the release — `silvann_windows_x64.zip` on the release's page, used when git's hashes of the engine and `scripts/build.py`
+for the release — `silvann_windows_libraries_update_x64.zip` on the release's page (`silvann_windows_x64.zip` up to 1.6.0; it is
+what this installer fetches, not the app: that is `silvann_portable_x64.zip`), used when git's hashes of the engine and `scripts/build.py`
 it was built from are the folder's — then writes `silvann.cmd` and `silvann_cli.cmd` into the folder and puts the folder
 on your PATH, from the next PowerShell you open (in the one it ran in, `.\silvann\silvann`). The `silvann` command is
 Linux's: `list`, `download`, `serve`, `ui`, `models <folder>`, `update`, `build`, `help`. Where the libraries are not the

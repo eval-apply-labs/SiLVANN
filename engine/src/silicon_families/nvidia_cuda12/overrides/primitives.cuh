@@ -15,7 +15,7 @@
  * the row is three reads deep, and the sum goes through the family's fold. The arithmetic is nn's — the mean of the squares
  * in fp32, `1 / sqrt(mean + eps)`, each element `(x · scale) · w` rounded once — with the squares grouped eight to a lane,
  * so the sum's last bits are this kernel's own. ⛳ BOTH DOORS TAKE IT, the one-row and the rows, so a prompt's rows and its
- * positions norm alike; and `rmsnorm_rotate` below takes the same sum. Rows whose width is not whole groups of eight, or
+ * positions norm alike; and `rmsnorm_pair_rotate` below takes the same sum. Rows whose width is not whole groups of eight, or
  * whose memory is not 16-byte aligned, are nn's. AMD's other form, a row cut across waves that each take the whole sum, is
  * gfx906's answer to a decoded token's one row on one block; here a row stays one block's (`REASONED`: a row of 5120 is
  * 10 KB, and the launch, not the block, sets its time — to be measured). A row normed in place is safe: every lane reads
@@ -88,45 +88,83 @@ static void nvidia_cuda12__override_rmsnorm(uint16_t* o, const uint16_t* x, cons
     nvidia_cuda12__override_rmsnorm_rows(o, x, w, n, 1u, n, n, eps, over);
 }
 
-/* ⭐ THE NORM AND ITS ROTATION IN ONE LAUNCH — `rmsnorm_rotate`. nn's definition is the norm's door and then the
- *   rotation's (`nn/gpu/doors.cuh`), two launches and the normed row read back. Here every block of 256 lanes takes the
- *   row's whole scale as the norm above takes it — the same lanes, the same groups, the same fold, so the same scale — and
- *   then each of its warps a 512-block of the row: a lane writes `o` at its elements `l, l + 32, …` as the norm writes them,
- *   and the warp rotates them with `hadamard_rotate`'s own `rotation_at`, whose lane reads exactly the elements it has just
- *   written, so no lane waits on another. `o` and `rot` are then, to the bit, the two doors' (`REASONED` from the shared
- *   code; to be checked by the door bench). Rows `n` a multiple of 512, `o`, `x` and `w` on 16 bytes, the three vectors
- *   apart; anything else is nn's two doors. */
+/* ⭐ THE PAIR'S NORMS AND ROTATION IN ONE LAUNCH — `rmsnorm_pair_rotate`: two rows `x` and `y` of `n` normed by one weight
+ *   into `o` and `o + n`, each its own scale, and the rotation over the pair's `2n` — nn's definition is three doors (two
+ *   norms and a rotation; Inkling 2's message gate, `nn/gpu/doors.cuh`). Here every block of 256 lanes takes both rows'
+ *   scales as the norm above takes them — the same lanes, the same groups, the same fold, so the same scales — and then
+ *   each of its warps a block of the rotation's ladder over `2n` (the 512s, then a 256 and a 128, as `hadamard_rotate`
+ *   places them past 512, ▶ hadamard.cuh): a lane writes `o` at its elements `l, l + 32, …` as the norm writes them, an
+ *   element `i` from `x` below `n` and from `y` past it, and the warp rotates them with `hadamard_rotate`'s own
+ *   `rotation_at`, whose lane reads exactly the elements it has just written. `o` and `rot` are then, to the bit, the
+ *   three doors' (the door bench's `pair_rotate` cases). `MEASURED` on the 5060 Ti at 2 × 2,304, back to back: 7.6 µs
+ *   against the three doors' 8.4.
+ * ⛔ NOT THE SINGLE ROW'S `rmsnorm_rotate`: one launch for the norm and its rotation was slower here than the two doors
+ *   — at 2,048 7.1 µs against 4.9, at 2,304 7.3 against 5.7 (the door bench, back to back): a launch after a launch costs
+ *   this card ~0.3 µs, and the two doors spread the rotation across more blocks — so nn's two doors run it. */
 #define NVIDIA_CUDA12__ZZPRIVATE_NORM_ROT_WARPS 8u     /* 256 lanes: the norm's block */
-static __global__ NVIDIA_CUDA12__ZZPRIVATE_NORM_BOUNDS void nvidia_cuda12__zzprivate_norm_rotate(uint16_t* rot, uint16_t* o,
-        const uint16_t* x, const uint16_t* w, const uint16_t* sign, uint64_t n, float eps, unsigned int* over) {
+/* The ladder's blocks over `n` (whole 128s): how many, and block `u`'s start and its lanes' elements `E` (16, 8, 4). */
+static __device__ __forceinline__ uint64_t nvidia_cuda12__zzprivate_ladder_units(uint64_t n) {
+    const uint64_t rest = n % 512u;
+    return n / 512u + (rest >= 256u ? 1u : 0u) + (rest % 256u != 0u ? 1u : 0u);
+}
+static __device__ __forceinline__ uint64_t nvidia_cuda12__zzprivate_ladder_unit(uint64_t n, uint64_t u, uint32_t* E) {
+    const uint64_t whole = n / 512u, rest = n % 512u;
+    if (u < whole) { *E = 16u; return u * 512u; }
+    if (rest >= 256u && u == whole) { *E = 8u; return whole * 512u; }
+    *E = 4u;
+    return whole * 512u + (rest >= 256u ? 256u : 0u);
+}
+/* A warp's block of `E · 32` at `at`: its elements normed into `o` — from `x` below `split`, scaled by `sx`, from `y` at
+ * `i - split` past it, by `sy`, each against `w[i mod split]` — then rotated from `o` into `rot`. */
+template <uint32_t E>
+static __device__ __forceinline__ void nvidia_cuda12__zzprivate_norm_rotate_unit(uint16_t* rot, uint16_t* o, const uint16_t* x, const uint16_t* y,
+        const uint16_t* w, const uint16_t* sign, uint64_t split, uint64_t at, float sx, float sy, unsigned int* over) {
     const uint32_t lane = (uint32_t)nn__silicon__lane() % NVIDIA_CUDA12__ZZPACKAGE_WARP;
+#pragma unroll
+    for (uint32_t e = 0u; e < E; ++e) {
+        const uint64_t i = at + lane + NVIDIA_CUDA12__ZZPACKAGE_WARP * e;
+        o[i] = i < split ? (uint16_t)nvidia_cuda12__zzprivate_normed(x[i], w[i], sx, over)
+                         : (uint16_t)nvidia_cuda12__zzprivate_normed(y[i - split], w[i - split], sy, over);
+    }
+    nvidia_cuda12__zzpackage_rotation_at(rot, o, at, sign, 0u, over, E);
+}
+static __device__ __forceinline__ void nvidia_cuda12__zzprivate_norm_rotate_ladder(uint16_t* rot, uint16_t* o, const uint16_t* x,
+        const uint16_t* y, const uint16_t* w, const uint16_t* sign, uint64_t split, uint64_t total, float sx, float sy,
+        unsigned int* over) {
     const uint32_t warp = (uint32_t)nn__silicon__lane() / NVIDIA_CUDA12__ZZPACKAGE_WARP;
-    const float scale = nvidia_cuda12__zzprivate_norm_scale(x, n, eps);
-    const uint64_t units = n / 512u;
+    const uint64_t units = nvidia_cuda12__zzprivate_ladder_units(total);
     for (uint64_t u = (uint64_t)nn__silicon__block() * NVIDIA_CUDA12__ZZPRIVATE_NORM_ROT_WARPS + warp; u < units;
          u += (uint64_t)nn__silicon__blocks() * NVIDIA_CUDA12__ZZPRIVATE_NORM_ROT_WARPS) {
-        const uint64_t at = u * 512u;
-#pragma unroll
-        for (uint32_t e = 0u; e < 16u; ++e) {
-            const uint64_t i = at + lane + NVIDIA_CUDA12__ZZPACKAGE_WARP * e;
-            o[i] = (uint16_t)nvidia_cuda12__zzprivate_normed(x[i], w[i], scale, over);
-        }
-        nvidia_cuda12__zzpackage_rotation_at(rot, o, at, sign, 0u, over, 16u);
+        uint32_t E = 0u;
+        const uint64_t at = nvidia_cuda12__zzprivate_ladder_unit(total, u, &E);
+        if (E == 16u)     nvidia_cuda12__zzprivate_norm_rotate_unit<16u>(rot, o, x, y, w, sign, split, at, sx, sy, over);
+        else if (E == 8u) nvidia_cuda12__zzprivate_norm_rotate_unit<8u>(rot, o, x, y, w, sign, split, at, sx, sy, over);
+        else              nvidia_cuda12__zzprivate_norm_rotate_unit<4u>(rot, o, x, y, w, sign, split, at, sx, sy, over);
     }
 }
-static void nvidia_cuda12__override_rmsnorm_rotate(uint16_t* rot, uint16_t* o, const uint16_t* x, const uint16_t* w, const uint16_t* sign,
-                                                   uint64_t n, float eps, unsigned int* over) {
-    const bool apart = (rot + n <= o || o + n <= rot) && (rot + n <= x || x + n <= rot) && (o + n <= x || x + n <= o);
-    if (n == 0u || n % 512u != 0u || !apart || !nvidia_cuda12__zzprivate_norm_fit(o, x, w, n, n, n)) {
-        nn__rmsnorm__zzabi_launch_rotate(rot, o, x, w, sign, n, eps, over);
+static __global__ NVIDIA_CUDA12__ZZPRIVATE_NORM_BOUNDS void nvidia_cuda12__zzprivate_norm_pair_rotate(uint16_t* rot, uint16_t* o,
+        const uint16_t* x, const uint16_t* y, const uint16_t* w, const uint16_t* sign, uint64_t n, float eps, unsigned int* over) {
+    const float sx = nvidia_cuda12__zzprivate_norm_scale(x, n, eps), sy = nvidia_cuda12__zzprivate_norm_scale(y, n, eps);
+    nvidia_cuda12__zzprivate_norm_rotate_ladder(rot, o, x, y, w, sign, n, 2u * n, sx, sy, over);
+}
+static void nvidia_cuda12__override_rmsnorm_pair_rotate(uint16_t* rot, uint16_t* o, const uint16_t* x, const uint16_t* y, const uint16_t* w,
+                                                        const uint16_t* sign, uint64_t n, float eps, unsigned int* over) {
+    const uint64_t t = 2u * n;
+    const bool apart = (rot + t <= o || o + t <= rot) && (rot + t <= x || x + n <= rot) && (rot + t <= y || y + n <= rot)
+                    && (o + t <= x || x + n <= o) && (o + t <= y || y + n <= o);
+    /* the widths the rotation's door takes as the ladder (▶ hadamard.cuh): 512 and on in whole 128s */
+    if (n == 0u || t < 512u || t % 128u != 0u || !apart || !nvidia_cuda12__zzprivate_norm_fit(o, x, w, n, n, n)
+     || ((uint64_t)(uintptr_t)y) % 16u != 0u) {
+        nn__rmsnorm__zzabi_launch_pair_rotate(rot, o, x, y, w, sign, n, eps, over);
         return;
     }
-    const uint64_t want = (n / 512u + NVIDIA_CUDA12__ZZPRIVATE_NORM_ROT_WARPS - 1u) / NVIDIA_CUDA12__ZZPRIVATE_NORM_ROT_WARPS;
+    const uint64_t rest = t % 512u, units = t / 512u + (rest >= 256u ? 1u : 0u) + (rest % 256u != 0u ? 1u : 0u);
+    const uint64_t want = (units + NVIDIA_CUDA12__ZZPRIVATE_NORM_ROT_WARPS - 1u) / NVIDIA_CUDA12__ZZPRIVATE_NORM_ROT_WARPS;
     const uint32_t blocks = want < NN__KERNELS__BLOCKS_MAX ? (uint32_t)want : NN__KERNELS__BLOCKS_MAX;
-    void* args[] = { &rot, &o, &x, &w, &sign, &n, &eps, &over };
-    const size_t sizes[] = { sizeof rot, sizeof o, sizeof x, sizeof w, sizeof sign, sizeof n, sizeof eps, sizeof over };
-    nn__silicon__launch((const void*)nvidia_cuda12__zzprivate_norm_rotate, "nvidia_cuda12__zzprivate_norm_rotate", blocks,
-                        NVIDIA_CUDA12__ZZPRIVATE_NORM_LANES, args, sizes, 8u);
+    void* args[] = { &rot, &o, &x, &y, &w, &sign, &n, &eps, &over };
+    const size_t sizes[] = { sizeof rot, sizeof o, sizeof x, sizeof y, sizeof w, sizeof sign, sizeof n, sizeof eps, sizeof over };
+    nn__silicon__launch((const void*)nvidia_cuda12__zzprivate_norm_pair_rotate, "nvidia_cuda12__zzprivate_norm_pair_rotate", blocks,
+                        NVIDIA_CUDA12__ZZPRIVATE_NORM_LANES, args, sizes, 9u);
 }
 
 /* ⭐ THE NORM OF A ROW OF FLOATS, INTO HALVES — nn's `rmsnorm_fp32`, a hyper-connection's collapse (DeepSeek's streams are

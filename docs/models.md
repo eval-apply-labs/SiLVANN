@@ -25,6 +25,7 @@ columns [`results.md`](results.md)'s are in, its card linking that kind of machi
 | Qwen 3.5 4B | `D8` | 5.3 GB — 8 bits | [eval-apply/silvann_tq_D8_qwen3.5_4b](https://huggingface.co/eval-apply/silvann_tq_D8_qwen3.5_4b) |
 | Ministral 3 14B (dense, Mistral AI) | `D4`, for 8 GB cards | 7.4 GB — 4 bits | [eval-apply/silvann_tq_D4_ministral_3_14b](https://huggingface.co/eval-apply/silvann_tq_D4_ministral_3_14b) |
 | Ministral 3 14B | `D8`, for 16 GB cards | 13.5 GB — 8 bits | [eval-apply/silvann_tq_D8_ministral_3_14b](https://huggingface.co/eval-apply/silvann_tq_D8_ministral_3_14b) |
+| Inkling 2 Mini (Thinking Machines; mixture of experts, 5.4B active of 26.4B) | `D8E4` | 14 GB — experts 4 bits, the rest 8 | [eval-apply/silvann_tq_D8E4_inkling2_mini](https://huggingface.co/eval-apply/silvann_tq_D8E4_inkling2_mini) |
 | Qwen 3.8 27B (dense) | `D4` | 15 GB — 4 bits | [eval-apply/silvann_tq_D4_qwen3.8_27b](https://huggingface.co/eval-apply/silvann_tq_D4_qwen3.8_27b) |
 | Qwen 3.6 35B-A3B (mixture of experts, 3B active) | `D8E4` | 19 GB — experts 4 bits, the rest 8 | [eval-apply/silvann_tq_D8E4_qwen3.6_35b_a3b](https://huggingface.co/eval-apply/silvann_tq_D8E4_qwen3.6_35b_a3b) |
 | Qwen 3.5 122B-A10B (mixture of experts, 10B active) | `D8E4`, for 8 GB cards | 67 GB — experts 4 bits, the rest 8 | [eval-apply/silvann_tq_D8E4_qwen3.5_122b_a10b](https://huggingface.co/eval-apply/silvann_tq_D8E4_qwen3.5_122b_a10b) |
@@ -41,7 +42,8 @@ download it again.
 
 The name says the bits: `D8E4` is the dense matrices at 8 and the experts at 4; `D4` a dense model at 4. The 8-bit dense
 part is the one that pays — ▶ [`compression.md`](compression.md), and how close each pack comes to the original weights
-is in [`results.md`](results.md#how-good-each-pack-is-perplexity). `python3 silvann_core.py list-models` lists them all,
+is in [`results.md`](results.md#how-good-each-pack-is-perplexity). `silvann list` (`python3 silvann_core.py list-models`)
+lists the packs on offer and any other that is here — every pack is on [Hugging Face](https://huggingface.co/eval-apply) —
 and `download-model NAME` fetches one into `models/`.
 
 Each model keeps its own licence, which is in its folder once downloaded: Qwen's and Mistral's Apache-2.0, GLM's and

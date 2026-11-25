@@ -21,6 +21,7 @@
 #include "ai_qwen_image/language_contract.cuh"
 #include "ai_deepseek_4/language_contract.cuh"
 #include "ai_qwen_4/language_contract.cuh"
+#include "ai_thinkingmachines__inkling_2/language_contract.cuh"
 #include "language_contract_kinds.cuh"
 
 /* Each package's card side. */
@@ -31,5 +32,6 @@
 #include "ai_qwen_image/manifest__gpu.cuh"
 #include "ai_deepseek_4/manifest__gpu.cuh"
 #include "ai_qwen_4/manifest__gpu.cuh"
+#include "ai_thinkingmachines__inkling_2/manifest__gpu.cuh"
 
 #endif /* SILVANN__PACKAGES_MANIFEST__GPU_CUH */

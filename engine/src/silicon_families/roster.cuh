@@ -47,8 +47,9 @@
  *   (`REASONED` from the ICD loader's design; two of them in one process `MEASURED` on node03's stand-in, NN-142).
  * ⛳ THE OPENCL FAMILIES ARE TWO SOURCES, FOUR ROWS (⚖ 2026-11-09 *"old_nvidia does its own thing and does not stomp
  *   against the intel old igpu"*): 75 NVIDIA's cards through the 1.2 source, the number every machine that stood up on
- *   it recorded (an NVIDIA card, each); 80 Intel's before Gen9 through the same; 100 any GPU through the 2.0 source; 150
- *   Intel's from Gen9 through it, offered before 100.
+ *   it recorded (an NVIDIA card, each); 80 Intel's through the same, asked last — before Gen9 theirs alone, after it where
+ *   the 2.0 families see none (▶ `choose.cuh`); 100 any GPU through the 2.0 source; 150 Intel's from Gen9 through it,
+ *   offered before 100.
  * ⛳ THE PROCESSORS ARE A FAMILY A KIND: 50 x86's (`x86_avx2`), 55 and 60 Arm's, one source (`arm_base`, ⚖ 2026-11-09 *"make
  *   the arm_base silicon platform and then add the overrides for that specific dgx sparx platform"*) — 55 any Armv8.2 with
  *   half precision and the dot product, 60 the DGX Spark's GB10, offered before 55. */

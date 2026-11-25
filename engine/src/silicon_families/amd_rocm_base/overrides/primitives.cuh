@@ -369,13 +369,102 @@ static __global__ AMD_ROCM_BASE__ZZPRIVATE_BOUNDS void amd_rocm_base__zzprivate_
         const uint16_t* w, const uint16_t* sign, uint64_t n, float eps, unsigned int* over) {
     amd_rocm_base__zzprivate_norm_rotate_wave<12u>(rot, o, x, w, sign, n, eps, over);
 }
+/* ⭐ …AND OVER THE PACK'S LADDER — a row that is not whole 512-blocks, rotated as `hadamard_rotate` rotates it: its
+ *   512-blocks, then a 256 when that much is left, then a 128 (2,304: four 512s and a 256; ▶ hadamard.cuh). A wave a
+ *   block of the ladder: the whole row's sum of squares as the wave above takes it, so the same scale; then its own
+ *   block normed with the norm's arithmetic, written to `o`, and rotated with the ladder's butterfly — a lane `E = block
+ *   / 64` consecutive halves, two lanes to a group of eight at a 256, four at a 128. So `o` and `rot` are, to the bit, the
+ *   norm's door and the ladder's: one launch and one read of `x` for two launches and the normed row read back. */
+template <uint32_t E>
+static __device__ inline void amd_rocm_base__zzprivate_norm_rotate_piece(uint16_t* rot, uint16_t* o, const uint16_t* x, const uint16_t* w,
+                                                                             const uint16_t* sign, uint64_t at, float scale, unsigned int* over) {
+    const uint32_t lane = (uint32_t)(nn__silicon__lane() % AMD_ROCM_BASE__ZZPRIVATE_WAVE);
+    const uint64_t first = at + (uint64_t)lane * E, g = first / 8u;
+    const uint32_t sub = (uint32_t)(first % 8u);                              /* where in its group of eight the lane starts */
+    const uint4 normed = amd_rocm_base__zzprivate_normed8(((const uint4*)(const void*)x)[g], ((const uint4*)(const void*)w)[g], scale, over);
+    const uint32_t words[4] = { normed.x, normed.y, normed.z, normed.w };
+    uint16_t nh[E];
+    float v[E];
+#pragma unroll
+    for (uint32_t e = 0u; e < E; ++e) {
+        nh[e] = (uint16_t)(words[(sub + e) / 2u] >> (16u * ((sub + e) % 2u)));
+        v[e] = nn__silicon__half_to_float(nh[e]) * nn__silicon__half_to_float(sign[lane * E + e]);
+    }
+#pragma unroll
+    for (uint32_t e = 0u; e < E; ++e) o[first + e] = nh[e];
+    amd_rocm_base__zzpackage_butterfly_of<E>(v, lane);
+    const float inv = 1.0f / nn__silicon__sqrtf((float)(E * AMD_ROCM_BASE__ZZPRIVATE_WAVE));
+    uint16_t h[E];
+#pragma unroll
+    for (uint32_t e = 0u; e < E; ++e) h[e] = amd_rocm_base__zzpackage_to_half(v[e] * inv, over);
+#pragma unroll
+    for (uint32_t e = 0u; e < E; ++e) rot[first + e] = h[e];
+}
+template <uint32_t HELD>
+static __device__ inline void amd_rocm_base__zzprivate_norm_rotate_ladder(uint16_t* rot, uint16_t* o, const uint16_t* x, const uint16_t* w,
+                                                                              const uint16_t* sign, uint64_t n, float eps, unsigned int* over) {
+    const uint32_t lane = (uint32_t)(nn__silicon__lane() % AMD_ROCM_BASE__ZZPRIVATE_WAVE);
+    const uint64_t unit = (uint64_t)nn__silicon__block() * AMD_ROCM_BASE__ZZPRIVATE_ROWS
+                        + nn__silicon__lane() / AMD_ROCM_BASE__ZZPRIVATE_WAVE;
+    const uint64_t whole = n / AMD_ROCM_BASE__ZZPRIVATE_ROT_BLOCK, rest = n - whole * AMD_ROCM_BASE__ZZPRIVATE_ROT_BLOCK;
+    const uint64_t units = whole + (rest >= 256u ? 1u : 0u) + (rest % 256u != 0u ? 1u : 0u);
+    if (unit >= units) return;
+    const uint64_t groups = n / 8u, held = (groups + AMD_ROCM_BASE__ZZPRIVATE_WAVE - 1u) / AMD_ROCM_BASE__ZZPRIVATE_WAVE;
+    const uint4 none = make_uint4(0u, 0u, 0u, 0u);
+    const uint4* xr = (const uint4*)(const void*)x;
+    uint4 q[HELD];
+#pragma unroll
+    for (uint32_t k = 0u; k < HELD; ++k) {
+        const uint64_t gk = lane + (uint64_t)k * AMD_ROCM_BASE__ZZPRIVATE_WAVE;
+        q[k] = k < held && gk < groups ? xr[gk] : none;
+    }
+    float part[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+#pragma unroll
+    for (uint32_t k = 0u; k < HELD; ++k)
+        if (k < held) part[k % 4u] = amd_rocm_base__zzprivate_squares8(q[k], part[k % 4u]);
+#pragma unroll
+    for (uint32_t off = 1u; off < AMD_ROCM_BASE__ZZPRIVATE_WAVE; off <<= 1)
+#pragma unroll
+        for (uint32_t k = 0u; k < (HELD < 4u ? HELD : 4u); ++k) part[k] += amd_rocm_base__zzpackage_xor(part[k], off);
+    const float scale = 1.0f / nn__silicon__sqrtf(((part[0] + part[1]) + (part[2] + part[3])) / (float)n + eps);
+    if (unit < whole)
+        amd_rocm_base__zzprivate_norm_rotate_piece<8u>(rot, o, x, w, sign, unit * AMD_ROCM_BASE__ZZPRIVATE_ROT_BLOCK, scale, over);
+    else if (rest >= 256u && unit == whole)
+        amd_rocm_base__zzprivate_norm_rotate_piece<4u>(rot, o, x, w, sign, whole * AMD_ROCM_BASE__ZZPRIVATE_ROT_BLOCK, scale, over);
+    else
+        amd_rocm_base__zzprivate_norm_rotate_piece<2u>(rot, o, x, w, sign, whole * AMD_ROCM_BASE__ZZPRIVATE_ROT_BLOCK + (rest >= 256u ? 256u : 0u),
+                                                       scale, over);
+}
+static __global__ AMD_ROCM_BASE__ZZPRIVATE_BOUNDS void amd_rocm_base__zzprivate_norm_rotate_ladder_h4(uint16_t* rot, uint16_t* o, const uint16_t* x,
+        const uint16_t* w, const uint16_t* sign, uint64_t n, float eps, unsigned int* over) {
+    amd_rocm_base__zzprivate_norm_rotate_ladder<4u>(rot, o, x, w, sign, n, eps, over);
+}
+static __global__ AMD_ROCM_BASE__ZZPRIVATE_BOUNDS void amd_rocm_base__zzprivate_norm_rotate_ladder_h12(uint16_t* rot, uint16_t* o, const uint16_t* x,
+        const uint16_t* w, const uint16_t* sign, uint64_t n, float eps, unsigned int* over) {
+    amd_rocm_base__zzprivate_norm_rotate_ladder<12u>(rot, o, x, w, sign, n, eps, over);
+}
 static void amd_rocm_base__override_rmsnorm_rotate(uint16_t* rot, uint16_t* o, const uint16_t* x, const uint16_t* w, const uint16_t* sign,
                                                       uint64_t n, float eps, unsigned int* over) {
     const uint64_t held = (n / 8u + AMD_ROCM_BASE__ZZPRIVATE_WAVE - 1u) / AMD_ROCM_BASE__ZZPRIVATE_WAVE;
     const bool apart = (rot + n <= o || o + n <= rot) && (rot + n <= x || x + n <= rot) && (o + n <= x || x + n <= o);
-    if (n == 0u || n % AMD_ROCM_BASE__ZZPRIVATE_ROT_BLOCK != 0u || held > AMD_ROCM_BASE__ZZPRIVATE_NORM_HELD || !apart
+    /* the widths `hadamard_rotate` ladders (▶ hadamard.cuh) */
+    const bool ladder = n % AMD_ROCM_BASE__ZZPRIVATE_ROT_BLOCK != 0u && n % 128u == 0u
+                     && (n > AMD_ROCM_BASE__ZZPRIVATE_ROT_BLOCK || n == 128u || n == 256u);
+    if (n == 0u || (n % AMD_ROCM_BASE__ZZPRIVATE_ROT_BLOCK != 0u && !ladder) || held > AMD_ROCM_BASE__ZZPRIVATE_NORM_HELD || !apart
      || !amd_rocm_base__zzprivate_norm_fit(o, x, w, n, n, n) || ((uint64_t)(uintptr_t)rot) % 16u != 0u) {
         nn__rmsnorm__zzabi_launch_rotate(rot, o, x, w, sign, n, eps, over);
+        return;
+    }
+    if (ladder) {
+        const void* kernel = held <= 4u ? (const void*)amd_rocm_base__zzprivate_norm_rotate_ladder_h4
+                                        : (const void*)amd_rocm_base__zzprivate_norm_rotate_ladder_h12;
+        const uint64_t whole = n / AMD_ROCM_BASE__ZZPRIVATE_ROT_BLOCK, rest = n - whole * AMD_ROCM_BASE__ZZPRIVATE_ROT_BLOCK;
+        const uint64_t units = whole + (rest >= 256u ? 1u : 0u) + (rest % 256u != 0u ? 1u : 0u);
+        const uint32_t launch = (uint32_t)((units + AMD_ROCM_BASE__ZZPRIVATE_ROWS - 1u) / AMD_ROCM_BASE__ZZPRIVATE_ROWS);
+        void* args[] = { &rot, &o, &x, &w, &sign, &n, &eps, &over };
+        const size_t sizes[] = { sizeof rot, sizeof o, sizeof x, sizeof w, sizeof sign, sizeof n, sizeof eps, sizeof over };
+        nn__silicon__launch(kernel, "amd_rocm_base__zzprivate_norm_rotate_ladder", launch,
+                            AMD_ROCM_BASE__ZZPRIVATE_ROWS * AMD_ROCM_BASE__ZZPRIVATE_WAVE, args, sizes, 8u);
         return;
     }
     const void* kernel = held <= 4u ? (const void*)amd_rocm_base__zzprivate_norm_rotate_h4
@@ -386,6 +475,98 @@ static void amd_rocm_base__override_rmsnorm_rotate(uint16_t* rot, uint16_t* o, c
     const size_t sizes[] = { sizeof rot, sizeof o, sizeof x, sizeof w, sizeof sign, sizeof n, sizeof eps, sizeof over };
     nn__silicon__launch(kernel, "amd_rocm_base__zzprivate_norm_rotate", launch,
                         AMD_ROCM_BASE__ZZPRIVATE_ROWS * AMD_ROCM_BASE__ZZPRIVATE_WAVE, args, sizes, 8u);
+}
+
+/* ⭐ TWO NORMS AND THEIR PAIR'S ROTATION IN ONE LAUNCH — `rmsnorm_pair_rotate`, a wave a 512-block of the pair. nn's
+ *   definition is the norm's door on each row, then the rotation's over the two (`nn/gpu/doors.cuh`); here a wave takes the
+ *   sum of squares of each row its block holds as a slice of `norm_slices` takes a row's — the same groups, parts and fold,
+ *   so the same scale — norms the eight halves a lane holds with its own row's, and rotates them with the rotation's own
+ *   butterfly from the halves `o` receives, as `norm_rotate_wave` does a row. A block across the two rows holds lanes of
+ *   each. So `o` and `rot` are, to the bit, the three doors': one launch where they were three, the normed pair never
+ *   read back. Rows of a multiple of 256 (the pair whole 512-blocks) of up to 64 · `NORM_HELD` groups, 16-byte aligned,
+ *   `o` and `rot` apart from each other and from the rows; anything else is nn's three doors. */
+template <uint32_t HELD>
+static __device__ inline float amd_rocm_base__zzprivate_norm_scale(const uint16_t* x, uint64_t n, float eps) {
+    const uint32_t lane = (uint32_t)(nn__silicon__lane() % AMD_ROCM_BASE__ZZPRIVATE_WAVE);
+    const uint64_t groups = n / 8u, held = (groups + AMD_ROCM_BASE__ZZPRIVATE_WAVE - 1u) / AMD_ROCM_BASE__ZZPRIVATE_WAVE;
+    const uint4 none = make_uint4(0u, 0u, 0u, 0u);
+    const uint4* xr = (const uint4*)(const void*)x;
+    uint4 q[HELD];
+#pragma unroll
+    for (uint32_t k = 0u; k < HELD; ++k) {
+        const uint64_t gk = lane + (uint64_t)k * AMD_ROCM_BASE__ZZPRIVATE_WAVE;
+        q[k] = k < held && gk < groups ? xr[gk] : none;
+    }
+    float part[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+#pragma unroll
+    for (uint32_t k = 0u; k < HELD; ++k)
+        if (k < held) part[k % 4u] = amd_rocm_base__zzprivate_squares8(q[k], part[k % 4u]);
+#pragma unroll
+    for (uint32_t off = 1u; off < AMD_ROCM_BASE__ZZPRIVATE_WAVE; off <<= 1)
+#pragma unroll
+        for (uint32_t k = 0u; k < (HELD < 4u ? HELD : 4u); ++k) part[k] += amd_rocm_base__zzpackage_xor(part[k], off);
+    return 1.0f / nn__silicon__sqrtf(((part[0] + part[1]) + (part[2] + part[3])) / (float)n + eps);
+}
+template <uint32_t HELD>
+static __device__ inline void amd_rocm_base__zzprivate_norm_pair_rotate_wave(uint16_t* rot, uint16_t* o, const uint16_t* x, const uint16_t* y,
+                                                                                 const uint16_t* w, const uint16_t* sign, uint64_t n, float eps,
+                                                                                 unsigned int* over) {
+    const uint32_t lane = (uint32_t)(nn__silicon__lane() % AMD_ROCM_BASE__ZZPRIVATE_WAVE);
+    const uint64_t block = (uint64_t)nn__silicon__block() * AMD_ROCM_BASE__ZZPRIVATE_ROWS
+                         + nn__silicon__lane() / AMD_ROCM_BASE__ZZPRIVATE_WAVE;
+    if (block * AMD_ROCM_BASE__ZZPRIVATE_ROT_BLOCK >= 2u * n) return;
+    const uint64_t groups = n / 8u;
+    const uint64_t g = block * AMD_ROCM_BASE__ZZPRIVATE_WAVE + lane;          /* this lane's group of the pair: its elements 8·g … */
+    const bool second = g >= groups;
+    const uint64_t own = second ? g - groups : g;                               /* …the group `own` of its own row */
+    const uint4 xa = ((const uint4*)(const void*)(second ? y : x))[own], wa = ((const uint4*)(const void*)w)[own];
+    /* the scale of each row the block holds — the same for every lane of the wave, so each wave reads only its rows */
+    const float sx = block * AMD_ROCM_BASE__ZZPRIVATE_ROT_BLOCK < n ? amd_rocm_base__zzprivate_norm_scale<HELD>(x, n, eps) : 0.0f;
+    const float sy = (block + 1u) * AMD_ROCM_BASE__ZZPRIVATE_ROT_BLOCK > n ? amd_rocm_base__zzprivate_norm_scale<HELD>(y, n, eps) : 0.0f;
+    const uint4 normed = amd_rocm_base__zzprivate_normed8(xa, wa, second ? sy : sx, over);
+    ((uint4*)(void*)o)[g] = normed;
+    const uint32_t words[4] = { normed.x, normed.y, normed.z, normed.w };
+    const uint32_t c0 = lane * AMD_ROCM_BASE__ZZPRIVATE_ROT_EACH;
+    float v[AMD_ROCM_BASE__ZZPRIVATE_ROT_EACH];
+#pragma unroll
+    for (uint32_t e = 0u; e < AMD_ROCM_BASE__ZZPRIVATE_ROT_EACH; ++e)
+        v[e] = nn__silicon__half_to_float((uint16_t)(words[e / 2u] >> (16u * (e % 2u)))) * nn__silicon__half_to_float(sign[c0 + e]);
+    amd_rocm_base__zzpackage_butterfly8(v, lane);
+    const float inv = 1.0f / nn__silicon__sqrtf((float)AMD_ROCM_BASE__ZZPRIVATE_ROT_BLOCK);
+    uint16_t h[AMD_ROCM_BASE__ZZPRIVATE_ROT_EACH];
+#pragma unroll
+    for (uint32_t e = 0u; e < AMD_ROCM_BASE__ZZPRIVATE_ROT_EACH; ++e) h[e] = amd_rocm_base__zzpackage_to_half(v[e] * inv, over);
+    const uint64_t at = block * AMD_ROCM_BASE__ZZPRIVATE_ROT_BLOCK + c0;
+#pragma unroll
+    for (uint32_t e = 0u; e < AMD_ROCM_BASE__ZZPRIVATE_ROT_EACH; ++e) rot[at + e] = h[e];
+}
+static __global__ AMD_ROCM_BASE__ZZPRIVATE_BOUNDS void amd_rocm_base__zzprivate_norm_pair_rotate_h4(uint16_t* rot, uint16_t* o, const uint16_t* x,
+        const uint16_t* y, const uint16_t* w, const uint16_t* sign, uint64_t n, float eps, unsigned int* over) {
+    amd_rocm_base__zzprivate_norm_pair_rotate_wave<4u>(rot, o, x, y, w, sign, n, eps, over);
+}
+static __global__ AMD_ROCM_BASE__ZZPRIVATE_BOUNDS void amd_rocm_base__zzprivate_norm_pair_rotate_h12(uint16_t* rot, uint16_t* o, const uint16_t* x,
+        const uint16_t* y, const uint16_t* w, const uint16_t* sign, uint64_t n, float eps, unsigned int* over) {
+    amd_rocm_base__zzprivate_norm_pair_rotate_wave<12u>(rot, o, x, y, w, sign, n, eps, over);
+}
+static void amd_rocm_base__override_rmsnorm_pair_rotate(uint16_t* rot, uint16_t* o, const uint16_t* x, const uint16_t* y, const uint16_t* w,
+                                                           const uint16_t* sign, uint64_t n, float eps, unsigned int* over) {
+    const uint64_t held = (n / 8u + AMD_ROCM_BASE__ZZPRIVATE_WAVE - 1u) / AMD_ROCM_BASE__ZZPRIVATE_WAVE, pair = 2u * n;
+    const bool apart = (rot + pair <= o || o + pair <= rot) && (rot + pair <= x || x + n <= rot) && (rot + pair <= y || y + n <= rot)
+                    && (o + pair <= x || x + n <= o) && (o + pair <= y || y + n <= o);
+    if (n == 0u || pair % AMD_ROCM_BASE__ZZPRIVATE_ROT_BLOCK != 0u || held > AMD_ROCM_BASE__ZZPRIVATE_NORM_HELD || !apart
+     || !amd_rocm_base__zzprivate_norm_fit(o, x, w, n, n, n) || ((uint64_t)(uintptr_t)y) % 16u != 0u
+     || ((uint64_t)(uintptr_t)rot) % 16u != 0u) {
+        nn__rmsnorm__zzabi_launch_pair_rotate(rot, o, x, y, w, sign, n, eps, over);
+        return;
+    }
+    const void* kernel = held <= 4u ? (const void*)amd_rocm_base__zzprivate_norm_pair_rotate_h4
+                                    : (const void*)amd_rocm_base__zzprivate_norm_pair_rotate_h12;
+    const uint64_t blocks = pair / AMD_ROCM_BASE__ZZPRIVATE_ROT_BLOCK;
+    const uint32_t launch = (uint32_t)((blocks + AMD_ROCM_BASE__ZZPRIVATE_ROWS - 1u) / AMD_ROCM_BASE__ZZPRIVATE_ROWS);
+    void* args[] = { &rot, &o, &x, &y, &w, &sign, &n, &eps, &over };
+    const size_t sizes[] = { sizeof rot, sizeof o, sizeof x, sizeof y, sizeof w, sizeof sign, sizeof n, sizeof eps, sizeof over };
+    nn__silicon__launch(kernel, "amd_rocm_base__zzprivate_norm_pair_rotate", launch,
+                        AMD_ROCM_BASE__ZZPRIVATE_ROWS * AMD_ROCM_BASE__ZZPRIVATE_WAVE, args, sizes, 9u);
 }
 
 #endif /* SILVANN__SILICON_FAMILIES_AMD_ROCM_BASE_OVERRIDES_PRIMITIVES_CUH */

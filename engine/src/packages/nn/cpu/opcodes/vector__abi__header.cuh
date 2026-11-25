@@ -27,6 +27,11 @@ static sys__heap_node nn__vector__zzabi_apply_copy(const sys__heap_node* argv, u
 static sys__heap_node nn__vector__zzabi_apply_widen(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx);
 static sys__heap_node nn__vector__zzabi_apply_exp(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx);
 static sys__heap_node nn__vector__zzabi_apply_softplus(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx);
+static sys__heap_node nn__vector__zzabi_apply_tanh(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx);
+static sys__heap_node nn__vector__zzabi_apply_l2clip(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx);
+static sys__heap_node nn__vector__zzabi_apply_add_fp32(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx);
+static sys__heap_node nn__vector__zzabi_apply_convolution_step(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx);
+static sys__heap_node nn__vector__zzabi_apply_gate_tanh(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx);
 static sys__heap_node nn__vector__zzabi_apply_l2norm(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx);
 static sys__heap_node nn__vector__zzabi_apply_pointwise_mul(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx);
 static sys__heap_node nn__vector__zzabi_apply_scale(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx);
@@ -42,6 +47,11 @@ static __device__ SYS__NOINLINE void nn__vector__zzabi_adapter_copy(sys__heap_no
 static __device__ SYS__NOINLINE void nn__vector__zzabi_adapter_widen(sys__heap_node* base, uint64_t form);
 static __device__ SYS__NOINLINE void nn__vector__zzabi_adapter_exp(sys__heap_node* base, uint64_t form);
 static __device__ SYS__NOINLINE void nn__vector__zzabi_adapter_softplus(sys__heap_node* base, uint64_t form);
+static __device__ SYS__NOINLINE void nn__vector__zzabi_adapter_tanh(sys__heap_node* base, uint64_t form);
+static __device__ SYS__NOINLINE void nn__vector__zzabi_adapter_l2clip(sys__heap_node* base, uint64_t form);
+static __device__ SYS__NOINLINE void nn__vector__zzabi_adapter_add_fp32(sys__heap_node* base, uint64_t form);
+static __device__ SYS__NOINLINE void nn__vector__zzabi_adapter_convolution_step(sys__heap_node* base, uint64_t form);
+static __device__ SYS__NOINLINE void nn__vector__zzabi_adapter_gate_tanh(sys__heap_node* base, uint64_t form);
 static __device__ SYS__NOINLINE void nn__vector__zzabi_adapter_l2norm(sys__heap_node* base, uint64_t form);
 static __device__ SYS__NOINLINE void nn__vector__zzabi_adapter_pointwise_mul(sys__heap_node* base, uint64_t form);
 static __device__ SYS__NOINLINE void nn__vector__zzabi_adapter_scale(sys__heap_node* base, uint64_t form);

@@ -242,6 +242,10 @@ class Machine:
         for w, params in sorted((worker_params or {}).items()):
             text += "worker%d_params{\n%s}\n" % (w, params)
         if workers:
+            missing = self.missing_worker(workers)
+            if missing:
+                from .model_folder import Refused
+                raise Refused(missing)
             e.choose_workers(workers)
             e.boot(config=text, blocks=len(workers))
         else:
@@ -655,6 +659,29 @@ class Machine:
 
     def write(self, at, data):
         self.e.nn.write(at, data)
+
+    def missing_worker(self, workers):
+        """What to say of the first of `workers` — (family, device) each — that this machine has no device for: its number,
+        its family and device, how many of that family's devices the binary counts here, and why where that is known; None
+        where every one is there. The engine's own refusal (`choose_workers`) names none of them."""
+        tried = {f.get("silicon") or os.path.basename(f["path"])[len("libsilvann_"):].rsplit(".", 1)[0]: f["outcome"]
+                 for f in self.e.silicon_families()}
+        for w, (family, device) in enumerate(workers):
+            counted = self.e.devices(family)
+            if device < counted:
+                continue
+            said = "worker %d is %s's device %d, and %s counts %s here" % (
+                w, family, device, family, "no device" if counted == 0 else "%d device%s" % (counted, "" if counted == 1 else "s"))
+            if counted == 0 and tried.get(family) != "loaded":
+                said += ": its library is not loaded (%s)" % tried.get(family, "this binary did not look for it")
+            elif family == "x86_avx2" and counted == 0:
+                said += (": this processor has no AVX2, FMA and F16C, which x86_avx2 — the CPU worker's family — needs "
+                         "(Intel from Haswell, AMD from Excavator and Zen), so no setup with the experts on the CPU runs "
+                         "here")
+            elif family in OPENCL_FAMILIES and counted == 0:
+                said += ": the system's OpenCL lists no GPU of that family (its driver, or a GPU the family does not take)"
+            return said
+        return None
 
     def integrated(self):
         """The integrated GPU beside this machine's cards, as a worker — (its OpenCL family, its device) — where an OpenCL

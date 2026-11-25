@@ -256,18 +256,18 @@ static __device__ inline float khronos_opencl1_base__zzprivate_gemv_part(const u
         if (d == 8u) {
             for (uint64_t q = 0u; q < 4u; ++q) {
                 const uint32_t c = cw[q], a = xw[2u * q], b = xw[2u * q + 1u];
-                part += levels[c & 0xFFu] * nn__silicon__half_to_float((uint16_t)(a & 0xFFFFu));
-                part += levels[(c >> 8) & 0xFFu] * nn__silicon__half_to_float((uint16_t)(a >> 16));
-                part += levels[(c >> 16) & 0xFFu] * nn__silicon__half_to_float((uint16_t)(b & 0xFFFFu));
-                part += levels[c >> 24] * nn__silicon__half_to_float((uint16_t)(b >> 16));
+                part += khronos_opencl1_base__zzpackage_level8(levels, c & 0xFFu) * nn__silicon__half_to_float((uint16_t)(a & 0xFFFFu));
+                part += khronos_opencl1_base__zzpackage_level8(levels, (c >> 8) & 0xFFu) * nn__silicon__half_to_float((uint16_t)(a >> 16));
+                part += khronos_opencl1_base__zzpackage_level8(levels, (c >> 16) & 0xFFu) * nn__silicon__half_to_float((uint16_t)(b & 0xFFFFu));
+                part += khronos_opencl1_base__zzpackage_level8(levels, c >> 24) * nn__silicon__half_to_float((uint16_t)(b >> 16));
             }
         } else {
             for (uint64_t q = 0u; q < 4u; ++q) {
                 const uint32_t c = cw[q];
                 for (uint64_t e = 0u; e < 4u; ++e) {
                     const uint32_t a = xw[4u * q + e];
-                    part += levels[256u + ((c >> (8u * e)) & 0xFu)] * nn__silicon__half_to_float((uint16_t)(a & 0xFFFFu));
-                    part += levels[256u + ((c >> (8u * e + 4u)) & 0xFu)] * nn__silicon__half_to_float((uint16_t)(a >> 16));
+                    part += khronos_opencl1_base__zzpackage_level4(levels, ((c >> (8u * e)) & 0xFu)) * nn__silicon__half_to_float((uint16_t)(a & 0xFFFFu));
+                    part += khronos_opencl1_base__zzpackage_level4(levels, ((c >> (8u * e + 4u)) & 0xFu)) * nn__silicon__half_to_float((uint16_t)(a >> 16));
                 }
             }
         }
@@ -279,11 +279,13 @@ static __device__ inline float khronos_opencl1_base__zzprivate_gemv_part(const u
  *   lanes, a run a row: a lane reads sixteen bytes of the row's codes a step, the run's reads one stretch of the row, `x`'s
  *   halves two to a word, and the run's sixteen parts are folded together — all the block's rows at once
  *   (`lanes_sum_each`). The levels come as floats from the card's memory (`levels`: the 8 bits' 256, then the 4 bits' 16),
- *   not from the program's constants, which the card serves one lane at a time when the lanes ask for different ones.
- *   The products are nn's; the order they are added in is not, so an answer is within the bench's bound of nn's, not its
+ *   not from the program's constants, which the card serves one lane at a time when the lanes ask for different ones —
+ *   or, where the family's build holds them (`levels_stage` at the start, then `level`: Intel's), from the block's shared
+ *   memory, the same floats. The products are nn's; the order they are added in is not, so an answer is within the bench's bound of nn's, not its
  *   bytes. Rows a multiple of sixteen bytes, codes and `x` on sixteen (▶ the door's fit). */
 static __device__ inline void khronos_opencl1_base__zzprivate_gemv(uint16_t* out, nn__turboquant__groups g, const uint16_t* x, uint64_t cols,
                                                                    const float* levels, unsigned int* over) {
+    khronos_opencl1_base__zzpackage_levels_stage(levels);
     const uint64_t lane = nn__silicon__lane(), W = KHRONOS_OPENCL1_BASE__GEMV_RUN, runs = nn__silicon__lanes() / W, j = lane % W;
     uint64_t units = 0u;
     for (uint64_t i = 0u; i < g.count && i < NN__TURBOQUANT__GROUPS_MAX; ++i) units += (g.rows[i] + runs - 1u) / runs;
@@ -310,6 +312,7 @@ static __device__ inline void khronos_opencl1_base__zzprivate_gemv(uint16_t* out
 static __device__ inline void khronos_opencl1_base__zzprivate_gemv_rows(uint16_t* out, nn__turboquant__groups g, const uint16_t* x,
                                                                         uint64_t cols, const float* levels, unsigned int* over,
                                                                         const uint64_t R) {
+    khronos_opencl1_base__zzpackage_levels_stage(levels);
     const uint64_t lane = nn__silicon__lane(), W = KHRONOS_OPENCL1_BASE__GEMV_RUN, runs = nn__silicon__lanes() / W, j = lane % W;
     const uint64_t span = runs * R;
     uint64_t units = 0u;
@@ -333,10 +336,10 @@ static __device__ inline void khronos_opencl1_base__zzprivate_gemv_rows(uint16_t
                     const float x2 = nn__silicon__half_to_float((uint16_t)(b & 0xFFFFu)), x3 = nn__silicon__half_to_float((uint16_t)(b >> 16));
                     for (uint64_t k = 0u; k < R; ++k) {
                         const uint32_t c = cw[k][q];
-                        part[k] += levels[c & 0xFFu] * x0;
-                        part[k] += levels[(c >> 8) & 0xFFu] * x1;
-                        part[k] += levels[(c >> 16) & 0xFFu] * x2;
-                        part[k] += levels[c >> 24] * x3;
+                        part[k] += khronos_opencl1_base__zzpackage_level8(levels, c & 0xFFu) * x0;
+                        part[k] += khronos_opencl1_base__zzpackage_level8(levels, (c >> 8) & 0xFFu) * x1;
+                        part[k] += khronos_opencl1_base__zzpackage_level8(levels, (c >> 16) & 0xFFu) * x2;
+                        part[k] += khronos_opencl1_base__zzpackage_level8(levels, c >> 24) * x3;
                     }
                 }
             } else {
@@ -346,8 +349,8 @@ static __device__ inline void khronos_opencl1_base__zzprivate_gemv_rows(uint16_t
                         const float x0 = nn__silicon__half_to_float((uint16_t)(a & 0xFFFFu)), x1 = nn__silicon__half_to_float((uint16_t)(a >> 16));
                         for (uint64_t k = 0u; k < R; ++k) {
                             const uint32_t c = cw[k][q];
-                            part[k] += levels[256u + ((c >> (8u * e)) & 0xFu)] * x0;
-                            part[k] += levels[256u + ((c >> (8u * e + 4u)) & 0xFu)] * x1;
+                            part[k] += khronos_opencl1_base__zzpackage_level4(levels, ((c >> (8u * e)) & 0xFu)) * x0;
+                            part[k] += khronos_opencl1_base__zzpackage_level4(levels, ((c >> (8u * e + 4u)) & 0xFu)) * x1;
                         }
                     }
             }
@@ -378,6 +381,7 @@ static __device__ inline void khronos_opencl1_base__zzprivate_gemv4(uint16_t* ou
 static __device__ inline void khronos_opencl1_base__zzprivate_gemv_sum(uint16_t* out, nn__turboquant__groups g, const uint16_t* x, const uint16_t* w,
                                                                        const uint16_t* residual, uint64_t rows, uint64_t cols,
                                                                        const float* levels, unsigned int* over) {
+    khronos_opencl1_base__zzpackage_levels_stage(levels);
     const uint64_t lane = nn__silicon__lane(), W = KHRONOS_OPENCL1_BASE__GEMV_RUN, runs = nn__silicon__lanes() / W, j = lane % W;
     const uint64_t units = (rows + runs - 1u) / runs;
     for (uint64_t u = nn__silicon__block(); u < units; u += nn__silicon__blocks()) {
@@ -405,6 +409,7 @@ static __device__ inline void khronos_opencl1_base__zzprivate_gemv_sum_rows(uint
                                                                             const uint16_t* w, const uint16_t* residual, uint64_t rows,
                                                                             uint64_t cols, const float* levels, unsigned int* over,
                                                                             const uint64_t R) {
+    khronos_opencl1_base__zzpackage_levels_stage(levels);
     const uint64_t lane = nn__silicon__lane(), W = KHRONOS_OPENCL1_BASE__GEMV_RUN, runs = nn__silicon__lanes() / W, j = lane % W;
     const uint64_t span = runs * R, units = (rows + span - 1u) / span;
     for (uint64_t u = nn__silicon__block(); u < units; u += nn__silicon__blocks()) {
@@ -430,10 +435,10 @@ static __device__ inline void khronos_opencl1_base__zzprivate_gemv_sum_rows(uint
                         const float x2 = nn__silicon__half_to_float((uint16_t)(b & 0xFFFFu)), x3 = nn__silicon__half_to_float((uint16_t)(b >> 16));
                         for (uint64_t k = 0u; k < R; ++k) {
                             const uint32_t c = cw[k][q];
-                            p[k] += levels[c & 0xFFu] * x0;
-                            p[k] += levels[(c >> 8) & 0xFFu] * x1;
-                            p[k] += levels[(c >> 16) & 0xFFu] * x2;
-                            p[k] += levels[c >> 24] * x3;
+                            p[k] += khronos_opencl1_base__zzpackage_level8(levels, c & 0xFFu) * x0;
+                            p[k] += khronos_opencl1_base__zzpackage_level8(levels, (c >> 8) & 0xFFu) * x1;
+                            p[k] += khronos_opencl1_base__zzpackage_level8(levels, (c >> 16) & 0xFFu) * x2;
+                            p[k] += khronos_opencl1_base__zzpackage_level8(levels, c >> 24) * x3;
                         }
                     }
                 } else {
@@ -443,8 +448,8 @@ static __device__ inline void khronos_opencl1_base__zzprivate_gemv_sum_rows(uint
                             const float x0 = nn__silicon__half_to_float((uint16_t)(a & 0xFFFFu)), x1 = nn__silicon__half_to_float((uint16_t)(a >> 16));
                             for (uint64_t k = 0u; k < R; ++k) {
                                 const uint32_t c = cw[k][q];
-                                p[k] += levels[256u + ((c >> (8u * e)) & 0xFu)] * x0;
-                                p[k] += levels[256u + ((c >> (8u * e + 4u)) & 0xFu)] * x1;
+                                p[k] += khronos_opencl1_base__zzpackage_level4(levels, ((c >> (8u * e)) & 0xFu)) * x0;
+                                p[k] += khronos_opencl1_base__zzpackage_level4(levels, ((c >> (8u * e + 4u)) & 0xFu)) * x1;
                             }
                         }
                 }
@@ -473,6 +478,154 @@ static __device__ inline void khronos_opencl1_base__zzprivate_gemv_sum4(uint16_t
                                                                         const uint16_t* residual, uint64_t rows, uint64_t cols,
                                                                         const float* levels, unsigned int* over) {
     khronos_opencl1_base__zzprivate_gemv_sum_rows(out, g, x, w, residual, rows, cols, levels, over, 4u);
+}
+
+/* ⭐ THE SAME PRODUCTS READ NARROW — where a family defines `KHRONOS_OPENCL1_BASE__GEMV_NARROW` (Intel's, ▶ doors.cuh): the
+ *   gemv and the weighted sum above, a run of sixteen lanes `R` rows, but a lane reads eight bytes of a row a step, so the
+ *   run's sixteen read 128 contiguous bytes, and the halves of `x` they need are each lane's own 32 (4 bits) or 16 (8 bits)
+ *   beside its neighbours'. Intel's compiler loads the wide reading's sixteen bytes a lane, and its 64 of `x`, four bytes
+ *   at a time, every load's lanes on as many cache lines. `MEASURED` on a Rocket Lake's UHD P750
+ *   (measurements/2026-11-25_nn214_intel_opencl_phoenixnap.md, `gemv_layout.py`: eight experts' gate and up, 4 bits, four
+ *   rows a run): 18.7 GB/s of codes read wide, 33.1 narrow; the family's kernels (`family_gemv.py`), 1459 us wide, 1179
+ *   narrow, then 984 a run of eight with no branch around a load, 865 the 4 bits' levels at the start of shared memory.
+ *   Each row's part is the same at every `R` — the same products added in the same order by the same lane, folded by the
+ *   same run — so the same bytes; not the wide reading's. */
+#define KHRONOS_OPENCL1_BASE__NARROW_BYTES 8u
+/* ⭐ A RUN EIGHT LANES, eight bytes each a step: 64 contiguous bytes of a row, a cache line, and twice the steps a block's
+ *   rows take of a run of sixteen — what a block does once for its rows (its matrix found, its folds, its scales) spread
+ *   over twice the reading. `MEASURED` (the record above, `family_gemv.py`, the experts' gate and up): 1070 us at sixteen,
+ *   984 at eight. */
+#define KHRONOS_OPENCL1_BASE__NARROW_RUN 8u
+/* `part[k]` gains row `r0 + k`'s products for `k` below `R`: the stretches of eight bytes of the lane at `j` in its run,
+ * `codes` the matrix's first byte. A row at or past `rows` reads the matrix's last row instead, its part the caller's to
+ * drop: every lane loads, with no branch around a load. */
+static __device__ inline void khronos_opencl1_base__zzprivate_narrow(float* part, const uint8_t* codes, const uint16_t* x, uint64_t d,
+                                                                    uint64_t row_bytes, uint64_t r0, uint64_t rows, uint64_t j,
+                                                                    const float* levels, const uint64_t R) {
+    const uint32_t end = (uint32_t)row_bytes, step = KHRONOS_OPENCL1_BASE__NARROW_BYTES * KHRONOS_OPENCL1_BASE__NARROW_RUN;
+    uint64_t row_at[4];
+    for (uint32_t k = 0u; k < (uint32_t)R; ++k) row_at[k] = (r0 + k < rows ? r0 + k : rows - 1u) * row_bytes;
+    for (uint32_t at = KHRONOS_OPENCL1_BASE__NARROW_BYTES * (uint32_t)j; at < end; at += step) {
+        uint32_t cw[4][2];
+        for (uint32_t k = 0u; k < (uint32_t)R; ++k)
+            for (uint32_t h = 0u; h < 2u; ++h) cw[k][h] = ((const uint32_t*)(codes + row_at[k] + at))[h];
+        if (d == 8u) {
+            const uint32_t* xw = (const uint32_t*)(x + at);
+            for (uint32_t h = 0u; h < 2u; ++h) {
+                const uint32_t a = xw[2u * h], b = xw[2u * h + 1u];
+                const float x0 = nn__silicon__half_to_float((uint16_t)(a & 0xFFFFu)), x1 = nn__silicon__half_to_float((uint16_t)(a >> 16));
+                const float x2 = nn__silicon__half_to_float((uint16_t)(b & 0xFFFFu)), x3 = nn__silicon__half_to_float((uint16_t)(b >> 16));
+                for (uint32_t k = 0u; k < (uint32_t)R; ++k) {
+                    const uint32_t c = cw[k][h];
+                    part[k] += khronos_opencl1_base__zzpackage_level8(levels, c & 0xFFu) * x0;
+                    part[k] += khronos_opencl1_base__zzpackage_level8(levels, (c >> 8) & 0xFFu) * x1;
+                    part[k] += khronos_opencl1_base__zzpackage_level8(levels, (c >> 16) & 0xFFu) * x2;
+                    part[k] += khronos_opencl1_base__zzpackage_level8(levels, c >> 24) * x3;
+                }
+            }
+        } else {
+            const uint32_t* xw = (const uint32_t*)(x + 2u * at);
+            for (uint32_t h = 0u; h < 2u; ++h)
+                for (uint32_t e = 0u; e < 4u; ++e) {
+                    const uint32_t a = xw[4u * h + e];
+                    const float x0 = nn__silicon__half_to_float((uint16_t)(a & 0xFFFFu)), x1 = nn__silicon__half_to_float((uint16_t)(a >> 16));
+                    for (uint32_t k = 0u; k < (uint32_t)R; ++k) {
+                        const uint32_t c = cw[k][h];
+                        part[k] += khronos_opencl1_base__zzpackage_level4(levels, ((c >> (8u * e)) & 0xFu)) * x0;
+                        part[k] += khronos_opencl1_base__zzpackage_level4(levels, ((c >> (8u * e + 4u)) & 0xFu)) * x1;
+                    }
+                }
+        }
+    }
+}
+static __device__ inline void khronos_opencl1_base__zzprivate_gemv_narrow_rows(uint16_t* out, nn__turboquant__groups g, const uint16_t* x,
+                                                                               uint64_t cols, const float* levels, unsigned int* over,
+                                                                               const uint64_t R) {
+    khronos_opencl1_base__zzpackage_levels_stage(levels);
+    const uint64_t lane = nn__silicon__lane(), W = KHRONOS_OPENCL1_BASE__NARROW_RUN, runs = nn__silicon__lanes() / W, j = lane % W;
+    const uint64_t span = runs * R;
+    uint64_t units = 0u;
+    for (uint64_t i = 0u; i < g.count && i < NN__TURBOQUANT__GROUPS_MAX; ++i) units += (g.rows[i] + span - 1u) / span;
+    for (uint64_t u = nn__silicon__block(); u < units; u += nn__silicon__blocks()) {
+        uint64_t i = 0u, first = 0u;
+        while (u >= first + (g.rows[i] + span - 1u) / span) { first += (g.rows[i] + span - 1u) / span; ++i; }
+        const uint64_t d = g.d[i], r0 = (u - first) * span + (lane / W) * R, row_bytes = cols * d / 8u, rows = g.rows[i];
+        float part[4];
+        for (uint64_t k = 0u; k < R; ++k) part[k] = 0.0f;
+        khronos_opencl1_base__zzprivate_narrow(part, (const uint8_t*)(uintptr_t)g.codes[i], x, d, row_bytes, r0, rows, j,
+                                               levels, R);
+        for (uint64_t k = 0u; k < R; ++k) {
+            const uint64_t r = r0 + k;
+            const float sum = khronos_opencl1_base__zzpackage_lanes_sum_each(r < rows ? part[k] : 0.0f, (uint32_t)W);
+            if (j == 0u && r < rows) {
+                const uint8_t* lut = (const uint8_t*)(uintptr_t)g.luts[i];
+                const float scale = nn__silicon__half_to_float((uint16_t)((uint32_t)lut[r * 2u] | ((uint32_t)lut[r * 2u + 1u] << 8)));
+                out[g.out_at[i] + r] = nn__kernels__zzabi_to_half(sum * scale, over);
+            }
+        }
+    }
+}
+static __device__ inline void khronos_opencl1_base__zzprivate_gemv_narrow(uint16_t* out, nn__turboquant__groups g, const uint16_t* x,
+                                                                          uint64_t cols, const float* levels, unsigned int* over) {
+    khronos_opencl1_base__zzprivate_gemv_narrow_rows(out, g, x, cols, levels, over, 1u);
+}
+static __device__ inline void khronos_opencl1_base__zzprivate_gemv2_narrow(uint16_t* out, nn__turboquant__groups g, const uint16_t* x,
+                                                                           uint64_t cols, const float* levels, unsigned int* over) {
+    khronos_opencl1_base__zzprivate_gemv_narrow_rows(out, g, x, cols, levels, over, 2u);
+}
+static __device__ inline void khronos_opencl1_base__zzprivate_gemv4_narrow(uint16_t* out, nn__turboquant__groups g, const uint16_t* x,
+                                                                           uint64_t cols, const float* levels, unsigned int* over) {
+    khronos_opencl1_base__zzprivate_gemv_narrow_rows(out, g, x, cols, levels, over, 4u);
+}
+static __device__ inline void khronos_opencl1_base__zzprivate_gemv_sum_narrow_rows(uint16_t* out, nn__turboquant__groups g,
+                                                                                   const uint16_t* x, const uint16_t* w,
+                                                                                   const uint16_t* residual, uint64_t rows,
+                                                                                   uint64_t cols, const float* levels,
+                                                                                   unsigned int* over, const uint64_t R) {
+    khronos_opencl1_base__zzpackage_levels_stage(levels);
+    const uint64_t lane = nn__silicon__lane(), W = KHRONOS_OPENCL1_BASE__NARROW_RUN, runs = nn__silicon__lanes() / W, j = lane % W;
+    const uint64_t span = runs * R, units = (rows + span - 1u) / span;
+    for (uint64_t u = nn__silicon__block(); u < units; u += nn__silicon__blocks()) {
+        const uint64_t r0 = u * span + (lane / W) * R;
+        float part[4];
+        for (uint64_t k = 0u; k < R; ++k) part[k] = 0.0f;
+        for (uint64_t i = 0u; i < g.count && i < NN__TURBOQUANT__GROUPS_MAX; ++i) {
+            const uint64_t d = g.d[i], row_bytes = cols * d / 8u;
+            const uint8_t* lut = (const uint8_t*)(uintptr_t)g.luts[i];
+            const float wi = nn__silicon__half_to_float(w[g.out_at[i]]);
+            float p[4];
+            for (uint64_t k = 0u; k < R; ++k) p[k] = 0.0f;
+            khronos_opencl1_base__zzprivate_narrow(p, (const uint8_t*)(uintptr_t)g.codes[i], x + i * cols, d, row_bytes, r0,
+                                                   rows, j, levels, R);
+            for (uint64_t k = 0u; k < R; ++k) {
+                const uint64_t r = r0 + k;
+                if (r < rows) {
+                    const float scale = nn__silicon__half_to_float((uint16_t)((uint32_t)lut[r * 2u] | ((uint32_t)lut[r * 2u + 1u] << 8)));
+                    part[k] += p[k] * scale * wi;
+                }
+            }
+        }
+        for (uint64_t k = 0u; k < R; ++k) {
+            const uint64_t r = r0 + k;
+            const float sum = khronos_opencl1_base__zzpackage_lanes_sum_each(r < rows ? part[k] : 0.0f, (uint32_t)W);
+            if (j == 0u && r < rows) out[r] = nn__kernels__zzabi_to_half(nn__silicon__half_to_float(residual[r]) + sum, over);
+        }
+    }
+}
+static __device__ inline void khronos_opencl1_base__zzprivate_gemv_sum_narrow(uint16_t* out, nn__turboquant__groups g, const uint16_t* x,
+                                                                              const uint16_t* w, const uint16_t* residual, uint64_t rows,
+                                                                              uint64_t cols, const float* levels, unsigned int* over) {
+    khronos_opencl1_base__zzprivate_gemv_sum_narrow_rows(out, g, x, w, residual, rows, cols, levels, over, 1u);
+}
+static __device__ inline void khronos_opencl1_base__zzprivate_gemv_sum2_narrow(uint16_t* out, nn__turboquant__groups g, const uint16_t* x,
+                                                                               const uint16_t* w, const uint16_t* residual, uint64_t rows,
+                                                                               uint64_t cols, const float* levels, unsigned int* over) {
+    khronos_opencl1_base__zzprivate_gemv_sum_narrow_rows(out, g, x, w, residual, rows, cols, levels, over, 2u);
+}
+static __device__ inline void khronos_opencl1_base__zzprivate_gemv_sum4_narrow(uint16_t* out, nn__turboquant__groups g, const uint16_t* x,
+                                                                               const uint16_t* w, const uint16_t* residual, uint64_t rows,
+                                                                               uint64_t cols, const float* levels, unsigned int* over) {
+    khronos_opencl1_base__zzprivate_gemv_sum_narrow_rows(out, g, x, w, residual, rows, cols, levels, over, 4u);
 }
 
 /* ⭐ THE HADAMARD ROTATION AS THE BUTTERFLY — nn's `hadamard_rotate`, `out = H·(s ⊙ in) / √b` over each block of the ladder
@@ -1178,6 +1331,91 @@ static __device__ inline void khronos_opencl1_base__zzprivate_top_k(uint64_t* va
     }
 }
 
+/* ⭐ THE ROTATION ROW BY ROW IN THE PACK'S LADDER — nn's `hadamard_ladder_rows`: each row of `cols` in blocks of 512, then a
+ *   256 and a 128 for what is left, each block's signs from the vector's start, a block of 256 lanes a block of a row as
+ *   `rotate` above makes a vector's — every row's blocks in one launch, where nn's body gives a lane an output and `b`
+ *   terms. The butterfly's order, within the bench's bound of nn's. `out` apart from `in` (▶ the door). */
+static __device__ inline void khronos_opencl1_base__zzprivate_rotate_rows(uint16_t* out, const uint16_t* in, const uint16_t* sign, uint64_t cols,
+                                                                          uint64_t rows, unsigned int* over) {
+    const uint64_t B = NN__HADAMARD__WHOLE_BELOW, whole = (cols / B) * B, rest = cols - whole;
+    const uint64_t per = whole / B + (rest >= 256u ? 1u : 0u) + (rest % 256u != 0u ? 1u : 0u);
+    const uint32_t l = (uint32_t)nn__silicon__lane();
+    for (uint64_t u = nn__silicon__block(); u < rows * per; u += nn__silicon__blocks()) {
+        const uint64_t row = u / per, k = u - row * per;
+        uint64_t a = k * B, b = B;
+        if (a >= whole) {
+            if (rest >= 256u && a == whole) b = 256u;
+            else { a = whole + (rest >= 256u ? 256u : 0u); b = 128u; }
+        }
+        a += row * cols;
+        const float norm = 1.0f / nn__silicon__sqrtf((float)b);
+        if (b == B) {
+            const float lo = l < 256u ? nn__silicon__half_to_float(in[a + l]) * nn__silicon__half_to_float(sign[l]) : 0.0f;
+            const float hi = l < 256u ? nn__silicon__half_to_float(in[a + 256u + l]) * nn__silicon__half_to_float(sign[256u + l]) : 0.0f;
+            const float y0 = khronos_opencl1_base__zzpackage_lanes_hadamard(lo + hi, 256u), y1 = khronos_opencl1_base__zzpackage_lanes_hadamard(lo - hi, 256u);
+            if (l < 256u) {
+                out[a + l] = nn__kernels__zzabi_to_half(y0 * norm, over);
+                out[a + 256u + l] = nn__kernels__zzabi_to_half(y1 * norm, over);
+            }
+        } else {
+            const float v = l < b ? nn__silicon__half_to_float(in[a + l]) * nn__silicon__half_to_float(sign[l]) : 0.0f;
+            const float y = khronos_opencl1_base__zzpackage_lanes_hadamard(v, (uint32_t)b);
+            if (l < b) out[a + l] = nn__kernels__zzabi_to_half(y * norm, over);
+        }
+    }
+}
+
+/* ⭐ THE ROTATION IN SMALL BLOCKS — nn's `hadamard_blocks` at a block of 2 to 256 (Inkling 2's message gate rotates a rank of
+ *   64): a block of 256 lanes takes 256 elements, `256 / block` blocks of them at once, each run of `block` lanes the
+ *   butterfly (`lanes_hadamard`); `inverse` signs the outputs (Rᵀ = S ⊙ H·u) where the forward signs the inputs. nn's body
+ *   gives a lane an output and `block` terms. The butterfly's order, within the bench's bound of nn's. `out` apart from
+ *   `in`, as nn's door asks. */
+static __device__ inline void khronos_opencl1_base__zzprivate_rotate_blocks(uint16_t* out, const uint16_t* in, const uint16_t* sign, uint64_t n,
+                                                                            uint64_t block, uint64_t inverse, unsigned int* over) {
+    const uint32_t l = (uint32_t)nn__silicon__lane();
+    const uint64_t r = l % block;
+    const float norm = 1.0f / nn__silicon__sqrtf((float)(uint32_t)block), s = nn__silicon__half_to_float(sign[r]);
+    for (uint64_t base = (uint64_t)nn__silicon__block() * 256u; base < n; base += (uint64_t)nn__silicon__blocks() * 256u) {
+        const uint64_t i = base + l;
+        float v = i < n ? nn__silicon__half_to_float(in[i]) : 0.0f;
+        if (inverse == 0u) v *= s;
+        float y = khronos_opencl1_base__zzpackage_lanes_hadamard(v, (uint32_t)block) * norm;
+        if (inverse != 0u) y *= s;
+        if (i < n) out[i] = nn__kernels__zzabi_to_half(y, over);
+    }
+}
+
+/* ⭐ THE GEMV OF HALVES — `d` 16, a router's matrix (Inkling 2's 128 × 2,304 an application), no scales:
+ *   `out[r] = half(Σ_c W[r][c] · x[c])`. nn's body is the generic gemv, a block a row; here a block is four runs of 64
+ *   lanes, a run a row — so a router's 128 rows are 32 blocks — each lane two halves a read through `dot2` and four
+ *   sums of its pairs in flight, the runs folded at once (`lanes_sum_each`). The products are nn's, added in this
+ *   kernel's order, within the bench's bound of nn's. Columns even, the matrix and `x` on four bytes (▶ the door). */
+static __device__ inline void khronos_opencl1_base__zzprivate_gemv16(uint16_t* out, const uint16_t* w, const uint16_t* x, uint64_t rows,
+                                                                     uint64_t cols, unsigned int* over) {
+    const uint32_t l = (uint32_t)nn__silicon__lane(), run = l / 64u, j = l % 64u;
+    const uint64_t pairs = cols / 2u;
+    const uint32_t* x2 = (const uint32_t*)x;
+    for (uint64_t r0 = (uint64_t)nn__silicon__block() * 4u; r0 < rows; r0 += (uint64_t)nn__silicon__blocks() * 4u) {
+        const uint64_t r = r0 + run;
+        float s0 = 0.0f, s1 = 0.0f, s2 = 0.0f, s3 = 0.0f;
+        if (r < rows) {
+            const uint32_t* row = (const uint32_t*)(w + r * cols);
+            uint64_t c = j;
+            for (; c + 192u < pairs; c += 256u) {
+                const uint32_t a0 = row[c], a1 = row[c + 64u], a2 = row[c + 128u], a3 = row[c + 192u];
+                const uint32_t b0 = x2[c], b1 = x2[c + 64u], b2 = x2[c + 128u], b3 = x2[c + 192u];
+                s0 = nn__silicon__dot2(a0, b0, s0);
+                s1 = nn__silicon__dot2(a1, b1, s1);
+                s2 = nn__silicon__dot2(a2, b2, s2);
+                s3 = nn__silicon__dot2(a3, b3, s3);
+            }
+            for (; c < pairs; c += 64u) s0 = nn__silicon__dot2(row[c], x2[c], s0);
+        }
+        const float sum = khronos_opencl1_base__zzpackage_lanes_sum_each((s0 + s1) + (s2 + s3), 64u);
+        if (r < rows && j == 0u) out[r] = nn__kernels__zzabi_to_half(sum, over);
+    }
+}
+
 #define KHRONOS_OPENCL1_BASE__OVERRIDE_ROWS(X) \
     X(khronos_opencl1_base__zzprivate_kda_step, (float* S, const uint16_t* conved, const uint16_t* f, const uint16_t* b, const uint16_t* dt, const uint16_t* a_log, const uint16_t* gate, const uint16_t* w, uint16_t* out, uint64_t heads, float lower, float eps, unsigned int* over)) \
     X(khronos_opencl1_base__zzprivate_hyper_logits, (float* lg, const uint16_t* streams, const uint16_t* fn, uint64_t hidden, uint64_t mult, float norm_eps)) \
@@ -1206,7 +1444,16 @@ static __device__ inline void khronos_opencl1_base__zzprivate_top_k(uint64_t* va
     X(khronos_opencl1_base__zzprivate_gemv_sum, (uint16_t* out, nn__turboquant__groups g, const uint16_t* x, const uint16_t* w, uint16_t* residual, uint64_t rows, uint64_t cols, const float* levels, unsigned int* over)) \
     X(khronos_opencl1_base__zzprivate_gemv_sum2, (uint16_t* out, nn__turboquant__groups g, const uint16_t* x, const uint16_t* w, uint16_t* residual, uint64_t rows, uint64_t cols, const float* levels, unsigned int* over)) \
     X(khronos_opencl1_base__zzprivate_gemv_sum4, (uint16_t* out, nn__turboquant__groups g, const uint16_t* x, const uint16_t* w, uint16_t* residual, uint64_t rows, uint64_t cols, const float* levels, unsigned int* over)) \
+    X(khronos_opencl1_base__zzprivate_gemv_narrow, (uint16_t* out, nn__turboquant__groups g, const uint16_t* x, uint64_t cols, const float* levels, unsigned int* over)) \
+    X(khronos_opencl1_base__zzprivate_gemv2_narrow, (uint16_t* out, nn__turboquant__groups g, const uint16_t* x, uint64_t cols, const float* levels, unsigned int* over)) \
+    X(khronos_opencl1_base__zzprivate_gemv4_narrow, (uint16_t* out, nn__turboquant__groups g, const uint16_t* x, uint64_t cols, const float* levels, unsigned int* over)) \
+    X(khronos_opencl1_base__zzprivate_gemv_sum_narrow, (uint16_t* out, nn__turboquant__groups g, const uint16_t* x, const uint16_t* w, uint16_t* residual, uint64_t rows, uint64_t cols, const float* levels, unsigned int* over)) \
+    X(khronos_opencl1_base__zzprivate_gemv_sum2_narrow, (uint16_t* out, nn__turboquant__groups g, const uint16_t* x, const uint16_t* w, uint16_t* residual, uint64_t rows, uint64_t cols, const float* levels, unsigned int* over)) \
+    X(khronos_opencl1_base__zzprivate_gemv_sum4_narrow, (uint16_t* out, nn__turboquant__groups g, const uint16_t* x, const uint16_t* w, uint16_t* residual, uint64_t rows, uint64_t cols, const float* levels, unsigned int* over)) \
     X(khronos_opencl1_base__zzprivate_rotate, (uint16_t* out, const uint16_t* in, const uint16_t* sign, uint64_t n, unsigned int* over)) \
+    X(khronos_opencl1_base__zzprivate_rotate_rows, (uint16_t* out, const uint16_t* in, const uint16_t* sign, uint64_t cols, uint64_t rows, unsigned int* over)) \
+    X(khronos_opencl1_base__zzprivate_rotate_blocks, (uint16_t* out, const uint16_t* in, const uint16_t* sign, uint64_t n, uint64_t block, uint64_t inverse, unsigned int* over)) \
+    X(khronos_opencl1_base__zzprivate_gemv16, (uint16_t* out, const uint16_t* w, const uint16_t* x, uint64_t rows, uint64_t cols, unsigned int* over)) \
     X(khronos_opencl1_base__zzprivate_kda_steps, (float* S, const uint16_t* conved, const float* eg, const uint16_t* b, const uint16_t* gate, const uint16_t* w, uint16_t* out, uint64_t heads, float eps, uint64_t rows, unsigned int* over)) \
     X(khronos_opencl1_base__zzprivate_absorb1, (uint16_t* out, const uint16_t* q, const uint16_t* W, uint64_t heads, uint64_t nope, uint64_t latent, uint64_t stride, float scale, uint64_t rows, unsigned int* over)) \
     X(khronos_opencl1_base__zzprivate_absorb16, (uint16_t* out, const uint16_t* q, const uint16_t* W, uint64_t heads, uint64_t nope, uint64_t latent, uint64_t stride, float scale, uint64_t rows, unsigned int* over)) \

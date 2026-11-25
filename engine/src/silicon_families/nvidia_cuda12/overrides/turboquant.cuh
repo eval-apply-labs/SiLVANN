@@ -27,7 +27,8 @@
  *   · a matrix of few tiles has its columns split between `split` warps of a block, each a run of whole slices, their
  *     sums added in shared memory in the warps' order — so a short matrix keeps the card's warps busy; a sum's tiles the
  *     same, on a kernel of their own (▶ `groups_sum_rows`)
- * Covers 4 and 8 bits over whole slices, codes and `x` on sixteen bytes; anything else is nn's door. The products are
+ * Covers 4 and 8 bits over rows of whole quarters of a slice (▶ `lane_on`), codes and `x` on sixteen bytes; anything else
+ * is nn's door. The products are
  * nn's and the order they are summed in is not; it is a function of the shapes and the card, the same every call.
  * ⛳ THE BARRIERS: the block waits once after staging nn's levels, and where the columns are split, once before a tile's
  *   parts are added and once after — the category of amd_rocm6_wave64's row kernels (`groups_rows`,
@@ -64,6 +65,13 @@ static __device__ __forceinline__ float nvidia_cuda12__zzprivate_scale(const uin
  * runs until it reaches `stop`. */
 typedef struct nvidia_cuda12__gemv_walk { uint64_t m, k; } nvidia_cuda12__gemv_walk;
 static __device__ __forceinline__ uint64_t nvidia_cuda12__zzprivate_slice(uint64_t d) { return d == 4u ? 256u : 128u; }
+/* ⭐ A ROW'S LAST SLICE MAY BE PART OF ONE — a row of whole quarters, 32 bytes each (64 columns at 4 bits, 32 at 8): a
+ *   lane whose quarter lies past the row's end loads no codes and multiplies by a zero `x`, read nowhere, so its
+ *   products add nothing. Inkling 2's experts' down, 1,152 columns at 4 bits, is 4.5 slices; its message gates, 64 at 8,
+ *   half of one. A row of whole slices has every lane inside it, and its walk and sums are those it always had. */
+static __device__ __forceinline__ bool nvidia_cuda12__zzprivate_lane_on(uint64_t cols, uint64_t D, uint64_t k, uint32_t t) {
+    return (k + (D == 4u ? 64u : 32u) * (t + 1u)) <= cols;
+}
 static __device__ __forceinline__ bool nvidia_cuda12__zzprivate_before(nvidia_cuda12__gemv_walk w, nvidia_cuda12__gemv_walk stop) {
     return w.m < stop.m || (w.m == stop.m && w.k < stop.k);
 }
@@ -75,8 +83,9 @@ static __device__ __forceinline__ void nvidia_cuda12__zzprivate_fetch(const nvid
     const uint64_t m = w.m < j->count ? w.m : j->count - 1u, D = j->d[m], row_bytes = j->cols * D / 8u;
     const uint8_t* codes = (const uint8_t*)(uintptr_t)j->codes[m];
     const uint64_t at = w.k * D / 8u + 32u * t;
-    nvidia_cuda12__zzprivate_codes32(on && r0 + g < j->rows[m] ? codes + (r0 + g) * row_bytes : 0, at, c, 0u);
-    nvidia_cuda12__zzprivate_codes32(on && r0 + g + 8u < j->rows[m] ? codes + (r0 + g + 8u) * row_bytes : 0, at, c, 1u);
+    const bool in = on && at + 32u <= row_bytes;          /* the lane's quarter inside the row (▶ `lane_on`) */
+    nvidia_cuda12__zzprivate_codes32(in && r0 + g < j->rows[m] ? codes + (r0 + g) * row_bytes : 0, at, c, 0u);
+    nvidia_cuda12__zzprivate_codes32(in && r0 + g + 8u < j->rows[m] ? codes + (r0 + g + 8u) * row_bytes : 0, at, c, 1u);
 }
 static __device__ __forceinline__ void nvidia_cuda12__zzprivate_advance(const nvidia_cuda12__gemv_job* j, nvidia_cuda12__gemv_walk* w) {
     w->k += nvidia_cuda12__zzprivate_slice(j->d[w->m]);
@@ -126,12 +135,13 @@ static __device__ __forceinline__ void nvidia_cuda12__zzprivate_levels4_mirror_p
 }
 /* One 4-bit slice's products into `acc` by the mirror: as `slice_mma` at 4 bits, the A operands from `levels4_mirror_pairs`. */
 static __device__ __forceinline__ void nvidia_cuda12__zzprivate_slice_mma_mirror(const uint32_t c[2][8], const uint16_t* x, uint32_t t,
-                                                                                  const uint32_t ml[2], const uint32_t mh[2], float acc[4]) {
+                                                                                  const uint32_t ml[2], const uint32_t mh[2], float acc[4],
+                                                                                  bool on) {
     uint32_t xw[32];
     const uint4* xs = (const uint4*)(const void*)(x + 64u * t);
 #pragma unroll
     for (uint32_t q = 0u; q < 8u; ++q) {
-        const uint4 v = xs[q];
+        const uint4 v = on ? xs[q] : make_uint4(0u, 0u, 0u, 0u);
         xw[4u * q] = v.x; xw[4u * q + 1u] = v.y; xw[4u * q + 2u] = v.z; xw[4u * q + 3u] = v.w;
     }
 #pragma unroll
@@ -147,13 +157,13 @@ static __device__ __forceinline__ void nvidia_cuda12__zzprivate_slice_mma_mirror
 /* One slice's products into `acc`, at width `D`: each step's A operands decoded from the codes, `x`'s 16U columns the B. */
 static __device__ __forceinline__ void nvidia_cuda12__zzprivate_slice_mma(const uint32_t D, const uint32_t c[2][8], const uint16_t* x,
                                                                            uint32_t t, const uint32_t tl[4], const uint32_t th[4],
-                                                                           const uint16_t* lev8, float acc[4]) {
+                                                                           const uint16_t* lev8, float acc[4], bool on) {
     const uint32_t U = D == 4u ? 4u : 2u, W = 8u * U;
     uint32_t xw[32];
     const uint4* xs = (const uint4*)(const void*)(x + 16u * U * t);
 #pragma unroll
     for (uint32_t q = 0u; q < W / 4u; ++q) {
-        const uint4 v = xs[q];
+        const uint4 v = on ? xs[q] : make_uint4(0u, 0u, 0u, 0u);
         xw[4u * q] = v.x; xw[4u * q + 1u] = v.y; xw[4u * q + 2u] = v.z; xw[4u * q + 3u] = v.w;
     }
     if (D == 4u) {                       /* a word's eight codes, two steps: bytes 0 and 1, then 2 and 3 */
@@ -217,7 +227,7 @@ static __device__ __forceinline__ void nvidia_cuda12__zzprivate_groups_rows(cons
         else if (live) {                                   /* part `p` of the matrix's slices */
             /* in shifts: a slice is 2^7 or 2^8 columns and the split a power of two */
             const uint32_t ls = j->d[i] == 4u ? 8u : 7u, lS = (uint32_t)__ffs((int)S) - 1u;
-            const uint32_t n = (uint32_t)(j->cols >> ls);
+            const uint32_t n = (uint32_t)((j->cols + (1ull << ls) - 1u) >> ls);   /* a part slice counted whole */
             now.m = i; now.k = (uint64_t)((n * p) >> lS) << ls;
             const uint64_t k1 = (uint64_t)((n * (p + 1u)) >> lS) << ls;
             if (k1 < j->cols) { stop.m = i; stop.k = k1; } else stop.m = i + 1u;
@@ -239,9 +249,10 @@ static __device__ __forceinline__ void nvidia_cuda12__zzprivate_groups_rows(cons
             if (nvidia_cuda12__zzprivate_before(ahead, stop)) nvidia_cuda12__zzprivate_advance(j, &ahead);
             const uint64_t m = now.m;
             const uint16_t* xm = (j->sum ? j->x + m * j->cols : j->x) + now.k;
-            if (j->d[m] == 4u && mirrored) nvidia_cuda12__zzprivate_slice_mma_mirror(c0, xm, t, ml, mh, acc);
-            else if (j->d[m] == 4u) nvidia_cuda12__zzprivate_slice_mma(4u, c0, xm, t, tl, th, lev8, acc);
-            else               nvidia_cuda12__zzprivate_slice_mma(8u, c0, xm, t, tl, th, lev8, acc);
+            const bool on = nvidia_cuda12__zzprivate_lane_on(j->cols, j->d[m], now.k, t);
+            if (j->d[m] == 4u && mirrored) nvidia_cuda12__zzprivate_slice_mma_mirror(c0, xm, t, ml, mh, acc, on);
+            else if (j->d[m] == 4u) nvidia_cuda12__zzprivate_slice_mma(4u, c0, xm, t, tl, th, lev8, acc, on);
+            else               nvidia_cuda12__zzprivate_slice_mma(8u, c0, xm, t, tl, th, lev8, acc, on);
             nvidia_cuda12__zzprivate_advance(j, &now);
             if (j->sum && now.m != m) {                        /* a matrix of the sum is done: its share */
                 const uint8_t* lut = (const uint8_t*)(uintptr_t)j->luts[m];
@@ -316,7 +327,8 @@ static __device__ __forceinline__ void nvidia_cuda12__zzprivate_groups_sum_rows(
     uint32_t ls = 7u;
     for (uint64_t m = 0u; m < j->count; ++m) if (j->d[m] == 4u) ls = 8u;
     const uint32_t lS = (uint32_t)__ffs((int)S) - 1u;
-    const uint64_t n = j->cols >> ls, k0 = ((n * p) >> lS) << ls, k1 = ((n * (p + 1u)) >> lS) << ls;
+    const uint64_t n = (j->cols + (1ull << ls) - 1u) >> ls;          /* a part slice counted whole */
+    const uint64_t k0 = ((n * p) >> lS) << ls, k1 = ((n * (p + 1u)) >> lS) << ls;
     const uint64_t tiles = j->first[1], rows = j->rows[0];
     bool staged = false;
     uint32_t tl[4], th[4];                                 /* the 4-bit levels, in registers (▶ kernels.cuh) */
@@ -345,9 +357,10 @@ static __device__ __forceinline__ void nvidia_cuda12__zzprivate_groups_sum_rows(
             if (nvidia_cuda12__zzprivate_before(ahead, stop)) nvidia_cuda12__zzprivate_advance_part(j, &ahead, k0, k1);
             const uint64_t m = now.m;
             const uint16_t* xm = j->x + m * j->cols + now.k;
-            if (j->d[m] == 4u && mirrored) nvidia_cuda12__zzprivate_slice_mma_mirror(c0, xm, t, ml, mh, acc);
-            else if (j->d[m] == 4u) nvidia_cuda12__zzprivate_slice_mma(4u, c0, xm, t, tl, th, lev8, acc);
-            else               nvidia_cuda12__zzprivate_slice_mma(8u, c0, xm, t, tl, th, lev8, acc);
+            const bool on = nvidia_cuda12__zzprivate_lane_on(j->cols, j->d[m], now.k, t);
+            if (j->d[m] == 4u && mirrored) nvidia_cuda12__zzprivate_slice_mma_mirror(c0, xm, t, ml, mh, acc, on);
+            else if (j->d[m] == 4u) nvidia_cuda12__zzprivate_slice_mma(4u, c0, xm, t, tl, th, lev8, acc, on);
+            else               nvidia_cuda12__zzprivate_slice_mma(8u, c0, xm, t, tl, th, lev8, acc, on);
             nvidia_cuda12__zzprivate_advance_part(j, &now, k0, k1);
             if (now.m != m) {                              /* the part is done with a matrix: its share */
                 const uint8_t* lut = (const uint8_t*)(uintptr_t)j->luts[m];
@@ -455,9 +468,9 @@ static inline bool nvidia_cuda12__zzprivate_gemvs(nvidia_cuda12__gemv_job* j) {
     uint64_t fewest = ~0ull;                               /* the fewest slices a row of any matrix */
     for (uint64_t i = 0u; i < j->count; ++i) {
         const uint64_t D = j->d[i];
-        if ((D != 4u && D != 8u) || j->cols % (D == 4u ? 256u : 128u) != 0u || ((uint64_t)(uintptr_t)j->codes[i]) % 16u != 0u) return false;
+        if ((D != 4u && D != 8u) || j->cols % (D == 4u ? 64u : 32u) != 0u || ((uint64_t)(uintptr_t)j->codes[i]) % 16u != 0u) return false;
         if (j->sum && j->rows[i] != j->rows[0]) return false;
-        const uint64_t n = j->cols / (D == 4u ? 256u : 128u);
+        const uint64_t n = (j->cols + (D == 4u ? 255u : 127u)) / (D == 4u ? 256u : 128u);   /* a part slice counted whole */
         if (n < fewest) fewest = n;
     }
     j->first[0] = 0u;
@@ -484,7 +497,7 @@ static inline bool nvidia_cuda12__zzprivate_gemvs(nvidia_cuda12__gemv_job* j) {
     uint32_t split[NN__TURBOQUANT__GROUPS_MAX];
     bool alike = true;
     for (uint64_t i = 0u; i < j->count; ++i) {
-        split[i] = nvidia_cuda12__zzprivate_split(j->first[i + 1u] - j->first[i], j->cols / (j->d[i] == 4u ? 256u : 128u),
+        split[i] = nvidia_cuda12__zzprivate_split(j->first[i + 1u] - j->first[i], (j->cols + (j->d[i] == 4u ? 255u : 127u)) / (j->d[i] == 4u ? 256u : 128u),
                                                   sms, wave);
         alike = alike && split[i] == split[0];
     }

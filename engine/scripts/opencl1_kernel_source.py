@@ -48,6 +48,7 @@ LANES_MAX = 256        # nn's `NN__SILICON__LANES_MAX`: the fold's scratch, one 
 AT = FAMILY + '__zzprivate_at'
 RO_AT = FAMILY + '__zzprivate_ro_at'
 READ_ONLY = FAMILY.upper() + '__READ_ONLY'   # the macro a card's build defines to hand its kernels the read-only arenas
+INLINE = FAMILY.upper() + '__INLINE'         # what every function of the program is written with: nothing, or what a family's build defines
 # the family's own kernels, read after nn's card side: the doors it runs faster than nn's generic body launch them by name
 OVERRIDES = os.path.join(HERE, '..', 'src', 'silicon_families', FAMILY, 'overrides', 'kernels.cuh')
 G, C, P = '__global', '__constant', '__private'
@@ -76,11 +77,15 @@ SILICON = {
     'nn__silicon__lanes_sums': 'void nn__silicon__lanes_sums(float* parts, uint n);',
     'khronos_opencl1_base__zzpackage_lanes_sum_each': 'float khronos_opencl1_base__zzpackage_lanes_sum_each(float part, uint width);',
     'khronos_opencl1_base__zzpackage_lanes_hadamard': 'float khronos_opencl1_base__zzpackage_lanes_hadamard(float v, uint width);',
+    'khronos_opencl1_base__zzpackage_levels_stage': 'void khronos_opencl1_base__zzpackage_levels_stage(const float* table);',
+    'khronos_opencl1_base__zzpackage_level4': 'float khronos_opencl1_base__zzpackage_level4(const float* table, uint e);',
+    'khronos_opencl1_base__zzpackage_level8': 'float khronos_opencl1_base__zzpackage_level8(const float* table, uint e);',
     'nn__silicon__half_to_float': 'float nn__silicon__half_to_float(ushort h);',
     'nn__silicon__dot2': 'float nn__silicon__dot2(uint a, uint b, float c);',
 }
 FOLDS = ('nn__silicon__lanes_sum', 'nn__silicon__lanes_max', 'nn__silicon__lanes_sums', 'khronos_opencl1_base__zzpackage_lanes_sum_each',
-         'khronos_opencl1_base__zzpackage_lanes_hadamard')
+         'khronos_opencl1_base__zzpackage_lanes_hadamard', 'khronos_opencl1_base__zzpackage_levels_stage',
+         'khronos_opencl1_base__zzpackage_level4', 'khronos_opencl1_base__zzpackage_level8')
 # ⛳ THE FOLDS WAIT FOR THE WHOLE BLOCK, as `work_group_reduce_add` does in the 2.0 family: every lane of the block reaches
 #   each one, which nn's bodies already promise. The order of the sum is a tree over the lanes, the same every run.
 DEFINITIONS = r'''
@@ -170,6 +175,45 @@ static inline float nn__silicon__dot2(uint a, uint b, float c) {
          + nn__silicon__half_to_float((ushort)(a >> 16)) * nn__silicon__half_to_float((ushort)(b >> 16));
 }
 '''
+# ⭐ EVERY FUNCTION THE PROGRAM DEFINES IS WRITTEN WITH `<FAMILY>__INLINE`, empty unless a family's build defines it
+#   (▶ the family's `KHRONOS_OPENCL1_BASE__BUILD_OPTIONS`): Intel's asks for every function inlined. `MEASURED` on a
+#   Rocket Lake's UHD P750 (Intel's compute runtime 26.40, IGC 2.42; measurements/2026-11-25_nn214_intel_opencl_phoenixnap.md):
+#   the whole program built, IGC keeps nn's row product (`nn__turboquant__zzprivate_rows`) a function of its own and
+#   leaves out, with no error, the three kernels that call it — 179 of 182; the row product inlined, all 182, and their
+#   answers nn's. The leaving out needs about twenty other kernels in the program, so a kernel built alone is no test.
+INLINE_DEFINITION = '#ifndef %s\n#define %s\n#endif\n' % (INLINE, INLINE)
+# ⭐ THE LEVELS HELD IN THE BLOCK'S SHARED MEMORY, before the folds' scratch — on a card whose build defines
+#   `<FAMILY>__LEVELS_HELD` (▶ the family's `KHRONOS_OPENCL1_BASE__BUILD_OPTIONS`); without it a level is read from the table
+#   in the card's memory, as before. The family's products stage the table (`levels_stage`: the 4 bits' 16 first, then the
+#   8 bits' 256 — 272 floats) at their start, every lane of the block there, and read a level with `level4` or `level8`.
+#   A kernel's scratch is `zz_scratch`; the folds' part, `zz_lanes`, begins `<FAMILY>__FOLD_AT` floats into it — past the
+#   levels where held, at its start otherwise — so the 4 bits' levels are at the block's shared memory's first byte, a
+#   lookup no more than its index. `MEASURED` on a Rocket Lake's UHD P750 (measurements/2026-11-25_nn214_intel_opencl_phoenixnap.md):
+#   `levels_probe.py`, 64 MiB of 8-bit codes, a level from the table in memory 2.0 G codes a second, from shared memory 34.8,
+#   no table 38.1 — Intel's card reads a lookup whose lanes ask for different lines a line at a time; the experts' gate and up
+#   (`family_gemv.py`, narrow, 8 x 2304 x 2304 at 4 bits), the 4 bits' levels 512 floats in 984 us, at the start 865.
+LEVELS = 272
+LEVELS_HELD = FAMILY.upper() + '__LEVELS_HELD'
+SCRATCH = FAMILY.upper() + '__SCRATCH'      # the floats of a kernel's scratch: the levels where held, and the lanes'
+FOLD_AT = FAMILY.upper() + '__FOLD_AT'      # where the folds' part of it begins
+LEVELS_DEFINITION = (
+    '#ifdef %(held)s\n#define %(scratch)s %(both)d\n#define %(fold)s %(levels)du\n'
+    'static inline void khronos_opencl1_base__zzpackage_levels_stage(const __global float* table, __local float* zz_lanes) {\n'
+    '    __local float* held = zz_lanes - %(levels)du;\n'
+    '    for (uint e = (uint)get_local_id(0); e < %(levels)du; e += (uint)get_local_size(0)) held[e] = table[e < 16u ? 256u + e : e - 16u];\n'
+    '    barrier(CLK_LOCAL_MEM_FENCE);\n}\n'
+    'static inline float khronos_opencl1_base__zzpackage_level4(const __global float* table, uint e, __local float* zz_lanes) {\n'
+    '    return (zz_lanes - %(levels)du)[e];\n}\n'
+    'static inline float khronos_opencl1_base__zzpackage_level8(const __global float* table, uint e, __local float* zz_lanes) {\n'
+    '    return (zz_lanes - %(eight)du)[e];\n}\n'
+    '#else\n#define %(scratch)s %(lanes)d\n#define %(fold)s 0u\n'
+    'static inline void khronos_opencl1_base__zzpackage_levels_stage(const __global float* table, __local float* zz_lanes) { }\n'
+    'static inline float khronos_opencl1_base__zzpackage_level4(const __global float* table, uint e, __local float* zz_lanes) {\n'
+    '    return table[256u + e];\n}\n'
+    'static inline float khronos_opencl1_base__zzpackage_level8(const __global float* table, uint e, __local float* zz_lanes) {\n'
+    '    return table[e];\n}\n'
+    '#endif\n' % {'held': LEVELS_HELD, 'scratch': SCRATCH, 'fold': FOLD_AT, 'both': LANES_MAX + LEVELS, 'lanes': LANES_MAX,
+                   'levels': LEVELS, 'eight': LEVELS - 16})
 # an address the family handed out: its arena in the bits above the offset, as `khronos_opencl1_base/sys.cuh` writes it
 AT_DEFINITION = ('static inline __global uchar* %s(__global uchar* const* zz_arena, ulong a) {\n'
                  '    return a == 0ul ? (__global uchar*)0 : zz_arena[(a >> 40) & %dul] + (a & 0xFFFFFFFFFFul);\n}\n'
@@ -758,7 +802,7 @@ def write(prog, roots, ext_skip, raw_typedefs, definitions):
                 if e.name not in written:
                     written.add(e.name)
                     if e.name == 'nn__silicon__expf':
-                        out.append(definitions + AT_DEFINITION + RO_AT_DEFINITION)
+                        out.append(INLINE_DEFINITION + definitions + AT_DEFINITION + RO_AT_DEFINITION + LEVELS_DEFINITION)
                     if e.name == 'nn__silicon__gemm_tile':
                         out.append('static inline nn__gemm__tile nn__silicon__gemm_tile(void) { nn__gemm__tile t = {1u, 4u}; return t; }\n')
                 continue
@@ -791,7 +835,8 @@ def write(prog, roots, ext_skip, raw_typedefs, definitions):
                                   n, m.group(1) + ', ' if m.group(1) not in ('', 'void') else '', params, ro_params,
                                   '  __global uchar* zz_arena[%d] = {%s};\n' % (ARENAS, ', '.join('zz_a%d' % k for k in range(ARENAS)))
                                   if n in prog.needs_arena else '', ro_set,
-                                  '  __local float zz_lanes[%d];\n' % LANES_MAX if n in prog.needs_lanes else ''),
+                                  '  __local float zz_scratch[%s];\n  __local float* zz_lanes = zz_scratch + %s;\n' % (SCRATCH, FOLD_AT)
+                                  if n in prog.needs_lanes else ''),
                               text, count=1, flags=re.S)
             out.append(text)
             continue
@@ -805,6 +850,8 @@ def write(prog, roots, ext_skip, raw_typedefs, definitions):
     # ⛳ `_Alignof` IS WRITTEN `__alignof__`, as the 2.0 generator spells it: C11's keyword is the parser's, and
     #   Qualcomm's compiler refuses it in OpenCL C 1.2 (`MEASURED` on the Adreno 660, an implicit function there:
     #   measurements/2026-11-12_nn187_opencl1_adreno_razer_edge.md)
+    # a function written `inline static` takes the family's inlining; one that asks for none (`_Noreturn`, below) does not
+    text = re.sub(r'^inline static ', 'inline static %s ' % INLINE, text, flags=re.M)
     return text.replace('_Noreturn ', '__attribute__((noinline)) ').replace('_Alignof(', '__alignof__(')
 
 

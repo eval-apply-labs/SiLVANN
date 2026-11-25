@@ -82,6 +82,12 @@ take (rented)
 - nn's verbs and the family's doors on each; Qwen 3.6 35B-A3B checked against Hugging Face on both — on the V100 whole on
   its 32 GB at 46 tokens a second, Qwen 3.5 4B at 62
 
+**OpenCL 1.2 through Intel's OpenCL: a Rocket Lake's UHD P750 (Gen12, 32 units), Intel's compute runtime 26.40** —
+`intel_opencl1_igpu` (rented)
+- nn's verbs; Inkling 2 Mini `D8E4` checked against its oracle, with its experts on the CPU and on the GPU — at 4.4 and
+  3.4 tokens a second, where the PC's 8-core Xeon E-2388G alone runs it at 6.5; on Linux the GPU is used when asked for
+  (`SILVANN_IGPU_CPU=1`)
+
 **Windows with an NVIDIA card, natively** (an RTX 5070 Ti, a Ryzen 7 5800X)
 - built from source with CUDA 13.4, Ministral 3 14B `D4` on the card ([`users.md`](users.md#on-windows))
 - a GTX 1080 Ti through OpenCL 1.2 (the portable app, two Xeon E5-2620 v4; rented): Qwen 3.6 35B-A3B `D8E4`, its
@@ -117,11 +123,13 @@ take (rented)
   shuffle reaches half its wave there); through OpenCL 2.0 the same card ran the 4B correctly
 
 **OpenCL on other devices**
-- the integrated GPUs `intel_opencl1_igpu` (Intel's before Gen9) and `intel_opencl2` (from Gen9) are for among them. On one, the model's memory is read where it is, not
-  copied to the GPU: checked only through PoCL, a CPU's OpenCL
+- Intel's GPUs other than the one above: `intel_opencl2` takes those whose OpenCL shares memory with the CPU finely
+  (fine-grained SVM — Gen9 to Gen11, by Intel's published versions), and every other Intel GPU goes on to
+  `intel_opencl1_igpu`: those before Gen9, and from Gen12 on, whose OpenCL shares it coarsely alone — an Arc too. On an
+  integrated GPU the model's memory is read where it is, not copied to the GPU
 - which card goes to OpenCL 1.2 and which to 2 is a best guess from the vendors' published versions — OpenCL 1.2: every
-  NVIDIA card CUDA does not take, Intel's iGPUs before Gen9, AMD's TeraScale and GCN 1; OpenCL 2: the rest. A card on
-  the wrong one is an issue to open, with its `clinfo`
+  NVIDIA card CUDA does not take, Intel's GPUs the 2.0 families see none of, AMD's TeraScale and GCN 1; OpenCL 2: the
+  rest. A card on the wrong one is an issue to open, with its `clinfo`
 
 **The CPU**
 - AVX-512 on processors other than Skylake (AMD's Zen 4 and 5, later Xeons)

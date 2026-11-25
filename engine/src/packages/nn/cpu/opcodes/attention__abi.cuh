@@ -159,6 +159,64 @@ static sys__heap_node nn__attention__zzabi_apply_decode(const sys__heap_node* ar
     return nn__doors_answer(&argv[4]);
 }
 
+/* The operands the two halves of an attention share, checked as `nn__attention__decode` checks its own: the cache `c` (keys
+ * or values) from `from` up to but not including `to`, the scores `p` a row a query head. Answers the fault, or 0. */
+static inline uint64_t nn__attention__zzprivate_half(const sys__heap_node* cache, const sys__heap_node* scores, const sys__heap_node* argv,
+                                                     uint64_t* c_at, uint64_t* p_at, uint64_t* q_heads, uint64_t* kv_heads,
+                                                     uint64_t* head_dim, uint64_t* length) {
+    uint64_t c_room = 0, p_room = 0, to = 0;
+    if (!nn__primitives__room(cache, c_at, &c_room) || !nn__primitives__room(scores, p_at, &p_room)
+     || !nn__attention__zzprivate_dim(&argv[3], q_heads) || !nn__attention__zzprivate_dim(&argv[4], kv_heads)
+     || !nn__attention__zzprivate_dim(&argv[5], head_dim) || argv[6].dtype != SYS__KIND__VALUE_INT
+     || !nn__attention__zzprivate_dim(&argv[7], &to)) return SYS__OPCODES__FAULT_TYPE;
+    const uint64_t from = argv[6].args[0], row = *kv_heads * *head_dim;
+    if (from >= to) return NN__PRIMITIVES__FAULT_BOUNDS;                 /* an empty range has no softmax */
+    *length = to - from;
+    if (*q_heads % *kv_heads != 0ull || !nn__primitives__fits(to * row, c_room)
+     || !nn__primitives__fits(2ull * *q_heads * *length, p_room)) return NN__PRIMITIVES__FAULT_BOUNDS;
+    *c_at += from * row * NN__PRIMITIVES__ELEMENT_BYTES;
+    return 0ull;
+}
+
+/* `(nn__attention__score q k scores q_heads kv_heads head_dim from to)` — one query's scores over positions `from` up to
+ * but not including `to` of a cache, as they are before a softmax: `q·k / √head_dim`, a row of `to − from` floats a query
+ * head. `k` is `[position][kv_head][head_dim]`; query head `h` reads kv head `h / (q_heads / kv_heads)`. The first half of
+ * `nn__attention__decode`, for a model that puts something of its own between the two: a program adds its bias
+ * (`nn__vector__add_fp32`), takes the softmax its model takes (`nn__attention__softmax_sink`) and mixes the values with
+ * `nn__attention__mix`. */
+static sys__heap_node nn__attention__zzabi_apply_score(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx) {
+    if (argc != 8u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
+    uint64_t q_at = 0, q_room = 0, k_at = 0, p_at = 0, q_heads = 0, kv_heads = 0, head_dim = 0, length = 0;
+    if (!nn__primitives__room(&argv[0], &q_at, &q_room)) return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
+    const uint64_t fault = nn__attention__zzprivate_half(&argv[1], &argv[2], argv, &k_at, &p_at, &q_heads, &kv_heads, &head_dim, &length);
+    if (fault != 0ull) return sys__engine__abi__error(fault);
+    if (!nn__primitives__fits(q_heads * head_dim, q_room)) return sys__engine__abi__error(NN__PRIMITIVES__FAULT_BOUNDS);
+
+    const nn__doors* doors = nn__doors_for(ctx);
+    if (doors == 0) return sys__engine__abi__error(NN__PRIMITIVES__FAULT_NO_DEVICE);
+    doors->attention_scores_grouped((float*)(uintptr_t)p_at, (const uint16_t*)(uintptr_t)q_at, (const uint16_t*)(uintptr_t)k_at,
+                                    q_heads, kv_heads, head_dim, length);
+    return nn__doors_answer(&argv[2]);
+}
+
+/* `(nn__attention__mix scores v out q_heads kv_heads head_dim from to)` — the values of positions `from` up to but not
+ * including `to` weighed by each query head's row of `scores`, into `out`, `q_heads · head_dim` halves: the second half
+ * of `nn__attention__decode`. The rows are weights by then — the program's softmax made them so. */
+static sys__heap_node nn__attention__zzabi_apply_mix(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx) {
+    if (argc != 8u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
+    uint64_t o_at = 0, o_room = 0, v_at = 0, p_at = 0, q_heads = 0, kv_heads = 0, head_dim = 0, length = 0;
+    if (!nn__primitives__room(&argv[2], &o_at, &o_room)) return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
+    const uint64_t fault = nn__attention__zzprivate_half(&argv[1], &argv[0], argv, &v_at, &p_at, &q_heads, &kv_heads, &head_dim, &length);
+    if (fault != 0ull) return sys__engine__abi__error(fault);
+    if (!nn__primitives__fits(q_heads * head_dim, o_room)) return sys__engine__abi__error(NN__PRIMITIVES__FAULT_BOUNDS);
+
+    const nn__doors* doors = nn__doors_for(ctx);
+    if (doors == 0) return sys__engine__abi__error(NN__PRIMITIVES__FAULT_NO_DEVICE);
+    doors->attention_mix((uint16_t*)(uintptr_t)o_at, (const float*)(uintptr_t)p_at, (const uint16_t*)(uintptr_t)v_at,
+                         q_heads, kv_heads, head_dim, length, ctx->fault_word);
+    return nn__doors_answer(&argv[2]);
+}
+
 /* ── RESIDUALS — SEVERAL RANGES, ONE SOFTMAX ────────────────────────────────────────────────────────
  * ⚖ *"in the future we can add residuals"*. A sentence evicted from the middle of a conversation leaves
  * two ranges, and each is one call: `residual` over a range, `merge` to fold two residuals into one, and
@@ -271,12 +329,45 @@ static sys__heap_node nn__attention__zzabi_apply_residual_tq(const sys__heap_nod
     return nn__doors_answer(&argv[6]);
 }
 
+/* `(nn__attention__states queries states current out how_many width rows with_current eps)` — a few queries' mix over a
+ * few states, each as wide as the model, in one launch: query `h`'s scores over `rows` states of `width` halves and —
+ * `with_current` 1 — `current` normed with no weight; the scores over √width, their softmax, the states weighed by it
+ * into `out`, a row a query. With `with_current` 0, `current` is any buffer, not read. Refused: no state at all, or
+ * more than the door's `NN__ATTENTION__STATES_MAX`. `out` is none of the others. */
+static sys__heap_node nn__attention__zzabi_apply_states(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx) {
+    if (argc != 9u) return sys__engine__abi__error(SYS__OPCODES__FAULT_ARITY);
+    uint64_t q_at = 0, q_room = 0, s_at = 0, s_room = 0, c_at = 0, c_room = 0, o_at = 0, o_room = 0;
+    for (unsigned a = 4u; a < 8u; ++a)
+        if (argv[a].dtype != SYS__KIND__VALUE_INT) return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
+    if (argv[8].dtype != SYS__KIND__VALUE_FLOAT
+     || !nn__primitives__room(&argv[0], &q_at, &q_room) || !nn__primitives__room(&argv[1], &s_at, &s_room)
+     || !nn__primitives__room(&argv[2], &c_at, &c_room) || !nn__primitives__room(&argv[3], &o_at, &o_room))
+        return sys__engine__abi__error(SYS__OPCODES__FAULT_TYPE);
+    const uint64_t queries = argv[4].args[0], width = argv[5].args[0], rows = argv[6].args[0], with_current = argv[7].args[0];
+    if (queries == 0ull || queries > 4096ull || width == 0ull || width > (1ull << 24) || with_current > 1ull
+     || rows + with_current == 0ull || rows + with_current > NN__ATTENTION__STATES_MAX
+     || !nn__primitives__fits(queries * width, q_room) || !nn__primitives__fits(queries * width, o_room)
+     || !nn__primitives__fits(rows * width, s_room) || (with_current == 1ull && !nn__primitives__fits(width, c_room))
+     || o_at == q_at || o_at == s_at || (with_current == 1ull && o_at == c_at))
+        return sys__engine__abi__error(NN__PRIMITIVES__FAULT_BOUNDS);
+
+    const nn__doors* doors = nn__doors_for(ctx);
+    if (doors == 0) return sys__engine__abi__error(NN__PRIMITIVES__FAULT_NO_DEVICE);
+    doors->attention_states((uint16_t*)(uintptr_t)o_at, (const uint16_t*)(uintptr_t)q_at, (const uint16_t*)(uintptr_t)s_at,
+                            (const uint16_t*)(uintptr_t)c_at, queries, width, rows, with_current,
+                            (float)sys__heap_node__real(argv[8].args[0]), ctx->fault_word);
+    return nn__doors_answer(&argv[3]);
+}
+
 SYS__ENGINE__ABI__BRIDGE(nn__attention__zzabi_adapter_residual_tq, nn__attention__zzabi_apply_residual_tq)
 SYS__ENGINE__ABI__BRIDGE(nn__rope__zzabi_adapter,             nn__rope__zzabi_apply)
 SYS__ENGINE__ABI__BRIDGE(nn__attention__zzabi_adapter_decode, nn__attention__zzabi_apply_decode)
 SYS__ENGINE__ABI__BRIDGE(nn__rope__zzabi_adapter_angles,      nn__rope__zzabi_apply_angles)
 SYS__ENGINE__ABI__BRIDGE(nn__rope__zzabi_adapter_interleaved, nn__rope__zzabi_apply_interleaved)
 SYS__ENGINE__ABI__BRIDGE(nn__attention__zzabi_adapter_softmax_sink, nn__attention__zzabi_apply_softmax_sink)
+SYS__ENGINE__ABI__BRIDGE(nn__attention__zzabi_adapter_score,   nn__attention__zzabi_apply_score)
+SYS__ENGINE__ABI__BRIDGE(nn__attention__zzabi_adapter_mix,      nn__attention__zzabi_apply_mix)
+SYS__ENGINE__ABI__BRIDGE(nn__attention__zzabi_adapter_states,   nn__attention__zzabi_apply_states)
 SYS__ENGINE__ABI__BRIDGE(nn__attention__zzabi_adapter_residual, nn__attention__zzabi_apply_residual)
 SYS__ENGINE__ABI__BRIDGE(nn__attention__zzabi_adapter_merge,    nn__attention__zzabi_apply_merge)
 SYS__ENGINE__ABI__BRIDGE(nn__attention__zzabi_adapter_finish,   nn__attention__zzabi_apply_finish)

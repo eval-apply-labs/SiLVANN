@@ -47,7 +47,9 @@ INCLUDE = re.compile(r'^\s*#\s*include\s*"([^"]+)"', re.M)
 OPENCL_GENERATOR = {"khronos_opencl2": "opencl_kernel_source.py", "intel_opencl2": "opencl_kernel_source.py",
                     "nvidia_opencl1": "opencl1_kernel_source.py", "intel_opencl1_igpu": "opencl1_kernel_source.py"}
 # where each file is in the release's zips, for a reuse
-WINDOWS_ZIP, PORTABLE_ZIP = "silvann_windows_x64.zip", "silvann_portable_x64.zip"
+WINDOWS_ZIP, PORTABLE_ZIP = "silvann_windows_libraries_update_x64.zip", "silvann_portable_x64.zip"
+# the libraries' zip as the releases up to 1.6.0 named it: a release whose last signed one is of those finds its files there
+WINDOWS_ZIP_BEFORE = "silvann_windows_x64.zip"
 
 
 def sha256(path):
@@ -239,7 +241,12 @@ def reuse(built, plan_path, prevdir):
     for fid, f in sorted(p["files"].items()):
         if f["action"] != "reuse":
             continue
-        z = zips.get(f["zip"]) or zips.setdefault(f["zip"], zipfile.ZipFile(os.path.join(prevdir, f["zip"])))
+        z = zips.get(f["zip"])
+        if z is None:
+            path = os.path.join(prevdir, f["zip"])
+            if not os.path.isfile(path) and f["zip"] == WINDOWS_ZIP:
+                path = os.path.join(prevdir, WINDOWS_ZIP_BEFORE)
+            z = zips.setdefault(f["zip"], zipfile.ZipFile(path))
         data = z.read(f["member"])
         if hashlib.sha256(data).hexdigest() != f["sha256"]:
             sys.exit("%s in %s's %s is not the bytes its manifest names" % (f["member"], p["previous"], f["zip"]))

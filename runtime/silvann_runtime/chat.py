@@ -22,6 +22,16 @@ and a later turn continues from it.
               prompt or a tool. Its repository's encoding/encoding.py, which no chat template carries; a turn keeps the
               reasoning of the turns before it, where the encoding drops it without a tool
 ```
+```
+  Inkling 2   <|message_system|><|content_text|> … <|end_message|>   (the system prompt, where there is one)
+              <|message_system|><|content_text|>Thinking effort level: 0.9<|end_message|>
+              <|message_user|><|content_text|> … <|end_message|>
+              a later turn: <|message_user|><|content_text|> … <|end_message|>
+              No header for the answer: the model writes its own messages — <|message_model|><|content_thinking|> … 
+              <|end_message|>, then <|message_model|><|content_text|> … <|end_message|> — and ends its turn on
+              <|content_model_end_sampling|>. `decode` shows them as the other families' answers read: the thinking in
+              a <think> block, then the text. Thinking off: effort level 0.
+```
 A turn with pictures puts each before the text, as the chat template renders a message whose content is the pictures
 then the text: Qwen's `<|vision_start|>`, a pad a token of the picture, `<|vision_end|>` (▶ `vision.py`); GLM's
 `<|begin_of_image|>`, an `<|image|>` a token, `<|end_of_image|>` (▶ `vision_glm.py`); DeepSeek's a
@@ -137,14 +147,23 @@ class Chat:
             self.default_system = open(sp, encoding="utf-8").read() if os.path.isfile(sp) else None
         elif self.arch.startswith("deepseek_v41"):
             self.think_end = self.tok.token_to_id("</think>")
+        elif self.arch.startswith("inkling2"):
+            # the tokens a message of the model's is made of: its header, what its content is, its end
+            self.ink = {k: self.tok.token_to_id(t) for k, t in (
+                ("model", "<|message_model|>"), ("text", "<|content_text|>"), ("thinking", "<|content_thinking|>"),
+                ("call", "<|content_invoke_tool_json|>"), ("end", "<|end_message|>"))}
+            if None in self.ink.values():
+                raise Refused("%s's tokenizer has not Inkling 2's message tokens" % folder.path)
         else:
             raise Refused("no chat framing for a %r model" % self.arch)
         self.stop.discard(None)
         # a call's first token, and the one it ends on where that is not the turn's end (Mistral's and DeepSeek's end on
         #   theirs); `call_lead` the text before the first token, which a call's markup opens with — DeepSeek's `<`
         mistral, deepseek = self.arch.startswith("ministral3"), self.arch.startswith("deepseek_v41")
-        self.call_start = self.tok.token_to_id("[TOOL_CALLS]" if mistral else "｜DSML｜" if deepseek else "<tool_call>")
-        self.call_end = None if mistral or deepseek else self.tok.token_to_id("</tool_call>")
+        inkling = self.arch.startswith("inkling2")
+        self.call_start = (self.ink["call"] if inkling else
+                           self.tok.token_to_id("[TOOL_CALLS]" if mistral else "｜DSML｜" if deepseek else "<tool_call>"))
+        self.call_end = None if mistral or deepseek or inkling else self.tok.token_to_id("</tool_call>")
         self.call_lead = "<" if deepseek else ""
 
     def encode(self, text):
@@ -157,7 +176,41 @@ class Chat:
         return [i for i, t in enumerate(tokens) if t in pads and (i == 0 or tokens[i - 1] != t)]
 
     def decode(self, ids):
+        if self.arch.startswith("inkling2"):
+            return self._inkling_text(ids)
         return self.tok.decode([i for i in ids if i not in self.stop], skip_special_tokens=False)
+
+    def _inkling_text(self, ids):
+        """Inkling 2's answer as the other families' read: each message the model wrote, its thinking in a `<think>`
+        block and its text as it is. A message's header — `<|message_model|>`, then a tool's name where it calls one — and
+        its end are the model's framing and are not text; a call's own content is left as the model wrote it."""
+        ink, out, run, mode = self.ink, [], [], "text"
+
+        def flush():
+            if run:
+                out.append(self.tok.decode(run, skip_special_tokens=False))
+                del run[:]
+        for t in ids:
+            if t in self.stop:
+                continue
+            if t == ink["model"]:
+                flush()
+                mode = "head"
+            elif mode == "head":                   # up to what the content is: a tool's name, which is not text
+                if t == ink["thinking"]:
+                    out.append("<think>")
+                    mode = "thinking"
+                elif t in (ink["text"], ink["call"]):
+                    mode = "text" if t == ink["text"] else "call"
+            elif t == ink["end"]:
+                flush()
+                if mode == "thinking":
+                    out.append("</think>")
+                mode = "text"
+            else:
+                run.append(t)
+        flush()
+        return "".join(out)
 
     def opened(self, tokens):
         """The think block a turn's tokens leave open — Qwen's `<think>\\n`, GLM's `<think>` — which its answer's text
@@ -180,6 +233,21 @@ class Chat:
             raise Refused("a %r model's tokenizer has no tool call" % self.arch)
         if images and not self.arch.startswith(("qwen3_5", "glm5", "deepseek_v41")):
             raise Refused("a %r model is not given pictures here" % self.arch)
+        if self.arch.startswith("inkling2"):
+            # as its template renders them: the tool's declaration, the system prompt, the thinking effort before the
+            #   first message that is not the system's — 0.9 its own default, 0 none — then the user's
+            s = ""
+            if first:
+                if tools:
+                    spec = dict(TOOL["function"], type="function")
+                    s += ("<|message_system|>tool_declare<|content_xml|>"
+                          + json.dumps([spec], sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "<|end_message|>")
+                if files:
+                    system = (system + "\n\n" if system else "") + files
+                if system:
+                    s += "<|message_system|><|content_text|>%s<|end_message|>" % system
+                s += "<|message_system|><|content_text|>Thinking effort level: %s<|end_message|>" % ("0.9" if thinking else "0")
+            return self.encode(s + "<|message_user|><|content_text|>%s<|end_message|>" % text)
         if videos and not self.arch.startswith(("qwen3_5", "glm5")):
             raise Refused("a %r model is not given videos here" % self.arch)
         if self.arch.startswith("glm5"):
@@ -263,6 +331,8 @@ class Chat:
         at = len(answer) - 1 - answer[::-1].index(self.call_start)
         if self.call_end is None:                      # Mistral's: every call since the answer's last text
             at = answer.index(self.call_start)
+        if self.arch.startswith("inkling2"):
+            return self._inkling_calls(answer)
         text = self.tok.decode(answer[at:], skip_special_tokens=False)
         if self.arch.startswith("ministral3"):
             calls = []
@@ -292,6 +362,26 @@ class Chat:
         if name.strip() != "lisp":
             return [ToolMarkup("the one tool is lisp, not %s" % name.strip())]
         return [form]
+
+    def _inkling_calls(self, answer):
+        """Inkling 2's calls: each message of the answer whose content is a tool's invocation —
+        `{"name": "lisp", "args": {"form": "…"}}` up to the message's end."""
+        calls, at = [], 0
+        while self.call_start in answer[at:]:
+            at = answer.index(self.call_start, at) + 1
+            end = answer.index(self.ink["end"], at) if self.ink["end"] in answer[at:] else len(answer)
+            text = self.tok.decode([t for t in answer[at:end] if t not in self.stop], skip_special_tokens=False)
+            try:
+                got = json.loads(text)
+                args = got["args"]
+                form = args["form"] if "form" in args else next(iter(args.values())) if len(args) == 1 else args["form"]
+                calls.append(str(form) if got.get("name", "lisp") == "lisp"
+                             else ToolMarkup("the one tool is lisp, not %s" % got.get("name")))
+            except (ValueError, KeyError, TypeError, AttributeError, StopIteration):
+                calls.append(ToolMarkup("the call does not read as {\"name\": \"lisp\", \"args\": {\"form\": \"…\"}}: %s"
+                                        % text[:200]))
+            at = end
+        return calls
 
     def _dsml_calls(self, answer):
         """DeepSeek's calls: the `<｜DSML｜ calls>` block after the answer's reasoning, an invoke a call, its one
@@ -333,6 +423,8 @@ class Chat:
             raise Refused("a %r model is not shown pictures in a tool's answer here" % self.arch)
         if self.arch.startswith("ministral3"):
             return self.encode("".join("[TOOL_RESULTS]%s[/TOOL_RESULTS]" % a for a in answers))
+        if self.arch.startswith("inkling2"):       # a tool's message each; the model writes its own header after them
+            return self.encode("".join("<|message_tool|>lisp<|content_text|>%s<|end_message|>" % a for a in answers))
         if self.arch.startswith("deepseek_v41"):
             return self.encode("<｜User｜>" + "\n\n".join(
                 "<tool_result>%s%s</tool_result>" % ("".join("<｜deepseek_image｜>" * n + "\n\n" for n in ps), a)

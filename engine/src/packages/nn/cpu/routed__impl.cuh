@@ -109,10 +109,12 @@ static void nn__routed__zzprivate_rotate(const nn__doors* doors, unsigned int* o
                                (const uint16_t*)(uintptr_t)r->signs, I, over);
 }
 
-/* The activation of `pairs` gate-and-up pairs: SwiGLU, clamped where the model's is. */
+/* The activation of `pairs` gate-and-up pairs: SwiGLU, soft-capped or clamped where the model's is. */
 static void nn__routed__zzprivate_activate(const nn__doors* doors, unsigned int* over, const nn__routed* r, uint64_t act, uint64_t gu,
                                            uint64_t pairs) {
-    if (r->limit != 0.0f)
+    if (r->gate_cap != 0.0f)
+        doors->swiglu_softcapped((uint16_t*)(uintptr_t)act, (const uint16_t*)(uintptr_t)gu, pairs, r->inter, r->gate_cap, r->up_cap, over);
+    else if (r->limit != 0.0f)
         doors->swiglu_clamped((uint16_t*)(uintptr_t)act, (const uint16_t*)(uintptr_t)gu, pairs, r->inter, r->limit, over);
     else
         doors->swiglu_pairs((uint16_t*)(uintptr_t)act, (const uint16_t*)(uintptr_t)gu, pairs, r->inter, over);

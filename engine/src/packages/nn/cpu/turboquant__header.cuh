@@ -98,6 +98,10 @@ static __device__ inline uint64_t nn__turboquant__family(uint64_t rate);
  * reasonable. */
 static __device__ inline bool nn__turboquant__rate_is_known(uint64_t d);
 static __device__ inline uint64_t nn__turboquant__values_per_container(uint64_t d);
+/* a row's containers, the container column `c` is in: in 32 bits (▶ gpu/kernels/kernels.cuh) */
+static __device__ inline uint64_t nn__turboquant__zzpackage_units(uint64_t cols, uint64_t per);
+static __device__ inline uint64_t nn__turboquant__zzpackage_unit_of(uint64_t c, uint64_t per);
+static __device__ inline uint32_t nn__turboquant__zzpackage_mask(uint64_t d);
 
 /* How many bytes one row of `cols` weights occupies at width D — the producer's arithmetic restated:
  * a row is uint16-aligned, `ceil(cols / (16/D)) * 2`.

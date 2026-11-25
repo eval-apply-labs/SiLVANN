@@ -4,7 +4,7 @@
  * nn's attention doors (`nn/cpu/opcodes/attention__abi.cuh`), where this family covers them: the scores and the mix
  * over heads of 128 or 256, as one call or as the two residual passes, and two residuals' merge; the grouped scores, the
  * mix as halves and the causal mix over heads of 512 too, and those two over rows of keys of their own; MLA's absorb and
- * expand, a row or many. */
+ * expand, a row or many; a few queries' mix over a few states as wide as the model. */
 
 /* What this file needs, named where a reader — and an editor — can follow it. */
 #include <stdint.h>
@@ -603,10 +603,63 @@ static inline bool amd_rocm_base__zzprivate_scores_tile_fit(const uint16_t* q, c
     return head_dim == 512u && kv_heads != 0u && q_heads % kv_heads == 0u && q_heads / kv_heads >= 32u
         && ((uint64_t)(uintptr_t)q) % 16u == 0u && ((uint64_t)(uintptr_t)k) % 16u == 0u;
 }
+/* ⭐ THE GROUPED SCORES AT A SMALL HEAD — `attention_scores_grouped` at heads of 8 to 64 halves: Inkling 2's position bias,
+ *   24 query heads of 16 (its rank) on one kv head, over the cache's positions. nn's body gives a lane a query head and
+ *   eight positions, so at a group of 24 a wave is a third idle and each lane walks its eight key rows one after another:
+ *   `MEASURED` (rocprof on the model, node03's MI50) 21 µs a call at some 46 positions. Here a wave is a block, and 64
+ *   positions of one kv head: a lane reads its key row once (`G` reads of 16 bytes) and scores it against each query head
+ *   of the group, whose row is the same for the whole wave and is read through the scalar unit, as kernels.cuh's
+ *   `scalar_half` reads (the query was written by an earlier launch). Each dot is nn's — `dot2` over the head's pairs in
+ *   their order, from zero, then times 1/√D — so the scores are nn's body's to the bit on the same card. `MEASURED` (the
+ *   door bench, node03): at 24 heads of 16 over 46 positions 7.2 µs back to back for nn's body's 19.8, over 1,024 7.0 for
+ *   20.6; its outputs the bytes of nn's body on the card at every shape it asks; the model's answers the same digits
+ *   (measurements/2026-11-24_nn207_inkling2_rates_node03.md ⑪). `G` groups of eight a head: 1, 2, 4 or 8. */
+template <uint32_t G>
+static __global__ AMD_ROCM_BASE__ZZPRIVATE_BOUNDS void amd_rocm_base__zzprivate_scores_small(float* p, const uint16_t* q, const uint16_t* k,
+                                                                                                    uint64_t q_heads, uint64_t kv_heads,
+                                                                                                    uint64_t length) {
+    const uint64_t D = 8u * G, group = q_heads / kv_heads, row = kv_heads * D;
+    const uint64_t waves = (length + AMD_ROCM_BASE__ZZPRIVATE_WAVE - 1u) / AMD_ROCM_BASE__ZZPRIVATE_WAVE;   /* a kv head's */
+    const float scale = 1.0f / nn__silicon__sqrtf((float)D);
+    for (uint64_t b = nn__silicon__block(); b < kv_heads * waves; b += nn__silicon__blocks()) {
+        const uint64_t g = b / waves, pos = (b - g * waves) * AMD_ROCM_BASE__ZZPRIVATE_WAVE + nn__silicon__lane();
+        const bool in = pos < length;
+        const uint4* kr = (const uint4*)(const void*)(k + (in ? pos : 0u) * row + g * D);
+        uint4 kv[G];
+#pragma unroll
+        for (uint32_t j = 0u; j < G; ++j) kv[j] = kr[j];
+        for (uint64_t hg = 0u; hg < group; ++hg) {
+            const uint64_t h = g * group + hg;
+            const __attribute__((address_space(4))) uint32_t* qr = (const __attribute__((address_space(4))) uint32_t*)(const void*)(q + h * D);
+            float dot = 0.0f;
+#pragma unroll
+            for (uint32_t j = 0u; j < G; ++j) {
+                dot = nn__silicon__dot2(qr[4u * j], kv[j].x, dot);
+                dot = nn__silicon__dot2(qr[4u * j + 1u], kv[j].y, dot);
+                dot = nn__silicon__dot2(qr[4u * j + 2u], kv[j].z, dot);
+                dot = nn__silicon__dot2(qr[4u * j + 3u], kv[j].w, dot);
+            }
+            if (in) p[h * length + pos] = dot * scale;
+        }
+    }
+}
 static void amd_rocm_base__override_attention_scores_grouped(float* p, const uint16_t* q, const uint16_t* k, uint64_t q_heads,
                                                                 uint64_t kv_heads, uint64_t head_dim, uint64_t length) {
     if (length >= AMD_ROCM_BASE__ZZPRIVATE_SCORES_TILE_FROM && amd_rocm_base__zzprivate_scores_tile_fit(q, k, q_heads, kv_heads, head_dim)) {
         amd_rocm_base__override_attention_causal_scores_grouped(p, q, k, q_heads, kv_heads, head_dim, length - 1u, 1u);
+        return;
+    }
+    if ((head_dim == 8u || head_dim == 16u || head_dim == 32u || head_dim == 64u) && kv_heads != 0u && q_heads != 0u
+     && q_heads % kv_heads == 0u && length != 0u && ((uint64_t)(uintptr_t)q) % 16u == 0u && ((uint64_t)(uintptr_t)k) % 16u == 0u) {
+        const void* kernel = head_dim == 8u  ? (const void*)amd_rocm_base__zzprivate_scores_small<1u>
+                           : head_dim == 16u ? (const void*)amd_rocm_base__zzprivate_scores_small<2u>
+                           : head_dim == 32u ? (const void*)amd_rocm_base__zzprivate_scores_small<4u>
+                           :                   (const void*)amd_rocm_base__zzprivate_scores_small<8u>;
+        const uint64_t want = kv_heads * ((length + AMD_ROCM_BASE__ZZPRIVATE_WAVE - 1u) / AMD_ROCM_BASE__ZZPRIVATE_WAVE);
+        const uint32_t blocks = want < NN__KERNELS__BLOCKS_MAX ? (uint32_t)want : NN__KERNELS__BLOCKS_MAX;
+        void* args[] = { &p, &q, &k, &q_heads, &kv_heads, &length };
+        const size_t sizes[] = { sizeof p, sizeof q, sizeof k, sizeof q_heads, sizeof kv_heads, sizeof length };
+        nn__silicon__launch(kernel, "amd_rocm_base__zzprivate_scores_small", blocks, AMD_ROCM_BASE__ZZPRIVATE_WAVE, args, sizes, 6u);
         return;
     }
     if (!amd_rocm_base__zzprivate_attention_fit_wide(q, k, q_heads, kv_heads, head_dim)) {
@@ -1663,5 +1716,219 @@ static void amd_rocm_base__override_attention_expand_rows(uint16_t* out, const u
         return;
     }
     amd_rocm_base__zzprivate_expand_launch(out, o, W, heads, width, stride, offset, rows, over);
+}
+
+/* ══ ⭐ A FEW QUERIES' MIX OVER A FEW STATES AS WIDE AS THE MODEL, A WAVE A SLICE ══════════════════════════════════
+ * nn's `attention_states` — a learned query's mix: Inkling 2's block states, a loop layer's messages — runs a block a
+ * query and gives a lane a slice of the width, read a half at a time: at 2,304 one to four blocks on the card, each lane
+ * nine dependent reads a state, and `MEASURED` 38.7 µs a call, 119 calls a token (rocprof on node03's MI50,
+ * measurements/2026-11-24_nn207_inkling2_rates_node03.md ⑦). Here, as the norm's slices are (▶ primitives.cuh), a wave
+ * takes a query's sums whole itself — eight halves a read, the reads of every group and every state issued before the
+ * first is waited on, the lanes' parts through the family's shuffles — so it needs no other wave, no shared memory and no
+ * wait for its block; and the query's row is cut across waves (`cuts`), each writing its own groups of eight. Every wave
+ * of a query sums the same halves in the same order, so every wave holds the same weights to the bit. `MEASURED` (rocprof
+ * on node03's MI50, 300 calls a shape at 2,304, the harness in measurements/2026-11-24_nn207_inkling2_rates_node03_
+ * artifacts/states/): one query over four states and the current 8.3 µs, three 8.0–8.5, four over two with no current
+ * 5.9, one over one and the current 6.2.
+ * The arithmetic is nn's: the current state normed as `rmsnorm` norms it, with no weight, and rounded to a half as a
+ * stored state is; the scores over √width; the softmax from the largest; the stored states weighed in their order, then
+ * the current, each a fused multiply-add, and the sum over the total rounded once into `o`, its overflow in the fault
+ * word. The products are the card's dot (`nn__silicon__dot2`) and summed eight to a lane before the fold, so a score's
+ * last bits are this kernel's own.
+ * A kernel for each pair of counts a lane holds — groups of eight (`HELD`: rows up to 1,024, 3,072 or 6,144 halves) and
+ * stored states (`STATES`: 2, 4 or 8) — so a call reads what its shape uses. A group past the row, or a state past the
+ * call's, is read from a row that exists and taken as zeros, so the reads are issued without a branch; a zero added to
+ * a sum leaves it as it was, so a call's answer does not depend on which kernel takes it (`REASONED`: x + 0 is x, and a
+ * score's sign of zero does not reach its exponential). Widths that are not whole groups of eight or are past 6,144,
+ * memory not on 16 bytes, or an output that overlaps what is read take nn's door. */
+#define AMD_ROCM_BASE__ZZPRIVATE_STATES_HELD 12u     /* groups of eight a lane holds at most: rows up to 6,144 halves */
+
+/* Eight halves by eight onto `c`: four of the card's dots. */
+static __device__ inline float amd_rocm_base__zzprivate_states_dot8(uint4 x, uint4 y, float c) {
+    c = nn__silicon__dot2(x.x, y.x, c);
+    c = nn__silicon__dot2(x.y, y.y, c);
+    c = nn__silicon__dot2(x.z, y.z, c);
+    return nn__silicon__dot2(x.w, y.w, c);
+}
+/* ⭐ A FLOAT AS A HALF BY THE CARD'S OWN CONVERSION (`v_cvt_f16_f32`), FENCED: the empty asm makes the float a value of
+ *   its own, so the compiler cannot fold the multiply that made it into the conversion — the `v_fma_mixlo_f16`, one
+ *   rounding for nn's two, that keeps the family's `to_half` off this instruction (▶ kernels.cuh). One instruction where
+ *   `to_half` is ten and carries nn's conversion for every half it does not take itself: with `to_half`, the current's
+ *   48 conversions unrolled made this kernel 46 KB of code, and in a loop of one copy, re-reading its groups, it was
+ *   2.4 µs of a call's 12. nn's fault word is raised exactly where a finite float's half is infinite, so `_fault` raises
+ *   it there. `MEASURED` on gfx906 (node03, ROCm 6.1.3), the sweep in measurements/2026-11-24_nn207_inkling2_rates_node03_
+ *   artifacts/states/: against the family's `to_half` over all 2^32 floats 0 halves differ and the fault rule disagrees
+ *   with its fault word at 0, and over 238,245,376 products of a half and a gain formed before the fence 0 halves differ
+ *   — the same sweeps against its answer with the low bit flipped, and the rule inverted, find every one; the products'
+ *   ISA a `v_mul_f32` then a `v_cvt_f16_f32`, no `v_fma_mix`. */
+static __device__ inline uint32_t amd_rocm_base__zzprivate_states_half(float f) {
+    __asm__ volatile("" : "+v"(f));
+    return (uint32_t)__builtin_bit_cast(uint16_t, (_Float16)f);
+}
+static __device__ inline uint32_t amd_rocm_base__zzprivate_states_half_fault(float f, unsigned int* over) {
+    const uint32_t h = amd_rocm_base__zzprivate_states_half(f);
+    if ((h & 0x7FFFu) == 0x7C00u && (__builtin_bit_cast(uint32_t, f) & 0x7FFFFFFFu) < 0x7F800000u) *over = NN__KERNELS__OVERFLOWED;
+    return h;
+}
+/* Eight halves normed: each `x · gain` rounded to a half, as a stored state is. */
+static __device__ inline uint4 amd_rocm_base__zzprivate_states_normed8(uint4 x, float gain) {
+    const uint32_t xs[4] = { x.x, x.y, x.z, x.w };
+    uint32_t out[4];
+#pragma unroll
+    for (uint32_t k = 0u; k < 4u; ++k)
+        out[k] = amd_rocm_base__zzprivate_states_half(nn__silicon__half_to_float((uint16_t)(xs[k] & 0xFFFFu)) * gain)
+               | (amd_rocm_base__zzprivate_states_half(nn__silicon__half_to_float((uint16_t)(xs[k] >> 16)) * gain) << 16);
+    return make_uint4(out[0], out[1], out[2], out[3]);
+}
+/* Eight halves weighed onto eight sums, each a fused multiply-add. */
+static __device__ inline void amd_rocm_base__zzprivate_states_weigh8(uint4 x, float weight, float* sum) {
+    const uint32_t xs[4] = { x.x, x.y, x.z, x.w };
+#pragma unroll
+    for (uint32_t k = 0u; k < 4u; ++k) {
+        sum[2u * k]      = __builtin_fmaf(weight, nn__silicon__half_to_float((uint16_t)(xs[k] & 0xFFFFu)), sum[2u * k]);
+        sum[2u * k + 1u] = __builtin_fmaf(weight, nn__silicon__half_to_float((uint16_t)(xs[k] >> 16)), sum[2u * k + 1u]);
+    }
+}
+template <uint32_t HELD, uint32_t STATES>
+static __global__ AMD_ROCM_BASE__ZZPRIVATE_BOUNDS void amd_rocm_base__zzprivate_attention_states(uint16_t* o, const uint16_t* q,
+        const uint16_t* states, const uint16_t* current, uint64_t queries, uint64_t width, uint64_t rows, uint64_t with_current,
+        uint64_t cuts, float eps, unsigned int* over) {
+    const uint32_t W = AMD_ROCM_BASE__ZZPRIVATE_WAVE;
+    const uint32_t lane = nn__silicon__lane() % W, waves = nn__silicon__lanes() / W;
+    const uint32_t groups = (uint32_t)(width / 8u), held = (groups + W - 1u) / W, per = (held + (uint32_t)cuts - 1u) / (uint32_t)cuts;
+    const uint32_t stored = (uint32_t)rows;
+    const bool has_current = with_current != 0u;
+    const uint4 none = make_uint4(0u, 0u, 0u, 0u);
+    const float scale = 1.0f / nn__silicon__sqrtf((float)width);
+    for (uint64_t task = (uint64_t)nn__silicon__block() * waves + nn__silicon__lane() / W; task < queries * cuts;
+         task += (uint64_t)nn__silicon__blocks() * waves) {
+        const uint64_t h = task / cuts;
+        const uint32_t k0 = (uint32_t)(task % cuts) * per, k1 = k0 + per < held ? k0 + per : held;
+        const uint16_t* qh = q + h * width;
+        const uint4* qr = (const uint4*)(const void*)qh;
+        const uint4* cr = (const uint4*)(const void*)(has_current ? current : qh);    /* a row that exists either way */
+        /* ① the query's and the current's groups, held, and every stored state's score and the current's squares summed
+         *    as their groups arrive: every read issued before the first is waited on, no branch among them */
+        uint4 qk[HELD], ck[HELD];
+        float weight[STATES], squares = 0.0f, mine = 0.0f, gain = 0.0f;
+#pragma unroll
+        for (uint32_t t = 0u; t < STATES; ++t) weight[t] = 0.0f;
+#pragma unroll
+        for (uint32_t k = 0u; k < HELD; ++k) {
+            const uint32_t g = lane + k * W;
+            const bool in = g < groups;
+            const uint32_t at = in ? g : 0u;
+            const uint4 qv = qr[at], cv = cr[at];
+            qk[k] = in ? qv : none;
+            ck[k] = in && has_current ? cv : none;
+            squares = amd_rocm_base__zzprivate_states_dot8(ck[k], ck[k], squares);
+#pragma unroll
+            for (uint32_t t = 0u; t < STATES; ++t) {
+                const uint4 sv = ((const uint4*)(const void*)(t < stored ? states + (uint64_t)t * width : qh))[at];
+                weight[t] = amd_rocm_base__zzprivate_states_dot8(qk[k], in && t < stored ? sv : none, weight[t]);
+            }
+        }
+        /* ② the lanes' parts folded: every lane holds the sums */
+#pragma unroll
+        for (uint32_t m = 1u; m < W; m <<= 1) {
+            squares += amd_rocm_base__zzpackage_xor(squares, m);
+#pragma unroll
+            for (uint32_t t = 0u; t < STATES; ++t) weight[t] += amd_rocm_base__zzpackage_xor(weight[t], m);
+        }
+        /* ③ the current normed, a half an element, from the groups ① holds, and its score */
+        if (has_current) {
+            gain = 1.0f / nn__silicon__sqrtf(squares / (float)width + eps);
+#pragma unroll
+            for (uint32_t k = 0u; k < HELD; ++k)
+                mine = amd_rocm_base__zzprivate_states_dot8(qk[k], amd_rocm_base__zzprivate_states_normed8(ck[k], gain), mine);
+#pragma unroll
+            for (uint32_t m = 1u; m < W; m <<= 1) mine += amd_rocm_base__zzpackage_xor(mine, m);
+        }
+        /* ④ the softmax, in nn's order: the stored states, then the current */
+        float top = -NN__KERNELS__INFINITY, total = 0.0f;
+#pragma unroll
+        for (uint32_t t = 0u; t < STATES; ++t)
+            if (t < stored) {
+                weight[t] *= scale;
+                if (weight[t] > top) top = weight[t];
+            }
+        if (has_current) {
+            mine *= scale;
+            if (mine > top) top = mine;
+        }
+#pragma unroll
+        for (uint32_t t = 0u; t < STATES; ++t)
+            if (t < stored) {
+                weight[t] = nn__silicon__expf(weight[t] - top);
+                total += weight[t];
+            }
+        if (has_current) {
+            mine = nn__silicon__expf(mine - top);
+            total += mine;
+        }
+        /* ⑤ this wave's groups of the query's row: the states weighed in their order, then the current, over the total */
+        uint4* orow = (uint4*)(void*)(o + h * width);
+#pragma unroll 1
+        for (uint32_t k = k0; k < k1; ++k) {
+            const uint32_t g = lane + k * W;
+            const bool in = g < groups;
+            const uint32_t at = in ? g : 0u;
+            uint4 sv[STATES];
+#pragma unroll
+            for (uint32_t t = 0u; t < STATES; ++t) sv[t] = ((const uint4*)(const void*)(t < stored ? states + (uint64_t)t * width : qh))[at];
+            const uint4 cv = cr[at];
+            if (in) {
+                float sum[8] = { 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f };
+#pragma unroll
+                for (uint32_t t = 0u; t < STATES; ++t)
+                    if (t < stored) amd_rocm_base__zzprivate_states_weigh8(sv[t], weight[t], sum);
+                if (has_current) amd_rocm_base__zzprivate_states_weigh8(amd_rocm_base__zzprivate_states_normed8(cv, gain), mine, sum);
+                uint32_t out[4];
+#pragma unroll
+                for (uint32_t e = 0u; e < 4u; ++e)
+                    out[e] = amd_rocm_base__zzprivate_states_half_fault(sum[2u * e] / total, over)
+                           | (amd_rocm_base__zzprivate_states_half_fault(sum[2u * e + 1u] / total, over) << 16);
+                orow[g] = make_uint4(out[0], out[1], out[2], out[3]);
+            }
+        }
+    }
+}
+static inline bool amd_rocm_base__zzprivate_states_apart(const uint16_t* a, uint64_t n, const uint16_t* b, uint64_t m) {
+    return a + n <= b || b + m <= a;
+}
+static void amd_rocm_base__override_attention_states(uint16_t* o, const uint16_t* q, const uint16_t* states, const uint16_t* current,
+                                                        uint64_t queries, uint64_t width, uint64_t rows, uint64_t with_current,
+                                                        float eps, unsigned int* over) {
+    static const void* const kernels[3][3] = {          /* by groups a lane holds (2, 6, 12), then stored states (2, 4, 8) */
+        { (const void*)amd_rocm_base__zzprivate_attention_states<2u, 2u>,  (const void*)amd_rocm_base__zzprivate_attention_states<2u, 4u>,
+          (const void*)amd_rocm_base__zzprivate_attention_states<2u, 8u> },
+        { (const void*)amd_rocm_base__zzprivate_attention_states<6u, 2u>,  (const void*)amd_rocm_base__zzprivate_attention_states<6u, 4u>,
+          (const void*)amd_rocm_base__zzprivate_attention_states<6u, 8u> },
+        { (const void*)amd_rocm_base__zzprivate_attention_states<12u, 2u>, (const void*)amd_rocm_base__zzprivate_attention_states<12u, 4u>,
+          (const void*)amd_rocm_base__zzprivate_attention_states<12u, 8u> } };
+    const uint64_t W = AMD_ROCM_BASE__ZZPRIVATE_WAVE, held = (width / 8u + W - 1u) / W, count = rows + (with_current != 0u ? 1u : 0u);
+    const uint64_t span = queries * width;
+    if (queries == 0u || width == 0u || width % 8u != 0u || held > AMD_ROCM_BASE__ZZPRIVATE_STATES_HELD || count == 0u
+     || count > NN__ATTENTION__STATES_MAX || ((uint64_t)(uintptr_t)o) % 16u != 0u || ((uint64_t)(uintptr_t)q) % 16u != 0u
+     || (rows != 0u && ((uint64_t)(uintptr_t)states) % 16u != 0u) || (with_current != 0u && ((uint64_t)(uintptr_t)current) % 16u != 0u)
+     || !amd_rocm_base__zzprivate_states_apart(o, span, q, span)
+     || (rows != 0u && !amd_rocm_base__zzprivate_states_apart(o, span, states, rows * width))
+     || (with_current != 0u && !amd_rocm_base__zzprivate_states_apart(o, span, current, width))) {
+        nn__attention__zzabi_launch_states(o, q, states, current, queries, width, rows, with_current, eps, over);
+        return;
+    }
+    const void* kernel = kernels[held <= 2u ? 0 : held <= 6u ? 1 : 2][rows <= 2u ? 0 : rows <= 4u ? 1 : 2];
+    /* a wave a block (`MEASURED` the same as four a block, within 0.3 µs at each shape above); each query's row cut
+     * across as many waves as the card holds at once for this many queries, at most a wave a group of a lane */
+    const uint32_t threads = AMD_ROCM_BASE__ZZPRIVATE_WAVE;
+    uint64_t cuts = (uint64_t)amd_rocm_base__zzpackage_resident(kernel, threads, 0u) / queries;
+    cuts = cuts < 1u ? 1u : cuts > held ? held : cuts;
+    cuts = (held + (held + cuts - 1u) / cuts - 1u) / ((held + cuts - 1u) / cuts);     /* no cut left without a group */
+    const uint64_t want = queries * cuts;
+    const uint32_t blocks = want < NN__KERNELS__BLOCKS_MAX ? (uint32_t)want : NN__KERNELS__BLOCKS_MAX;
+    void* args[] = { &o, &q, &states, &current, &queries, &width, &rows, &with_current, &cuts, &eps, &over };
+    const size_t sizes[] = { sizeof o, sizeof q, sizeof states, sizeof current, sizeof queries, sizeof width, sizeof rows,
+                             sizeof with_current, sizeof cuts, sizeof eps, sizeof over };
+    nn__silicon__launch(kernel, "amd_rocm_base__zzprivate_attention_states", blocks, threads, args, sizes, 11u);
 }
 #endif /* SILVANN__SILICON_FAMILIES_AMD_ROCM_BASE_OVERRIDES_ATTENTION_CUH */

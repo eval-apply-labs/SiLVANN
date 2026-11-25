@@ -81,7 +81,7 @@ NOT_A_CARD = CPU_FAMILIES + ("host", "intel_opencl1_igpu")   # silicon whose poo
 TIER_MAX_GB = 128        # the binary search's ceiling, past any card's memory
 DISK_CHUNK = 1024        # GLM's prompt rows a step with its experts on the disk (Qwen's chunk is at most 256)
 FREED_GB = 1             # a card this much emptier than when a kept choice was made chooses again (`_freed`)
-RULES = 11               # the rules' version, in what a kept choice was made for: a change to them chooses again
+RULES = 12               # the rules' version, in what a kept choice was made for: a change to them chooses again
 REGISTER_TABLES = 512    # registered RAM over the card memory that maps it: an 8-byte page-table entry a 4 KiB page.
                          # MEASURED node03 2026-10-26: GLM's 142 GiB registered took 281 MiB more of the MI50 at its peak
                          # (measurements/2026-10-26_v0200_r730_rows_node03.md, vram_register.sh); held beside the margin,
@@ -174,6 +174,10 @@ class _Prober:
         #   the least Windows budgets this process on a card it boots on; None until a boot has shown them
         self.beside = None
         self.budget = None
+        # what the last setup whose worker this machine has none of said — a CPU worker on a processor no CPU family takes —
+        #   and what the search found of an integrated GPU in its place: said if nothing else runs (▶ `choose`)
+        self.missing = None
+        self.integrated_note = None
 
     def model(self, max_context, options):
         """The architecture's model for these options, unbooted: what it plans, and refuses, before the card."""
@@ -185,6 +189,12 @@ class _Prober:
         `self.answer`."""
         model = self.model(max_context, options)
         machine = model.m
+        # a setup with a worker this machine has no device for does not run here, whatever its size: the search goes on
+        missing = machine.missing_worker(model.workers())
+        if missing:
+            declined = getattr(model, "IGPU_DECLINED", None)
+            self.missing = missing + ("; %s" % declined if declined else "")
+            return False
         params = _held(model.device_params(), model.workers(), self.margin_mb + _tables_mb(model), machine)
         asked = _pools(params, model.workers(), machine)
         pools = [bytes_ for bytes_, _ in asked]
@@ -449,11 +459,79 @@ def _remembered(folder, key):
 
 def _remember(folder, key, options, max_context, why, used):
     try:
+        kept = _measures(folder)
         with open(os.path.join(folder.path, "autotune.json"), "w") as f:
             json.dump({"key": key, "options": options, "max_context": max_context, "why": why, "card_used": used,
-                       "chosen": datetime.datetime.now().isoformat(timespec="seconds")}, f, indent=2)
+                       "chosen": datetime.datetime.now().isoformat(timespec="seconds"), "measured": kept}, f, indent=2)
     except OSError:
         pass                          # a read-only folder chooses again at each boot
+
+
+def _measures(folder):
+    """What `silicon` measured and kept in the folder's autotune.json, by its key: {} where nothing is."""
+    try:
+        with open(os.path.join(folder.path, "autotune.json")) as f:
+            return dict(json.load(f).get("measured") or {})
+    except (OSError, ValueError, AttributeError):
+        return {}
+
+
+def _measure_kept(folder, key, value):
+    """`value` kept under `key` in the folder's autotune.json, beside the setup it holds."""
+    path = os.path.join(folder.path, "autotune.json")
+    try:
+        try:
+            with open(path) as f:
+                got = json.load(f)
+        except (OSError, ValueError):
+            got = {}
+        got.setdefault("measured", {})[key] = value
+        with open(path, "w") as f:
+            json.dump(got, f, indent=2)
+    except OSError:
+        pass                          # a read-only folder measures again at each boot
+
+
+def silicon(path, options=None, log=print):
+    """The silicon to boot `path`'s model on: None — the machine's own choice — or "cpu" where that choice is an integrated
+    GPU, the only GPU, and the cores beside it ran the model's products faster: a token's picks of one layer's experts
+    counted for every layer, and the head, at the model's widths (▶ PROBE_READINGS). Measured once for this machine and
+    the model's shapes, kept in its autotune.json."""
+    machine = Machine()
+    where = machine.silicon
+    if where not in OPENCL_FAMILIES or own_memory(machine):
+        return None
+    folder = ModelFolder(path)
+    from . import ARCHITECTURES
+    arch = ARCHITECTURES.get(folder.architecture)
+    if arch is None:
+        return None
+    try:
+        model = arch(folder, Machine(silicon=where), max_context=MIN_CONTEXT, **(options or {}))
+    except Exception:                                       # noqa: BLE001 — a setup refused here is refused at its boot
+        return None
+    shapes = _shapes(model, head=True)
+    if not shapes:
+        return None
+    # as a token runs them: a layer's experts every layer, the head once
+    layers = len(getattr(model, "run_layers", None) or ()) or int(getattr(model, "LAYERS", 1) or 1)
+    weights = [layers] * (len(shapes) - 1) + [1] if len(shapes) > 1 else [1]
+    names = [c["card"] for c in machine.e.cards()]
+    key = json.dumps({"rules": RULES, "integrated": where, "cards": names, "cores": machine.cpu, "shapes": shapes,
+                      "weights": weights, "release": _release(machine.e.__file__, where)}, sort_keys=True)
+    kept = _measures(folder).get(key)
+    if kept is None:
+        timed = _against_cores(where, 0, machine.cpu, shapes, weights)
+        if timed is None:
+            return None
+        kept = {"integrated_ms": timed[0] * 1e3, "cores_ms": timed[1] * 1e3,
+                "measured": datetime.datetime.now().isoformat(timespec="seconds")}
+        _measure_kept(folder, key, kept)
+    faster = kept["cores_ms"] < kept["integrated_ms"]
+    log("[autotune] the integrated GPU (%s) against the cores (%s): a token's experts' and head's products %.1f ms on it, "
+        "%.1f on the cores — %s" % (where, machine.cpu, kept["integrated_ms"], kept["cores_ms"],
+                                    "the cores run the model" if faster else "the integrated GPU runs it"))
+    return "cpu" if faster else None
 
 
 def choose(path, max_context, options=None, silicon=None, fresh=False, log=print, video_tokens=None, margin_mb=None):
@@ -523,6 +601,10 @@ def choose(path, max_context, options=None, silicon=None, fresh=False, log=print
     #   the disk at 62 GB, measurements/2026-11-08_owed_rows_precision.md ②d): 100,384 asked was halved to 50,192 and a
     #   4.5 GB tier, where 90,973 boots with none.
     found = _setup(p, top, options, takes, grow=True)
+    if found is None and p.missing:
+        # nothing ran, and some setup needed a worker this machine has none of: that, not the card's size, is the reason
+        raise Refused("%s: no setup runs here — %s%s" % (folder.path, p.missing,
+                                                         "; %s" % p.integrated_note if p.integrated_note else ""))
     if found is None:
         moe = bool(getattr(p.model(MIN_CONTEXT, options), "MOE", False)) or "experts_on" not in takes and "card_experts_gb" in takes
         raise Refused("%s does not fit this card even at a %d-token context%s: a larger card, or a smaller pack"
@@ -598,6 +680,140 @@ def _tier_from_disk(p, options):
         return True
     except Refused:
         return False
+
+
+def _integrated(p, cpu, options, takes):
+    """(the setup, the integrated GPU's worker) where the model gives the CPU worker's part to an integrated GPU beside the
+    card in `cpu` with no tier on the card — `igpu_cpu` auto or yes, the experts in RAM — or None where it does not."""
+    if "igpu_cpu" not in takes or options.get("igpu_cpu", "auto") in ("no", False) or cpu.get("experts_from") != "ram":
+        return None
+    setup = dict(cpu)
+    if "card_experts_gb" in takes and "card_experts_gb" not in options:
+        setup["card_experts_gb"] = 0
+    try:
+        igpu = getattr(p.model(MIN_CONTEXT, setup), "IGPU", None)
+    except Refused:
+        return None
+    return (setup, igpu) if igpu is not None else None
+
+
+# ⭐ AN INTEGRATED GPU AGAINST THE CORES BESIDE IT, MEASURED (⚖ 2026-11-25 *"go with the boot measurement"* · *"if server
+#   type chips also have igpus then it becomes less defined"*). An integrated GPU reads the PC's RAM as the cores do, so
+#   which of them runs a model's products faster is their two sizes, not a rule: `MEASURED` on a Xeon E-2388G (8 cores,
+#   AVX2) and its UHD P750 (32 units; measurements/2026-11-25_nn214_intel_opencl_phoenixnap.md), Inkling 2 Mini 6.5
+#   tokens/s on the cores alone and 4.6 with the GPU's help; a laptop's the other way (NN-142, as the architect relayed it:
+#   the 35B-A3B 5 → 12 tokens/s with its integrated GPU in the CPU worker's place). So where an integrated GPU would take
+#   a model's work — in the CPU worker's place beside a card (`_setup`), or as the only GPU (`silicon`) — the products a
+#   token runs, at the model's own shapes and widths, are timed on it and on the cores, and the faster keeps the work.
+PROBE_READINGS = 5
+# ⛳ WARMED FIRST, half a second of the products at least: the cores' clocks rise with their load, and a reading of cores at
+#   rest is the processor's idle clock, not its speed. `MEASURED` on the box above (`box/boot_measure/`): the cores at rest
+#   (`schedutil`, 800 MHz) read a token's products 117 ms against the GPU's 60 — the GPU chosen — and 52 ms by the sixth
+#   machine in a row; the GPU 60 at every one.
+PROBE_WARM_S = 0.5
+# a machine of one worker with nn's span and a pool of buffers: the main class each shape's codes, the logits class its
+#   scales, `x` and answer — nn boots its span only with a model's shape named too (▶ main/silvann_base_repl.py's NN_POOLS,
+#   which these follow)
+PROBE_POOLS = """nn__buffer_resid__size_bytes:4096
+nn__buffer_resid__qty:8
+nn__buffer_main__size_bytes:%(main)d
+nn__buffer_main__qty:%(qty)d
+nn__buffer_attn_out__size_bytes:4096
+nn__buffer_attn_out__qty:4
+nn__buffer_logits__size_bytes:%(small)d
+nn__buffer_logits__qty:%(smalls)d
+nn__buffer_partials__size_bytes:4096
+nn__buffer_partials__qty:4
+nn__expert_cache_l1__size_mb:8
+nn__cartridge_sink__tokens:4
+nn__cartridge_sink__bytes_per_token_layer:512
+nn__cartridge_tq4__tokens:16
+nn__cartridge_tq4__bytes_per_token_layer:512
+nn__cartridge_tq6__tokens:16
+nn__cartridge_tq6__bytes_per_token_layer:512
+nn__cartridge_fp32__tokens:16
+nn__cartridge_fp32__bytes_per_token_layer:512
+nn__model__kv_cache_layers_fullattn:1
+nn__model__kv_cache_layers_deltanet:3
+nn__conversation__text_size_kb:4
+nn__deltanet_state__bytes_per_layer:4096
+nn__model__layer_types:dddf
+nn__ram_buffer_result__size_bytes:65536
+nn__ram_buffer_result__qty:16
+nn__ram_buffer_experts__size_bytes:4096
+nn__ram_buffer_experts__qty:1
+nn__ram_buffer_table__size_bytes:128
+nn__ram_buffer_table__qty:1
+"""
+
+
+def _shapes(model, head=False):
+    """The products the comparison times, as (rows, cols, bits): a token's picks of one layer's experts — their gate and up
+    as one matrix, their downs as one — read off the model's expert plan, and with `head` its head; [] where the model has
+    none of them (no expert plan, or widths no product door takes)."""
+    shapes = []
+    plan, k, h = getattr(model, "EPLAN", None), getattr(model, "TOPK", None), getattr(model, "H", None)
+    if plan is not None and k and h:
+        up_rows, down_rows = plan.up_lut // 2, plan.down_lut // 2
+        if up_rows and down_rows and plan.up_data % up_rows == 0 and plan.down_data % down_rows == 0:
+            up_row, down_row = plan.up_data // up_rows, plan.down_data // down_rows
+            bits = up_row * 8 // h
+            if bits in (4, 8) and up_row * 8 == bits * h and (down_row * 8) % bits == 0:
+                shapes += [(k * up_rows, h, bits), (down_rows, k * (down_row * 8 // bits), bits)]
+    vocab, head_bits = getattr(model, "VOCAB", None), getattr(model, "HEAD_BITS", None)
+    if head and vocab and h and head_bits in (4, 8):
+        shapes.append((vocab, h, head_bits))
+    return shapes
+
+
+def products_seconds(family, device, shapes, readings=PROBE_READINGS):
+    """The seconds `family`'s device `device` takes for each of `shapes` — (rows, cols, bits): nn's product over random
+    codes, scales and `x`, its answer read back so a card's queue is done — the best of `readings` each, after runs of
+    them all that warm it (▶ PROBE_WARM_S; an OpenCL card builds its program at its first). A machine of that one worker, booted for it
+    and shut down."""
+    import numpy as np
+    main = -(-max(r * c * b // 8 for r, c, b in shapes) // (1 << 20)) << 20
+    small = -(-max(max(r, c) * 2 for r, c, _ in shapes) // 4096) * 4096
+    qty, smalls = len(shapes) + 1, 3 * len(shapes) + 1
+    m = Machine(silicon=family)
+    m.boot(PROBE_POOLS % {"main": main, "qty": qty, "small": small, "smalls": smalls},
+           alloc_mb=(qty * main + smalls * small >> 20) + 64, workers=[(family, device)])
+    try:
+        m.act_as(0)
+        rng = np.random.default_rng(0)
+        calls = []
+        for i, (rows, cols, bits) in enumerate(shapes):
+            m.buffer(rows * cols * bits // 8, "probe_codes%d" % i, rng.integers(0, 256, rows * cols * bits // 8, dtype=np.uint8).tobytes())
+            m.buffer(rows * 2, "probe_scales%d" % i, rng.uniform(0.01, 0.05, rows).astype("<f2").tobytes())
+            m.buffer(cols * 2, "probe_x%d" % i, rng.uniform(-1.0, 1.0, cols).astype("<f2").tobytes())
+            out = m.buffer(rows * 2, "probe_out%d" % i)
+            calls.append(("(begin (nn__turboquant__gemv probe_codes%d probe_scales%d probe_x%d probe_out%d %d %d %d) 0)"
+                          % (i, i, i, i, rows, cols, bits), out))
+
+        def once(text, out):
+            a = time.perf_counter()
+            m.must(text, "a product the integrated GPU is measured by")
+            m.read(out, 2)
+            return time.perf_counter() - a
+        spent, a = 0.0, time.perf_counter()
+        while spent < PROBE_WARM_S:
+            for text, out in calls:
+                once(text, out)
+            spent = time.perf_counter() - a
+        return [min(once(text, out) for _ in range(readings)) for text, out in calls]
+    finally:
+        m.shutdown()
+
+
+def _against_cores(family, device, cores, shapes, weights=None):
+    """(the integrated GPU's seconds, the cores' seconds) for `shapes`, each shape's counted `weights[i]` times (once where
+    none are given) — or None where either refused to run them."""
+    weights = weights or [1] * len(shapes)
+    try:
+        timed = products_seconds(family, device, shapes), products_seconds(cores, 0, shapes)
+    except Exception:                                       # noqa: BLE001 — a probe that does not run decides nothing
+        return None
+    return tuple(sum(w * t for w, t in zip(weights, each)) for each in timed)
 
 
 def _takes_card(p, options):
@@ -690,6 +906,32 @@ def _setup(p, ctx, options, takes, grow=False):
         source = "ram" if experts_file.in_ram(need, held, video_ram(p.folder.config, p.video_tokens),
                                               getattr(p.arch, "HOST_OWN", None)) else "disk"
     cpu["experts_from"] = source
+    # ⭐ THE INTEGRATED GPU FIRST (⚖ 2026-11-25 *"ideally the igpu on auto should first try to work instead of using the cpu,
+    #   so this does not block the server launch"*): where the model gives the CPU worker's part to an integrated GPU beside
+    #   the card — `igpu_cpu` auto, the experts in RAM — that setup is tried before any of the CPU's, with no tier on the
+    #   card, which an integrated GPU's slots cannot feed (▶ qwen3_5.py, NN-142). Only where it does not boot are the CPU's
+    #   tried — and where the processors are no worker (x86_avx2 on a CPU without AVX2) those find none (▶ `boots`).
+    integrated = _integrated(p, cpu, options, takes)
+    if integrated is not None:
+        igpu_options, igpu = integrated
+        # ...where its products are no slower than the cores' (▶ PROBE_READINGS above): a token's picks of one layer, timed
+        #   on each; a probe that does not run leaves it the integrated GPU's
+        shapes = _shapes(p.model(MIN_CONTEXT, igpu_options))
+        timed = _against_cores(igpu[0], igpu[1], Machine(silicon=p.silicon).cpu, shapes) if shapes else None
+        said = (" (a token's picks of a layer %.2f ms on it, %.2f on the cores)" % (timed[0] * 1e3, timed[1] * 1e3)
+                if timed else "")
+        if timed and timed[1] < timed[0]:
+            p.integrated_note = "the integrated GPU (%s device %d) runs the experts' products slower than the cores%s" % (igpu + (said,))
+            p.log("[autotune] %s: the CPU's" % p.integrated_note)
+        else:
+            got = sized(igpu_options)
+            if got is not None:
+                return igpu_options, got, "the experts in RAM (%s), the integrated GPU (%s device %d) in the CPU worker's place%s" % (
+                    (gb,) + igpu + (said,))
+            p.integrated_note = "the experts in RAM read by the integrated GPU (%s device %d), with no tier, did not boot" % igpu
+    elif source != "ram" and "igpu_cpu" in takes:
+        p.integrated_note = ("an integrated GPU takes the CPU worker's part only with the experts in RAM, and here they are "
+                             "read from the disk (%s)" % gb)
     # ⭐ FROM THE DISK, A TIER TOO (NN-164; ⚖ 2026-11-08 "yes"): where the family takes a card's tier fed from the disk's
     #   cache — each promotion copied from the slot that cache holds its expert in, a layer's most picked — the tier is
     #   sized as from RAM; a family that refuses one beside these options (GLM's experts over two sockets) has none.

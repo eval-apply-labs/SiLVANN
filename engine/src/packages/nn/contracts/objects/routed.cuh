@@ -24,6 +24,8 @@ typedef struct nn__routed {
     bool     int8;                              /* the products in integers                                         */
     float    limit;                             /* the activation: SwiGLU, its gate and up clamped at `limit`, or —
                                                  * 0 — SwiGLU as nn's `swiglu_pairs` computes it                    */
+    float    gate_cap, up_cap;                  /* or — `gate_cap` not 0 — SwiGLU soft-capped: the gate's factor and
+                                                 * the up each `cap · tanh(· / cap)`, as `swiglu_softcapped` does  */
     uint64_t signs, zero;                       /* card memory: the rotation's signs, a row of zeros (H halves)     */
     uint64_t scratch, scratch_room;             /* the verb's scratch, and its bytes                                */
     uint64_t hand_bytes, picks_at;              /* a hand row's width and where its picks are in it, in bytes       */

@@ -266,6 +266,13 @@ POLICY = [
     (r"\.engram\.[qk]_weight$",                              RAW),
     # Qwen3.8-Flash-Next: the gated residual's injection, four rows a site — as the router, kept exact
     (r"_hyper_connection\.block_inject_weight\.weight$",     RAW),
+    # Inkling 2: its small tensors, each kept exact — a short convolution's four taps a channel and, in a full layer,
+    # the maps its taps are made with; the clips' scales; the position bias's 16 x 1,024 table, whose product is along
+    # its 16; a sublayer's learned queries. The rotation would place every one of their widths (4, 16, 64, 128, 1,024).
+    (r"_sconv\.(weight|static_w|weight_proj)$",              RAW),
+    (r"\.(q_l2_clip|rel_l2_clip)\.scale$",                   RAW),
+    (r"\.rel_logits_proj\.proj$",                           RAW),
+    (r"(^|\.)(attn_query|mlp_query|output_query|cross_pass_queries|cross_pass_kv_queries)$", RAW),
 ]
 
 
@@ -812,7 +819,37 @@ def read_tensor(raw, name, expert=None):
     idx = _index(raw)
     if idx["weight_map"].get(name) == PER_EXPERT:
         return _read_per_expert(raw, idx, name, expert)
-    return _read_from(raw, idx["weight_map"][name], stored_name(idx, name), expert, view=name)
+    return _as_its_model_holds_it(raw, idx, name,
+                                  _read_from(raw, idx["weight_map"][name], stored_name(idx, name), expert, view=name))
+
+
+def _rounded_bf16(x):
+    """fp32 values rounded to BF16 — the nearest, ties to even — and widened again: what a BF16 parameter holds."""
+    u = np.ascontiguousarray(x, dtype=np.float32).view(np.uint32)
+    return (((u + np.uint32(0x7FFF) + ((u >> np.uint32(16)) & np.uint32(1))) >> np.uint32(16)) << np.uint32(16)).view(np.float32)
+
+
+def _as_its_model_holds_it(raw, idx, name, W):
+    """A view's further facts about a quantised expert stack — Inkling 2's (▶ `nn_rename_view.py`) — applied to `W`.
+
+    `outer_scale_map`: NVFP4 keeps, beside a scale a block of 16, a scale an expert (`amax`) over a denominator: a weight
+    is `code x block scale x amax / denominator`. `held_bf16`: the values are the ones the model's reference computes
+    with — transformers' loader rounds `amax` to BF16 before it multiplies, and holds the product in BF16.
+    `alternate_rows`: a stack whose rows alternate in the file — a gate row, an up row — read as the gate's rows then the
+    up's, which is `mlp.experts.gate_up_proj`'s layout.
+    `MEASURED` 2026-11-24, node03: decoded so, the stacks are the reference's parameters to the bit
+    (measurements/2026-11-24_nn207_inkling2_answers_node03.md; measurements/2026-11-24_nn207_inkling2_pack_node03.md)."""
+    outer = idx.get("outer_scale_map", {}).get(name)
+    if outer is not None:
+        f, amax, den = outer
+        a = _rounded_bf16(_read_from(raw, f, amax))
+        W = W * (a / np.float32(_read_from(raw, f, den)[0]))[:, None, None]
+    if name in idx.get("held_bf16", ()):
+        W = _rounded_bf16(W)
+    if name in idx.get("alternate_rows", ()):
+        e, r, c = W.shape
+        W = np.ascontiguousarray(W.reshape(e, r // 2, 2, c).transpose(0, 2, 1, 3).reshape(e, r, c))
+    return W
 
 
 def stored_name(idx, name):
@@ -885,7 +922,8 @@ def _scale_where(raw, name):
 
 
 def _scale_of(raw, name):
-    """The block scale stored beside a quantised weight, as fp32 (E8M0 bytes decoded as powers of two) — or None."""
+    """The block scale stored beside a quantised weight, as fp32 (E8M0 bytes decoded as powers of two, E4M3 bytes as
+    FP8 values) — or None."""
     where = _scale_where(raw, name)
     if where is None:
         return None
@@ -894,6 +932,8 @@ def _scale_of(raw, name):
     b = _bytes(raw, f, s)
     if t["dtype"] in ("F8_E8M0", "U8"):
         v = np.ldexp(np.float32(1), b.astype(np.int32) - 127).astype(np.float32)
+    elif t["dtype"] == "F8_E4M3":                # NVFP4's: a scale a block of 16, itself an FP8 value
+        v = E4M3[b]
     elif t["dtype"] == "F32":
         v = b.view("<f4").astype(np.float32)
     elif t["dtype"] == "BF16":

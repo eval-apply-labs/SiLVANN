@@ -369,6 +369,9 @@ class Qwen35(Generates):
         if igpu_cpu not in ("auto", "yes", "no", True, False):
             raise Refused("igpu_cpu is 'auto', 'yes' or 'no', not %r" % (igpu_cpu,))
         self.IGPU = machine.integrated() if self.CPU_WORKER and igpu_cpu not in ("no", False) else None
+        # why the CPU worker's part stays the CPU's, where it does: what a refusal of that worker says (▶ autotune's `boots`)
+        self.IGPU_DECLINED = (None if not self.CPU_WORKER else "igpu_cpu is 'no'" if igpu_cpu in ("no", False) else
+                              "no integrated GPU beside the card" if self.IGPU is None else None)
         if igpu_cpu in ("yes", True) and self.IGPU is None:
             raise Refused("igpu_cpu 'yes': no integrated GPU beside the card%s" % (
                 "" if self.CPU_WORKER else " — and nothing is the CPU's (experts_on 'cpu' puts the experts in RAM)"))
@@ -383,6 +386,7 @@ class Qwen35(Generates):
                 if igpu_cpu in ("yes", True):
                     raise Refused("the integrated GPU as the CPU worker takes %s" % ", ".join(why))
                 self.IGPU = None                    # "auto": the CPU's, as this setup asks of it
+                self.IGPU_DECLINED = "the integrated GPU in its place takes %s" % ", ".join(why)
             else:
                 self.EXPERTS_REGISTER = False
         # ⭐ FROM THE DISK, THE EXPERTS ARE A CACHE IN THE CPU WORKER'S OWN MEMORY — read from the file into a slot when a

@@ -1042,10 +1042,71 @@ static inline bool nvidia_cuda12__zzprivate_latent_scores_fit(const uint16_t* q,
     return kv_heads != 0u && q_heads % kv_heads == 0u && q_heads / kv_heads >= 32u && head_dim != 0u && head_dim % 64u == 0u
         && ((uint64_t)(uintptr_t)q) % 16u == 0u && ((uint64_t)(uintptr_t)k) % 16u == 0u;
 }
+/* ⭐ A SMALL GROUP'S SCORES — a kv head's few query heads (Inkling 2's 24 over 8 kv heads of 128, a group of 3; its
+ *   relative bias, 24 over one of 16) — which the latent kernel above, a warp 32 query heads, does not fit. nn's body
+ *   gives an item a (kv head, eight positions, query head) and at a few hundred positions launches one block: `MEASURED`
+ *   22 µs a call, 96 calls a token (nsys on the precision's 5060 Ti). Here a warp takes a kv head and `32 / P` positions,
+ *   `P` lanes a position, each lane a run of eight halves of the key row read once in sixteen bytes; every query head
+ *   of the group is dotted with it on the lane through `nn__silicon__dot2`, the `P` lanes' parts folded by the warp's
+ *   shuffles one lane apart, then two, …, and the position's first lane writes. A key row of `8P` halves, `P` 1 to 32; a
+ *   row of more is walked 256 halves a lane-step in the same order. The scores' last bits are this kernel's own sum,
+ *   the same every call. */
+static __global__ NVIDIA_CUDA12__ZZPRIVATE_ATT_BOUNDS void nvidia_cuda12__zzprivate_small_group_scores(float* p, const uint16_t* q, const uint16_t* k,
+        uint64_t q_heads, uint64_t kv_heads, uint64_t head_dim, uint64_t length, uint32_t P) {
+    const uint32_t W = NVIDIA_CUDA12__ZZPACKAGE_WARP, lane = (uint32_t)nn__silicon__lane() % W, warps = (uint32_t)nn__silicon__lanes() / W;
+    const uint64_t group = q_heads / kv_heads, row = kv_heads * head_dim, chunks = head_dim / 8u;
+    const uint32_t per = W / P, seg = lane / P, part = lane % P;
+    const uint64_t tiles = (length + per - 1u) / per;
+    const float scale = 1.0f / nn__silicon__sqrtf((float)head_dim);
+    for (uint64_t task = (uint64_t)nn__silicon__block() * warps + (uint32_t)nn__silicon__lane() / W; task < kv_heads * tiles;
+         task += (uint64_t)nn__silicon__blocks() * warps) {
+        const uint64_t g = task / tiles, t = (task % tiles) * per + seg;
+        const bool live = t < length;
+        const uint4* kr = (const uint4*)(const void*)(k + (live ? t : 0u) * row + g * head_dim);
+        for (uint64_t hg = 0u; hg < group; ++hg) {
+            const uint64_t h = g * group + hg;
+            const uint4* qr = (const uint4*)(const void*)(q + h * head_dim);
+            float dot = 0.0f;
+            for (uint64_t c = part; c < chunks; c += P) {
+                const uint4 kv = kr[c], qv = qr[c];
+                dot = nn__silicon__dot2(qv.x, kv.x, dot);
+                dot = nn__silicon__dot2(qv.y, kv.y, dot);
+                dot = nn__silicon__dot2(qv.z, kv.z, dot);
+                dot = nn__silicon__dot2(qv.w, kv.w, dot);
+            }
+            for (uint32_t m = 1u; m < P; m <<= 1) dot += __shfl_xor_sync(0xFFFFFFFFu, dot, (int)m);
+            if (live && part == 0u) p[h * length + t] = dot * scale;
+        }
+    }
+}
+/* The lanes a position takes: a key row's runs of eight, up to the warp's 32, a power of two that divides the runs or
+ * (past 32) the warp's width; 0 where a row is none of these. */
+static inline uint32_t nvidia_cuda12__zzprivate_small_group_lanes(uint64_t head_dim) {
+    if (head_dim == 0u || head_dim % 8u != 0u) return 0u;
+    const uint64_t chunks = head_dim / 8u;
+    if (chunks >= NVIDIA_CUDA12__ZZPACKAGE_WARP) return chunks % NVIDIA_CUDA12__ZZPACKAGE_WARP == 0u ? NVIDIA_CUDA12__ZZPACKAGE_WARP : 0u;
+    return (chunks & (chunks - 1u)) == 0u ? (uint32_t)chunks : 0u;
+}
+static inline bool nvidia_cuda12__zzprivate_small_group_launch(float* p, const uint16_t* q, const uint16_t* k, uint64_t q_heads,
+                                                               uint64_t kv_heads, uint64_t head_dim, uint64_t length) {
+    uint32_t P = nvidia_cuda12__zzprivate_small_group_lanes(head_dim);
+    if (P == 0u || kv_heads == 0u || q_heads % kv_heads != 0u || ((uint64_t)(uintptr_t)q) % 16u != 0u
+     || ((uint64_t)(uintptr_t)k) % 16u != 0u)
+        return false;
+    const uint64_t per = NVIDIA_CUDA12__ZZPACKAGE_WARP / P, warps = kv_heads * ((length + per - 1u) / per), want = (warps + 7u) / 8u;
+    const uint32_t blocks = want < NN__KERNELS__BLOCKS_MAX ? (uint32_t)want : NN__KERNELS__BLOCKS_MAX;
+    void* args[] = { &p, &q, &k, &q_heads, &kv_heads, &head_dim, &length, &P };
+    const size_t sizes[] = { sizeof p, sizeof q, sizeof k, sizeof q_heads, sizeof kv_heads, sizeof head_dim, sizeof length, sizeof P };
+    nn__silicon__launch((const void*)nvidia_cuda12__zzprivate_small_group_scores, "nvidia_cuda12__zzprivate_small_group_scores", blocks,
+                        256u, args, sizes, 8u);
+    return true;
+}
 static void nvidia_cuda12__override_attention_scores_grouped(float* p, const uint16_t* q, const uint16_t* k, uint64_t q_heads,
                                                              uint64_t kv_heads, uint64_t head_dim, uint64_t length) {
-    if (length == 0u || !nvidia_cuda12__zzprivate_latent_scores_fit(q, k, q_heads, kv_heads, head_dim)) {
-        nn__attention__zzabi_launch_scores_grouped(p, q, k, q_heads, kv_heads, head_dim, length);
+    if (length == 0u) return;
+    if (!nvidia_cuda12__zzprivate_latent_scores_fit(q, k, q_heads, kv_heads, head_dim)) {
+        if (!nvidia_cuda12__zzprivate_small_group_launch(p, q, k, q_heads, kv_heads, head_dim, length))
+            nn__attention__zzabi_launch_scores_grouped(p, q, k, q_heads, kv_heads, head_dim, length);
         return;
     }
     const uint64_t tiles = kv_heads * ((q_heads / kv_heads + 63u) / 64u) * ((length + 63u) / 64u);
@@ -1354,6 +1415,199 @@ static void nvidia_cuda12__override_attention_merge(float* into, const float* a,
     const size_t sizes[] = { sizeof into, sizeof a, sizeof b, sizeof q_heads, sizeof head_dim };
     nn__silicon__launch((const void*)nvidia_cuda12__zzprivate_merge, "nvidia_cuda12__zzprivate_merge", blocks,
                         NVIDIA_CUDA12__ZZPRIVATE_MERGE_WARPS * NVIDIA_CUDA12__ZZPACKAGE_WARP, args, sizes, 5u);
+}
+
+/* ══ ⭐ A FEW QUERIES' MIX OVER A FEW STATES AS WIDE AS THE MODEL, A WARP A QUERY'S SUMS ═════════════════════════════════
+ * nn's `attention_states` — a learned query's mix: Inkling 2's block states, a loop layer's messages — runs a block a
+ * query and gives a lane a slice of the width, read a half at a time: at 2,304 one to four blocks on the card, and
+ * `MEASURED` 14.3 µs a call, 119 calls a token (nsys on the precision's 5060 Ti, measurements/2026-11-24_nn213_inkling2_
+ * rates_precision.md). Here, as amd_rocm_base's port has it, a warp takes a query's sums whole itself — eight halves a
+ * read, the reads of every group and every state issued before the first is waited on, the lanes' parts through the
+ * warp's shuffles — so it needs no other warp, no shared memory and no wait for its block; and the query's row is cut
+ * across warps (`cuts`), each writing its own groups of eight. Every warp of a query sums the same halves in the same
+ * order, so every warp holds the same weights to the bit.
+ * The arithmetic is nn's: the current state normed as `rmsnorm` norms it, with no weight, and rounded to a half as a
+ * stored state is; the scores over √width; the softmax from the largest; the stored states weighed in their order, then
+ * the current, each a fused multiply-add, and the sum over the total rounded once into `o`, its overflow in the fault
+ * word. The products are `nn__silicon__dot2`'s and summed eight to a lane before the fold, so a score's last bits are
+ * this kernel's own. Halves are made by the family's `zzpackage_to_half` (▶ kernels.cuh), never `__float2half_rn`.
+ * A kernel for each pair of counts a lane holds — groups of eight (`HELD`: rows up to 1,024 or 3,072 halves) and
+ * stored states (`STATES`: 2, 4 or 8) — so a call reads what its shape uses. A group past the row, or a state past the
+ * call's, is read from a row that exists and taken as zeros, so the reads are issued without a branch; a zero added to
+ * a sum leaves it as it was, so a call's answer does not depend on which kernel takes it (`REASONED`: x + 0 is x, and a
+ * score's sign of zero does not reach its exponential). Widths that are not whole groups of eight or are past 3,072,
+ * memory not on 16 bytes, or an output that overlaps what is read take nn's door. */
+#define NVIDIA_CUDA12__ZZPRIVATE_STATES_HELD 12u     /* groups of eight a lane holds at most: rows up to 3,072 halves */
+#define NVIDIA_CUDA12__ZZPRIVATE_STATES_BOUNDS __launch_bounds__(32)
+
+/* Eight halves by eight onto `c`: four of the family's dots. */
+static __device__ __forceinline__ float nvidia_cuda12__zzprivate_states_dot8(uint4 x, uint4 y, float c) {
+    c = nn__silicon__dot2(x.x, y.x, c);
+    c = nn__silicon__dot2(x.y, y.y, c);
+    c = nn__silicon__dot2(x.z, y.z, c);
+    return nn__silicon__dot2(x.w, y.w, c);
+}
+/* ⭐ Eight halves normed: each `x · gain` rounded to a half, as a stored state is, its fault not raised — the product by
+ *   `__fmul_rn`, which nvcc never contracts, then the card's own conversion (`cvt.rn.f16.f32`): two roundings, as nn's.
+ *   NVIDIA has no instruction that multiplies into the conversion, so nothing can fold them into one; the family's
+ *   `zzpackage_to_half` carries nn's conversion for every half it does not take, and 96 of them inlined in the current's
+ *   norm made a call with the current 14-16 µs where one without it was 4.9 (nsys, the precision's 5060 Ti). An overflow
+ *   is infinity either way; the product of a finite half and a finite gain is no NaN. */
+static __device__ __forceinline__ uint4 nvidia_cuda12__zzprivate_states_normed8(uint4 x, float gain) {
+    const uint32_t xs[4] = { x.x, x.y, x.z, x.w };
+    uint32_t out[4];
+#pragma unroll
+    for (uint32_t k = 0u; k < 4u; ++k)
+        out[k] = (uint32_t)__half_as_ushort(__float2half_rn(__fmul_rn(nn__silicon__half_to_float((uint16_t)(xs[k] & 0xFFFFu)), gain)))
+               | ((uint32_t)__half_as_ushort(__float2half_rn(__fmul_rn(nn__silicon__half_to_float((uint16_t)(xs[k] >> 16)), gain))) << 16);
+    return make_uint4(out[0], out[1], out[2], out[3]);
+}
+/* Eight halves weighed onto eight sums, each a fused multiply-add. */
+static __device__ __forceinline__ void nvidia_cuda12__zzprivate_states_weigh8(uint4 x, float weight, float* sum) {
+    const uint32_t xs[4] = { x.x, x.y, x.z, x.w };
+#pragma unroll
+    for (uint32_t k = 0u; k < 4u; ++k) {
+        sum[2u * k]      = __fmaf_rn(weight, nn__silicon__half_to_float((uint16_t)(xs[k] & 0xFFFFu)), sum[2u * k]);
+        sum[2u * k + 1u] = __fmaf_rn(weight, nn__silicon__half_to_float((uint16_t)(xs[k] >> 16)), sum[2u * k + 1u]);
+    }
+}
+template <uint32_t HELD, uint32_t STATES>
+static __global__ NVIDIA_CUDA12__ZZPRIVATE_STATES_BOUNDS void nvidia_cuda12__zzprivate_attention_states(uint16_t* o, const uint16_t* q,
+        const uint16_t* states, const uint16_t* current, uint64_t queries, uint64_t width, uint64_t rows, uint64_t with_current,
+        uint64_t cuts, float eps, unsigned int* over) {
+    const uint32_t W = NVIDIA_CUDA12__ZZPACKAGE_WARP;
+    const uint32_t lane = (uint32_t)nn__silicon__lane() % W, warps = (uint32_t)nn__silicon__lanes() / W;
+    const uint32_t groups = (uint32_t)(width / 8u), held = (groups + W - 1u) / W, per = (held + (uint32_t)cuts - 1u) / (uint32_t)cuts;
+    const uint32_t stored = (uint32_t)rows;
+    const bool has_current = with_current != 0u;
+    const uint4 none = make_uint4(0u, 0u, 0u, 0u);
+    const float scale = 1.0f / nn__silicon__sqrtf((float)width);
+    for (uint64_t task = (uint64_t)nn__silicon__block() * warps + (uint32_t)nn__silicon__lane() / W; task < queries * cuts;
+         task += (uint64_t)nn__silicon__blocks() * warps) {
+        const uint64_t h = task / cuts;
+        const uint32_t k0 = (uint32_t)(task % cuts) * per, k1 = k0 + per < held ? k0 + per : held;
+        const uint16_t* qh = q + h * width;
+        const uint4* qr = (const uint4*)(const void*)qh;
+        const uint4* cr = (const uint4*)(const void*)(has_current ? current : qh);    /* a row that exists either way */
+        /* ① the query's and the current's groups, held, and every stored state's score and the current's squares summed
+         *    as their groups arrive: every read issued before the first is waited on, no branch among them */
+        uint4 qk[HELD], ck[HELD];
+        float weight[STATES], squares = 0.0f, mine = 0.0f, gain = 0.0f;
+#pragma unroll
+        for (uint32_t t = 0u; t < STATES; ++t) weight[t] = 0.0f;
+#pragma unroll
+        for (uint32_t k = 0u; k < HELD; ++k) {
+            const uint32_t g = lane + k * W;
+            const bool in = g < groups;
+            const uint32_t at = in ? g : 0u;
+            const uint4 qv = qr[at], cv = cr[at];
+            qk[k] = in ? qv : none;
+            ck[k] = in && has_current ? cv : none;
+            squares = nvidia_cuda12__zzprivate_states_dot8(ck[k], ck[k], squares);
+#pragma unroll
+            for (uint32_t t = 0u; t < STATES; ++t) {
+                const uint4 sv = ((const uint4*)(const void*)(t < stored ? states + (uint64_t)t * width : qh))[at];
+                weight[t] = nvidia_cuda12__zzprivate_states_dot8(qk[k], in && t < stored ? sv : none, weight[t]);
+            }
+        }
+        /* ② the lanes' parts folded: every lane holds the sums */
+        squares = nvidia_cuda12__zzpackage_warp_sum(squares);
+#pragma unroll
+        for (uint32_t t = 0u; t < STATES; ++t) weight[t] = nvidia_cuda12__zzpackage_warp_sum(weight[t]);
+        /* ③ the current normed, a half an element, from the groups ① holds, and its score */
+        if (has_current) {
+            gain = 1.0f / nn__silicon__sqrtf(squares / (float)width + eps);
+#pragma unroll
+            for (uint32_t k = 0u; k < HELD; ++k)
+                mine = nvidia_cuda12__zzprivate_states_dot8(qk[k], nvidia_cuda12__zzprivate_states_normed8(ck[k], gain), mine);
+            mine = nvidia_cuda12__zzpackage_warp_sum(mine);
+        }
+        /* ④ the softmax, in nn's order: the stored states, then the current */
+        float top = -NN__KERNELS__INFINITY, total = 0.0f;
+#pragma unroll
+        for (uint32_t t = 0u; t < STATES; ++t)
+            if (t < stored) {
+                weight[t] *= scale;
+                if (weight[t] > top) top = weight[t];
+            }
+        if (has_current) {
+            mine *= scale;
+            if (mine > top) top = mine;
+        }
+#pragma unroll
+        for (uint32_t t = 0u; t < STATES; ++t)
+            if (t < stored) {
+                weight[t] = nn__silicon__expf(weight[t] - top);
+                total += weight[t];
+            }
+        if (has_current) {
+            mine = nn__silicon__expf(mine - top);
+            total += mine;
+        }
+        /* ⑤ this warp's groups of the query's row: the states weighed in their order, then the current, over the total */
+        uint4* orow = (uint4*)(void*)(o + h * width);
+#pragma unroll 1
+        for (uint32_t k = k0; k < k1; ++k) {
+            const uint32_t g = lane + k * W;
+            if (g >= groups) continue;
+            float sum[8] = { 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f };
+#pragma unroll
+            for (uint32_t t = 0u; t < STATES; ++t)
+                if (t < stored) nvidia_cuda12__zzprivate_states_weigh8(((const uint4*)(const void*)(states + (uint64_t)t * width))[g], weight[t], sum);
+            if (has_current) nvidia_cuda12__zzprivate_states_weigh8(nvidia_cuda12__zzprivate_states_normed8(cr[g], gain), mine, sum);
+            uint32_t out[4];
+#pragma unroll
+            for (uint32_t e = 0u; e < 4u; ++e)
+                out[e] = (uint32_t)nvidia_cuda12__zzpackage_to_half(sum[2u * e] / total, over)
+                       | ((uint32_t)nvidia_cuda12__zzpackage_to_half(sum[2u * e + 1u] / total, over) << 16);
+            orow[g] = make_uint4(out[0], out[1], out[2], out[3]);
+        }
+    }
+}
+static inline bool nvidia_cuda12__zzprivate_states_apart(const uint16_t* a, uint64_t n, const uint16_t* b, uint64_t m) {
+    return a + n <= b || b + m <= a;
+}
+static void nvidia_cuda12__override_attention_states(uint16_t* o, const uint16_t* q, const uint16_t* states, const uint16_t* current,
+                                                     uint64_t queries, uint64_t width, uint64_t rows, uint64_t with_current,
+                                                     float eps, unsigned int* over) {
+    static const void* const kernels[2][3] = {          /* by groups a lane holds (4, 12), then stored states (2, 4, 8) */
+        { (const void*)nvidia_cuda12__zzprivate_attention_states<4u, 2u>,  (const void*)nvidia_cuda12__zzprivate_attention_states<4u, 4u>,
+          (const void*)nvidia_cuda12__zzprivate_attention_states<4u, 8u> },
+        { (const void*)nvidia_cuda12__zzprivate_attention_states<12u, 2u>, (const void*)nvidia_cuda12__zzprivate_attention_states<12u, 4u>,
+          (const void*)nvidia_cuda12__zzprivate_attention_states<12u, 8u> } };
+    const uint64_t W = NVIDIA_CUDA12__ZZPACKAGE_WARP, held = (width / 8u + W - 1u) / W, count = rows + (with_current != 0u ? 1u : 0u);
+    const uint64_t span = queries * width;
+    if (queries == 0u || width == 0u || width % 8u != 0u || held > NVIDIA_CUDA12__ZZPRIVATE_STATES_HELD || count == 0u
+     || count > NN__ATTENTION__STATES_MAX || ((uint64_t)(uintptr_t)o) % 16u != 0u || ((uint64_t)(uintptr_t)q) % 16u != 0u
+     || (rows != 0u && ((uint64_t)(uintptr_t)states) % 16u != 0u) || (with_current != 0u && ((uint64_t)(uintptr_t)current) % 16u != 0u)
+     || !nvidia_cuda12__zzprivate_states_apart(o, span, q, span)
+     || (rows != 0u && !nvidia_cuda12__zzprivate_states_apart(o, span, states, rows * width))
+     || (with_current != 0u && !nvidia_cuda12__zzprivate_states_apart(o, span, current, width))) {
+        nn__attention__zzabi_launch_states(o, q, states, current, queries, width, rows, with_current, eps, over);
+        return;
+    }
+    const uint32_t hi = held <= 4u ? 0u : 1u, si = rows <= 2u ? 0u : rows <= 4u ? 1u : 2u;
+    const void* kernel = kernels[hi][si];
+    /* a warp a block; each query's row cut across as many warps as the card holds at once for this many queries, at
+     * most a warp a group of a lane — asked of the card once a kernel */
+    static int resident[2][3];
+    int d = 0;
+    if (resident[hi][si] == 0) {
+        int sms = 0, blocks = 0;
+        if (cudaGetDevice(&d) == cudaSuccess && cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, d) == cudaSuccess
+         && cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blocks, kernel, (int)W, 0) == cudaSuccess)
+            resident[hi][si] = sms * blocks > 0 ? sms * blocks : 1;
+        else resident[hi][si] = 1;
+    }
+    uint64_t cuts = (uint64_t)resident[hi][si] / queries;
+    cuts = cuts < 1u ? 1u : cuts > held ? held : cuts;
+    cuts = (held + (held + cuts - 1u) / cuts - 1u) / ((held + cuts - 1u) / cuts);     /* no cut left without a group */
+    const uint64_t want = queries * cuts;
+    const uint32_t blocks = want < NN__KERNELS__BLOCKS_MAX ? (uint32_t)want : NN__KERNELS__BLOCKS_MAX;
+    void* args[] = { &o, &q, &states, &current, &queries, &width, &rows, &with_current, &cuts, &eps, &over };
+    const size_t sizes[] = { sizeof o, sizeof q, sizeof states, sizeof current, sizeof queries, sizeof width, sizeof rows,
+                             sizeof with_current, sizeof cuts, sizeof eps, sizeof over };
+    nn__silicon__launch(kernel, "nvidia_cuda12__zzprivate_attention_states", blocks, (uint32_t)W, args, sizes, 11u);
 }
 
 #endif /* SILVANN__SILICON_FAMILIES_NVIDIA_CUDA12_OVERRIDES_ATTENTION_CUH */

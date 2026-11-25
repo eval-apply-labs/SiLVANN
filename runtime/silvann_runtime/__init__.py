@@ -23,9 +23,10 @@ from .glm5 import Glm5
 from .mistral3 import Ministral3
 from .deepseek4 import DeepSeek4
 from .qwen4_exp import Qwen4Exp
+from .inkling2 import Inkling2
 
 ARCHITECTURES = {"qwen3_5_text": Qwen35, "qwen3_5_moe_text": Qwen35, "qwen3_vl_text": Qwen35, "glm5_next_text": Glm5, "ministral3": Ministral3,
-                 "deepseek_v41_text": DeepSeek4, "qwen4_exp_text": Qwen4Exp}
+                 "deepseek_v41_text": DeepSeek4, "qwen4_exp_text": Qwen4Exp, "inkling2_loop_text": Inkling2}
 
 
 def _yes_no(value, name):
