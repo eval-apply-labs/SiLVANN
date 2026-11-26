@@ -290,6 +290,29 @@ static __device__ inline void nn__vector__zzabi_body_l2norm(uint16_t* o, const u
     }
 }
 
+/* Each of `rows` rows of `n` halves held to a length: `o = x · min(limit / (‖x‖ + 1e-6), 1)`, `‖x‖` the root of the row's
+ * sum of squares — a head's query, its key or its bias state clipped (Inkling 2's attention). A block a row, its lanes
+ * each their elements; a row's sum is whole before its first write, so `o` may be `x`. */
+static __device__ inline void nn__vector__zzabi_body_l2clip(uint16_t* o, const uint16_t* x, uint64_t rows, uint64_t n, float limit,
+                                                             unsigned int* over) {
+    const uint64_t lane = nn__silicon__lane(), lanes = nn__silicon__lanes();
+    for (uint64_t r = nn__silicon__block(); r < rows; r += nn__silicon__blocks()) {
+        const uint16_t* xr = x + r * n;
+        float part = 0.0f;
+        for (uint64_t i = lane; i < n; i += lanes) {
+            const float v = nn__silicon__half_to_float(xr[i]);
+            part += v * v;
+        }
+        const float ratio = limit / (nn__silicon__sqrtf(nn__silicon__lanes_sum(part)) + 1e-6f);
+        const float scale = ratio < 1.0f ? ratio : 1.0f;
+        for (uint64_t i = lane; i < n; i += lanes) {
+            bool hit = false;
+            o[r * n + i] = nn__primitives__zzpackage_float_to_half(nn__silicon__half_to_float(xr[i]) * scale, &hit);
+            if (hit) *over = NN__KERNELS__OVERFLOWED;
+        }
+    }
+}
+
 /* ⛳ THE MAX IS SUBTRACTED BEFORE EVERY `exp` AND THAT IS NOT AN OPTIMISATION — it is what stops
  * `exp(large)` becoming an infinity that turns the whole row into NaN. Three passes, all kept, and the
  * first two each end in the combine step. */
@@ -890,19 +913,47 @@ static __device__ inline void nn__rope__zzabi_body_angles(float* cs, uint64_t po
  *   — the grouped-query sharing. One block per query head; the head loop is the block's, so every lane of
  *   a block calls the combine step together. */
 /* One query head's weights over `length` positions, into `ph`: its scores, their largest, and the softmax. Every
- * lane of the block runs it, and reaches its two folds. */
+ * lane of the block runs it, and reaches its folds.
+ * ⛳ A WIDE HEAD — `NN__ATTENTION__WIDE_HEAD` elements or more — is scored a lane a slice of the head: a lane sums its
+ *   own elements of a position's dot, and the lanes' sums are folded `NN__ATTENTION__WIDE_SPAN` positions at a time.
+ *   A narrow head is scored a lane a position, the whole dot on that lane: with fewer positions than lanes most of the
+ *   block waits, which costs a head of 128 nothing and a head of thousands its whole time. `MEASURED` on the MI50 (node03,
+ *   gfx906) at one head of 2,304 over five positions — a learned query's mix over a model's block states: 312 µs a lane
+ *   a position, 29 µs a lane a slice (▶ measurements/2026-11-24_nn207_inkling2_rates_node03.md). On a family of one
+ *   lane the two forms sum in the same order, so the host's body gives one answer for both. */
+#define NN__ATTENTION__WIDE_HEAD 1024u
+#define NN__ATTENTION__WIDE_SPAN 8u
 static __device__ inline void nn__attention__zzprivate_scores_head(float* ph, const uint16_t* qh, const uint16_t* kh,
                                                                    uint64_t row, uint64_t head_dim, uint64_t length,
                                                                    float scale) {
     const uint64_t lane = nn__silicon__lane(), lanes = nn__silicon__lanes();
-    /* each lane scores its own positions, and keeps them in `p`, where only it reads them again */
+    /* a position's score is kept by one lane — in `p`, where only it reads it again */
     float top = -NN__KERNELS__INFINITY;
-    for (uint64_t t = lane; t < length; t += lanes) {
-        float dot = 0.0f;
-        for (uint64_t e = 0ull; e < head_dim; ++e)
-            dot += nn__silicon__half_to_float(qh[e]) * nn__silicon__half_to_float(kh[t * row + e]);
-        ph[t] = dot * scale;
-        if (ph[t] > top) top = ph[t];
+    if (head_dim >= NN__ATTENTION__WIDE_HEAD) {
+        for (uint64_t t0 = 0ull; t0 < length; t0 += NN__ATTENTION__WIDE_SPAN) {
+            const uint32_t span = (uint32_t)(length - t0 < NN__ATTENTION__WIDE_SPAN ? length - t0 : NN__ATTENTION__WIDE_SPAN);
+            float part[NN__ATTENTION__WIDE_SPAN];
+            for (uint32_t s = 0u; s < span; ++s) part[s] = 0.0f;
+            for (uint64_t e = lane; e < head_dim; e += lanes) {
+                const float qe = nn__silicon__half_to_float(qh[e]);
+                for (uint32_t s = 0u; s < span; ++s) part[s] += qe * nn__silicon__half_to_float(kh[(t0 + s) * row + e]);
+            }
+            nn__silicon__lanes_sums(part, span);
+            for (uint32_t s = 0u; s < span; ++s) {
+                const uint64_t t = t0 + s;
+                if (t % lanes != lane) continue;
+                ph[t] = part[s] * scale;
+                if (ph[t] > top) top = ph[t];
+            }
+        }
+    } else {
+        for (uint64_t t = lane; t < length; t += lanes) {
+            float dot = 0.0f;
+            for (uint64_t e = 0ull; e < head_dim; ++e)
+                dot += nn__silicon__half_to_float(qh[e]) * nn__silicon__half_to_float(kh[t * row + e]);
+            ph[t] = dot * scale;
+            if (ph[t] > top) top = ph[t];
+        }
     }
     top = nn__silicon__lanes_max(top);
     float part = 0.0f;
@@ -1344,7 +1395,7 @@ static __device__ inline void nn__turboquant__zzprivate_rows(const uint32_t D, u
         uint64_t scales_held, unsigned int* over) {
     const uint32_t per = 16u / D, run_codes = 4u * per, held = 2u * NN__TURBOQUANT__HELD_WORDS / run_codes;
     const uint64_t lane = nn__silicon__lane(), lanes = nn__silicon__lanes();
-    const uint64_t row_bytes = ((cols + per - 1ull) / per) * 2ull, runs = row_bytes / 8ull;
+    const uint64_t row_bytes = nn__turboquant__zzpackage_units(cols, per) * 2ull, runs = row_bytes / 8ull;
     uint32_t xh[NN__TURBOQUANT__HELD_WORDS];
     for (uint32_t w = 0u; w < NN__TURBOQUANT__HELD_WORDS; ++w) {
         uint32_t pair = 0u;
@@ -1418,8 +1469,8 @@ static __device__ inline bool nn__turboquant__zzabi_body_gemv(uint16_t* out, con
         else                 nn__turboquant__zzprivate_rows(16u, out, weights, luts, x, rows, cols, rows_held, scales_held, over);
         return true;
     }
-    const uint64_t lane = nn__silicon__lane(), lanes = nn__silicon__lanes(), units = (cols + per - 1ull) / per;
-    const uint32_t mask = (uint32_t)((1ull << d) - 1ull);
+    const uint64_t lane = nn__silicon__lane(), lanes = nn__silicon__lanes(), units = nn__turboquant__zzpackage_units(cols, per);
+    const uint32_t mask = nn__turboquant__zzpackage_mask(d);
     for (uint64_t r = nn__silicon__block(); r < rows; r += nn__silicon__blocks()) {
         if (r >= rows_held || (d != 16ull && r >= scales_held)) continue;
         const uint8_t* row_base = weights + r * row_bytes;
@@ -1485,8 +1536,8 @@ static __device__ inline void nn__turboquant__zzabi_body_gemv_groups_sum(uint16_
         float part = 0.0f;
         for (uint64_t i = 0ull; i < g.count && i < NN__TURBOQUANT__GROUPS_MAX; ++i) {
             const uint64_t d = g.d[i], per = nn__turboquant__values_per_container(d);
-            const uint64_t units = (cols + per - 1ull) / per;
-            const uint32_t mask = (uint32_t)((1ull << d) - 1ull);
+            const uint64_t units = nn__turboquant__zzpackage_units(cols, per);
+            const uint32_t mask = nn__turboquant__zzpackage_mask(d);
             const uint8_t* row_base = (const uint8_t*)(uintptr_t)g.codes[i] + r * nn__turboquant__row_bytes(d, cols);
             const uint16_t* xi = x + i * cols;
             float mine = 0.0f;
@@ -1539,10 +1590,10 @@ static __device__ inline void nn__expert__zzprivate_rows(uint16_t* out, float* a
     const nn__gemm__tile tile = nn__silicon__gemm_tile();
     const uint32_t WR = tile.w_rows, XR = tile.x_rows;
     const uint64_t per = nn__turboquant__values_per_container(d), row_bytes = nn__turboquant__row_bytes(d, cols);
-    const uint64_t units = (cols + per - 1ull) / per, rows_held = row_bytes == 0ull ? 0ull : w_room / row_bytes;
+    const uint64_t units = nn__turboquant__zzpackage_units(cols, per), rows_held = row_bytes == 0ull ? 0ull : w_room / row_bytes;
     const uint64_t held = d == 16ull || rows_held < l_room / 2ull ? rows_held : l_room / 2ull;
     const uint64_t lane = nn__silicon__lane(), lanes = nn__silicon__lanes();
-    const uint32_t mask = (uint32_t)((1ull << d) - 1ull);
+    const uint32_t mask = nn__turboquant__zzpackage_mask(d);
     /* ⭐ IN PAIRS where a container holds an even number of codes and a row of `x` an even number of columns — 4 and
      *   8 bits, every matrix of the models shipped — so a pair never straddles a container or a row's end, and `x`'s
      *   pair is one aligned word. `nn__silicon__dot2`; the codes' levels are the table's halves, as they are. */
@@ -2392,9 +2443,9 @@ static __device__ inline int32_t nn__turboquant__zzprivate_block_i8(const uint32
     const uint64_t table = nn__turboquant__zzprivate_gaussian_at(D);
     int32_t acc = 0;
     for (uint32_t i = 0u; i < NN__TURBOQUANT__INT8_BLOCK; ++i) {
-        const uint64_t c = c0 + i, u = c / per;
+        const uint64_t c = c0 + i, u = nn__turboquant__zzpackage_unit_of(c, per);
         const uint32_t unit = (uint32_t)row[2ull * u] | ((uint32_t)row[2ull * u + 1ull] << 8);
-        const uint32_t code = (unit >> (D * (uint32_t)(c % per))) & ((1u << D) - 1u);
+        const uint32_t code = (unit >> (D * ((uint32_t)c % (uint32_t)per))) & ((1u << D) - 1u);
         const int32_t xv = (int32_t)(int8_t)(uint8_t)(q[i / 4u] >> (8u * (i % 4u)));
         acc += xv * (int32_t)nn__turboquant__zzprivate_gaussian_i8[table + code];
     }
@@ -2561,9 +2612,9 @@ static __device__ inline void nn__expert__zzprivate_rows_int8(uint16_t* out, flo
                 const float s = nn__expert__zzprivate_quantise(xr, b * NN__EXPERT__INT8_BLOCK, q);
                 int32_t dot = 0;
                 for (uint32_t i = 0u; i < NN__EXPERT__INT8_BLOCK; ++i) {
-                    const uint64_t c = b * NN__EXPERT__INT8_BLOCK + i, u = c / per;
+                    const uint64_t c = b * NN__EXPERT__INT8_BLOCK + i, u = nn__turboquant__zzpackage_unit_of(c, per);
                     const uint32_t unit = (uint32_t)row[2ull * u] | ((uint32_t)row[2ull * u + 1ull] << 8);
-                    dot += (int32_t)q[i] * (int32_t)nn__turboquant__zzprivate_gaussian_i8[table + ((unit >> (D * (uint32_t)(c % per))) & mask)];
+                    dot += (int32_t)q[i] * (int32_t)nn__turboquant__zzprivate_gaussian_i8[table + ((unit >> (D * ((uint32_t)c % (uint32_t)per))) & mask)];
                 }
                 part += (float)dot * s;
             }
@@ -2655,10 +2706,10 @@ static __device__ inline float nn__turboquant__zzpackage_level(uint64_t d, uint3
 static __device__ inline float nn__turboquant__zzpackage_weight(const uint8_t* row_base, uint64_t d,
                                                           const uint8_t* lut_base, uint64_t c) {
     const uint64_t per   = nn__turboquant__values_per_container(d);
-    const uint64_t unit_i = c / per;
+    const uint64_t unit_i = nn__turboquant__zzpackage_unit_of(c, per);
     const uint64_t slot   = c - unit_i * per;
     const uint32_t unit   = nn__turboquant__zzprivate_unit(row_base + unit_i * 2ull);
-    const uint32_t code   = (unit >> (uint32_t)(d * slot)) & (uint32_t)((1ull << d) - 1ull);
+    const uint32_t code   = (unit >> (uint32_t)(d * slot)) & nn__turboquant__zzpackage_mask(d);
     /* ⛳ `D == 16` IS ONE VALUE A CONTAINER, so the arithmetic above already located it and the only
      * thing that differs is what the bits MEAN: the code IS the fp16, not an index into anything.
      * ⇒ ★ A SHAPE BRANCH AND AN INTERPRETATION BRANCH ARE DIFFERENT THINGS, AND ONLY THE SECOND IS
@@ -2808,12 +2859,30 @@ static __device__ inline uint16_t nn__primitives__zzpackage_float_to_half(float 
 }
 
 static __device__ inline uint64_t nn__turboquant__values_per_container(uint64_t d) {
-    return 16ull / d;                                   /* past `rate_is_known`, never zero */
+    return (uint64_t)(16u / (uint32_t)d);               /* past `rate_is_known`, never zero; in 32 bits (▶ zzpackage_units) */
+}
+
+/* ⭐ A ROW'S CONTAINERS, AND THE CONTAINER COLUMN `c` IS IN — the quotients by a width's `per` (1 to 16 codes a container)
+ *   taken in 32 bits: a TurboQuant row is under 2^32 columns (`REASONED`: a row is a matrix's, the packs' widest 2^18), so
+ *   the quotient is the 64-bit one. Intel's compiler for OpenCL crashes on these divisions in 64 bits, both OpenCL
+ *   generators' forms, its newest included (IGC 2.42, driver 26.40, on a Gen12 GPU: `MEASURED`,
+ *   measurements/2026-11-25_nn214_intel_opencl_phoenixnap.md). */
+static __device__ inline uint64_t nn__turboquant__zzpackage_units(uint64_t cols, uint64_t per) {
+    return (uint64_t)(((uint32_t)cols + (uint32_t)per - 1u) / (uint32_t)per);
+}
+static __device__ inline uint64_t nn__turboquant__zzpackage_unit_of(uint64_t c, uint64_t per) {
+    return (uint64_t)((uint32_t)c / (uint32_t)per);
+}
+/* A width's code mask, `d` bits — in 32 bits for the same reason, and a second: on that GPU, which has no 64-bit integers,
+ *   `(1ull << d) - 1` with `d` known only at run time came back 0, so every code read as 0 — no crash, the wrong answer
+ *   (`MEASURED`, the record above: nn's decode at 3, 4, 5 and 8 bits, every element; exact in 32 bits). `d` is 1 to 16. */
+static __device__ inline uint32_t nn__turboquant__zzpackage_mask(uint64_t d) {
+    return (1u << (uint32_t)d) - 1u;
 }
 
 static __device__ inline uint64_t nn__turboquant__row_bytes(uint64_t d, uint64_t cols) {
     const uint64_t per = nn__turboquant__values_per_container(d);
-    return ((cols + per - 1ull) / per) * 2ull;
+    return nn__turboquant__zzpackage_units(cols, per) * 2ull;
 }
 
 /* ══ ⭐⭐ THE KV CACHE IN TIERS — rotated from the start, then TurboQuant 8 and 4 as positions age ══════════════
@@ -2942,8 +3011,9 @@ static __device__ inline void nn__turboquant__zzabi_body_encode_rows(uint8_t* co
 /* One element of a TurboQuant row: its level times the row's scale. */
 static __device__ inline float nn__turboquant__zzprivate_element(const uint8_t* row, float scale, uint64_t d, uint64_t c) {
     const uint64_t per = nn__turboquant__values_per_container(d);
-    const uint32_t unit = (uint32_t)row[(c / per) * 2ull] | ((uint32_t)row[(c / per) * 2ull + 1ull] << 8);
-    return scale * nn__turboquant__zzpackage_level(d, (unit >> (uint32_t)(d * (c % per))) & ((1u << (uint32_t)d) - 1u));
+    const uint64_t at = nn__turboquant__zzpackage_unit_of(c, per) * 2ull;
+    const uint32_t unit = (uint32_t)row[at] | ((uint32_t)row[at + 1ull] << 8);
+    return scale * nn__turboquant__zzpackage_level(d, (unit >> ((uint32_t)d * ((uint32_t)c % (uint32_t)per))) & nn__turboquant__zzpackage_mask(d));
 }
 
 /* A residual's first pass over TurboQuant keys: `attention_weights`, a key row `t · kv_heads + g`. `q` is rotated. */
@@ -3583,6 +3653,30 @@ static __device__ inline void nn__swiglu__zzabi_body_clamped(uint16_t* act, cons
     }
 }
 
+/* `cap · tanh(v / cap)`: a value held under `cap` smoothly. The tanh is `1 − 2/(e^{2x} + 1)` — and below 0.1 its series,
+ * `x − x³/3 + 2x⁵/15`, since the first form subtracts two numbers next to 1 there and keeps few of a small `x`'s digits. */
+static __device__ inline float nn__swiglu__zzprivate_softcap(float v, float cap) {
+    const float x = v / cap, x2 = x * x;
+    if (x2 < 0.01f) return cap * x * (1.0f - x2 * (0.33333334f - x2 * 0.13333334f));
+    return cap * (1.0f - 2.0f / (nn__silicon__expf(2.0f * x) + 1.0f));
+}
+
+/* `act = gate_cap·tanh(g / gate_cap) · σ(g) · up_cap·tanh(u / up_cap)` — Inkling 2's soft-capped swiglu — for `pairs` pairs,
+ * each its gate then its up, `n` each, as the grouped gate-and-up launch leaves them. The sigmoid reads the gate as it
+ * is. */
+static __device__ inline void nn__swiglu__zzabi_body_softcapped(uint16_t* act, const uint16_t* gu, uint64_t pairs, uint64_t n,
+                                                                 float gate_cap, float up_cap, unsigned int* over) {
+    const uint64_t all = pairs * n;
+    for (uint64_t i = nn__kernels__zzprivate_first(); i < all; i += nn__kernels__zzprivate_stride()) {
+        const uint64_t p = i / n, j = i - p * n;
+        const float g = nn__silicon__half_to_float(gu[p * 2ull * n + j]), u = nn__silicon__half_to_float(gu[p * 2ull * n + n + j]);
+        bool hit = false;
+        act[i] = nn__primitives__zzpackage_float_to_half(nn__swiglu__zzprivate_softcap(g, gate_cap) / (1.0f + nn__silicon__expf(-g))
+                                                         * nn__swiglu__zzprivate_softcap(u, up_cap), &hit);
+        if (hit) *over = NN__KERNELS__OVERFLOWED;
+    }
+}
+
 /* ── MULTI-HEAD LATENT ATTENTION — THE KEYS AND VALUES OF EVERY HEAD FROM ONE CACHED LATENT ────────────────
  * `W` is the latent's expansion, `heads · stride` rows of `latent`: a head's `stride` rows are its key rows, then its
  * value rows. A query is ABSORBED into the latent — `Wₖᵀ q` a head — so its scores are dot products with the latent
@@ -3743,10 +3837,11 @@ static __device__ inline void nn__index__zzabi_body_scores(float* scores, const 
 static __device__ inline void nn__index__zzabi_body_scores_rows(float* scores, uint64_t scores_row, const uint16_t* q, const uint16_t* w,
                                                                 const uint16_t* pooled, uint64_t heads, uint64_t dim, uint64_t len0,
                                                                 uint64_t kpool, uint64_t rows, float scale) {
-    const uint64_t most = (len0 + rows - 1ull) / kpool;
-    for (uint64_t b = nn__silicon__block(); b < rows * most; b += nn__silicon__blocks()) {
-        const uint64_t u = b / most, p = b - u * most;
-        if (p < (len0 + u) / kpool)
+    /* a row at a time, its pools across the blocks: no quotient of a quotient, which Intel's compiler for OpenCL crashes
+     * on (▶ `nn__turboquant__zzpackage_units`); each (row, pool) the same score into the same place */
+    for (uint64_t u = 0ull; u < rows; ++u) {
+        const uint64_t finished = (len0 + u) / kpool;
+        for (uint64_t p = nn__silicon__block(); p < finished; p += nn__silicon__blocks())
             nn__index__zzprivate_score(scores + u * scores_row, q + u * heads * dim, w + u * heads, pooled, heads, dim, p, scale);
     }
 }
@@ -3818,7 +3913,8 @@ static __device__ inline void nn__index__zzprivate_select(uint32_t* index, uint3
 /* Each block of `block` scores' largest into `out` — `pools` scores, the last block what is left of them: the first level of
  * a two-level top k scores a block by its best position (DeepSeek's candidate blocks). */
 static __device__ inline void nn__index__zzabi_body_blocks(float* out, const float* scores, uint64_t pools, uint64_t block) {
-    const uint64_t blocks = (pools + block - 1ull) / block;
+    /* in 32 bits (▶ `nn__turboquant__zzpackage_units`): `pools` is a count of a context's pools, far under 2^32 */
+    const uint64_t blocks = (uint64_t)(((uint32_t)pools + (uint32_t)block - 1u) / (uint32_t)block);
     for (uint64_t b = nn__kernels__zzprivate_first(); b < blocks; b += nn__kernels__zzprivate_stride()) {
         const uint64_t end = (b + 1ull) * block < pools ? (b + 1ull) * block : pools;
         float best = scores[b * block];
@@ -3850,6 +3946,393 @@ static __device__ inline void nn__index__zzabi_body_gather_rows(uint16_t* out, u
 /* Halves into floats, each exactly: a vector into a residual kept as floats (▶ THE STREAMS AS FLOATS). */
 static __device__ inline void nn__vector__zzabi_body_widen(float* out, const uint16_t* x, uint64_t n) {
     for (uint64_t i = nn__kernels__zzprivate_first(); i < n; i += nn__kernels__zzprivate_stride()) out[i] = nn__silicon__half_to_float(x[i]);
+}
+
+/* `z[i] = x[i] + y[i]` for `n` floats — what a model adds to an attention's scores before their softmax. `z` may be `x`
+ * or `y`. */
+static __device__ inline void nn__vector__zzabi_body_add_fp32(float* z, const float* x, const float* y, uint64_t n) {
+    for (uint64_t i = nn__kernels__zzprivate_first(); i < n; i += nn__kernels__zzprivate_stride()) z[i] = x[i] + y[i];
+}
+
+/* ⭐ A SHORT CAUSAL CONVOLUTION'S STEP, A CHANNEL ITS OWN TAPS — a position's output from its input and the `count − 1`
+ *   inputs before it: `o[c] = scale · (x[c] + Σ tap[lag][c] · x_lag[c])`, `x_0` this position's and `x_lag` the one
+ *   `lag` positions back. `w` is the taps, a row a lag, this position's first; `s` the inputs before this one, a row a
+ *   lag, the newest first — and the step slides it: this input in, the oldest out.
+ *   With `group` not zero a run of `group` channels — an attention's head — has taps of its own for this position as
+ *   well, `made`'s `count` halves a run, and they join the layer's: `tap[lag][c] + made[(c / group)·count + lag]`.
+ *   With `group` zero `made` is not read.
+ * ⛳ A LANE PER CHANNEL, as `deltanet_conv_step`: a channel's column of the inputs is read and slid inside one lane,
+ *   and no other lane touches it. `o` and `x` are not `s`.
+ * The sum is kept in floats and rounded to a half once. `MEASURED` on the MI50 (node03): the same step as twelve of
+ * nn's words — four products, three sums, the input added, the scale, three copies — was twelve kernels of 2 to 3 µs
+ * (▶ measurements/2026-11-24_nn207_inkling2_rates_node03.md). */
+static __device__ inline void nn__convolution__zzabi_body_step(uint16_t* o, uint16_t* s, const uint16_t* w, const uint16_t* made,
+                                                               const uint16_t* x, uint64_t width, uint64_t count, uint64_t group,
+                                                               float scale, unsigned int* over) {
+    for (uint64_t c = nn__kernels__zzprivate_first(); c < width; c += nn__kernels__zzprivate_stride()) {
+        const uint64_t run = group != 0ull ? (c / group) * count : 0ull;
+        const float xc = nn__silicon__half_to_float(x[c]);
+        float tap = nn__silicon__half_to_float(w[c]);
+        if (group != 0ull) tap += nn__silicon__half_to_float(made[run]);
+        float sum = tap * xc;
+        for (uint64_t lag = 1ull; lag < count; ++lag) {
+            tap = nn__silicon__half_to_float(w[lag * width + c]);
+            if (group != 0ull) tap += nn__silicon__half_to_float(made[run + lag]);
+            sum += tap * nn__silicon__half_to_float(s[(lag - 1ull) * width + c]);
+        }
+        bool hit = false;
+        o[c] = nn__primitives__zzpackage_float_to_half((sum + xc) * scale, &hit);
+        if (hit) *over = NN__KERNELS__OVERFLOWED;
+        for (uint64_t lag = count - 1ull; lag > 1ull; --lag) s[(lag - 1ull) * width + c] = s[(lag - 2ull) * width + c];
+        if (count > 1ull) s[c] = x[c];
+    }
+}
+
+/* ⭐ …AND ITS OUTPUT ADDED TO A VECTOR, IN THE SAME LAUNCH — `convolution_step` into `o`, then `sum[c] = add[c] + o[c]` as
+ *   `vector_add` takes it: the step rounded to a half, the two halves added in floats and rounded once. What a layer does
+ *   with a residual: the convolution's output kept, the stream it joins made. With `add` zero `sum` is the step's output
+ *   itself. `sum` is none of `o`, `s` and `x`; it may be `add`. */
+static __device__ inline void nn__convolution__zzabi_body_step_add(uint16_t* o, uint16_t* sum, uint16_t* s, const uint16_t* w, const uint16_t* made,
+                                                                   const uint16_t* x, const uint16_t* add, uint64_t width, uint64_t count,
+                                                                   uint64_t group, float scale, unsigned int* over) {
+    for (uint64_t c = nn__kernels__zzprivate_first(); c < width; c += nn__kernels__zzprivate_stride()) {
+        const uint64_t run = group != 0ull ? (c / group) * count : 0ull;
+        const float xc = nn__silicon__half_to_float(x[c]);
+        float tap = nn__silicon__half_to_float(w[c]);
+        if (group != 0ull) tap += nn__silicon__half_to_float(made[run]);
+        float total = tap * xc;
+        for (uint64_t lag = 1ull; lag < count; ++lag) {
+            tap = nn__silicon__half_to_float(w[lag * width + c]);
+            if (group != 0ull) tap += nn__silicon__half_to_float(made[run + lag]);
+            total += tap * nn__silicon__half_to_float(s[(lag - 1ull) * width + c]);
+        }
+        bool hit = false;
+        const uint16_t out = nn__primitives__zzpackage_float_to_half((total + xc) * scale, &hit);
+        o[c] = out;
+        if (add != 0) sum[c] = nn__primitives__zzpackage_float_to_half(nn__silicon__half_to_float(add[c]) + nn__silicon__half_to_float(out), &hit);
+        else sum[c] = out;
+        if (hit) *over = NN__KERNELS__OVERFLOWED;
+        for (uint64_t lag = count - 1ull; lag > 1ull; --lag) s[(lag - 1ull) * width + c] = s[(lag - 2ull) * width + c];
+        if (count > 1ull) s[c] = x[c];
+    }
+}
+
+/* ⭐ …OVER A CHUNK'S POSITIONS IN ONE LAUNCH — `n` steps in order, position `p`'s input from `x + p·width`, its output to
+ *   `o + p·width` and, where `sum` is not zero, `sum + p·width` as `convolution_step_add` makes it (`add + p·width`
+ *   added, or none where `add` is zero); its made taps, with `group` not zero, from `made + p·made_stride`. A lane per
+ *   channel slides that channel's inputs through every position in turn, as the one-position door's lane does a
+ *   position, so each position's output is that door's, bit for bit, and `s` is left as the `n` steps leave it.
+ *   `o`, `sum` and `x` are not `s`. */
+static __device__ inline void nn__convolution__zzabi_body_steps(uint16_t* o, uint16_t* sum, uint16_t* s, const uint16_t* w, const uint16_t* made,
+                                                                const uint16_t* x, const uint16_t* add, uint64_t width, uint64_t count,
+                                                                uint64_t group, float scale, uint64_t n, uint64_t made_stride,
+                                                                unsigned int* over) {
+    for (uint64_t c = nn__kernels__zzprivate_first(); c < width; c += nn__kernels__zzprivate_stride()) {
+        const uint64_t run = group != 0ull ? (c / group) * count : 0ull;
+        for (uint64_t p = 0ull; p < n; ++p) {
+            const uint64_t at = p * width + c;
+            const uint16_t* mp = made + (group != 0ull ? p * made_stride : 0ull);
+            const float xc = nn__silicon__half_to_float(x[at]);
+            float tap = nn__silicon__half_to_float(w[c]);
+            if (group != 0ull) tap += nn__silicon__half_to_float(mp[run]);
+            float total = tap * xc;
+            for (uint64_t lag = 1ull; lag < count; ++lag) {
+                tap = nn__silicon__half_to_float(w[lag * width + c]);
+                if (group != 0ull) tap += nn__silicon__half_to_float(mp[run + lag]);
+                total += tap * nn__silicon__half_to_float(s[(lag - 1ull) * width + c]);
+            }
+            bool hit = false;
+            const uint16_t out = nn__primitives__zzpackage_float_to_half((total + xc) * scale, &hit);
+            o[at] = out;
+            if (sum != 0) {
+                if (add != 0) sum[at] = nn__primitives__zzpackage_float_to_half(nn__silicon__half_to_float(add[at]) + nn__silicon__half_to_float(out), &hit);
+                else sum[at] = out;
+            }
+            if (hit) *over = NN__KERNELS__OVERFLOWED;
+            for (uint64_t lag = count - 1ull; lag > 1ull; --lag) s[(lag - 1ull) * width + c] = s[(lag - 2ull) * width + c];
+            if (count > 1ull) s[c] = x[at];
+        }
+    }
+}
+
+/* ⭐ A GATE BETWEEN TWO VECTORS, EACH SIDE ITS OWN TANH: `o[i] = (1 − tanh(forget[i]))·x[i] + tanh(gain[i])·y[i]` — how a
+ *   model lets a message into a state: what it forgets of the state, what it takes of the message. tanh as
+ *   `nn__vector__tanh` has it; the sum kept in floats and rounded to a half once. `o` may be `x` or `y`. */
+static __device__ inline void nn__vector__zzabi_body_gate_tanh(uint16_t* o, const uint16_t* x, const uint16_t* y, const uint16_t* forget,
+                                                               const uint16_t* gain, uint64_t n, unsigned int* over) {
+    for (uint64_t i = nn__kernels__zzprivate_first(); i < n; i += nn__kernels__zzprivate_stride()) {
+        const float f = 1.0f - 2.0f / (nn__silicon__expf(2.0f * nn__silicon__half_to_float(forget[i])) + 1.0f);
+        const float g = 1.0f - 2.0f / (nn__silicon__expf(2.0f * nn__silicon__half_to_float(gain[i])) + 1.0f);
+        bool hit = false;
+        o[i] = nn__primitives__zzpackage_float_to_half((1.0f - f) * nn__silicon__half_to_float(x[i]) + g * nn__silicon__half_to_float(y[i]), &hit);
+        if (hit) *over = NN__KERNELS__OVERFLOWED;
+    }
+}
+
+/* ⭐ A FEW QUERIES OVER A FEW STATES, EACH AS WIDE AS THE MODEL, IN ONE LAUNCH — a learned query's mix: query `h`'s
+ *   scores over `rows` states of `width` halves and — `with_current` 1 — one more, `current` normed with no weight
+ *   (as `rmsnorm` norms, rounded to a half as a stored state is); the scores over √width, their softmax, and the states
+ *   weighed by it into `o`, a row a query.
+ * ⛳ ONE LAUNCH WHERE `attention_scores` AND `attention_mix` ARE TWO, because here the weights fit a lane's registers:
+ *   at most `NN__ATTENTION__STATES_MAX` states, their sums folded together, so every lane of a block holds the whole
+ *   softmax and needs no other lane's writes. A lane sums its own slice of the width, a block a query.
+ * `MEASURED` on the MI50 (node03) at four states and the current one of 2,304: the norm, the scores and the mix as
+ * three launches 7 + 28 + 15 µs (▶ measurements/2026-11-24_nn207_inkling2_rates_node03.md). `o` is none of the others. */
+#define NN__ATTENTION__STATES_MAX 8u
+static __device__ inline void nn__attention__zzabi_body_states(uint16_t* o, const uint16_t* q, const uint16_t* states, const uint16_t* current,
+                                                               uint64_t queries, uint64_t width, uint64_t rows, uint64_t with_current,
+                                                               float eps, unsigned int* over) {
+    const uint64_t lane = nn__silicon__lane(), lanes = nn__silicon__lanes();
+    const uint32_t stored = (uint32_t)rows, count = stored + (with_current != 0ull ? 1u : 0u);
+    float gain = 0.0f;
+    if (with_current != 0ull) {
+        float squares = 0.0f;
+        for (uint64_t e = lane; e < width; e += lanes) {
+            const float v = nn__silicon__half_to_float(current[e]);
+            squares += v * v;
+        }
+        gain = 1.0f / nn__silicon__sqrtf(nn__silicon__lanes_sum(squares) / (float)width + eps);
+    }
+    const float scale = 1.0f / nn__silicon__sqrtf((float)width);
+    for (uint64_t h = nn__silicon__block(); h < queries; h += nn__silicon__blocks()) {
+        const uint16_t* qh = q + h * width;
+        float weight[NN__ATTENTION__STATES_MAX];
+        for (uint32_t t = 0u; t < count; ++t) weight[t] = 0.0f;
+        for (uint64_t e = lane; e < width; e += lanes) {
+            const float qe = nn__silicon__half_to_float(qh[e]);
+            for (uint32_t t = 0u; t < stored; ++t) weight[t] += qe * nn__silicon__half_to_float(states[t * width + e]);
+            if (with_current != 0ull) {
+                bool hit = false;
+                weight[stored] += qe * nn__silicon__half_to_float(
+                    nn__primitives__zzpackage_float_to_half(nn__silicon__half_to_float(current[e]) * gain, &hit));
+            }
+        }
+        nn__silicon__lanes_sums(weight, count);
+        float top = -NN__KERNELS__INFINITY, total = 0.0f;
+        for (uint32_t t = 0u; t < count; ++t) {
+            weight[t] *= scale;
+            if (weight[t] > top) top = weight[t];
+        }
+        for (uint32_t t = 0u; t < count; ++t) {
+            weight[t] = nn__silicon__expf(weight[t] - top);
+            total += weight[t];
+        }
+        for (uint64_t e = lane; e < width; e += lanes) {
+            float sum = 0.0f;
+            for (uint32_t t = 0u; t < stored; ++t) sum += weight[t] * nn__silicon__half_to_float(states[t * width + e]);
+            bool hit = false;
+            if (with_current != 0ull)
+                sum += weight[stored] * nn__silicon__half_to_float(
+                    nn__primitives__zzpackage_float_to_half(nn__silicon__half_to_float(current[e]) * gain, &hit));
+            hit = false;
+            o[h * width + e] = nn__primitives__zzpackage_float_to_half(sum / total, &hit);
+            if (hit) *over = NN__KERNELS__OVERFLOWED;
+        }
+    }
+}
+
+/* ⭐ …OVER A CHUNK'S POSITIONS IN ONE LAUNCH — `attention_states` for each of `n` positions: position `p`'s states from
+ *   `states + p·states_stride`, its current from `current + p·current_stride`, its answers from `o + p·o_stride`, the
+ *   queries every position's. A block a position's query, each as the one-position door's block makes it, so a row is
+ *   that door's for its position, bit for bit, where a family answers both with these bodies. A prompt read as rows:
+ *   each position mixes its own block states. */
+static __device__ inline void nn__attention__zzabi_body_states_rows(uint16_t* o, const uint16_t* q, const uint16_t* states,
+                                                                    const uint16_t* current, uint64_t queries, uint64_t width, uint64_t rows,
+                                                                    uint64_t with_current, float eps, uint64_t n, uint64_t states_stride,
+                                                                    uint64_t current_stride, uint64_t o_stride, unsigned int* over) {
+    const uint64_t lane = nn__silicon__lane(), lanes = nn__silicon__lanes();
+    const uint32_t stored = (uint32_t)rows, count = stored + (with_current != 0ull ? 1u : 0u), each = (uint32_t)queries;
+    const float scale = 1.0f / nn__silicon__sqrtf((float)width);
+    for (uint64_t b = nn__silicon__block(); b < n * queries; b += nn__silicon__blocks()) {
+        const uint32_t p = (uint32_t)b / each, h = (uint32_t)b - p * each;
+        const uint16_t* sp = states + (uint64_t)p * states_stride;
+        const uint16_t* cp = current + (uint64_t)p * current_stride;
+        uint16_t* op = o + (uint64_t)p * o_stride + (uint64_t)h * width;
+        float gain = 0.0f;
+        if (with_current != 0ull) {
+            float squares = 0.0f;
+            for (uint64_t e = lane; e < width; e += lanes) {
+                const float v = nn__silicon__half_to_float(cp[e]);
+                squares += v * v;
+            }
+            gain = 1.0f / nn__silicon__sqrtf(nn__silicon__lanes_sum(squares) / (float)width + eps);
+        }
+        const uint16_t* qh = q + (uint64_t)h * width;
+        float weight[NN__ATTENTION__STATES_MAX];
+        for (uint32_t t = 0u; t < count; ++t) weight[t] = 0.0f;
+        for (uint64_t e = lane; e < width; e += lanes) {
+            const float qe = nn__silicon__half_to_float(qh[e]);
+            for (uint32_t t = 0u; t < stored; ++t) weight[t] += qe * nn__silicon__half_to_float(sp[t * width + e]);
+            if (with_current != 0ull) {
+                bool hit = false;
+                weight[stored] += qe * nn__silicon__half_to_float(
+                    nn__primitives__zzpackage_float_to_half(nn__silicon__half_to_float(cp[e]) * gain, &hit));
+            }
+        }
+        nn__silicon__lanes_sums(weight, count);
+        float top = -NN__KERNELS__INFINITY, total = 0.0f;
+        for (uint32_t t = 0u; t < count; ++t) {
+            weight[t] *= scale;
+            if (weight[t] > top) top = weight[t];
+        }
+        for (uint32_t t = 0u; t < count; ++t) {
+            weight[t] = nn__silicon__expf(weight[t] - top);
+            total += weight[t];
+        }
+        for (uint64_t e = lane; e < width; e += lanes) {
+            float sum = 0.0f;
+            for (uint32_t t = 0u; t < stored; ++t) sum += weight[t] * nn__silicon__half_to_float(sp[t * width + e]);
+            bool hit = false;
+            if (with_current != 0ull)
+                sum += weight[stored] * nn__silicon__half_to_float(
+                    nn__primitives__zzpackage_float_to_half(nn__silicon__half_to_float(cp[e]) * gain, &hit));
+            hit = false;
+            op[e] = nn__primitives__zzpackage_float_to_half(sum / total, &hit);
+            if (hit) *over = NN__KERNELS__OVERFLOWED;
+        }
+    }
+}
+
+/* ⭐ ROWS SCALED, HELD TO A LENGTH AND TIMES A FACTOR, IN ONE LAUNCH — Inkling 2's query and its bias state, a row a
+ *   head: each of `rows` rows of `n` halves multiplied element by element by `scale` (as long as all the rows) and rounded
+ *   as `vector_pointwise_mul` rounds; the row held to a length as `vector_l2clip` holds it — the same lanes' sums, the
+ *   same fold — and rounded; then times `factor` as `vector_scale` multiplies, and rounded. So `o` is, to the bit, the three
+ *   doors one after the other on a family whose bodies they are, in one launch where they were three; a factor of one
+ *   leaves the clipped row as it is. A row's sum is whole before its first write, and a lane writes only what it read, so
+ *   `o` may be `x`. */
+static __device__ inline void nn__vector__zzabi_body_scale_l2clip(uint16_t* o, const uint16_t* x, const uint16_t* scale, uint64_t rows,
+                                                                   uint64_t n, float limit, float factor, unsigned int* over) {
+    const uint64_t lane = nn__silicon__lane(), lanes = nn__silicon__lanes();
+    for (uint64_t r = nn__silicon__block(); r < rows; r += nn__silicon__blocks()) {
+        const uint16_t* xr = x + r * n;
+        const uint16_t* sr = scale + r * n;
+        float part = 0.0f;
+        for (uint64_t i = lane; i < n; i += lanes) {
+            bool hit = false;
+            const float v = nn__silicon__half_to_float(nn__primitives__zzpackage_float_to_half(
+                                nn__silicon__half_to_float(xr[i]) * nn__silicon__half_to_float(sr[i]), &hit));
+            part += v * v;
+        }
+        const float ratio = limit / (nn__silicon__sqrtf(nn__silicon__lanes_sum(part)) + 1e-6f);
+        const float clip = ratio < 1.0f ? ratio : 1.0f;
+        for (uint64_t i = lane; i < n; i += lanes) {
+            bool hit = false;
+            const uint16_t scaled = nn__primitives__zzpackage_float_to_half(nn__silicon__half_to_float(xr[i]) * nn__silicon__half_to_float(sr[i]), &hit);
+            const uint16_t clipped = nn__primitives__zzpackage_float_to_half(nn__silicon__half_to_float(scaled) * clip, &hit);
+            o[r * n + i] = nn__primitives__zzpackage_float_to_half(nn__silicon__half_to_float(clipped) * factor, &hit);
+            if (hit) *over = NN__KERNELS__OVERFLOWED;
+        }
+    }
+}
+
+/* ⭐ A VECTOR GATED BY THE SIGMOID OF ANOTHER — `o = x · σ(gate)`, Inkling 2's attention answer through its output gate:
+ *   σ as `sigmoid` takes it and rounded to a half, then the product as `vector_pointwise_mul` rounds it — the two doors'
+ *   bits in one launch. `o` may be `x` or `gate`. */
+static __device__ inline void nn__vector__zzabi_body_gate_sigmoid(uint16_t* o, const uint16_t* x, const uint16_t* gate, uint64_t n,
+                                                                  unsigned int* over) {
+    for (uint64_t i = nn__kernels__zzprivate_first(); i < n; i += nn__kernels__zzprivate_stride()) {
+        const float v = nn__silicon__half_to_float(gate[i]);
+        bool hit = false;
+        const uint16_t g = nn__primitives__zzpackage_float_to_half(1.0f / (1.0f + nn__silicon__expf(-v)), &hit);
+        o[i] = nn__primitives__zzpackage_float_to_half(nn__silicon__half_to_float(x[i]) * nn__silicon__half_to_float(g), &hit);
+        if (hit) *over = NN__KERNELS__OVERFLOWED;
+    }
+}
+
+/* ⭐ THE ROW SOFTMAX WITH A SINK OF THE SCORES PLUS A BIAS — `attention_softmax_sink` over `p + bias`, each sum a float as
+ *   `vector_add_fp32` takes it and left in `p` as that door leaves it: Inkling 2's scores and its position's bias, two
+ *   launches as one, their bits. `bias` is laid as `p` is, a row `length` apart. */
+static __device__ inline void nn__attention__zzabi_body_softmax_sink_bias(float* p, const float* bias, const uint16_t* sink, uint64_t rows,
+                                                                          uint64_t length) {
+    const uint64_t lane = nn__silicon__lane(), lanes = nn__silicon__lanes();
+    for (uint64_t r = nn__silicon__block(); r < rows; r += nn__silicon__blocks()) {
+        float* ph = p + r * length;
+        const float* bh = bias + r * length;
+        const float sk = nn__silicon__half_to_float(sink[r]);
+        float top = sk;
+        for (uint64_t t = lane; t < length; t += lanes) {
+            ph[t] = ph[t] + bh[t];
+            if (ph[t] > top) top = ph[t];
+        }
+        top = nn__silicon__lanes_max(top);
+        float part = 0.0f;
+        for (uint64_t t = lane; t < length; t += lanes) {
+            ph[t] = nn__silicon__expf(ph[t] - top);
+            part += ph[t];
+        }
+        const float inv = 1.0f / (nn__silicon__lanes_sum(part) + nn__silicon__expf(sk - top));
+        for (uint64_t t = lane; t < length; t += lanes) ph[t] *= inv;
+    }
+}
+
+/* ⭐⭐ INKLING 2'S ATTENTION OVER A CHUNK — A WINDOW A ROW. Row `u` of `rows` reads `len0 + u·step` key rows from
+ *   `k + u·k_row` (a key row `kv_heads · head_dim` halves), the last of them its own position: the cache itself where it
+ *   is laid a row a position, or a chunk's keys after the window before them, each row's window then one row further on.
+ *   Its position's bias is the table laid a row a distance, the furthest first, whose row `last` is distance 0 — key
+ *   `t`'s at row `last − (length − 1 − t)`. Three doors, each the one-position door's work a row:
+ *   `attention_window_scores` the query heads' scores and the bias state's (`rank` halves a head), each over the root of
+ *   its width, added as floats — `attention_scores_grouped` twice and the add of `attention_softmax_sink_bias`;
+ *   `attention_window_softmax` the softmax with the sink, a head's own; `attention_window_mix` the values weighed.
+ *   Row `u`'s scores at `p + u·p_row`, a query head's `length` apart; its queries and its bias states rows of their
+ *   heads, one after another. The items are counted in 32 bits. */
+static __device__ inline void nn__attention__zzabi_body_window_scores(float* p, uint64_t p_row, const uint16_t* q, const uint16_t* k,
+                                                                      uint64_t k_row, const uint16_t* bq, const uint16_t* table, uint64_t last,
+                                                                      uint64_t len0, uint64_t step, uint64_t q_heads, uint64_t kv_heads,
+                                                                      uint64_t head_dim, uint64_t rank, uint64_t rows) {
+    const uint32_t group = (uint32_t)(q_heads / kv_heads), most = (uint32_t)(len0 + (rows - 1ull) * step);
+    const uint32_t tiles = (most + NN__ATTENTION__GROUP_SPAN - 1u) / NN__ATTENTION__GROUP_SPAN, per = (uint32_t)kv_heads * tiles * group;
+    const uint64_t row = kv_heads * head_dim, q_row = q_heads * head_dim, bq_row = q_heads * rank;
+    const float scale = 1.0f / nn__silicon__sqrtf((float)head_dim), bias_scale = 1.0f / nn__silicon__sqrtf((float)rank);
+    for (uint64_t it = nn__kernels__zzprivate_first(); it < rows * per; it += nn__kernels__zzprivate_stride()) {
+        const uint32_t u = (uint32_t)it / per, rem = (uint32_t)it - u * per;
+        const uint64_t length = len0 + (uint64_t)u * step;
+        const uint32_t hg = rem % group, rest = rem / group, tile = rest % tiles, g = rest / tiles;
+        const uint64_t h = (uint64_t)g * group + hg, t0 = (uint64_t)tile * NN__ATTENTION__GROUP_SPAN;
+        if (t0 >= length) continue;
+        float dot[NN__ATTENTION__GROUP_SPAN], bias[NN__ATTENTION__GROUP_SPAN];
+        const uint64_t span = length - t0 < NN__ATTENTION__GROUP_SPAN ? length - t0 : NN__ATTENTION__GROUP_SPAN;
+        nn__attention__zzprivate_dots(dot, q + u * q_row + h * head_dim, k + u * k_row + (uint64_t)g * head_dim, row, head_dim, t0, span);
+        nn__attention__zzprivate_dots(bias, bq + u * bq_row + h * rank, table + (last - (length - 1ull)) * rank, rank, rank, t0, span);
+        for (uint64_t j = 0ull; j < span; ++j) p[u * p_row + h * length + t0 + j] = dot[j] * scale + bias[j] * bias_scale;
+    }
+}
+
+/* …each row's heads' softmax over its window with the sink — `attention_softmax_sink`, head `h` of row `u` its own sink,
+ *   `sink + u·sink_row + h`. A block a (row, head). */
+static __device__ inline void nn__attention__zzabi_body_window_softmax(float* p, uint64_t p_row, const uint16_t* sink, uint64_t sink_row,
+                                                                       uint64_t len0, uint64_t step, uint64_t heads, uint64_t rows) {
+    const uint64_t lane = nn__silicon__lane(), lanes = nn__silicon__lanes();
+    for (uint64_t b = nn__silicon__block(); b < rows * heads; b += nn__silicon__blocks()) {
+        const uint32_t u = (uint32_t)b / (uint32_t)heads, h = (uint32_t)b - u * (uint32_t)heads;
+        const uint64_t length = len0 + (uint64_t)u * step;
+        float* ph = p + u * p_row + h * length;
+        const float sk = nn__silicon__half_to_float(sink[u * sink_row + h]);
+        float top = sk;
+        for (uint64_t t = lane; t < length; t += lanes) if (ph[t] > top) top = ph[t];
+        top = nn__silicon__lanes_max(top);
+        float part = 0.0f;
+        for (uint64_t t = lane; t < length; t += lanes) {
+            ph[t] = nn__silicon__expf(ph[t] - top);
+            part += ph[t];
+        }
+        const float inv = 1.0f / (nn__silicon__lanes_sum(part) + nn__silicon__expf(sk - top));
+        for (uint64_t t = lane; t < length; t += lanes) ph[t] *= inv;
+    }
+}
+
+/* …and each row's values weighed: row `u`'s window of value rows at `v + u·v_row`, its heads' answers at `o + u·o_row` —
+ *   `attention_mix`, a block a (row, query head). */
+static __device__ inline void nn__attention__zzabi_body_window_mix(uint16_t* o, uint64_t o_row, const float* p, uint64_t p_row,
+                                                                   const uint16_t* v, uint64_t v_row, uint64_t len0, uint64_t step,
+                                                                   uint64_t q_heads, uint64_t kv_heads, uint64_t head_dim, uint64_t rows,
+                                                                   unsigned int* over) {
+    const uint64_t group = q_heads / kv_heads, row = kv_heads * head_dim;
+    for (uint64_t b = nn__silicon__block(); b < rows * q_heads; b += nn__silicon__blocks()) {
+        const uint32_t u = (uint32_t)b / (uint32_t)q_heads, h = (uint32_t)b - u * (uint32_t)q_heads;
+        const uint64_t length = len0 + (uint64_t)u * step;
+        nn__attention__zzprivate_mix_head(o + u * o_row + h * head_dim, p + u * p_row + h * length, v + u * v_row + (h / group) * head_dim,
+                                          row, head_dim, length, over);
+    }
 }
 
 static __device__ inline void nn__vector__zzabi_body_copy(uint16_t* out, const uint16_t* in, uint64_t n) {

@@ -16,12 +16,13 @@ with every model measured on that kind of machine, and the model's own page.
 |---|---|---|---|---|---|---|---|---|---|
 | [a phone](android.md) | 5.4 GB | 8 Arm cores | — | [Qwen 3.5 2B](models.md#qwen-35-2b) `D4` | Android (Termux), experimental | 15.2-15.9 positions/s | 8.02-9.60 tokens/s after 163 | — | — |
 | [none](results.md#no-graphics-card) | 16 GB | 4 cores | — | [Qwen 3.5 4B](models.md#qwen-35-4b) `D4` | the CPU alone | 18.9 positions/s | 7.95 tokens/s after 8k | 8,320 | — |
-| [8 GB](results.md#an-8-gb-card) | 32 GB | 4 cores | — | [Qwen 3.6 35B-A3B](models.md#qwen-36-35b-a3b) `D8E4` | the experts in RAM, a tier on the card | 94.9 positions/s | 14.34 tokens/s after 100k | 262,144 | the 4B on the card |
+| [8 GB](results.md#an-8-gb-card) | 16 GB | 4 cores | — | [Inkling 2 Mini](models.md#inkling-2-mini) `D8E4` | the experts in RAM, a tier on the card | 48.8 positions/s | 13.85 tokens/s after 100k | 178,176 | Qwen 3.6 35B-A3B, its experts in RAM and a tier on the card |
+| [16 GB](results.md#a-16-gb-card) | 16 GB | 4 cores | — | [Inkling 2 Mini](models.md#inkling-2-mini) `D8E4` | on the card | 128.3 positions/s | 28.96 tokens/s after 57k | 57,344 | Qwen 3.8 27B on the card |
+| [16 GB](results.md#a-16-gb-card) | 16 GB | 4 cores | — | [Inkling 2 Mini](models.md#inkling-2-mini) `D8E4` | the experts in RAM, a tier lent the cache | 59.3 positions/s | 19.04 tokens/s after 100k | 424,960 | Qwen 3.6 35B-A3B over two 16 GB cards |
 | [16 GB](results.md#a-16-gb-card) | 32 GB | 4 cores | NVMe, 5.7 GB/s | [Qwen 3.8 Flash-Next](models.md#qwen-38-flash-next) `D8E4` | the experts from the disk | 29.2-29.4 positions/s | 10.61-10.64 tokens/s after 2k | — | the 122B from the disk |
 | [16 GB](results.md#a-16-gb-card) | 14 GB | 4 cores | NVMe, 5.7 GB/s | [GLM 5.3 Flash](models.md#glm-53-flash) `D8E4` | the experts from the disk | 9.1 positions/s | 2.21 tokens/s after 100k | 110,000 | — |
-| [16 GB](results.md#a-16-gb-card) | 16 GB | 4 cores | — | [Qwen 3.8 27B](models.md#qwen-38-27b) `D4` | on the card | 221.3 positions/s | 14.32 tokens/s after 35k | 35,840 | — |
-| [2× 16 GB](results.md#two-cards-or-more) | 125 GB | 28 cores | — | [Qwen 3.6 35B-A3B](models.md#qwen-36-35b-a3b) `D8E4` | every layer over both cards, a tier on each | 85.9 positions/s | 32.22 tokens/s after 100k | 262,144 | the 35B on one card, faster after a short prompt |
 | [32 GB](results.md#a-24-or-32-gb-card) | 160 GB | 28 cores | — | [GLM 5.3 Flash](models.md#glm-53-flash) `D8E4` | every expert in RAM, a tier on the card | 72.1 positions/s | 9.86 tokens/s after 100k | 1,048,576 | DeepSeek-V4.1-Flash, given RAM for its experts |
+| [16 GB](results.md#a-16-gb-card) | 62 GB | 4 cores | NVMe, 5.7 GB/s | [DeepSeek-V4.1-Flash](models.md#deepseek-v41-flash) `D8E4` | the experts from the disk | 8.2 positions/s | 2.53-2.56 tokens/s after 1k | — | — |
 | [32 GB](results.md#a-24-or-32-gb-card) | 1.5 TB (PMem 100) | 48 cores | — | [DeepSeek-V4.1-Flash](models.md#deepseek-v41-flash) `D8E4` | every expert in RAM, a CPU worker a socket | 27.6-29.5 positions/s | 10.9-11.6 tokens/s after 2k | 2,320 as run | every layer over two 32 GB cards |
 <!-- /rates -->
 
@@ -80,6 +81,7 @@ The CPU alone: the model in RAM, or its experts read from the disk.
 | Model | GPU | RAM | CPU | Disk | Setup | Prefill | Decode | Max context | Version |
 |---|---|---|---|---|---|---|---|---|---|
 | [Ministral 3 14B](models.md#ministral-3-14b) `D4` | 8 GB · RTX 5060 Ti, 7.8 GB free | 32 GB | Xeon W-2123 (4 cores) | — | on the card | 948 positions/s | 40.4 tokens/s after 2.6k | 4,096 | v0.20.0 |
+| [Inkling 2 Mini](models.md#inkling-2-mini) `D8E4` | 8 GB · RTX 5060 Ti, 7.8 GB free | 16 GB | Xeon W-2123 (4 cores) | — | the experts in RAM, a 2.5 GB tier (the boot's) | 48.8 positions/s | 13.85 tokens/s after 100k | 178,176 | v1.8.0 |
 | [Qwen 3.6 35B-A3B](models.md#qwen-36-35b-a3b) `D8E4` | 8 GB · RTX 5060 Ti, 7.8 GB free | 32 GB | Xeon W-2123 (4 cores) | — | the experts in RAM, a 1.75 GB tier | 94.9 positions/s | 14.34 tokens/s after 100k | 262,144 | v0.22.0 |
 | [Qwen 3.6 35B-A3B](models.md#qwen-36-35b-a3b) `D8E4` | 8 GB · RTX 5060 Ti, 7.8 GB free | 32 GB | Xeon W-2123 (4 cores) | — | the experts in RAM, a 4 GB tier | 164 positions/s | 52.2 tokens/s after 2k | — | v0.21.0 |
 | [Qwen 3.5 122B-A10B](models.md#qwen-35-122b-a10b) `D8E4` | 8 GB · RTX 5060 Ti, 8 GB held | 32 GB | Xeon W-2123 (4 cores) | NVMe, 5 GB/s | the experts from the disk | 19.0 positions/s | 7.8 tokens/s after 1k | 33,792 | v0.19.0 |
@@ -107,6 +109,10 @@ The CPU alone: the model in RAM, or its experts read from the disk.
 | [Qwen 3.8 27B](models.md#qwen-38-27b) `D4` | 16 GB · RTX 5060 Ti | 16 GB | Xeon W-2123 (4 cores) | — | on the card, the context the card holds | 221.3 positions/s | 14.32 tokens/s after 35k | 35,840 | v0.22.0 |
 | [Qwen 3.8 27B](models.md#qwen-38-27b) `D4` | 16 GB · RTX 5060 Ti | 32 GB | Xeon W-2123 (4 cores) | — | on the card | 552-553 positions/s | 23.8-23.9 tokens/s after 2k | 35,840 | v0.24.0 |
 | [Qwen 3.8 27B](models.md#qwen-38-27b) `D4` | 16 GB · RTX 5060 Ti | 62 GB | Xeon W-2123 (4 cores) | — | on the card | 486 positions/s | 22.2 tokens/s after 6k | 35,840 | v0.20.0 |
+| [Inkling 2 Mini](models.md#inkling-2-mini) `D8E4` | 16 GB · RTX 5060 Ti | 16 GB | Xeon W-2123 (4 cores) | — | on the card | 128.3 positions/s | 28.96 tokens/s after 57k | 57,344 | v1.8.0 |
+| [Inkling 2 Mini](models.md#inkling-2-mini) `D8E4` | 16 GB · RTX 5060 Ti | 16 GB | Xeon W-2123 (4 cores) | — | the experts in RAM, a tier lent the cache's unreached rows (12.9 GB) | 59.3 positions/s | 19.04 tokens/s after 100k | 424,960 | v1.8.0 |
+| [Inkling 2 Mini](models.md#inkling-2-mini) `D8E4` | 16 GB · MI50 | 125 GB | 2× Xeon E5-2680 v4 (28 cores) | — | the experts in RAM, a tier lent the cache's unreached rows (13.4 GB) | 150.4 positions/s | 33.63 tokens/s after 2k | 440,320 | v1.8.0 |
+| [Inkling 2 Mini](models.md#inkling-2-mini) `D8E4` | 16 GB · MI50 | 125 GB | 2× Xeon E5-2680 v4 (28 cores) | — | the experts in RAM, a tier lent the cache's unreached rows (13.4 GB) | 79.3 positions/s | 26.46 tokens/s after 20k | 440,320 | v1.8.0 |
 | [Qwen 3.6 35B-A3B](models.md#qwen-36-35b-a3b) `D8E4` | 16 GB · RTX 5060 Ti | 62 GB | Xeon W-2123 (4 cores) | — | the experts in RAM, an 11.75 GB tier | 194 positions/s | 59.4 tokens/s after 2k | 32,768 | v0.21.0 |
 | [Qwen 3.6 35B-A3B](models.md#qwen-36-35b-a3b) `D8E4` | 16 GB · RTX 5060 Ti | 62 GB | Xeon W-2123 (4 cores) | — | the experts in RAM, a 9.5 GB tier | 195-206 positions/s | 61.1-61.4 tokens/s after 2k | 262,144 | v0.24.0 |
 | [Qwen 3.6 35B-A3B](models.md#qwen-36-35b-a3b) `D8E4` | 16 GB · RTX 5060 Ti | 32 GB | Xeon W-2123 (4 cores) | — | the experts in RAM, a 9.5 GB tier | 185-204 positions/s | 60.6-61.3 tokens/s after 2k | 262,144 | v0.24.0 |
@@ -140,6 +146,7 @@ The CPU alone: the model in RAM, or its experts read from the disk.
 | [GLM 5.3 Flash](models.md#glm-53-flash) `D8E4` | 16 GB · RTX 5060 Ti | 32 GB | Xeon W-2123 (4 cores) | NVMe, 5 GB/s | the experts from the disk | 11.0 positions/s | 2.3 tokens/s after 1k | — | v0.20.0 |
 | [GLM 5.3 Flash](models.md#glm-53-flash) `D8E4` | 16 GB · RTX 5060 Ti | 28 GB | Xeon W-2123 (4 cores) | NVMe, 5 GB/s | the experts from the disk | 11.1 positions/s | 2.2 tokens/s after 1k | — | v0.20.0 |
 | [GLM 5.3 Flash](models.md#glm-53-flash) `D8E4` | 16 GB · MI50 32 GB, 16 GiB held | 150 GB | 2× Xeon E5-2680 v4 (28 cores) | — | every expert in RAM, a 1.5 GB tier | 49.6 positions/s | 9.2 tokens/s after 1k | 300,000 | v0.20.0 |
+| [DeepSeek-V4.1-Flash](models.md#deepseek-v41-flash) `D8E4` | 16 GB · RTX 5060 Ti | 62 GB | Xeon W-2123 (4 cores) | NVMe array, 5.7 GB/s | the experts from the disk, a 50 GB cache of them in RAM | 8.2 positions/s | 2.53-2.56 tokens/s after 1k | — | v1.0.0 |
 | [DeepSeek-V4.1-Flash](models.md#deepseek-v41-flash) `D8E4` | 16 GB · MI50 32 GB, 16 GiB held | 60 GB | 2× Xeon E5-2680 v4 (28 cores) | NVMe array, 6.6 GB/s | the experts from the disk | 9.8-11.0 positions/s | 2.3-2.8 tokens/s after 1k | — | v0.21.2 |
 | [DeepSeek-V4.1-Flash](models.md#deepseek-v41-flash) `D8E4` | 16 GB · MI50 32 GB, 16 GiB held | 30 GB | 2× Xeon E5-2680 v4 (28 cores) | NVMe array, 6.6 GB/s | the experts from the disk | 7.4-7.6 positions/s | 2.4-2.6 tokens/s after 1k | — | v0.21.2 |
 | [DeepSeek-V4.1-Flash](models.md#deepseek-v41-flash) `D8E4` | 16 GB · MI50 32 GB, 16 GiB held | 14 GB | 2× Xeon E5-2680 v4 (28 cores) | NVMe array, 6.6 GB/s | the experts from the disk | 7.1-7.7 positions/s | 1.4-1.8 tokens/s after 1k | — | v0.21.2 |

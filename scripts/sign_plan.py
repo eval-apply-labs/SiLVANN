@@ -47,7 +47,9 @@ INCLUDE = re.compile(r'^\s*#\s*include\s*"([^"]+)"', re.M)
 OPENCL_GENERATOR = {"khronos_opencl2": "opencl_kernel_source.py", "intel_opencl2": "opencl_kernel_source.py",
                     "nvidia_opencl1": "opencl1_kernel_source.py", "intel_opencl1_igpu": "opencl1_kernel_source.py"}
 # where each file is in the release's zips, for a reuse
-WINDOWS_ZIP, PORTABLE_ZIP = "silvann_windows_x64.zip", "silvann_portable_x64.zip"
+WINDOWS_ZIP, PORTABLE_ZIP = "silvann_windows_libraries_update_x64.zip", "silvann_portable_x64.zip"
+# the libraries' zip as the releases up to 1.6.0 named it: a release whose last signed one is of those finds its files there
+WINDOWS_ZIP_BEFORE = "silvann_windows_x64.zip"
 
 
 def sha256(path):
@@ -139,7 +141,7 @@ def _dry_lines(script):
         shutil.copy(script, here)
     try:
         env = dict(os.environ, SILVANN_SILICON_FAMILIES=os.environ.get(
-            "SILVANN_SILICON_FAMILIES", "x86_avx2 nvidia_cuda12 khronos_opencl2 intel_opencl2 nvidia_opencl1 intel_opencl1_igpu"))
+            "SILVANN_SILICON_FAMILIES", "x86_avx2 x86_base nvidia_cuda12 khronos_opencl2 intel_opencl2 nvidia_opencl1 intel_opencl1_igpu"))
         r = subprocess.run([sys.executable, here, "--dry-run"], capture_output=True, text=True, env=env)
     finally:
         if here != BUILD_PY and os.path.exists(here):
@@ -239,7 +241,12 @@ def reuse(built, plan_path, prevdir):
     for fid, f in sorted(p["files"].items()):
         if f["action"] != "reuse":
             continue
-        z = zips.get(f["zip"]) or zips.setdefault(f["zip"], zipfile.ZipFile(os.path.join(prevdir, f["zip"])))
+        z = zips.get(f["zip"])
+        if z is None:
+            path = os.path.join(prevdir, f["zip"])
+            if not os.path.isfile(path) and f["zip"] == WINDOWS_ZIP:
+                path = os.path.join(prevdir, WINDOWS_ZIP_BEFORE)
+            z = zips.setdefault(f["zip"], zipfile.ZipFile(path))
         data = z.read(f["member"])
         if hashlib.sha256(data).hexdigest() != f["sha256"]:
             sys.exit("%s in %s's %s is not the bytes its manifest names" % (f["member"], p["previous"], f["zip"]))

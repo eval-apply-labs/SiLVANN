@@ -109,10 +109,12 @@ static void nn__routed__zzprivate_rotate(const nn__doors* doors, unsigned int* o
                                (const uint16_t*)(uintptr_t)r->signs, I, over);
 }
 
-/* The activation of `pairs` gate-and-up pairs: SwiGLU, clamped where the model's is. */
+/* The activation of `pairs` gate-and-up pairs: SwiGLU, soft-capped or clamped where the model's is. */
 static void nn__routed__zzprivate_activate(const nn__doors* doors, unsigned int* over, const nn__routed* r, uint64_t act, uint64_t gu,
                                            uint64_t pairs) {
-    if (r->limit != 0.0f)
+    if (r->gate_cap != 0.0f)
+        doors->swiglu_softcapped((uint16_t*)(uintptr_t)act, (const uint16_t*)(uintptr_t)gu, pairs, r->inter, r->gate_cap, r->up_cap, over);
+    else if (r->limit != 0.0f)
         doors->swiglu_clamped((uint16_t*)(uintptr_t)act, (const uint16_t*)(uintptr_t)gu, pairs, r->inter, r->limit, over);
     else
         doors->swiglu_pairs((uint16_t*)(uintptr_t)act, (const uint16_t*)(uintptr_t)gu, pairs, r->inter, over);
@@ -172,7 +174,7 @@ static uint64_t nn__routed__zzprivate_slot_in(const nn__routed* r, uint64_t ring
  * `wait`, landed before it answers. False where the tier names no file for the layer or the read is refused. */
 static bool nn__routed__zzprivate_stream_read(const nn__expert_tier* tier, uint64_t x, const uint64_t* pinned, unsigned npinned,
                                               bool wait) {
-    if (tier->exclusive != 2u || tier->backings == 0ull || tier->layer >= sys__node_array__length(tier->backings)) return false;
+    if (tier->exclusive < 2u || tier->backings == 0ull || tier->layer >= sys__node_array__length(tier->backings)) return false;
     const sys__heap_node b = sys__node_array__borrow(tier->backings, tier->layer);
     nn__expert__backing backing;
     if (!sys__heap_node__carries_reference(b.dtype) || !nn__expert__backing_of(b.args[0], &backing)) return false;
@@ -469,10 +471,13 @@ static uint64_t nn__routed__position(sys__engine__ctx* ctx, const nn__doors* doo
     }
     if (n == 0u) {                                                   /* every pick another worker's: a sum of nothing */
         doors->vector_add((uint16_t*)(uintptr_t)routed, (const uint16_t*)(uintptr_t)r->zero, (const uint16_t*)(uintptr_t)r->zero, H, over);
+        if (tier == 0 && r->backing.file != 0ull) nn__expert_tier__drain(ctx->family, layer, type, &r->backing);   /* NN-218 */
         return 0u;
     }
     nn__routed__zzprivate_down(doors, over, r, hand, routed, gu, act, actr, all_slot, all_which, n);
     if (done != 0) for (uint64_t k = 0u; k < n; ++k) done->which[k] = all_which[k];
+    /* a disk's cache feeding a one-way tier: its notes for this layer taken, its picks computed (▶ NN-218's notes) */
+    if (tier == 0 && r->backing.file != 0ull) nn__expert_tier__drain(ctx->family, layer, type, &r->backing);
     return 0u;
 }
 
@@ -613,7 +618,7 @@ static uint64_t nn__routed__rows(sys__engine__ctx* ctx, const nn__doors* doors, 
     unsigned turn = 0u;                                              /* the batches computed, for the compute marks */
     uint64_t pinned[2u * NN__ROUTED__BATCH_MAX];
     /* ⭐ FROM THE DISK (NN-165): the first two batches' reads queued at once, each later batch's a batch ahead of its copy */
-    const bool disk = stream && tier->exclusive == 2u && tier->backings != 0ull;
+    const bool disk = stream && tier->exclusive >= 2u && tier->backings != 0ull;
     if (disk && used > 0u && P > 0u && fault == 0u) {
         const uint64_t n2 = 2u * batch < used ? 2u * batch : used;
         uint64_t held[2u * NN__ROUTED__BATCH_MAX];
@@ -700,6 +705,8 @@ static uint64_t nn__routed__rows(sys__engine__ctx* ctx, const nn__doors* doors, 
     free(rows_seen);
     free(rows_of); free(slot_of); free(w_of); free(expert_of); free(picked); free(begin); free(fill); free(order);
     free(pairs); free(laid); free(wj);
+    /* a disk's cache feeding a one-way tier: its notes for this layer taken, the chunk's picks computed (▶ NN-218) */
+    if (fault == 0u && tier == 0 && r->backing.file != 0ull) nn__expert_tier__drain(ctx->family, r->layer, r->type, &r->backing);
     return fault;
 }
 

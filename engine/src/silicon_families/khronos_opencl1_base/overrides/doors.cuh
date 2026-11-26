@@ -189,6 +189,10 @@ static const float* khronos_opencl1_base__zzprivate_gemv_levels(void) {
     sys__os__lock_give(&lock);
     return (const float*)at[card];
 }
+/* ⭐ THE PRODUCTS READ NARROW where a family defines this 1 (▶ intel_opencl1_igpu/unit.cuh; kernels.cuh says why) */
+#ifndef KHRONOS_OPENCL1_BASE__GEMV_NARROW
+#define KHRONOS_OPENCL1_BASE__GEMV_NARROW 0
+#endif
 #define KHRONOS_OPENCL1_BASE__GEMV_FOUR 128u       /* sixteens of rows from which a run takes four */
 #define KHRONOS_OPENCL1_BASE__GEMV_TWO  48u        /* and two */
 #define KHRONOS_OPENCL1_BASE__GEMV_SUM_FOUR 256u   /* the weighted sum's four */
@@ -212,19 +216,32 @@ static bool khronos_opencl1_base__zzprivate_gemv_launch(uint16_t* out, nn__turbo
     uint64_t R = rule;
     const char* say = getenv("SILVANN_OPENCL1_GEMV_ROWS");
     if (say && (say[0] == '1' || say[0] == '2' || say[0] == '4') && say[1] == 0) R = (uint64_t)(say[0] - '0');
+    const uint64_t span = (KHRONOS_OPENCL1_BASE__GEMV_NARROW ? 32u : 16u) * R;   /* a block's rows: its runs (of 8 lanes narrow, ▶ kernels.cuh's NARROW_RUN, else 16) R each */
     uint64_t blocks = 0u;
-    for (uint64_t i = 0u; i < g.count; ++i) blocks += (g.rows[i] + 16u * R - 1u) / (16u * R);
+    for (uint64_t i = 0u; i < g.count; ++i) blocks += (g.rows[i] + span - 1u) / span;
     void* args[] = { &out, &g, &x, &cols, &levels, &over };
     const size_t sizes[] = { sizeof out, sizeof g, sizeof x, sizeof cols, sizeof levels, sizeof over };
-    nn__silicon__launch(0, R == 1u ? "khronos_opencl1_base__zzprivate_gemv__kernel" : R == 2u ? "khronos_opencl1_base__zzprivate_gemv2__kernel"
-                                                                                           : "khronos_opencl1_base__zzprivate_gemv4__kernel",
-                        khronos_opencl1_base__zzprivate_blocks(blocks), 256u, args, sizes, 6u);
+    const char* name = KHRONOS_OPENCL1_BASE__GEMV_NARROW
+        ? (R == 1u ? "khronos_opencl1_base__zzprivate_gemv_narrow__kernel" : R == 2u ? "khronos_opencl1_base__zzprivate_gemv2_narrow__kernel"
+                                                                            : "khronos_opencl1_base__zzprivate_gemv4_narrow__kernel")
+        : (R == 1u ? "khronos_opencl1_base__zzprivate_gemv__kernel" : R == 2u ? "khronos_opencl1_base__zzprivate_gemv2__kernel"
+                                                                     : "khronos_opencl1_base__zzprivate_gemv4__kernel");
+    nn__silicon__launch(0, name, khronos_opencl1_base__zzprivate_blocks(blocks), 256u, args, sizes, 6u);
     return true;
 }
 static void khronos_opencl1_base__override_turboquant_gemv(uint16_t* out, const uint8_t* weights, uint64_t w_room, const uint8_t* luts,
                                                            uint64_t l_room, const uint16_t* x, uint64_t d, uint64_t rows, uint64_t cols,
                                                            unsigned int* over) {
     const uint64_t row_bytes = cols * d / 8u;
+    if (d == 16u && rows != 0u && cols != 0u && cols % 2u == 0u && rows <= w_room / (cols * 2u)
+     && ((uint64_t)(uintptr_t)weights) % 4u == 0u && ((uint64_t)(uintptr_t)x) % 4u == 0u) {     /* a router's halves (▶ `gemv16`) */
+        const uint16_t* w = (const uint16_t*)(const void*)weights;
+        void* args[] = { &out, &w, &x, &rows, &cols, &over };
+        const size_t sizes[] = { sizeof out, sizeof w, sizeof x, sizeof rows, sizeof cols, sizeof over };
+        nn__silicon__launch(0, "khronos_opencl1_base__zzprivate_gemv16__kernel", khronos_opencl1_base__zzprivate_blocks((rows + 3u) / 4u),
+                            256u, args, sizes, 6u);
+        return;
+    }
     if (d != 16u && row_bytes != 0u && rows <= w_room / row_bytes && rows <= l_room / 2u) {
         nn__turboquant__groups g = {};
         g.codes[0] = (uint64_t)(uintptr_t)weights; g.luts[0] = (uint64_t)(uintptr_t)luts; g.rows[0] = rows; g.d[0] = d; g.out_at[0] = 0u;
@@ -272,15 +289,22 @@ static void khronos_opencl1_base__override_turboquant_gemv_groups_sum(uint16_t* 
      * down, 2048 rows of nine matrices, 29.1 / 20.3 / 24.9 us at one / two / four rows, a 5120-row MLP down 175.6 / 154.6
      * / 142.6); `SILVANN_OPENCL1_GEMV_ROWS` names one */
     const uint64_t units = (rows + 15u) / 16u;
-    uint64_t R = units >= KHRONOS_OPENCL1_BASE__GEMV_SUM_FOUR ? 4u : units >= KHRONOS_OPENCL1_BASE__GEMV_TWO ? 2u : 1u;
+    /* read narrow, never four: `MEASURED` on the UHD P750 (measurements/2026-11-25_nn214_intel_opencl_phoenixnap.md,
+     * `family_gemv.py`), two rows a run the fastest at every shape tried — 8 x 2304 x 1152 at 4 bits 506 / 442 / 574 us at one
+     * / two / four, 5 x 1000 x 1152 197 / 152 / 188, 2 x 2304 x 2048 at 8 bits 296 / 295 / 450 */
+    uint64_t R = units >= KHRONOS_OPENCL1_BASE__GEMV_SUM_FOUR && !KHRONOS_OPENCL1_BASE__GEMV_NARROW ? 4u
+               : units >= KHRONOS_OPENCL1_BASE__GEMV_TWO ? 2u : 1u;
     const char* say = getenv("SILVANN_OPENCL1_GEMV_ROWS");
     if (say && (say[0] == '1' || say[0] == '2' || say[0] == '4') && say[1] == 0) R = (uint64_t)(say[0] - '0');
     void* args[] = { &out, &g, &x, &w, &residual, &rows, &cols, &levels, &over };
     const size_t sizes[] = { sizeof out, sizeof g, sizeof x, sizeof w, sizeof residual, sizeof rows, sizeof cols, sizeof levels, sizeof over };
-    nn__silicon__launch(0, R == 1u ? "khronos_opencl1_base__zzprivate_gemv_sum__kernel" : R == 2u ? "khronos_opencl1_base__zzprivate_gemv_sum2__kernel"
-                                                                                               : "khronos_opencl1_base__zzprivate_gemv_sum4__kernel",
-                        khronos_opencl1_base__zzprivate_blocks((rows + 16u * R - 1u) / (16u * R)), 256u,
-                        args, sizes, 9u);
+    const char* name = KHRONOS_OPENCL1_BASE__GEMV_NARROW
+        ? (R == 1u ? "khronos_opencl1_base__zzprivate_gemv_sum_narrow__kernel" : R == 2u ? "khronos_opencl1_base__zzprivate_gemv_sum2_narrow__kernel"
+                                                                                : "khronos_opencl1_base__zzprivate_gemv_sum4_narrow__kernel")
+        : (R == 1u ? "khronos_opencl1_base__zzprivate_gemv_sum__kernel" : R == 2u ? "khronos_opencl1_base__zzprivate_gemv_sum2__kernel"
+                                                                         : "khronos_opencl1_base__zzprivate_gemv_sum4__kernel");
+    const uint64_t span = (KHRONOS_OPENCL1_BASE__GEMV_NARROW ? 32u : 16u) * R;   /* a block's rows: its runs (of 8 lanes narrow, ▶ kernels.cuh's NARROW_RUN, else 16) R each */
+    nn__silicon__launch(0, name, khronos_opencl1_base__zzprivate_blocks((rows + span - 1u) / span), 256u, args, sizes, 9u);
 }
 
 /* ⭐ THE HADAMARD ROTATION (▶ kernels.cuh): `out` apart from `in` — rotating in place is nn's door, as nn's body runs it
@@ -594,6 +618,45 @@ static void khronos_opencl1_base__override_vector_top_k(uint64_t* values, uint64
     nn__silicon__launch(0, "khronos_opencl1_base__zzprivate_top_k__kernel", 1u, 256u, args, sizes, 6u);
 }
 
+/* ⭐ THE BIASED ROUTER IS THE SCORED ONE WITH ITS SIGMOID — nn's `top_k_biased` and `top_k_scored` at
+ *   `NN__VECTOR__SCORE_SIGMOID` make the same picks and weights, as amd_rocm_base answers it; the scored kernel's fit. */
+static void khronos_opencl1_base__override_vector_top_k_biased(uint64_t* values, uint64_t stride, uint16_t* weights, const uint16_t* x,
+                                                               const uint16_t* bias, uint64_t n, uint64_t k, float scale) {
+    if (n == 0u || n > 4u * 256u || k == 0u || k > NN__VECTOR__ROUTER_K_MAX || stride == 0u) {
+        nn__vector__zzabi_launch_top_k_biased(values, stride, weights, x, bias, n, k, scale);
+        return;
+    }
+    khronos_opencl1_base__override_vector_top_k_scored(values, stride, weights, x, bias, n, k, scale, NN__VECTOR__SCORE_SIGMOID);
+}
+
+/* The rotation row by row in the ladder: rows whose width is whole 128s, `out` apart from `in`; anything else is nn's. */
+static void khronos_opencl1_base__override_hadamard_ladder_rows(uint16_t* out, const uint16_t* in, const uint16_t* sign, uint64_t cols,
+                                                                uint64_t rows, unsigned int* over) {
+    const uint64_t n = cols * rows;
+    if (cols == 0u || rows == 0u || cols % 128u != 0u || !(out + n <= in || in + n <= out)) {
+        nn__hadamard__zzabi_launch_ladder_rows(out, in, sign, cols, rows, over);
+        return;
+    }
+    const uint64_t rest = cols % 512u, per = cols / 512u + (rest >= 256u ? 1u : 0u) + (rest % 256u != 0u ? 1u : 0u);
+    void* args[] = { &out, &in, &sign, &cols, &rows, &over };
+    const size_t sizes[] = { sizeof out, sizeof in, sizeof sign, sizeof cols, sizeof rows, sizeof over };
+    nn__silicon__launch(0, "khronos_opencl1_base__zzprivate_rotate_rows__kernel", khronos_opencl1_base__zzprivate_blocks(rows * per), 256u,
+                        args, sizes, 6u);
+}
+
+/* The rotation in blocks of 2 to 256, whole blocks, `out` apart from `in`; a block of 512 and anything else is nn's. */
+static void khronos_opencl1_base__override_hadamard_blocks(uint16_t* out, const uint16_t* in, const uint16_t* sign, uint64_t n, uint64_t block,
+                                                           uint64_t inverse, unsigned int* over) {
+    if (n == 0u || block < 2u || block > 256u || (block & (block - 1u)) != 0u || n % block != 0u || !(out + n <= in || in + n <= out)) {
+        nn__hadamard__zzabi_launch_blocks(out, in, sign, n, block, inverse, over);
+        return;
+    }
+    void* args[] = { &out, &in, &sign, &n, &block, &inverse, &over };
+    const size_t sizes[] = { sizeof out, sizeof in, sizeof sign, sizeof n, sizeof block, sizeof inverse, sizeof over };
+    nn__silicon__launch(0, "khronos_opencl1_base__zzprivate_rotate_blocks__kernel", khronos_opencl1_base__zzprivate_blocks((n + 255u) / 256u),
+                        256u, args, sizes, 7u);
+}
+
 static inline void khronos_opencl1_base__override_doors(nn__doors* doors) {
     doors->kda_step              = khronos_opencl1_base__override_kda_step;
     doors->hyper_logits          = khronos_opencl1_base__override_hyper_logits;
@@ -615,6 +678,9 @@ static inline void khronos_opencl1_base__override_doors(nn__doors* doors) {
     doors->attention_residual_mix    = khronos_opencl1_base__override_attention_residual_mix;
     doors->attention_residual_mix_tq = khronos_opencl1_base__override_attention_residual_mix_tq;
     doors->hadamard_rotate            = khronos_opencl1_base__override_hadamard_rotate;
+    doors->hadamard_ladder_rows       = khronos_opencl1_base__override_hadamard_ladder_rows;
+    doors->hadamard_blocks            = khronos_opencl1_base__override_hadamard_blocks;
+    doors->vector_top_k_biased        = khronos_opencl1_base__override_vector_top_k_biased;
     doors->turboquant_gemv_groups_n   = khronos_opencl1_base__override_turboquant_gemv_groups_n;
     doors->turboquant_gemv_groups_sum = khronos_opencl1_base__override_turboquant_gemv_groups_sum;
     doors->turboquant_gemv        = khronos_opencl1_base__override_turboquant_gemv;

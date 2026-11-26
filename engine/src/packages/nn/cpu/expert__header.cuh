@@ -143,6 +143,8 @@ static __device__ inline bool nn__expert__slot(uint64_t layer, uint64_t type, ui
 static __device__ inline bool nn__expert__admit(uint64_t layer, uint64_t expert, uint64_t at,
                                                 uint64_t type);
 static __device__ inline bool nn__expert__touch(uint64_t layer, uint64_t type, uint64_t expert);
+/* A resident expert made its band's oldest — the next its slot goes to (NN-218). A no-op on one not resident. */
+static __device__ inline bool nn__expert__age(uint64_t layer, uint64_t type, uint64_t expert);
 static __device__ inline bool nn__expert__evict(uint64_t layer, uint64_t type, uint64_t expert);
 /* `from`'s slot given to `to` without the free list — ▶ the impl. */
 static __device__ inline bool nn__expert__hand_over(uint64_t lf, uint64_t from, uint64_t lt, uint64_t to, uint64_t type);

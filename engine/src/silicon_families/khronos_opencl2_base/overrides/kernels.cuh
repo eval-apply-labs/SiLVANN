@@ -71,6 +71,13 @@ static inline float khronos_opencl2_base__zzprivate_scale(__global const uint8_t
     return nn__silicon__half_to_float((uint16_t)((uint32_t)luts[r * 2ul] | ((uint32_t)luts[r * 2ul + 1ul] << 8)));
 }
 
+/* ⛳ A KERNEL'S GROUPS (`nn__turboquant__groups`, passed by value) ARE READ FROM LOCAL MEMORY, copied there once a
+ *   work-group: a group picked by a number computed on the card — a row's, a pair's — made the compiler copy the whole
+ *   argument into each lane's private memory and read it back from there for every pair, 496 bytes of scratch a lane
+ *   (`MEASURED`, ROCm's clang for gfx906 — measurements/2026-11-24_nn207_inkling2_rates_node03.md ㉒). The copy is
+ *   ordered before its readers by the work-group's first barrier. */
+#define KHRONOS_OPENCL2_BASE__ZZPRIVATE_GROUPS_LOCAL
+
 /* The row this sub-group takes first, and the stride to its next. */
 #define KHRONOS_OPENCL2_BASE__ZZPRIVATE_FIRST_ROW  ((uint64_t)get_group_id(0) * get_num_sub_groups() + get_sub_group_id())
 #define KHRONOS_OPENCL2_BASE__ZZPRIVATE_ROW_STRIDE ((uint64_t)get_num_groups(0) * get_num_sub_groups())
@@ -102,18 +109,20 @@ __kernel void khronos_opencl2_base__gemv_groups(ulong out__address, nn__turboqua
     __local uint16_t xs[KHRONOS_OPENCL2_BASE__ZZPRIVATE_COLS_MAX];
     __local float lev4[16];
     __local float lev8[256];
+    __local nn__turboquant__groups lg;                      /* ▶ KHRONOS_OPENCL2_BASE__ZZPRIVATE_GROUPS_LOCAL */
+    if (get_local_id(0) == 0u) lg = g;
     khronos_opencl2_base__zzprivate_stage(xs, lev4, lev8, (__global const uint16_t*)x__address, cols);
     uint64_t total = 0ul;
-    for (uint64_t i = 0ul; i < g.count; ++i) total += g.rows[i];
+    for (uint64_t i = 0ul; i < lg.count; ++i) total += lg.rows[i];
     for (uint64_t t = KHRONOS_OPENCL2_BASE__ZZPRIVATE_FIRST_ROW; t < total; t += KHRONOS_OPENCL2_BASE__ZZPRIVATE_ROW_STRIDE) {
         uint64_t i = 0ul, r = t;
-        while (r >= g.rows[i]) { r -= g.rows[i]; ++i; }
-        const uint32_t d = (uint32_t)g.d[i];
-        __global const uint8_t* row = (__global const uint8_t*)g.codes[i] + r * (cols * d / 8u);
+        while (r >= lg.rows[i]) { r -= lg.rows[i]; ++i; }
+        const uint32_t d = (uint32_t)lg.d[i];
+        __global const uint8_t* row = (__global const uint8_t*)lg.codes[i] + r * (cols * d / 8u);
         const float sum = sub_group_reduce_add(khronos_opencl2_base__zzprivate_row_dot(d, row, cols, xs, lev4, lev8));
         if (get_sub_group_local_id() == 0u)
-            out[g.out_at[i] + r] = nn__kernels__zzabi_to_half(sum * khronos_opencl2_base__zzprivate_scale((__global const uint8_t*)g.luts[i], r),
-                                                             over);
+            out[lg.out_at[i] + r] = nn__kernels__zzabi_to_half(sum * khronos_opencl2_base__zzprivate_scale((__global const uint8_t*)lg.luts[i], r),
+                                                              over);
     }
 }
 
@@ -130,20 +139,22 @@ __kernel void khronos_opencl2_base__gemv_groups_sum(ulong out__address, nn__turb
     __global unsigned int* over = (__global unsigned int*)over__address;
     __local float lev4[16];
     __local float lev8[256];
+    __local nn__turboquant__groups lg;                      /* ▶ KHRONOS_OPENCL2_BASE__ZZPRIVATE_GROUPS_LOCAL */
     const uint32_t lid = (uint32_t)get_local_id(0), lsz = (uint32_t)get_local_size(0);
+    if (lid == 0u) lg = g;
     const uint16_t* t4 = nn__turboquant__zzabi_levels(4u);
     const uint16_t* t8 = nn__turboquant__zzabi_levels(8u);
     for (uint32_t i = lid; i < 16u; i += lsz) lev4[i] = nn__silicon__half_to_float(t4[i]);
     for (uint32_t i = lid; i < 256u; i += lsz) lev8[i] = nn__silicon__half_to_float(t8[i]);
     barrier(CLK_LOCAL_MEM_FENCE);
     const uint32_t lane = (uint32_t)get_sub_group_local_id(), lanes = (uint32_t)get_sub_group_size();
-    const uint64_t blocks = cols / 32u, spread = g.count * blocks;
+    const uint64_t blocks = cols / 32u, spread = lg.count * blocks;
     for (uint64_t r = KHRONOS_OPENCL2_BASE__ZZPRIVATE_FIRST_ROW; r < rows; r += KHRONOS_OPENCL2_BASE__ZZPRIVATE_ROW_STRIDE) {
         float part = 0.0f;
         for (uint64_t j = lane; j < spread; j += lanes) {
             const uint64_t i = j / blocks, b = j - i * blocks;
-            const uint32_t d = (uint32_t)g.d[i];
-            __global const uint8_t* row = (__global const uint8_t*)g.codes[i] + r * (cols * d / 8u);
+            const uint32_t d = (uint32_t)lg.d[i];
+            __global const uint8_t* row = (__global const uint8_t*)lg.codes[i] + r * (cols * d / 8u);
             __global const uint16_t* xb = x + i * cols + b * 32u;
             float dot = 0.0f;
             if (d == 4u) {
@@ -161,32 +172,133 @@ __kernel void khronos_opencl2_base__gemv_groups_sum(ulong out__address, nn__turb
                         dot += lev8[(uint32_t)(word >> (8u * k)) & 0xFFu] * nn__silicon__half_to_float(xb[8u * h + k]);
                 }
             }
-            part += dot * khronos_opencl2_base__zzprivate_scale((__global const uint8_t*)g.luts[i], r)
-                  * nn__silicon__half_to_float(w[g.out_at[i]]);
+            part += dot * khronos_opencl2_base__zzprivate_scale((__global const uint8_t*)lg.luts[i], r)
+                  * nn__silicon__half_to_float(w[lg.out_at[i]]);
         }
         const float sum = sub_group_reduce_add(part);
         if (lane == 0u) out[r] = nn__kernels__zzabi_to_half(nn__silicon__half_to_float(residual[r]) + sum, over);
     }
 }
 
-/* ⭐ `hadamard_rotate` over whole 512-blocks, `out` apart from `in`: `out = H·(S ⊙ in) / √512` a block, the signs afresh
- * at each. A work-group a block; each of the nine stages pairs elements `h` apart in local memory, a barrier between. */
-__kernel void khronos_opencl2_base__rotate(ulong out__address, ulong in__address, ulong sign__address, uint64_t blocks,
+/* The ladder's blocks of a row of `n`: how many, and block `b`'s size and (`*at`) start — a 512 of the row's whole ones,
+ * else the 256 the rest holds, else its 128. */
+static inline uint64_t khronos_opencl2_base__zzprivate_ladder_units(uint64_t n) {
+    const uint64_t whole = n / KHRONOS_OPENCL2_BASE__ZZPRIVATE_ROT_BLOCK, rest = n - whole * KHRONOS_OPENCL2_BASE__ZZPRIVATE_ROT_BLOCK;
+    return whole + (rest >= 256u ? 1u : 0u) + (rest % 256u != 0u ? 1u : 0u);
+}
+static inline uint32_t khronos_opencl2_base__zzprivate_ladder_block(uint64_t n, uint64_t b, uint64_t* at) {
+    const uint64_t whole = n / KHRONOS_OPENCL2_BASE__ZZPRIVATE_ROT_BLOCK, rest = n - whole * KHRONOS_OPENCL2_BASE__ZZPRIVATE_ROT_BLOCK;
+    *at = b < whole ? b * KHRONOS_OPENCL2_BASE__ZZPRIVATE_ROT_BLOCK : whole * KHRONOS_OPENCL2_BASE__ZZPRIVATE_ROT_BLOCK + (b == whole ? 0u : 256u);
+    return b < whole ? KHRONOS_OPENCL2_BASE__ZZPRIVATE_ROT_BLOCK : (b == whole && rest >= 256u) ? 256u : 128u;
+}
+/* One block of `size` at `at` rotated by the work-group, `out` apart from `in`, the first `size` signs. */
+static inline void khronos_opencl2_base__zzprivate_rotate_block(__global uint16_t* out, __global const uint16_t* in,
+                                                               __global const uint16_t* sign, uint64_t at, uint32_t size,
+                                                               __local float* v, __global unsigned int* over) {
+    const uint32_t lid = (uint32_t)get_local_id(0), lsz = (uint32_t)get_local_size(0);
+    const float inv = 1.0f / nn__silicon__sqrtf((float)size);
+    for (uint32_t e = lid; e < size; e += lsz)
+        v[e] = nn__silicon__half_to_float(in[at + e]) * nn__silicon__half_to_float(sign[e]);
+    barrier(CLK_LOCAL_MEM_FENCE);
+    for (uint32_t h = 1u; h < size; h <<= 1) {
+        for (uint32_t k = lid; k < size / 2u; k += lsz) {
+            const uint32_t i = (k / h) * 2u * h + (k % h), j = i + h;
+            const float a = v[i], b = v[j];
+            v[i] = a + b;
+            v[j] = a - b;
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+    for (uint32_t e = lid; e < size; e += lsz)
+        out[at + e] = nn__kernels__zzabi_to_half(v[e] * inv, over);
+    barrier(CLK_LOCAL_MEM_FENCE);
+}
+/* ⭐ `hadamard_rotate`, `out` apart from `in`: `out = H·(S ⊙ in) / √b` a block, the signs afresh at each — the blocks
+ * nn's door rotates a row of `n` in: its 512-blocks, then a 256 when that much is left, then a 128 (2,304: four 512s and
+ * a 256). A work-group a block; each stage pairs elements `h` apart in local memory, a barrier between. */
+__kernel void khronos_opencl2_base__rotate(ulong out__address, ulong in__address, ulong sign__address, uint64_t n,
                                       ulong over__address) {
-    __global uint16_t* out = (__global uint16_t*)out__address;
-    __global const uint16_t* in = (__global const uint16_t*)in__address;
+    __local float v[KHRONOS_OPENCL2_BASE__ZZPRIVATE_ROT_BLOCK];
+    for (uint64_t blk = get_group_id(0); blk < khronos_opencl2_base__zzprivate_ladder_units(n); blk += get_num_groups(0)) {
+        uint64_t at = 0u;
+        const uint32_t size = khronos_opencl2_base__zzprivate_ladder_block(n, blk, &at);
+        khronos_opencl2_base__zzprivate_rotate_block((__global uint16_t*)out__address, (__global const uint16_t*)in__address,
+                                                     (__global const uint16_t*)sign__address, at, size, v, (__global unsigned int*)over__address);
+    }
+}
+
+/* ⭐ `hadamard_ladder_rows`, `out` apart from `in`: each of `rows` rows of `cols` rotated as `hadamard_rotate` rotates a
+ * row — the experts' activations, a pick a row — a work-group a block of a row, in one launch. */
+__kernel void khronos_opencl2_base__rotate_rows(ulong out__address, ulong in__address, ulong sign__address, uint64_t cols,
+                                           uint64_t rows, ulong over__address) {
+    __local float v[KHRONOS_OPENCL2_BASE__ZZPRIVATE_ROT_BLOCK];
+    const uint64_t per = khronos_opencl2_base__zzprivate_ladder_units(cols);
+    for (uint64_t u = get_group_id(0); u < rows * per; u += get_num_groups(0)) {
+        const uint64_t row = u / per;
+        uint64_t at = 0u;
+        const uint32_t size = khronos_opencl2_base__zzprivate_ladder_block(cols, u - row * per, &at);
+        khronos_opencl2_base__zzprivate_rotate_block((__global uint16_t*)out__address + row * cols,
+                                                     (__global const uint16_t*)in__address + row * cols,
+                                                     (__global const uint16_t*)sign__address, at, size, v, (__global unsigned int*)over__address);
+    }
+}
+
+/* ⭐ A ROW'S NORM AS nn's `rmsnorm` MAKES IT — lane `l`'s squares of elements `l`, `l + lanes`, … in order, the
+ *   work-group's sum — with every element a lane takes asked of memory at once, `HELD` at most, where nn's loop asks for
+ *   one, waits, and asks for the next: the same sum, so nn's bits. `held` keeps the row's elements, as floats, for the
+ *   caller. */
+#define KHRONOS_OPENCL2_BASE__ZZPRIVATE_NORM_HELD  16u      /* a lane's elements of a row: 256 · 16 = 4,096 wide */
+static inline float khronos_opencl2_base__zzprivate_norm_scale(__global const uint16_t* x, uint64_t n, float eps, float* held) {
+    const uint32_t lid = (uint32_t)get_local_id(0), lsz = (uint32_t)get_local_size(0);
+#pragma unroll
+    for (uint32_t k = 0u; k < KHRONOS_OPENCL2_BASE__ZZPRIVATE_NORM_HELD; ++k) {
+        const uint64_t i = lid + (uint64_t)k * lsz;
+        held[k] = i < n ? nn__silicon__half_to_float(x[i]) : 0.0f;
+    }
+    float part = 0.0f;
+#pragma unroll
+    for (uint32_t k = 0u; k < KHRONOS_OPENCL2_BASE__ZZPRIVATE_NORM_HELD; ++k)
+        if (lid + (uint64_t)k * lsz < n) part += held[k] * held[k];
+    return 1.0f / nn__silicon__sqrtf(work_group_reduce_add(part) / (float)n + eps);
+}
+
+/* ⭐ `rmsnorm_rotate` (`rows` 1) AND `rmsnorm_pair_rotate` (`rows` 2, `y` the second row): each row of `n` normed as nn's
+ *   `rmsnorm` norms it into `o`, a row after the other, and the `rows · n` halves rotated as this family's
+ *   `hadamard_rotate` rotates them into `rot`. nn's definition is those two or three doors one after another
+ *   (`nn__rmsnorm__zzprivate_rotate_by_two`, `…_pair_rotate_by_three`); this is their arithmetic in one launch, so their
+ *   bits. A work-group a block of the rotation, as the rotation's own: each makes the rows' scales — nn's sum, its loads
+ *   at once (▶ `zzprivate_norm_scale`) — then norms its block's elements, writes them to `o`, and rotates them. */
+__kernel void khronos_opencl2_base__norm_rotate(ulong rot__address, ulong o__address, ulong x__address, ulong y__address, ulong w__address,
+                                           ulong sign__address, uint64_t n, uint64_t rows, float eps, ulong over__address) {
+    __global uint16_t* rot = (__global uint16_t*)rot__address;
+    __global uint16_t* o = (__global uint16_t*)o__address;
+    __global const uint16_t* x = (__global const uint16_t*)x__address;
+    __global const uint16_t* y = (__global const uint16_t*)y__address;
+    __global const uint16_t* w = (__global const uint16_t*)w__address;
     __global const uint16_t* sign = (__global const uint16_t*)sign__address;
     __global unsigned int* over = (__global unsigned int*)over__address;
     __local float v[KHRONOS_OPENCL2_BASE__ZZPRIVATE_ROT_BLOCK];
     const uint32_t lid = (uint32_t)get_local_id(0), lsz = (uint32_t)get_local_size(0);
-    const float inv = 1.0f / nn__silicon__sqrtf((float)KHRONOS_OPENCL2_BASE__ZZPRIVATE_ROT_BLOCK);
-    for (uint64_t blk = get_group_id(0); blk < blocks; blk += get_num_groups(0)) {
-        const uint64_t at = blk * KHRONOS_OPENCL2_BASE__ZZPRIVATE_ROT_BLOCK;
-        for (uint32_t e = lid; e < KHRONOS_OPENCL2_BASE__ZZPRIVATE_ROT_BLOCK; e += lsz)
-            v[e] = nn__silicon__half_to_float(in[at + e]) * nn__silicon__half_to_float(sign[e]);
+    float held[KHRONOS_OPENCL2_BASE__ZZPRIVATE_NORM_HELD];
+    const float scale_x = khronos_opencl2_base__zzprivate_norm_scale(x, n, eps, held);
+    const float scale_y = rows > 1u ? khronos_opencl2_base__zzprivate_norm_scale(y, n, eps, held) : 0.0f;
+    const uint64_t m = rows * n;
+    for (uint64_t blk = get_group_id(0); blk < khronos_opencl2_base__zzprivate_ladder_units(m); blk += get_num_groups(0)) {
+        uint64_t at = 0u;
+        const uint32_t size = khronos_opencl2_base__zzprivate_ladder_block(m, blk, &at);
+        const float inv = 1.0f / nn__silicon__sqrtf((float)size);
+        for (uint32_t e = lid; e < size; e += lsz) {
+            const uint64_t i = at + e;
+            const bool second = i >= n;
+            const uint64_t c = second ? i - n : i;
+            const uint16_t h = nn__kernels__zzabi_to_half((nn__silicon__half_to_float(second ? y[c] : x[c]) * (second ? scale_y : scale_x))
+                                                          * nn__silicon__half_to_float(w[c]), over);
+            o[i] = h;
+            v[e] = nn__silicon__half_to_float(h) * nn__silicon__half_to_float(sign[e]);
+        }
         barrier(CLK_LOCAL_MEM_FENCE);
-        for (uint32_t h = 1u; h < KHRONOS_OPENCL2_BASE__ZZPRIVATE_ROT_BLOCK; h <<= 1) {
-            for (uint32_t k = lid; k < KHRONOS_OPENCL2_BASE__ZZPRIVATE_ROT_BLOCK / 2u; k += lsz) {
+        for (uint32_t h = 1u; h < size; h <<= 1) {
+            for (uint32_t k = lid; k < size / 2u; k += lsz) {
                 const uint32_t i = (k / h) * 2u * h + (k % h), j = i + h;
                 const float a = v[i], b = v[j];
                 v[i] = a + b;
@@ -194,9 +306,191 @@ __kernel void khronos_opencl2_base__rotate(ulong out__address, ulong in__address
             }
             barrier(CLK_LOCAL_MEM_FENCE);
         }
-        for (uint32_t e = lid; e < KHRONOS_OPENCL2_BASE__ZZPRIVATE_ROT_BLOCK; e += lsz)
-            out[at + e] = nn__kernels__zzabi_to_half(v[e] * inv, over);
+        for (uint32_t e = lid; e < size; e += lsz) rot[at + e] = nn__kernels__zzabi_to_half(v[e] * inv, over);
         barrier(CLK_LOCAL_MEM_FENCE);
+    }
+}
+
+/* ⭐ `attention_states` — a learned query's mix: a work-group a slice of a query's row. Each makes the query's scores
+ *   whole: its lanes hold `HELD` groups of 8 halves of the query and of the current, read at once with every stored
+ *   state's; the current's squares and each state's score summed over a lane's groups in order, then over the
+ *   work-group in one pass for all of them — each sub-group's sum, then the sub-groups' in order through local memory,
+ *   one barrier, where nn's body takes a work-group's sum for each — and the current's score after its norm the same
+ *   way; the softmax in nn's order (the stored states, then the current). Then it weighs its slice of the row: the
+ *   states read again there. A rounding to a half is the card's own conversion (to nearest, ties to even, as nn's). Within
+ *   the bench's bound of nn's host body: its sums are another order's. */
+#define KHRONOS_OPENCL2_BASE__ZZPRIVATE_STATES_HELD    2u      /* groups of 8 a lane holds: 256 · 2 · 8 = 4,096 wide */
+#define KHRONOS_OPENCL2_BASE__ZZPRIVATE_STATES_MOST    8u      /* nn's `NN__ATTENTION__STATES_MAX` */
+#define KHRONOS_OPENCL2_BASE__ZZPRIVATE_SUBGROUPS      64u     /* sub-groups a work-group of 256 is cut into, at the most */
+static inline float khronos_opencl2_base__zzprivate_dot8(uint4 a, uint4 b, float c) {
+    const uint as[4] = { a.x, a.y, a.z, a.w }, bs[4] = { b.x, b.y, b.z, b.w };
+#pragma unroll
+    for (uint32_t k = 0u; k < 4u; ++k) {
+        c += nn__silicon__half_to_float((uint16_t)(as[k] & 0xFFFFu)) * nn__silicon__half_to_float((uint16_t)(bs[k] & 0xFFFFu));
+        c += nn__silicon__half_to_float((uint16_t)(as[k] >> 16)) * nn__silicon__half_to_float((uint16_t)(bs[k] >> 16));
+    }
+    return c;
+}
+/* A float as a half by the card's conversion; where a finite float became an infinity, the fault word raised by nn's. */
+static inline uint khronos_opencl2_base__zzprivate_half(float f, __global unsigned int* over) {
+    ushort h = 0u;
+    vstore_half_rte(f, 0, (half*)&h);
+    if ((h & 0x7FFFu) == 0x7C00u && isfinite(f)) (void)nn__kernels__zzabi_to_half(f, over);
+    return (uint)h;
+}
+/* Eight halves times `gain`, each rounded to a half as a stored state is. */
+static inline uint4 khronos_opencl2_base__zzprivate_normed8(uint4 x, float gain, __global unsigned int* over) {
+    const uint xs[4] = { x.x, x.y, x.z, x.w };
+    uint out[4];
+#pragma unroll
+    for (uint32_t k = 0u; k < 4u; ++k)
+        out[k] = khronos_opencl2_base__zzprivate_half(nn__silicon__half_to_float((uint16_t)(xs[k] & 0xFFFFu)) * gain, over)
+               | (khronos_opencl2_base__zzprivate_half(nn__silicon__half_to_float((uint16_t)(xs[k] >> 16)) * gain, over) << 16);
+    return (uint4)(out[0], out[1], out[2], out[3]);
+}
+/* `n` sums over the work-group, every lane handed each: a sub-group's sum, then the sub-groups' in order. */
+static inline void khronos_opencl2_base__zzprivate_sums(float* v, uint32_t n, __local float (*parts)[KHRONOS_OPENCL2_BASE__ZZPRIVATE_STATES_MOST + 1u]) {
+    const uint32_t sg = (uint32_t)get_sub_group_id(), sgs = (uint32_t)get_num_sub_groups();
+#pragma unroll
+    for (uint32_t t = 0u; t < KHRONOS_OPENCL2_BASE__ZZPRIVATE_STATES_MOST + 1u; ++t) {
+        const float r = sub_group_reduce_add(t < n ? v[t] : 0.0f);
+        if (t < n && get_sub_group_local_id() == 0u) parts[sg][t] = r;
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+#pragma unroll
+    for (uint32_t t = 0u; t < KHRONOS_OPENCL2_BASE__ZZPRIVATE_STATES_MOST + 1u; ++t)
+        if (t < n) {
+            float total = 0.0f;
+            for (uint32_t k = 0u; k < sgs; ++k) total += parts[k][t];
+            v[t] = total;
+        }
+    barrier(CLK_LOCAL_MEM_FENCE);                           /* `parts` free for the next sums */
+}
+__kernel void khronos_opencl2_base__attention_states(ulong o__address, ulong q__address, ulong states__address, ulong current__address,
+                                                uint64_t queries, uint64_t width, uint64_t rows, uint64_t with_current, uint64_t slices,
+                                                float eps, ulong over__address) {
+    __global unsigned int* over = (__global unsigned int*)over__address;
+    __local float parts[KHRONOS_OPENCL2_BASE__ZZPRIVATE_SUBGROUPS][KHRONOS_OPENCL2_BASE__ZZPRIVATE_STATES_MOST + 1u];
+    const uint32_t lid = (uint32_t)get_local_id(0), lsz = (uint32_t)get_local_size(0);
+    const uint32_t groups = (uint32_t)(width / 8u), stored = (uint32_t)rows, per = (groups + (uint32_t)slices - 1u) / (uint32_t)slices;
+    const bool has_current = with_current != 0u;
+    const uint4 none = (uint4)(0u);
+    const float scale = 1.0f / nn__silicon__sqrtf((float)width);
+    __global const uint4* states = (__global const uint4*)states__address;
+    __global const uint4* cr = (__global const uint4*)(has_current ? current__address : q__address);   /* a row either way */
+    for (uint64_t task = get_group_id(0); task < queries * slices; task += get_num_groups(0)) {
+        const uint64_t h = task / slices;
+        const uint32_t g0 = (uint32_t)(task - h * slices) * per, g1 = g0 + per < groups ? g0 + per : groups;
+        __global const uint4* qr = (__global const uint4*)q__address + h * groups;
+        uint4 qk[KHRONOS_OPENCL2_BASE__ZZPRIVATE_STATES_HELD], ck[KHRONOS_OPENCL2_BASE__ZZPRIVATE_STATES_HELD];
+        uint4 sk[KHRONOS_OPENCL2_BASE__ZZPRIVATE_STATES_HELD][KHRONOS_OPENCL2_BASE__ZZPRIVATE_STATES_MOST];
+#pragma unroll
+        for (uint32_t k = 0u; k < KHRONOS_OPENCL2_BASE__ZZPRIVATE_STATES_HELD; ++k) {
+            const uint32_t g = lid + k * lsz;
+            const bool in = g < groups;
+            const uint32_t at = in ? g : 0u;
+            qk[k] = qr[at];
+            ck[k] = cr[at];
+#pragma unroll
+            for (uint32_t t = 0u; t < KHRONOS_OPENCL2_BASE__ZZPRIVATE_STATES_MOST; ++t)
+                sk[k][t] = states[(uint64_t)(t < stored ? t : 0u) * groups + at];
+            if (!in) qk[k] = none;
+            if (!in || !has_current) ck[k] = none;
+        }
+        float v[KHRONOS_OPENCL2_BASE__ZZPRIVATE_STATES_MOST + 1u];        /* every stored state's score, then the squares */
+#pragma unroll
+        for (uint32_t t = 0u; t < KHRONOS_OPENCL2_BASE__ZZPRIVATE_STATES_MOST; ++t) {
+            float score = 0.0f;
+#pragma unroll
+            for (uint32_t k = 0u; k < KHRONOS_OPENCL2_BASE__ZZPRIVATE_STATES_HELD; ++k) score = khronos_opencl2_base__zzprivate_dot8(qk[k], sk[k][t], score);
+            v[t] = score;
+        }
+        float squares = 0.0f;
+#pragma unroll
+        for (uint32_t k = 0u; k < KHRONOS_OPENCL2_BASE__ZZPRIVATE_STATES_HELD; ++k) squares = khronos_opencl2_base__zzprivate_dot8(ck[k], ck[k], squares);
+#pragma unroll
+        for (uint32_t t = 0u; t <= KHRONOS_OPENCL2_BASE__ZZPRIVATE_STATES_MOST; ++t) if (t == stored) v[t] = squares;
+        khronos_opencl2_base__zzprivate_sums(v, stored + 1u, parts);
+        float gain = 0.0f, mine[KHRONOS_OPENCL2_BASE__ZZPRIVATE_STATES_MOST + 1u];
+        mine[0] = 0.0f;
+        if (has_current) {
+            float total_squares = 0.0f;
+#pragma unroll
+            for (uint32_t t = 0u; t <= KHRONOS_OPENCL2_BASE__ZZPRIVATE_STATES_MOST; ++t) if (t == stored) total_squares = v[t];
+            gain = 1.0f / nn__silicon__sqrtf(total_squares / (float)width + eps);
+#pragma unroll
+            for (uint32_t k = 0u; k < KHRONOS_OPENCL2_BASE__ZZPRIVATE_STATES_HELD; ++k)
+                mine[0] = khronos_opencl2_base__zzprivate_dot8(qk[k], khronos_opencl2_base__zzprivate_normed8(ck[k], gain, over), mine[0]);
+            khronos_opencl2_base__zzprivate_sums(mine, 1u, parts);
+        }
+        float top = -INFINITY, total = 0.0f;
+#pragma unroll
+        for (uint32_t t = 0u; t < KHRONOS_OPENCL2_BASE__ZZPRIVATE_STATES_MOST; ++t)
+            if (t < stored) { v[t] *= scale; if (v[t] > top) top = v[t]; }
+        if (has_current) { mine[0] *= scale; if (mine[0] > top) top = mine[0]; }
+#pragma unroll
+        for (uint32_t t = 0u; t < KHRONOS_OPENCL2_BASE__ZZPRIVATE_STATES_MOST; ++t)
+            if (t < stored) { v[t] = nn__silicon__expf(v[t] - top); total += v[t]; }
+        if (has_current) { mine[0] = nn__silicon__expf(mine[0] - top); total += mine[0]; }
+        __global uint4* orow = (__global uint4*)o__address + h * groups;
+        for (uint32_t g = g0 + lid; g < g1; g += lsz) {
+            float sum[8] = { 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f };
+#pragma unroll
+            for (uint32_t t = 0u; t < KHRONOS_OPENCL2_BASE__ZZPRIVATE_STATES_MOST; ++t)
+                if (t < stored) {
+                    const uint4 sv = states[(uint64_t)t * groups + g];
+                    const uint ss[4] = { sv.x, sv.y, sv.z, sv.w };
+#pragma unroll
+                    for (uint32_t e = 0u; e < 4u; ++e) {
+                        sum[2u * e]      += v[t] * nn__silicon__half_to_float((uint16_t)(ss[e] & 0xFFFFu));
+                        sum[2u * e + 1u] += v[t] * nn__silicon__half_to_float((uint16_t)(ss[e] >> 16));
+                    }
+                }
+            if (has_current) {
+                const uint4 cv = khronos_opencl2_base__zzprivate_normed8(cr[g], gain, over);
+                const uint cs[4] = { cv.x, cv.y, cv.z, cv.w };
+#pragma unroll
+                for (uint32_t e = 0u; e < 4u; ++e) {
+                    sum[2u * e]      += mine[0] * nn__silicon__half_to_float((uint16_t)(cs[e] & 0xFFFFu));
+                    sum[2u * e + 1u] += mine[0] * nn__silicon__half_to_float((uint16_t)(cs[e] >> 16));
+                }
+            }
+            uint out[4];
+#pragma unroll
+            for (uint32_t e = 0u; e < 4u; ++e)
+                out[e] = khronos_opencl2_base__zzprivate_half(sum[2u * e] / total, over)
+                       | (khronos_opencl2_base__zzprivate_half(sum[2u * e + 1u] / total, over) << 16);
+            orow[g] = (uint4)(out[0], out[1], out[2], out[3]);
+        }
+    }
+}
+
+/* ⭐ `attention_scores_grouped` — a work-item a (query head, position): the dot nn's body makes for that position, two
+ * halves a step through `dot2` in the head's order (`nn__attention__zzprivate_dots` at a span of one), so every score is
+ * nn's to the bit. nn's body gives an item a tile of 8 positions, the query heads of a kv head beside it — at Inkling 2's
+ * 24 heads over ~50 positions 144 items each walking 8 rows, `MEASURED` (rocprof, ⑳) 103 µs a call; here 8 times the
+ * items, each one row. */
+__kernel void khronos_opencl2_base__scores_grouped(ulong p__address, ulong q__address, ulong k__address, uint64_t q_heads,
+                                                   uint64_t kv_heads, uint64_t head_dim, uint64_t length) {
+    __global float* p = (__global float*)p__address;
+    __global const uint16_t* q = (__global const uint16_t*)q__address;
+    __global const uint16_t* k = (__global const uint16_t*)k__address;
+    const uint64_t group = q_heads / kv_heads, row = kv_heads * head_dim;
+    const float scale = 1.0f / nn__silicon__sqrtf((float)head_dim);
+    for (uint64_t it = get_global_id(0); it < q_heads * length; it += get_global_size(0)) {
+        const uint64_t h = it / length, t = it - h * length, g = h / group;
+        __global const uint16_t* qh = q + h * head_dim;
+        __global const uint16_t* kh = k + g * head_dim;
+        float dot = 0.0f;
+        if (head_dim % 2u == 0u && row % 2u == 0u && (q__address + 2u * h * head_dim) % 4u == 0u && (k__address + 2u * g * head_dim) % 4u == 0u) {
+            __global const uint32_t* q2 = (__global const uint32_t*)qh;
+            __global const uint32_t* k2 = (__global const uint32_t*)kh;
+            for (uint64_t e = 0u; e < head_dim / 2u; ++e) dot = nn__silicon__dot2(q2[e], k2[(t * row) / 2u + e], dot);
+        } else {
+            for (uint64_t e = 0u; e < head_dim; ++e)
+                dot += nn__silicon__half_to_float(qh[e]) * nn__silicon__half_to_float(kh[t * row + e]);
+        }
+        p[h * length + t] = dot * scale;
     }
 }
 

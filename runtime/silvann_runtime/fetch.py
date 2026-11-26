@@ -41,7 +41,23 @@ KNOWN = {
     "silvann_tq_D8_ministral_3_14b": ("eval-apply/silvann_tq_D8_ministral_3_14b", "13.5 GB",
                                       "mistralai/Ministral-3-14B-Instruct-2512"),
     "silvann_tq_D8_qwen_image_2.1": ("eval-apply/silvann_tq_D8_qwen_image_2.1", "18 GB", "Qwen/Qwen-Image-2.1"),
+    "silvann_tq_D8E4_inkling2_mini": ("eval-apply/silvann_tq_D8E4_inkling2_mini", "14 GB", "thinkingmachines/Inkling-2-Mini"),
 }
+# ⭐ THE PACKS A USER IS OFFERED — `silvann list` and the UI's "Download models" show these, and any other that is
+#   already here. ⚖ 2026-11-24 the architect: *"we should also remove some of the packs from the "suggested" link, and
+#   add a web link "to see all available packs go to https://huggingface.co/eval-apply", so we can remove all the d4
+#   packs except 27b and 2b, and remove the 122b and the 35b from the quick choice menu"*. A pack KNOWN names and this
+#   does not is still fetched by its name, updated where it is here, and sent its release's program.
+LISTED = ("silvann_tq_D4_qwen3.5_2b", "silvann_tq_D8_qwen3.5_4b", "silvann_tq_D8_ministral_3_14b",
+          "silvann_tq_D8E4_inkling2_mini", "silvann_tq_D4_qwen3.8_27b", "silvann_tq_D8E4_qwen3.8_flash_next",
+          "silvann_tq_D8E4_glm_5.3_flash", "silvann_tq_D8E4_deepseek_v4.1_flash_1017", "silvann_tq_D8_qwen_image_2.1")
+PACKS_PAGE = "https://huggingface.co/eval-apply"
+
+
+def offered(models):
+    """The packs a list shows, by name: the ones a user is offered (`LISTED`) and any other of `KNOWN` that is in the
+    folder `models` already."""
+    return [name for name in sorted(KNOWN) if name in LISTED or present(os.path.join(str(models), name))]
 
 
 def present(path):

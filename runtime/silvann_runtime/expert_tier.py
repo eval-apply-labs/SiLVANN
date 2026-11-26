@@ -137,11 +137,14 @@ def tier(m, name, type_, experts, top_k, hidden, inter, plan, layers, sources=No
     collection a chunk's experts are streamed through when its note's line is 0, `stream_batch` experts a batch.
     `slots`, {worker, type}, in place of `sources`: the experts a disk tier keeps in RAM, a cache whose slots move as it
     reads — a promotion copies its expert from the slot that worker's `type` collection holds it in when it is made (nn's
-    EXCLUSIVE 2, NN-164: the experts a tier promotes are its layer's most picked, the top of that cache). One part.
+    EXCLUSIVE 2, NN-164: the experts a tier promotes are its layer's most picked, the top of that cache); with `parts`,
+    part p from worker `worker + p`'s (DeepSeek's sockets, NN-217), stitched by `part_shapes`. `slots["one_way"]`: the tier
+    one way, nn's EXCLUSIVE 3 (NN-218) — disk → RAM → card, nothing copied off the card: a promoted expert the cache's next
+    victim once the card holds it, the one the card let go for it read back from the disk at once.
     `backings`, with `slots`: {layer: the name of that layer's backing on the slots' worker} — a streamed chunk's experts
     the cache does not hold read into it from the file before their copy to the ring (nn's BACKINGS, NN-165).
     `part_shapes`, [(inner width, part plan)] a part: parts of unequal widths, each slot its own plan (nn's PART_SHAPES,
-    NN-167 — DeepSeek's 2,304 over two sockets, 1,024 and 1,280); an inclusive tier's alone.
+    NN-167 — DeepSeek's 2,304 over two sockets, 1,024 and 1,280); an inclusive tier's, or a disk cache's (`slots`).
     Made as the card's worker, it opens that card's landing pad, which every promotion is moved through (▶ `pad_bytes`)."""
     m.must("(sys__add_bindings %d '%s %d)" % (m.env, LANDING_LINE, int(landing_line)), "the binding " + LANDING_LINE,
            "sys__value_true")
@@ -154,13 +157,14 @@ def tier(m, name, type_, experts, top_k, hidden, inter, plan, layers, sources=No
     if backings:
         m.table(name + "_backings", [backings.get(l, 0) for l in range(layers)])
     if part_shapes:
-        if exclusive or slots or len(part_shapes) != parts or sum(w for w, _ in part_shapes) != inter:
-            raise ValueError("parts of unequal widths are an inclusive tier's, one a part, summing to the inner width")
+        if exclusive or len(part_shapes) != parts or sum(w for w, _ in part_shapes) != inter:
+            raise ValueError("parts of unequal widths are an inclusive tier's or a disk cache's, one a part, summing to the "
+                             "inner width")
         m.table(name + "_parts", [c for w, q in part_shapes for c in [int(w)] + off(q)])
     m.table(name, [name + "_sources" if sources else 0, type_, experts, top_k, hidden, inter] + off(plan) + [parts] + off(pp)
             + [gate_row, down_row, landing]
             + ([1, exclusive["part_worker"], exclusive["part_type"], "(if %s 1 0)" % DUPLEX] if exclusive else
-               [2, slots["worker"], slots["type"], 0] if slots else [0, 0, 0, 0])
+               [3 if slots.get("one_way") else 2, slots["worker"], slots["type"], 0] if slots else [0, 0, 0, 0])
             + [LANDING_LINE] + ([int(ranks), int(shared)] if ranks > 1 or stream is not None or backings or part_shapes else [])
             + ([int(stream) + 1 if stream is not None else 0, int(stream_batch)] if stream is not None or backings or part_shapes
                else [])

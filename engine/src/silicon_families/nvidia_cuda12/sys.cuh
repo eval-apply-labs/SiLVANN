@@ -107,13 +107,21 @@ static inline bool nvidia_cuda12__memory_allocate_host_ram_mapped(void** at, voi
 
 /* Whether the card the vendor's runtime numbers `ordinal` is this family's, asked by its compute capability, as `sm_86`
  * — and by its name, as the program names it, so a Turing card without tensor cores is not (▶ `includes.cuh`). */
+/* ⛳ ASKED ONCE A CARD: `cudaGetDeviceProperties` is a driver query of every property, `MEASURED` 1.56 ms a call on the
+ *   precision's 5060 Ti (nsys), and the binding and the count ask this at every token's boundary — three calls, 4.7 ms
+ *   of Inkling 2 Mini's 23.5 ms token, the card idle through them. A card's model does not change in a process, so the
+ *   answer is kept: 0 not yet asked, 1 this family's, 2 not. Two threads asking at once each write the same answer. */
 static inline bool nvidia_cuda12__zzprivate_takes(int ordinal) {
+    static volatile uint8_t known[64];
+    if (ordinal >= 0 && ordinal < 64 && known[ordinal] != 0u) return known[ordinal] == 1u;
     cudaDeviceProp p;
     char card[24];
     if (cudaGetDeviceProperties(&p, ordinal) != cudaSuccess) return false;
     snprintf(card, sizeof card, silicon_families__no_tensor_cores(p.major, p.minor, p.name) ? "sm_%d%d:tc-" : "sm_%d%d",
              p.major, p.minor);
-    return nvidia_cuda12__includes(card);
+    const bool mine = nvidia_cuda12__includes(card);
+    if (ordinal >= 0 && ordinal < 64) known[ordinal] = mine ? 1u : 2u;
+    return mine;
 }
 
 /* How many cards the vendor's runtime shows, whichever family they are. */

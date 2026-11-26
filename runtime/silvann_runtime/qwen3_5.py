@@ -46,12 +46,17 @@ def _half(a):
 class Qwen35(Generates):
     PROGRAM = ("qwen3_5", "qwen3_5_cpu", "sampling", "generate", "qwen3_5_pictures", "qwen3_5_tp")   # the pack's lisp/ files (▶ `ModelFolder.program`)
     SAMPLES_ON_CARD = True          # `head_sample` — ▶ `sampling`
+    # the one-way tier from the disk measured against the inclusive one, so autotune chooses it (▶ its `_setup`): `MEASURED`
+    #   node03, the 35B, a 1 GB tier, a 6 GB cache, 1,000 positions then 256 tokens, three rounds interleaved — 40.72, 40.78,
+    #   41.58 ms a token against 47.76, 47.07, 45.60, the prompt 9.7 s each way; against HF 5 · 0 with a 1 and a 4 GB tier
+    #   (measurements/2026-11-26_nn218_one_way_node03.md)
+    ONE_WAY_MEASURED = True
 
     def __init__(self, folder, machine, max_context=4096, fused_moe=True, kv="tiered", tiers=None, experts_on="card",
                  experts_from="auto", experts_dir=None, layers=None, chunk=256, experts_ram_gb=None, card_experts_gb=0,
                  card_landing="auto", card_line=None, card_shared="auto", experts_int8=False, experts_lock=False, experts_register="auto", igpu_cpu=None, picture_pixels=1 << 22,
                  picture_weights="auto", tensor_parallel=1, lend_cache=True, mtp="no", mtp_rows=False, mtp_pairs=True,
-                 stream=False, embed_on="auto", experts_ahead="auto", seats=1, cards=None):
+                 stream=False, embed_on="auto", experts_ahead="auto", seats=1, cards=None, card_exclusive=False):
         if folder.architecture not in ARCHITECTURES:
             raise Refused("%s is a %r model, not one of %s" % (folder.path, folder.architecture, ARCHITECTURES))
         c, b = folder.config, folder.bundle
@@ -238,6 +243,12 @@ class Qwen35(Generates):
         if embed_on == "cpu" and self.CARDS != 1:
             raise Refused("embed_on 'cpu' is one card's: a group's card 0 reads the table in place")
         self.EMBED_CPU = embed_on == "cpu" or (embed_on == "auto" and self.CARDS == 1 and machine.silicon in OPENCL1_FAMILIES)
+        # ⭐ …AND WHERE IT IS NOT THE CPU'S ON SUCH A CARD — no CPU worker runs here (x86_avx2 needs AVX2; ▶ autotune's
+        #   `choose`), or the config says "card" — the table is a collection of the card's own memory, as the head is: the
+        #   card reads a row of it where it lies, and nothing crosses a token. `MEASURED` node03, the 2B through
+        #   nvidia_opencl1 on an MI50 with no CPU worker: the table in RAM read in place, 112 ms a token
+        #   (measurements/2026-11-25_nn207_inkling2_rows_node03.md "No AVX2").
+        self.TABLE_ON_CARD = None                   # decided where the seats' cards are known (▶ NCARDS below)
         # ⛳ A DENSE MODEL'S CPU WORKER IS THE EMBEDDING'S ALONE (⚖ 2026-10-26 *"i'd rather do 3, as that saves 1.2 gb"*): the
         #   27B's 1.2 GB table off the card, which through OpenCL 1.2 kept it twice and filled a 16 GB card. A worker standing
         #   in a token's program polls for work while it stands (▶ `eng__opcodes__await_instructions`) — measured beside the
@@ -260,6 +271,12 @@ class Qwen35(Generates):
         #   (`card_line` fixes it). ▶ glm5.py's, and nn's `nn__expert_tier__*`
         self.CARD_GB = float(card_experts_gb or 0)
         self.CARD_LANDING = None if card_landing in (None, "auto") else int(card_landing)
+        # ⭐ `card_exclusive`, THE TIER ONE WAY (NN-218, nn's EXCLUSIVE 3) — with the experts from the disk alone: disk → RAM →
+        #   card, nothing copied off the card; an expert the card holds the cache's next victim, one it lets go read back
+        #   from the disk at once, so RAM and the card hold distinct experts
+        if card_exclusive and (experts_from != "disk" or not card_experts_gb):
+            raise Refused("card_exclusive is the disk's tier one way: experts_from 'disk' and card_experts_gb")
+        self.ONE_WAY = bool(card_exclusive)
         self.CARD_LINE = int(card_line) if card_line else None
         # ⭐ A GROUP'S SHARED SLICE (NN-99 ③): `card_shared` of a card's slots a layer kept on every card of a tensor-parallel
         #   group — the hottest, chosen again from decayed picks (▶ nn's `NN__EXPERT_TIER__SHARED`); 0, none; "auto" from this
@@ -312,6 +329,8 @@ class Qwen35(Generates):
                 or not all(isinstance(c, int) and not isinstance(c, bool) and c >= 0 for c in cards):
             raise Refused("cards is a list of one or more cards, each once, not %r" % (cards,))
         self.CARD_IDS, self.NCARDS = cards, len(cards)
+        self.TABLE_ON_CARD = (not self.EMBED_CPU and self.CARDS == 1 and self.NCARDS <= 1
+                              and machine.silicon in OPENCL1_FAMILIES)
         # ⭐ ...EACH CARD A TIER OF ITS OWN (NN-166, seats.md — ⚖ 2026-11-02 *"one conversation per card cleanly, jack up
         #   the l1 cache"*): promoted by its one conversation's picks alone, inclusive, lent its own cache's unreached rows
         #   (▶ `_load_seat_cards`, `_lend`, `_room`); its seat's chain the tiered one (▶ qwen3_5.lisp's chain)
@@ -362,27 +381,37 @@ class Qwen35(Generates):
         #   *"we should set the igpu_cpu as auto, as it doubled the tps there even on a 6 core cpu"*), `"yes"` refused
         #   where there is none, `"no"` the CPU's own. Windows names an integrated GPU itself; Linux names Intel's only
         #   where `SILVANN_IGPU_CPU=1` (▶ cards_present.cuh), so there `"auto"` finds one only with it. Its slots are its
-        #   family's addresses, not the host's: a card's tier copying from them, their registration with the card or
-        #   their lock in RAM, the CPU's int8 arithmetic, the disk's cache and a group of cards are refused beside it.
+        #   family's addresses, not the host's: their registration with the card or their lock in RAM, the CPU's int8
+        #   arithmetic, the file mapped as memory and a group of cards are refused beside it. A card's tier is not
+        #   (NN-216, ⚖ 2026-11-25 *"the cpu is the one that moves it around and hands out the pointers"*): beside one,
+        #   the integrated GPU's room is mapped host RAM (`nn__room__in_host_ram`, ▶ nn's package__impl.cuh), its
+        #   family's address for its kernels and the program's copy for the CPU, whose threads gather a promotion from
+        #   it as from x86_avx2's slots — on an integrated GPU the two are one memory. The disk's cache is not (⚖ 2026-11-25 *"the cpu family doing the copies and the igpu doing the
+        #   gemv/gemm is likely better"*): nn's loader reads a missed expert through the worker's own family, an OpenCL
+        #   family's through a bounce buffer into its memory (`sys__file__zzabi_read_through`).
         if igpu_cpu is None:
             igpu_cpu = "auto"
         if igpu_cpu not in ("auto", "yes", "no", True, False):
             raise Refused("igpu_cpu is 'auto', 'yes' or 'no', not %r" % (igpu_cpu,))
         self.IGPU = machine.integrated() if self.CPU_WORKER and igpu_cpu not in ("no", False) else None
+        # why the CPU worker's part stays the CPU's, where it does: what a refusal of that worker says (▶ autotune's `boots`)
+        self.IGPU_DECLINED = (None if not self.CPU_WORKER else "igpu_cpu is 'no'" if igpu_cpu in ("no", False) else
+                              "no integrated GPU beside the card" if self.IGPU is None else None)
         if igpu_cpu in ("yes", True) and self.IGPU is None:
             raise Refused("igpu_cpu 'yes': no integrated GPU beside the card%s" % (
                 "" if self.CPU_WORKER else " — and nothing is the CPU's (experts_on 'cpu' puts the experts in RAM)"))
         if self.IGPU is not None:
             why = [w for w, on in (("one card (no tensor_parallel group, no conversation a card)", self.CARDS > 1 or self.NCARDS > 1),
-                                   ("the experts in RAM (experts_from 'ram')", self.CPU_EXPERTS and self.EXPERTS_FROM != "ram"),
+                                   ("the experts in RAM or read from the disk (experts_from 'ram' or 'disk')",
+                                    self.CPU_EXPERTS and self.EXPERTS_FROM not in ("ram", "disk")),
                                    ("no int8 experts (experts_int8 false: the CPU's arithmetic)", self.EXPERTS_INT8),
-                                   ("no card tier (card_experts_gb 0)", bool(self.CARD_GB)),
                                    ("no lock (experts_lock false)", self.EXPERTS_LOCK),
                                    ("no registration (experts_register not true)", self.REGISTER_REQUIRED)) if on]
             if why:
                 if igpu_cpu in ("yes", True):
                     raise Refused("the integrated GPU as the CPU worker takes %s" % ", ".join(why))
                 self.IGPU = None                    # "auto": the CPU's, as this setup asks of it
+                self.IGPU_DECLINED = "the integrated GPU in its place takes %s" % ", ".join(why)
             else:
                 self.EXPERTS_REGISTER = False
         # ⭐ FROM THE DISK, THE EXPERTS ARE A CACHE IN THE CPU WORKER'S OWN MEMORY — read from the file into a slot when a
@@ -527,6 +556,11 @@ class Qwen35(Generates):
         coll += [(self.T_HEAD, self.HPLAN, 1), (self.T_STATE, self.SPLAN, max(n_d, 1) * self.CARD_SEATS),
                  (self.T_KV, self.KVPLAN, (len(run) - n_d) * self.CARD_SEATS)]     # a layer's state a slot a seat
         after = self.T_KV + 1
+        self.T_EMB = None
+        if self.TABLE_ON_CARD:                          # the embedding a collection of the card's (▶ `__init__`)
+            self.T_EMB = after
+            coll.append((self.T_EMB, self.BPLAN, 1))
+            after += 1
         if self.VIS:
             self.T_VIS, self.T_VSCR = after, after + 1
             self._vision_plan()
@@ -627,7 +661,8 @@ class Qwen35(Generates):
                 "nn__ram_buffer_experts__size_bytes:64\nnn__ram_buffer_experts__qty:1\n"
                 "nn__ram_buffer_table__size_bytes:%d\nnn__ram_buffer_table__qty:1\n"
                 % (big, 6 + (self.MASK_BYTES[CARD] > 0) + tier, (self.arena + (256 << 20)) >> 20, len(self.kinds) - n_d, n_d,
-                   self._layer_types(), len(self.collections), types, 256 if self.EMBED_CPU else self.TABLE_BYTES))
+                   self._layer_types(), len(self.collections), types,
+                   256 if self.EMBED_CPU or self.TABLE_ON_CARD else self.TABLE_BYTES))
         card = self._pools(card, self._mtp_asks() + self._seat_asks())
         cards = {k: card for k in range(max(self.CARDS, self.NCARDS))}   # every card the same collections, each its own part
         if not self.CPU_WORKER:
@@ -670,6 +705,8 @@ class Qwen35(Generates):
                           + ([1024, self.H * 2, 2 * (self.H + 16), self.H * 2, 131072, self.CHUNK * self.HAND_ROW,
                               self.CHUNK * self.H * 2, self.RSCRATCH] * (self.NCARDS - 1) if self.CPU_EXPERTS else []))
         # ▲ each card past the first its own hand-off on the CPU (▶ `_cpu_hand_off`)
+        if self.IGPU is not None and self.CARD_GB:      # a tier beside the integrated GPU: its room the host's (NN-216)
+            cpu += "nn__room__in_host_ram:1\n"
         return {**cards, self.CPU: cpu}
 
     def _index_layers(self):
@@ -1095,13 +1132,17 @@ class Qwen35(Generates):
         m = self.m
         loader.layer_width(0, self.T_HEAD, 1)
         self.HEAD_AT = loader.load_bytes(self.HPLAN, self.T_HEAD, 0, self.head_data, self.head_lut)
-        if self.EMBED_CPU:                          # the CPU worker's own (▶ `__init__`)
-            m.act_as(self.CPU)
-        self.EMB_AT = m.buffer(self.TABLE_BYTES, "c_embedding" if self.EMBED_CPU else "EMBEDDING", ram=True)
-        m.write(self.EMB_AT, self.emb_data)
-        m.write(self.EMB_AT + self.EMB_DATA_BYTES, self.emb_lut)
-        if self.EMBED_CPU:
-            m.act_as(CARD)
+        if self.TABLE_ON_CARD:                      # a collection of the card's, as the head (▶ `__init__`)
+            loader.layer_width(0, self.T_EMB, 1)
+            self.EMB_AT = loader.load_bytes(self.BPLAN, self.T_EMB, 0, self.emb_data, self.emb_lut)
+        else:
+            if self.EMBED_CPU:                      # the CPU worker's own (▶ `__init__`)
+                m.act_as(self.CPU)
+            self.EMB_AT = m.buffer(self.TABLE_BYTES, "c_embedding" if self.EMBED_CPU else "EMBEDDING", ram=True)
+            m.write(self.EMB_AT, self.emb_data)
+            m.write(self.EMB_AT + self.EMB_DATA_BYTES, self.emb_lut)
+            if self.EMBED_CPU:
+                m.act_as(CARD)
         if not last:                                # another card loads them after this one (▶ `_load_seat_cards`)
             return
         for name in ("lm_head.weight", "model.language_model.embed_tokens.weight"):
@@ -1638,7 +1679,7 @@ class Qwen35(Generates):
                          {l: "src%d" % l for l in self.run_layers if l in self.SRC} if self.EXPERTS_FROM != "disk" else None,
                          landing=self.CARD_LANDING or 1, ranks=self.CARDS, shared=shared,
                          stream=self.T_STREAM, stream_batch=getattr(self, "STREAM_BATCH", expert_tier.STREAM_BATCH),
-                         slots=dict(worker=self.CPU, type=0) if self.EXPERTS_FROM == "disk" else None,
+                         slots=dict(worker=self.CPU, type=0, one_way=self.ONE_WAY) if self.EXPERTS_FROM == "disk" else None,
                          # ⭐ A PROMPT STREAMED FROM THE DISK (NN-165): an expert a slice picks that the cache does not
                          #   hold read into it from the layer's file, a batch ahead of its copy to the ring
                          backings={l: self._backing[(self.CPU, l)] for l in self.run_layers}
@@ -1764,7 +1805,7 @@ class Qwen35(Generates):
         row = self.EMB_ROW_BYTES
         plane = lambda at, size: "(nn__expert__plane 0 %d 0 %d %d)" % (self.T_HEAD, at, size)
         values = dict(HIDDEN=H, HIDDEN_BYTES=2 * H, VOCAB=self.VOCAB, EPS=self.EPS, THETA=self.THETA, ROTARY=self.ROT,
-                      RUN=len(run) - (1 if self.MTP is not None else 0), EMB_HALVES=row // 2, EMB_SCALES=self.EMB_DATA_BYTES // 2, EMB_BITS=self.EMB_BITS,
+                      RUN=len(run) - (1 if self.MTP is not None else 0), EMB_HALVES=row // 2, EMB_SCALES=(self.BPLAN.at_down_lut if self.TABLE_ON_CARD else self.EMB_DATA_BYTES) // 2, EMB_BITS=self.EMB_BITS,
                       HEAD_BITS=self.HEAD_BITS, STOPS=STOPS_MOST, SEEN=sampling.SEEN,
                       HEAD_CODES=plane(self.HPLAN.at_up_data, self.HPLAN.up_data),
                       HEAD_SCALES=plane(self.HPLAN.at_down_lut, self.HPLAN.down_lut),
@@ -1778,6 +1819,8 @@ class Qwen35(Generates):
             values.update(HAND_BYTES=2 * (H + 16), HANDS_BYTES=self.CHUNK * self.HAND_ROW, ROWS_BYTES=self.CHUNK * H * 2,
                           ROWS_HALVES=self.CHUNK * H, HAND_ROW=self.HAND_ROW, HAND_PICKS_AT=self.HAND_ROW - 8 * self.TOPK)
         values.update(STREAM=self.T_SLICE is not None, CHUNK=self.CHUNK, NOTE_STREAM=expert_tier.NOTE_STREAM)
+        if self.TABLE_ON_CARD:                      # the table a plane over its slot on the card (▶ `__init__`)
+            values["EMBEDDING"] = "(nn__expert__plane 0 %d 0 0 %d)" % (self.T_EMB, self.BPLAN.slot_bytes)
         if self.T_SLICE is not None:
             values.update(HAND_HALVES=self.HAND_ROW // 2,
                           **{name.upper() + "_S": self._slice_plane(name) for name in ("xs", "h1s", "rrows", "hands")})

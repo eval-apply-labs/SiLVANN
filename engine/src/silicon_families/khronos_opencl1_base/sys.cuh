@@ -112,6 +112,7 @@ typedef struct khronos_opencl1_base__state {
     cl_command_queue        queue[KHRONOS_OPENCL1_BASE__DEVICES_MAX];         /* one in-order queue each */
     uint64_t                largest[KHRONOS_OPENCL1_BASE__DEVICES_MAX];       /* the card's largest one buffer */
     bool                    unified[KHRONOS_OPENCL1_BASE__DEVICES_MAX];       /* its memory the host's (NN-73) */
+    bool                    small_only[KHRONOS_OPENCL1_BASE__DEVICES_MAX];    /* built without the large buffers' option */
     khronos_opencl1_base__arena  arena[KHRONOS_OPENCL1_BASE__DEVICES_MAX][KHRONOS_OPENCL1_BASE__ARENAS];
     uint64_t                generation[KHRONOS_OPENCL1_BASE__DEVICES_MAX];    /* moves when a card's arenas change */
     khronos_opencl1_base__allocation* live;                                   /* every span of card memory not yet given back */
@@ -259,13 +260,24 @@ static inline bool khronos_opencl1_base__zzprivate_fill(cl_command_queue q, cl_m
     return clEnqueueFillBuffer(q, b, zero, width, offset, bytes, 0u, 0, 0) == CL_SUCCESS && clFinish(q) == CL_SUCCESS;
 }
 
+/* ⭐ A FAMILY'S FLAG FOR A BUFFER LARGER THAN THE CARD'S LARGEST (▶ intel_opencl1_igpu/unit.cuh: Intel's
+ *   `CL_MEM_ALLOW_UNRESTRICTED_SIZE_INTEL`), added to the buffer's flags only then; 0, none, by default. */
+#ifndef KHRONOS_OPENCL1_BASE__LARGE_FLAG
+#define KHRONOS_OPENCL1_BASE__LARGE_FLAG 0
+#endif
+static inline cl_mem_flags khronos_opencl1_base__zzprivate_large(const khronos_opencl1_base__state* s, uint32_t card, uint64_t bytes) {
+    return (KHRONOS_OPENCL1_BASE__LARGE_FLAG != 0 && !s->small_only[card] && bytes > s->largest[card])
+               ? (cl_mem_flags)KHRONOS_OPENCL1_BASE__LARGE_FLAG : 0u;
+}
+
 /* A new arena in slot `slot` of `card`, of `bytes`.
  * ⛳ IT IS FILLED ONCE HERE, so the runtime places it on the card now: an allocation it only places at first use
  *   would fail at a kernel's launch instead of here, where the caller can be told. */
 static inline bool khronos_opencl1_base__zzprivate_arena(khronos_opencl1_base__state* s, uint32_t card, uint32_t slot, uint64_t bytes) {
     khronos_opencl1_base__arena* a = &s->arena[card][slot];
     cl_int err = CL_SUCCESS;
-    cl_mem b = clCreateBuffer(s->context[card], CL_MEM_READ_WRITE, (size_t)bytes, 0, &err);
+    cl_mem b = clCreateBuffer(s->context[card], CL_MEM_READ_WRITE | khronos_opencl1_base__zzprivate_large(s, card, bytes), (size_t)bytes, 0,
+                              &err);
     if (err != CL_SUCCESS || b == 0) return false;
     if (!khronos_opencl1_base__zzprivate_fill(s->queue[card], b, 0u, (size_t)bytes)) { (void)clReleaseMemObject(b); return false; }
     a->free = (khronos_opencl1_base__span*)malloc(16u * sizeof(khronos_opencl1_base__span));
@@ -342,7 +354,8 @@ static inline uint64_t khronos_opencl1_base__zzprivate_host_arena(khronos_opencl
         khronos_opencl1_base__arena* a = &s->arena[card][k];
         if (a->buffer) continue;
         cl_int err = CL_SUCCESS;
-        cl_mem b = clCreateBuffer(s->context[card], CL_MEM_READ_WRITE | CL_MEM_USE_HOST_PTR, (size_t)bytes, host, &err);
+        cl_mem b = clCreateBuffer(s->context[card], CL_MEM_READ_WRITE | CL_MEM_USE_HOST_PTR | khronos_opencl1_base__zzprivate_large(s, card, bytes),
+                                  (size_t)bytes, host, &err);
         if (err != CL_SUCCESS || b == 0) return 0u;
         void* seen = clEnqueueMapBuffer(s->queue[card], b, CL_TRUE, CL_MAP_READ | CL_MAP_WRITE, 0u, (size_t)bytes, 0u, 0, 0, &err);
         if (err != CL_SUCCESS || seen != (void*)host) {

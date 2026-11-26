@@ -257,7 +257,12 @@ class Glm5(Generates):
         #   lands in — and each promotion sends one back, written into the RAM slots the promoted one gave up. Whether
         #   the two copies run at once is bound in Lisp at boot (▶ `expert_tier.duplex`): `card_duplex` a ratio ×1000 to
         #   bind instead of measuring, `card_duplex_line` the one below which they do.
-        self.CARD_EXCLUSIVE, self.CARD_FREE = bool(card_exclusive), int(card_free)
+        # ⭐ `card_exclusive` WITH THE EXPERTS FROM THE DISK IS THE TIER ONE WAY (NN-218, nn's EXCLUSIVE 3): disk → RAM → card,
+        #   nothing copied off the card — an expert the card holds the cache's next victim, one it lets go read back from the
+        #   disk at once. With the experts in RAM it is the exclusive tier as before (CARD_EXCLUSIVE: each expert on the card
+        #   OR in RAM, a promotion swapping one back). `experts_from` "disk" named: "auto" keeps it the RAM's.
+        self.ONE_WAY = bool(card_exclusive) and experts_from == "disk"
+        self.CARD_EXCLUSIVE, self.CARD_FREE = bool(card_exclusive) and not self.ONE_WAY, int(card_free)
         self.CARD_DUPLEX_LINE, self.CARD_DUPLEX = int(card_duplex_line), card_duplex
         self.CARD_LANDING_LINE = int(card_landing_line)    # ▶ `expert_tier.tier`: above this many hits a visit lands one
         # ⭐ THE LATENT CACHE'S ROWS NO CONVERSATION HAS REACHED, LENT TO AN INCLUSIVE TIER (NN-93) — ▶ `_lend`. An exclusive
@@ -1717,7 +1722,7 @@ class Glm5(Generates):
                 if self.PARTS != 1:
                     raise Refused("a card's tier of experts from the disk's cache copies each expert whole from one socket's "
                                   "memory — sockets 1, not %d parts of each over the sockets" % self.PARTS)
-                fed, slots = None, dict(worker=self.CPUS[0]["w"], type=0)
+                fed, slots = None, dict(worker=self.CPUS[0]["w"], type=0, one_way=self.ONE_WAY)
             self._TIER[k] = dict(fed=fed, exclusive=exclusive, slots=slots)
             self._tier(k)
             if k == 0:

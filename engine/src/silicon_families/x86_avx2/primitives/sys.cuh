@@ -202,9 +202,16 @@ static inline bool x86_avx2__memory_register_host(void* at, size_t bytes, void**
 static inline void x86_avx2__memory_unregister_host(void* at) { (void)at; }
 
 /* ── THE DEVICE: one, when the processors can run what this family was built for ─────────────────── */
+#ifndef X86_AVX2__NEEDS_AVX2
+#define X86_AVX2__NEEDS_AVX2 1                    /* x86_base, built from these primitives for any x86-64-v2, says 0 */
+#endif
 static inline bool x86_avx2__zzprivate_capable(void) {
     __builtin_cpu_init();
+#if X86_AVX2__NEEDS_AVX2
     return __builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma") && __builtin_cpu_supports("f16c");
+#else
+    return __builtin_cpu_supports("sse4.2") && __builtin_cpu_supports("popcnt");
+#endif
 }
 /* ⭐ Device 0 is the whole machine; with more than one NUMA node, device 1 + s is node s alone (`pool.cuh`). */
 static inline uint32_t x86_avx2__device_count(void) { return x86_avx2__zzprivate_capable() ? x86_avx2__zzpackage_devices() : 0u; }

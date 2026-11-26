@@ -51,6 +51,19 @@
 #ifndef KHRONOS_OPENCL2_BASE__BUILD_OPTIONS
 #define KHRONOS_OPENCL2_BASE__BUILD_OPTIONS ""
 #endif
+/* ⭐ AMD'S OPENCL TOLD TO DISPATCH ON THE CALLING THREAD — a family's, where AMD's cards are among its own (▶
+ *   khronos_opencl2/unit.cuh; 0, untouched, by default): ROCm's OpenCL hands every command to a thread of its own unless
+ *   `AMD_DIRECT_DISPATCH` is 1, as HIP's is by default on Linux. Set at the stand-up, before this family's first OpenCL
+ *   call opens the runtime, which reads its settings then; never over a value the user set. `MEASURED` on node03's MI50,
+ *   ROCm 6.1.3: a wait's return 17 → 8 µs, a token of Inkling 2 Mini 42.6 → 37.3 ms, every check the same digits
+ *   (measurements/2026-11-24_nn207_inkling2_rates_node03.md ㉒). Only AMD's runtime reads the name — `REASONED`: it is
+ *   ROCclr's own setting, and Intel's runtime has its own (not run on an Intel card here). Where something in the process
+ *   opened OpenCL first — the system's listing of Intel's GPUs beside an AMD card, another OpenCL family — AMD's runtime
+ *   is already up and this does nothing: its slower dispatch, the same answers.
+ * ⛳ LINUX ONLY: AMD's OpenCL on Windows has not been run with it. */
+#ifndef KHRONOS_OPENCL2_BASE__DIRECT_DISPATCH
+#define KHRONOS_OPENCL2_BASE__DIRECT_DISPATCH 0
+#endif
 
 #define KHRONOS_OPENCL2_BASE__DEVICES_MAX  16u
 
@@ -88,6 +101,9 @@ static inline bool khronos_opencl2_base__zzprivate_svm(cl_device_id d) {
  * will not stand up takes the family's cards with it — a partial set would renumber the rest. */
 static void khronos_opencl2_base__zzprivate_stand_up(void) {
     khronos_opencl2_base__state* s = &khronos_opencl2_base__zzprivate_state;
+#if KHRONOS_OPENCL2_BASE__DIRECT_DISPATCH && defined(__linux__)
+    (void)setenv("AMD_DIRECT_DISPATCH", "1", 0);          /* 0: a value already set stays (▶ above) */
+#endif
     cl_platform_id platforms[8]; cl_uint np = 0u;
     if (clGetPlatformIDs(8u, platforms, &np) != CL_SUCCESS) return;
     for (cl_uint p = 0u; p < np && p < 8u && s->count == 0u; ++p) {

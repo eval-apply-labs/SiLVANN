@@ -25,6 +25,7 @@ columns [`results.md`](results.md)'s are in, its card linking that kind of machi
 | Qwen 3.5 4B | `D8` | 5.3 GB — 8 bits | [eval-apply/silvann_tq_D8_qwen3.5_4b](https://huggingface.co/eval-apply/silvann_tq_D8_qwen3.5_4b) |
 | Ministral 3 14B (dense, Mistral AI) | `D4`, for 8 GB cards | 7.4 GB — 4 bits | [eval-apply/silvann_tq_D4_ministral_3_14b](https://huggingface.co/eval-apply/silvann_tq_D4_ministral_3_14b) |
 | Ministral 3 14B | `D8`, for 16 GB cards | 13.5 GB — 8 bits | [eval-apply/silvann_tq_D8_ministral_3_14b](https://huggingface.co/eval-apply/silvann_tq_D8_ministral_3_14b) |
+| Inkling 2 Mini (Thinking Machines; mixture of experts, 5.4B active of 26.4B) | `D8E4` | 14 GB — experts 4 bits, the rest 8 | [eval-apply/silvann_tq_D8E4_inkling2_mini](https://huggingface.co/eval-apply/silvann_tq_D8E4_inkling2_mini) |
 | Qwen 3.8 27B (dense) | `D4` | 15 GB — 4 bits | [eval-apply/silvann_tq_D4_qwen3.8_27b](https://huggingface.co/eval-apply/silvann_tq_D4_qwen3.8_27b) |
 | Qwen 3.6 35B-A3B (mixture of experts, 3B active) | `D8E4` | 19 GB — experts 4 bits, the rest 8 | [eval-apply/silvann_tq_D8E4_qwen3.6_35b_a3b](https://huggingface.co/eval-apply/silvann_tq_D8E4_qwen3.6_35b_a3b) |
 | Qwen 3.5 122B-A10B (mixture of experts, 10B active) | `D8E4`, for 8 GB cards | 67 GB — experts 4 bits, the rest 8 | [eval-apply/silvann_tq_D8E4_qwen3.5_122b_a10b](https://huggingface.co/eval-apply/silvann_tq_D8E4_qwen3.5_122b_a10b) |
@@ -41,7 +42,8 @@ download it again.
 
 The name says the bits: `D8E4` is the dense matrices at 8 and the experts at 4; `D4` a dense model at 4. The 8-bit dense
 part is the one that pays — ▶ [`compression.md`](compression.md), and how close each pack comes to the original weights
-is in [`results.md`](results.md#how-good-each-pack-is-perplexity). `python3 silvann_core.py list-models` lists them all,
+is in [`results.md`](results.md#how-good-each-pack-is-perplexity). `silvann list` (`python3 silvann_core.py list-models`)
+lists the packs on offer and any other that is here — every pack is on [Hugging Face](https://huggingface.co/eval-apply) —
 and `download-model NAME` fetches one into `models/`.
 
 Each model keeps its own licence, which is in its folder once downloaded: Qwen's and Mistral's Apache-2.0, GLM's and
@@ -143,6 +145,25 @@ bits; v0.21.0's TurboQuant passes over it in slices (32,098 positions: 69.1 · 2
 prompt a position at a time; through CUDA the same card answers 1.3 to 2.6 times as fast. Three machines in a pipeline
 (v0.3) answered at 6.8 tokens a second, the same tokens. In the chat on the RTX 5060 Ti: 24.5 tokens a second, a
 35,840-token context.
+
+## Inkling 2 Mini
+
+<!-- rates:model Inkling 2 Mini -->
+| GPU | RAM | CPU | Disk | Setup | Prefill | Decode | Max context | Version |
+|---|---|---|---|---|---|---|---|---|
+| [8 GB · RTX 5060 Ti, 7.8 GB free](results.md#an-8-gb-card) | 16 GB | Xeon W-2123 (4 cores) | — | `D8E4` · the experts in RAM, a 2.5 GB tier (the boot's) | 48.8 positions/s | 13.85 tokens/s after 100k | 178,176 | v1.8.0 |
+| [16 GB · RTX 5060 Ti](results.md#a-16-gb-card) | 16 GB | Xeon W-2123 (4 cores) | — | `D8E4` · on the card | 128.3 positions/s | 28.96 tokens/s after 57k | 57,344 | v1.8.0 |
+| [16 GB · RTX 5060 Ti](results.md#a-16-gb-card) | 16 GB | Xeon W-2123 (4 cores) | — | `D8E4` · the experts in RAM, a tier lent the cache's unreached rows (12.9 GB) | 59.3 positions/s | 19.04 tokens/s after 100k | 424,960 | v1.8.0 |
+| [16 GB · MI50](results.md#a-16-gb-card) | 125 GB | 2× Xeon E5-2680 v4 (28 cores) | — | `D8E4` · the experts in RAM, a tier lent the cache's unreached rows (13.4 GB) | 150.4 positions/s | 33.63 tokens/s after 2k | 440,320 | v1.8.0 |
+| [16 GB · MI50](results.md#a-16-gb-card) | 125 GB | 2× Xeon E5-2680 v4 (28 cores) | — | `D8E4` · the experts in RAM, a tier lent the cache's unreached rows (13.4 GB) | 79.3 positions/s | 26.46 tokens/s after 20k | 440,320 | v1.8.0 |
+<!-- /rates -->
+
+Thinking Machines' mixture of experts: 26.4 B parameters, 5.4 B a token, 128 experts of which a position takes 8; 24
+layers, the middle twelve run three times — 48 applications a position. Four of the 24 attend the whole context and the
+rest a window of 1,024, so a long context costs little: on a 16 GB card the whole model holds 57,344 positions, and with
+its experts in RAM the card holds 424,960 on the RTX 5060 Ti and 440,320 on an MI50, its tier lent the cache's rows a
+conversation has not reached. Checked against Hugging Face's own model: over 1,601 positions its next token was Hugging
+Face's at 95.8 % of them. Its prompt is read as rows, 256 positions at a time.
 
 ## Qwen 3.6 35B-A3B
 
@@ -304,6 +325,7 @@ of the RAM, so 30 GB is its least. In the chat on the RTX 5060 Ti from the disk:
 | GPU | RAM | CPU | Disk | Setup | Prefill | Decode | Max context | Version |
 |---|---|---|---|---|---|---|---|---|
 | [32 GB · MI50](results.md#a-24-or-32-gb-card) | 1.5 TB (PMem 100) | 2× Xeon Gold 6252 (48 cores) | — | `D8E4` · every expert in RAM, a CPU worker a socket | 27.6-29.5 positions/s | 10.9-11.6 tokens/s after 2k | 2,320 as run | v0.25.0 |
+| [16 GB · RTX 5060 Ti](results.md#a-16-gb-card) | 62 GB | Xeon W-2123 (4 cores) | NVMe array, 5.7 GB/s | `D8E4` · the experts from the disk, a 50 GB cache of them in RAM | 8.2 positions/s | 2.53-2.56 tokens/s after 1k | — | v1.0.0 |
 | [none](results.md#no-graphics-card) | 60 GB | 2× Xeon E5-2680 v4 (28 cores) | NVMe array, 6.6 GB/s | `D8E4` · the experts from the disk | 3.4 positions/s | 1.2 tokens/s after 1k | — | v0.21.2 |
 | [none](results.md#no-graphics-card) | 30 GB | 2× Xeon E5-2680 v4 (28 cores) | NVMe array, 6.6 GB/s | `D8E4` · the experts from the disk | 3.1 positions/s | 0.7 tokens/s after 1k | — | v0.21.2 |
 | [12 GB · MI50 32 GB, 20 GiB held](results.md#a-12-gb-card) | 60 GB | 2× Xeon E5-2680 v4 (28 cores) | NVMe array, 6.6 GB/s | `D8E4` · the experts from the disk | 8.2 positions/s | 2.7 tokens/s after 1k | — | v0.21.2 |

@@ -66,16 +66,52 @@ def free():
     return available()
 
 
+def own():
+    """What this process holds of its own now — its anonymous memory (Linux), its private bytes (Windows) — which a cache
+    of experts must leave room beside; 0 where neither can be read."""
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("RssAnon:"):
+                    return int(line.split()[1]) * 1024
+    except OSError:
+        pass
+    if os.name == "nt":
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            class Counters(ctypes.Structure):
+                _fields_ = [("cb", wintypes.DWORD), ("PageFaultCount", wintypes.DWORD)] + [
+                    (n, ctypes.c_size_t) for n in ("PeakWorkingSetSize", "WorkingSetSize", "QuotaPeakPagedPoolUsage",
+                                                   "QuotaPagedPoolUsage", "QuotaPeakNonPagedPoolUsage", "QuotaNonPagedPoolUsage",
+                                                   "PagefileUsage", "PeakPagefileUsage", "PrivateUsage")]
+            k = ctypes.windll.kernel32
+            k.GetCurrentProcess.restype = wintypes.HANDLE
+            k.K32GetProcessMemoryInfo.argtypes = [wintypes.HANDLE, ctypes.POINTER(Counters), wintypes.DWORD]
+            c = Counters()
+            c.cb = ctypes.sizeof(Counters)
+            if k.K32GetProcessMemoryInfo(k.GetCurrentProcess(), ctypes.byref(c), c.cb):
+                return int(c.PrivateUsage)
+        except Exception:                                   # noqa: BLE001 — a count it cannot read is 0, never a failed boot
+            pass
+    return 0
+
+
 def cache_bytes(total, ram_gb=None, beside=0):
     """How much of `total` bytes of experts a cache in memory holds: `ram_gb` when a config says so, else what the process
-    may hold less a quarter of it, at least 3 GB and at most 8, for everything else — and less `beside`, what the process
-    holds in RAM beside its experts by the config's word (an n-gram table, ▶ `ram_table`). `MEASURED` on node03, the 35B
-    under an 8 GB cap: with 2 GB kept the cgroup killed the process (5.7 GB of its own memory and 1.5 GB of mapped files at
-    the kill) — the card's pinned host memory cannot be given back, and the cap counts it."""
+    may hold less what everything else takes — a quarter of it, at least 3 GB and at most 8, or what the process holds of
+    its own already and 3 GB more, whichever is larger — and less `beside`, what the process holds in RAM beside its
+    experts by the config's word (an n-gram table, ▶ `ram_table`). `MEASURED` on node03, the 35B under an 8 GB cap: with
+    2 GB kept the cgroup killed the process (5.7 GB of its own memory and 1.5 GB of mapped files at the kill) — the card's
+    pinned host memory cannot be given back, and the cap counts it. `REASONED` for the process's own: the search's trials
+    held 3.1 to 4.6 GB of it before a boot (node03, the 35B from the disk, measurements/2026-11-26_v180_candidate.md),
+    more than a 10 or 16 GB PC's quarter keeps."""
     if ram_gb is not None:
         return min(total, int(float(ram_gb) * (1 << 30)))
     held = limit() - int(beside)
-    return max(0, min(total, held - min(8 << 30, max(3 << 30, held // 4))))
+    reserve = max(min(8 << 30, max(3 << 30, held // 4)), own() + (3 << 30))
+    return max(0, min(total, held - reserve))
 
 
 # what the experts in RAM leave beside them: the process's own memory and the system's spare

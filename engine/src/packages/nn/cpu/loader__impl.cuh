@@ -462,6 +462,19 @@ static unsigned nn__loader__zzprivate_left(uint64_t owner) {
 /* Layer `l`'s least recently used expert that is not one of `pinned` (they are the asking layer's), evicted for its slot.
  * ⛳ A PINNED ONE CAN BE THE OLDEST: a batch's resident experts move to the front only as the batch's requests reach them,
  *   so the walk goes on toward the newer ones — at most one step a pinned expert. */
+/* ⭐ WHAT AN EVICTION LET GO (NN-218): the expert a worker's last eviction took a slot from — its layer and number, the
+ *   worker's own (by its number, `sys__silicon__worker`), written and read on its own thread — so a one-way tier can ask
+ *   the caches that feed it to read it back (▶ `nn__expert_tier__promote_from`). */
+#define NN__LOADER__ZZPRIVATE_OWNERS 64u
+static uint64_t nn__loader__zzprivate_gone[NN__LOADER__ZZPRIVATE_OWNERS][3];      /* layer, expert, 1 where it is set */
+static inline void nn__loader__zzprivate_gone_set(uint64_t layer, uint64_t expert) {
+    const uint64_t w = (uint64_t)sys__silicon__worker();
+    if (w >= NN__LOADER__ZZPRIVATE_OWNERS) return;
+    nn__loader__zzprivate_gone[w][0] = layer;
+    nn__loader__zzprivate_gone[w][1] = expert;
+    nn__loader__zzprivate_gone[w][2] = 1u;
+}
+
 static bool nn__loader__zzprivate_evict_oldest(uint64_t l, uint64_t type, uint64_t layer, const uint64_t* pinned, unsigned npinned,
                                                uint64_t* slot, uint64_t* room) {
     uint64_t victim = 0ull;
@@ -469,7 +482,11 @@ static bool nn__loader__zzprivate_evict_oldest(uint64_t l, uint64_t type, uint64
     for (unsigned step = 0u; step <= npinned; ++step) {
         bool held = false;
         for (unsigned p = 0u; l == layer && p < npinned; ++p) held = held || pinned[p] == victim;
-        if (!held) return nn__expert__evict(l, type, victim) && nn__expert__type_take(type, slot, room);
+        if (!held) {
+            if (!nn__expert__evict(l, type, victim) || !nn__expert__type_take(type, slot, room)) return false;
+            nn__loader__zzprivate_gone_set(l, victim);
+            return true;
+        }
         sys__heap_node me;
         if (!nn__expert__slot(l, type, victim, &me) || me.args[NN__EXPERT__SLOT_PREV] == NN__EXPERT__NONE) return false;
         victim = NN__EXPERT__UNLINK(me.args[NN__EXPERT__SLOT_PREV]);
@@ -617,6 +634,88 @@ static inline void nn__loader__zzprivate_wait(void) {
     ++nn__loader__zzprivate_count[NN__EXPERT__COUNT_WAITS];
 }
 
+/* ══ ⭐⭐ A ONE-WAY TIER'S NOTES TO THE CACHES THAT FEED IT (NN-218) ══════════════════════════════════════════════════
+ * ⚖ 2026-11-26 *"lets have demotions read from disk then, and undo the read from the gpu. this way the reads are one way
+ * only"* · *"a promotion will place the promoted expert as the next victim … the demoted expert gets read on top of it"* ·
+ * *"a demotion must be read immediately as we expect that expert to be used reasonably frequently"*. A tier fed from a disk's
+ * cache (EXCLUSIVE 2) holds its experts in RAM too; EXCLUSIVE 3 is that tier one way: disk → RAM → card, nothing copied off
+ * the card. Two notes, posted by the card, taken by each cache's own worker — whose index only it writes:
+ *   AGE    the promoted expert, admitted on the card: the cache's next victim (`nn__expert__age`) — the RAM it held the
+ *          next read's, the expert still there until then
+ *   READ   the expert the card let go for it: read back from the disk at once (`nn__expert__read_ahead`), popular enough
+ *          to have earned the card
+ * A cache takes its notes for a layer at the end of its own call for that layer (▶ routed's `nn__routed__position`,
+ * `nn__routed__rows`): ages first, so a read lands on an aged slot, and after its picks are computed, so no read evicts
+ * one. A note is a hint: one lost or never taken costs a miss later, never an answer.
+ * ⛔ A READ-BACK LEAVES ITS WORKER THE READS ITS PICKS NEED: one queued at a layer's end is in flight until that layer's
+ *   next call settles it, so a token's read-backs are all in flight at once, and a worker has FLIGHT_MAX of them — a burst
+ *   of promotions took every one, and a pick's own read was refused (`NNRE`, `MEASURED` node03, the 35B from the disk, a
+ *   1 GB tier). A read-back is queued only while the worker keeps 2 × TIER_K_MAX free; the rest are dropped. */
+#define NN__EXPERT_TIER__NOTES 512u
+#define NN__EXPERT_TIER__NOTE_AGE  1u
+#define NN__EXPERT_TIER__NOTE_READ 2u
+typedef struct nn__expert_tier__note_mail { uint32_t op; uint64_t worker, layer, type, expert; } nn__expert_tier__note_mail;
+static nn__expert_tier__note_mail nn__expert_tier__zzprivate_mail[NN__EXPERT_TIER__NOTES];
+static unsigned nn__expert_tier__zzprivate_mail_used = 0u;          /* read without the lock to skip it: a later call takes it */
+static unsigned nn__expert_tier__zzprivate_mail_next = 0u;          /* where the next note goes when every one is used */
+/* A promotion of a one-way tier awaiting its admission — so `settle`, admitting it, posts its AGE to the parts' workers. */
+typedef struct nn__expert_tier__waiting { bool used; uint64_t owner, layer, type, expert, worker, parts, part_type; } nn__expert_tier__waiting;
+static nn__expert_tier__waiting nn__expert_tier__zzprivate_waiting[NN__EXPERT__FLIGHT_RECORDS];
+
+/* A note for `worker`'s cache. Lock held. */
+static void nn__expert_tier__zzprivate_post(uint64_t worker, uint32_t op, uint64_t layer, uint64_t type, uint64_t expert) {
+    unsigned at = NN__EXPERT_TIER__NOTES;
+    for (unsigned i = 0u; i < NN__EXPERT_TIER__NOTES && at == NN__EXPERT_TIER__NOTES; ++i)
+        if (nn__expert_tier__zzprivate_mail[i].op == 0u) at = i;
+    if (at == NN__EXPERT_TIER__NOTES) {                              /* every one used: the oldest place given up */
+        at = nn__expert_tier__zzprivate_mail_next;
+        nn__expert_tier__zzprivate_mail_next = (at + 1u) % NN__EXPERT_TIER__NOTES;
+    } else {
+        ++nn__expert_tier__zzprivate_mail_used;
+    }
+    const nn__expert_tier__note_mail n = { op, worker, layer, type, expert };
+    nn__expert_tier__zzprivate_mail[at] = n;
+}
+
+/* A one-way promotion admitted — or not: its AGE posted to each part's worker where it is the card's now. Lock held. */
+static void nn__expert_tier__zzprivate_admitted(uint64_t owner, uint64_t layer, uint64_t type, uint64_t expert, bool admitted) {
+    for (unsigned i = 0u; i < NN__EXPERT__FLIGHT_RECORDS; ++i) {
+        nn__expert_tier__waiting* w = &nn__expert_tier__zzprivate_waiting[i];
+        if (!w->used || w->owner != owner || w->layer != layer || w->type != type || w->expert != expert) continue;
+        w->used = false;
+        if (admitted)
+            for (uint64_t p = 0u; p < w->parts; ++p)
+                nn__expert_tier__zzprivate_post(w->worker + p, NN__EXPERT_TIER__NOTE_AGE, layer, w->part_type, expert);
+    }
+}
+
+/* The notes for this worker's cache of (layer, type), taken and acted on — ages, then reads from `backing`. Called by the
+ * cache's own worker, at the end of its call for that layer. */
+static __device__ inline void nn__expert_tier__drain(sys__silicon_family__id family, uint64_t layer, uint64_t type,
+                                                     const nn__expert__backing* backing) {
+    if (nn__expert_tier__zzprivate_mail_used == 0u) return;
+    const uint64_t worker = (uint64_t)sys__silicon__worker();     /* a note's address: a worker's number, as the tier's */
+    uint64_t age[NN__EXPERT__TIER_K_MAX * 4u], read[NN__EXPERT__TIER_K_MAX * 4u];
+    unsigned n_age = 0u, n_read = 0u;
+    const unsigned most = NN__EXPERT__TIER_K_MAX * 4u;
+    sys__os__lock_take(&nn__loader__zzprivate_lock);
+    for (unsigned i = 0u; i < NN__EXPERT_TIER__NOTES; ++i) {
+        nn__expert_tier__note_mail* n = &nn__expert_tier__zzprivate_mail[i];
+        if (n->op == 0u || n->worker != worker || n->layer != layer || n->type != type) continue;
+        if (n->op == NN__EXPERT_TIER__NOTE_AGE && n_age < most) age[n_age++] = n->expert;
+        else if (n->op == NN__EXPERT_TIER__NOTE_READ && n_read < most) read[n_read++] = n->expert;
+        else continue;                                               /* more than a call takes: the next call's */
+        n->op = 0u;
+        --nn__expert_tier__zzprivate_mail_used;
+    }
+    const unsigned left = nn__loader__zzprivate_left(nn__expert__zzpackage_owner()), keep = 2u * NN__EXPERT__TIER_K_MAX;
+    sys__os__lock_give(&nn__loader__zzprivate_lock);
+    for (unsigned i = 0u; i < n_age; ++i) (void)nn__expert__age(layer, type, age[i]);
+    const unsigned want = left > keep ? (n_read < left - keep ? n_read : left - keep) : 0u;
+    if (want != 0u && backing != 0 && backing->file != 0ull)
+        (void)nn__expert__read_ahead(family, layer, type, read, n_read, want, backing);
+}
+
 static __device__ inline bool nn__expert__settle(uint64_t layer, uint64_t type) {
     bool ok = true;
     const uint64_t owner = nn__expert__zzpackage_owner();
@@ -641,6 +740,9 @@ static __device__ inline bool nn__expert__settle(uint64_t layer, uint64_t type) 
         if (!read || !nn__expert__admit(layer, expert, room, type)) {
             (void)nn__expert__type_give(type, slot);
             ok = false;
+            nn__expert_tier__zzprivate_admitted(owner, layer, type, expert, false);
+        } else {
+            nn__expert_tier__zzprivate_admitted(owner, layer, type, expert, true);
         }
     }
     sys__os__lock_give(&nn__loader__zzprivate_lock);
@@ -844,10 +946,11 @@ static __device__ inline bool nn__expert_tier__of(uint64_t binding, uint64_t lay
         v[NN__EXPERT_TIER__DOWN_LUT], v[NN__EXPERT_TIER__PARTS], v[NN__EXPERT_TIER__P_UP_LUT], v[NN__EXPERT_TIER__P_DOWN],
         v[NN__EXPERT_TIER__P_DOWN_LUT], v[NN__EXPERT_TIER__GATE_ROW], v[NN__EXPERT_TIER__DOWN_ROW], v[NN__EXPERT_TIER__LANDING],
         ex[0], ex[1], ex[2], ex[3], v[NN__EXPERT_TIER__SOURCES], v[NN__EXPERT_TIER__TOP_K], 1u, 0u, 0u, 0u };
-    if (t.exclusive > 2u || t.duplex > 1u || (t.exclusive == 1u && t.layers == 0u)) return false;   /* exclusive needs its sources to move */
-    if (t.exclusive == 2u && (t.parts != 1u || sources != 0u || v[NN__EXPERT_TIER__SOURCES] != 0ull)) return false;   /* the slots' */
-    /* parts of unequal widths (▶ PART_SHAPES): an inclusive tier's, the widths summing to the inner width, each cutting a
-     *   down row on a byte — read before the even split's checks, which they stand in for */
+    if (t.exclusive > 3u || t.duplex > 1u || (t.exclusive == 1u && t.layers == 0u)) return false;   /* exclusive needs its sources to move */
+    if (t.exclusive >= 2u && (sources != 0u || v[NN__EXPERT_TIER__SOURCES] != 0ull)) return false;   /* the slots' */
+    /* parts of unequal widths (▶ PART_SHAPES): an inclusive tier's — or a disk's cache's (EXCLUSIVE 2), part p in worker
+     *   `part_worker + p`'s — the widths summing to the inner width, each cutting a down row on a byte — read before the
+     *   even split's checks, which they stand in for */
     uint64_t shapes = 0u;
     if (sys__node_array__length(entry.args[0]) >= NN__EXPERT_TIER__LENGTH_PART_SHAPES) {
         const sys__heap_node n = sys__node_array__borrow(entry.args[0], NN__EXPERT_TIER__PART_SHAPES);
@@ -855,7 +958,7 @@ static __device__ inline bool nn__expert_tier__of(uint64_t binding, uint64_t lay
         else if (n.dtype != SYS__KIND__VALUE_INT || n.args[0] != 0u) return false;
     }
     if (shapes != 0u) {
-        if (t.exclusive != 0u || t.parts < 2u || sys__node_array__length(shapes) < 4u * t.parts || t.inter == 0u) return false;
+        if (t.exclusive == 1u || t.parts < 2u || sys__node_array__length(shapes) < 4u * t.parts || t.inter == 0u) return false;
         uint64_t sum = 0u;
         for (uint64_t p = 0u; p < t.parts; ++p) {
             const sys__heap_node w = sys__node_array__borrow(shapes, 4u * p);
@@ -899,12 +1002,55 @@ static __device__ inline bool nn__expert_tier__of(uint64_t binding, uint64_t lay
     if (sys__node_array__length(entry.args[0]) >= NN__EXPERT_TIER__LENGTH_BACKINGS) {
         const sys__heap_node n = sys__node_array__borrow(entry.args[0], NN__EXPERT_TIER__BACKINGS);
         if (sys__heap_node__carries_reference(n.dtype) && sys__node_array__is(n.args[0])) {
-            if (t.exclusive != 2u) return false;                  /* a file only where the tier's RAM is a disk's cache */
+            if (t.exclusive < 2u) return false;                   /* a file only where the tier's RAM is a disk's cache */
             t.backings = n.args[0];
         } else if (n.dtype != SYS__KIND__VALUE_INT || n.args[0] != 0u) return false;
     }
+    /* a split expert's caches are a socket's each: a prompt streamed from the disk reads one cache (▶ routed's stream) */
+    if (t.exclusive >= 2u && t.parts > 1u && (t.stream != 0u || t.backings != 0ull)) return false;
     *tier = t;
     return true;
+}
+
+/* ⭐ A WORKER'S ROOM IN HOST RAM (NN-216, ⚖ 2026-11-25 *"the cpu is the one that moves it around and hands out the
+ *   pointers"*): where the boot asks a worker's room of mapped host RAM (`nn__room__in_host_ram`, ▶ package__impl.cuh) —
+ *   an integrated GPU's in the CPU worker's place — the room's family address and the program's copy of it are kept
+ *   here, and a promotion gathers an expert from that copy: the card is handed what the CPU reaches, as from x86_avx2's
+ *   slots, while the integrated GPU computes on the same RAM through its family's address. Written at the boot and at
+ *   the shutdown, read by the loader's threads between them. */
+#define NN__LOADER__HOST_ROOMS 16u
+typedef struct nn__loader__host_room { uint64_t at, bytes; uint8_t* host; } nn__loader__host_room;
+static nn__loader__host_room nn__loader__zzprivate_host_rooms[NN__LOADER__HOST_ROOMS];
+static unsigned nn__loader__zzprivate_host_room_count = 0u;
+
+/* Room `at` of `bytes` kept with its copy `host` (`host` not zero), or given up; false where none is free or none was. */
+static inline bool nn__loader__zzpackage_host_room(uint64_t at, uint64_t bytes, void* host) {
+    for (unsigned i = 0u; i < nn__loader__zzprivate_host_room_count; ++i) {
+        if (nn__loader__zzprivate_host_rooms[i].at != at) continue;
+        if (host != 0) return false;
+        nn__loader__zzprivate_host_rooms[i] = nn__loader__zzprivate_host_rooms[--nn__loader__zzprivate_host_room_count];
+        return true;
+    }
+    if (host == 0 || nn__loader__zzprivate_host_room_count >= NN__LOADER__HOST_ROOMS) return false;
+    const nn__loader__host_room r = { at, bytes, (uint8_t*)host };
+    nn__loader__zzprivate_host_rooms[nn__loader__zzprivate_host_room_count++] = r;
+    return true;
+}
+
+/* The program's copy of room `at`'s copy where `at` lies in a room kept in host RAM, else `at` itself. */
+static inline void* nn__loader__zzpackage_host_copy(uint64_t at) {
+    for (unsigned i = 0u; i < nn__loader__zzprivate_host_room_count; ++i) {
+        const nn__loader__host_room* r = &nn__loader__zzprivate_host_rooms[i];
+        if (at == r->at) return r->host;
+    }
+    return 0;
+}
+static inline uint64_t nn__loader__zzpackage_host_of(uint64_t at) {
+    for (unsigned i = 0u; i < nn__loader__zzprivate_host_room_count; ++i) {
+        const nn__loader__host_room* r = &nn__loader__zzprivate_host_rooms[i];
+        if (at >= r->at && at - r->at < r->bytes) return (uint64_t)(uintptr_t)(r->host + (at - r->at));
+    }
+    return at;
 }
 
 /* Part `p`'s runs, gathering it from `src` (the part's RAM slot) into a whole card slot — its gate rows, its up rows, their
@@ -913,6 +1059,7 @@ static __device__ inline bool nn__expert_tier__of(uint64_t binding, uint64_t lay
 static __device__ inline bool nn__expert_tier__part_runs(const nn__expert_tier* t, uint64_t p, uint64_t src, bool scales,
                                                          nn__expert__gather* g) {
     const uint64_t P = t->parts, H = t->hidden, I = t->inter;
+    src = nn__loader__zzpackage_host_of(src);              /* a room in host RAM: its copy, which the CPU reaches (NN-216) */
     /* the part's inner width `PI` from inner row `O`, its columns of a down row `cols` bytes from byte `at`, and its slot's
      *   offsets — the even split's, or the part's own (▶ PART_SHAPES: DeepSeek's sockets, 1,024 and 1,280 of 2,304) */
     uint64_t PI = I / P, O = p * (I / P), cols = t->down_row / P, at = p * (t->down_row / P);
@@ -950,16 +1097,21 @@ static __device__ inline bool nn__expert_tier__part_runs(const nn__expert_tier* 
 
 static __device__ inline bool nn__expert_tier__stitch(const nn__expert_tier* t, uint64_t x, nn__expert__gather* g) {
     if (x >= t->experts) return false;
-    if (t->exclusive == 2u) {
+    if (t->exclusive >= 2u) {                              /* fed from a disk's cache: EXCLUSIVE 2, or 3 one way */
         /* the slot the RAM worker's collection holds the expert in now (▶ EXCLUSIVE 2) — looked up as that worker, whose
-         *   index it is; none holding it, no promotion */
+         *   index it is; a split expert's part p in worker `part_worker + p`'s, a socket's cache each (DeepSeek's, NN-217),
+         *   every part gathered as the sources' are; a part no cache holds, no promotion */
         const int acting = sys__silicon__host_acting_as();
-        sys__silicon__host_act_as((int)t->part_worker);
-        sys__heap_node at;
-        const bool have = nn__expert__slot(t->layer, t->part_type, x, &at) && at.args[NN__EXPERT__SLOT_AT] != 0ull;
-        sys__silicon__host_act_as(acting);
         g->runs = 0u;
-        return have && nn__expert_tier__part_runs(t, 0u, at.args[NN__EXPERT__SLOT_AT], true, g);
+        bool have = true;
+        for (uint64_t p = 0u; have && p < t->parts; ++p) {
+            sys__silicon__host_act_as((int)(t->part_worker + p));
+            sys__heap_node at;
+            have = nn__expert__slot(t->layer, t->part_type, x, &at) && at.args[NN__EXPERT__SLOT_AT] != 0ull
+                && nn__expert_tier__part_runs(t, p, at.args[NN__EXPERT__SLOT_AT], p == 0u, g);
+        }
+        sys__silicon__host_act_as(acting);
+        return have;
     }
     if (t->sources == 0ull) return false;
     g->runs = 0u;
@@ -969,6 +1121,36 @@ static __device__ inline bool nn__expert_tier__stitch(const nn__expert_tier* t, 
         if (!nn__expert_tier__part_runs(t, p, at.args[0], p == 0u, g)) return false;
     }
     return true;
+}
+
+/* ⭐ AN INCLUSIVE TIER'S PROMOTION OF `x`: stitched from its sources or its cache and given a card slot (▶
+ * `nn__expert__promote`) — and, a one-way tier's (EXCLUSIVE 3, NN-218), the caches that feed it told: the expert the card
+ * let go for it read back into them now, and `x`, once admitted, their next victim (▶ `settle`). As `nn__expert__promote`
+ * answers. */
+static __device__ inline int nn__expert_tier__promote_from(sys__silicon_family__id family, const nn__expert_tier* t, uint64_t layer,
+                                                           uint64_t type, uint64_t x, const uint64_t* pinned, unsigned npinned) {
+    nn__expert__gather g;
+    if (!nn__expert_tier__stitch(t, x, &g)) return NN__EXPERT__REFUSED;
+    /* the worker by its number (what an eviction recorded, ▶ `…_gone_set`); its promotion by its index's owner, as `settle`
+     *   admits it */
+    const uint64_t w = (uint64_t)sys__silicon__worker(), owner = nn__expert__zzpackage_owner();
+    if (w < NN__LOADER__ZZPRIVATE_OWNERS) nn__loader__zzprivate_gone[w][2] = 0u;
+    const int got = nn__expert__promote(family, layer, type, x, &g, pinned, npinned);
+    if (t->exclusive != 3u || got != NN__EXPERT__ARRIVING) return got;
+    sys__os__lock_take(&nn__loader__zzprivate_lock);
+    for (unsigned i = 0u; i < NN__EXPERT__FLIGHT_RECORDS; ++i) {
+        nn__expert_tier__waiting* a = &nn__expert_tier__zzprivate_waiting[i];
+        if (a->used) continue;
+        const nn__expert_tier__waiting made = { true, owner, layer, type, x, t->part_worker, t->parts, t->part_type };
+        *a = made;
+        break;
+    }
+    if (w < NN__LOADER__ZZPRIVATE_OWNERS && nn__loader__zzprivate_gone[w][2] != 0u)
+        for (uint64_t p = 0u; p < t->parts; ++p)
+            nn__expert_tier__zzprivate_post(t->part_worker + p, NN__EXPERT_TIER__NOTE_READ, nn__loader__zzprivate_gone[w][0],
+                                            t->part_type, nn__loader__zzprivate_gone[w][1]);
+    sys__os__lock_give(&nn__loader__zzprivate_lock);
+    return got;
 }
 
 /* ══ ⭐⭐ THE EXCLUSIVE TIER — FREE, OUTGOING, DEMOTION (NN-48) ═════════════════════════════════════════════════════════
@@ -1428,7 +1610,7 @@ static __device__ inline bool nn__expert_tier__visit(sys__silicon_family__id fam
                                                      bool* held) {
     const uint64_t layer = t->layer, type = t->type;
     const unsigned k = (unsigned)t->top_k;
-    const bool fed = t->sources != 0ull || t->exclusive == 2u;   /* a table of its sources, or the slots' (▶ EXCLUSIVE 2) */
+    const bool fed = t->sources != 0ull || t->exclusive >= 2u;   /* a table of its sources, or the slots' (▶ EXCLUSIVE 2, 3) */
     /* ⭐ A PROMOTION COUNTS AT ITS LAYER'S NEXT VISIT, LANDED OR WAITED FOR: every one this worker started on the layer —
      *   at the visit before — is admitted here, so which experts a card holds at a visit is the same on every boot (⚖ one
      *   config, one answer); admitting those landed by then would make it the copies' timing. A layer's next visit is a
@@ -1487,8 +1669,7 @@ static __device__ inline bool nn__expert_tier__visit(sys__silicon_family__id fam
         const unsigned j = cand[c];
         nn__expert__gather g;
         if (t->exclusive == 1u ? nn__expert_tier__promote(family, t, ids[j], pinned, n_pinned) == NN__EXPERT__ARRIVING
-                               : (nn__expert_tier__stitch(t, ids[j], &g)
-                                  && nn__expert__promote(family, layer, type, ids[j], &g, pinned, n_pinned) == NN__EXPERT__ARRIVING))
+                               : nn__expert_tier__promote_from(family, t, layer, type, ids[j], pinned, n_pinned) == NN__EXPERT__ARRIVING)
             ++started;
     }
     for (unsigned j = 0u; j < k; ++j) (void)nn__expert__called(layer, type, ids[j], now);
@@ -1964,7 +2145,7 @@ static __device__ inline bool nn__expert_tier__visit_group(sys__silicon_family__
     const uint64_t layer = t->layer, type = t->type, E = t->experts;
     const unsigned k = (unsigned)t->top_k;
     const uint32_t ranks = (uint32_t)t->ranks, me = (uint32_t)sys__silicon__worker();
-    const bool fed = t->sources != 0ull || t->exclusive == 2u;   /* a table of its sources, or the slots' (▶ EXCLUSIVE 2) */
+    const bool fed = t->sources != 0ull || t->exclusive >= 2u;   /* a table of its sources, or the slots' (▶ EXCLUSIVE 2, 3) */
     if (fed) (void)nn__expert__settle(layer, type);           /* the visit before's promotions, as `visit` admits them */
     /* an exclusive tier's swaps that are due, before this card says what it holds (▶ commit): every card's post is then the
      *   layout this position runs on */
@@ -2093,8 +2274,7 @@ static __device__ inline bool nn__expert_tier__visit_group(sys__silicon_family__
     for (unsigned c = 0u; c < n_cand && started < land && started < room; ++c) {
         nn__expert__gather g;
         if (t->exclusive == 1u ? nn__expert_tier__promote(family, t, ids[cand[c]], pinned, n_pinned) == NN__EXPERT__ARRIVING
-                               : (nn__expert_tier__stitch(t, ids[cand[c]], &g)
-                                  && nn__expert__promote(family, layer, type, ids[cand[c]], &g, pinned, n_pinned) == NN__EXPERT__ARRIVING))
+                               : nn__expert_tier__promote_from(family, t, layer, type, ids[cand[c]], pinned, n_pinned) == NN__EXPERT__ARRIVING)
             ++started;
     }
     if (choose && !nn__expert_tier__zzprivate_change(family, t, v, me, computed)) return false;
@@ -2106,7 +2286,7 @@ static __device__ inline bool nn__expert_tier__chunk(sys__silicon_family__id fam
                                                      uint64_t n, uint64_t threshold) {
     const uint64_t layer = t->layer, type = t->type, experts = t->experts;
     const unsigned k = (unsigned)t->top_k;
-    const bool fed = t->sources != 0ull || t->exclusive == 2u;   /* a table of its sources, or the slots' (▶ EXCLUSIVE 2) */
+    const bool fed = t->sources != 0ull || t->exclusive >= 2u;   /* a table of its sources, or the slots' (▶ EXCLUSIVE 2, 3) */
     if (fed) (void)nn__expert__settle(layer, type);           /* the chunk before's promotions, as `visit` admits them */
     if (t->exclusive == 1u && !nn__expert_tier__commit(family, t)) return false;   /* the swaps that are due: ▶ commit */
     /* ⭐ A GROUP'S EXCLUSIVE TIERS EACH TOLD OF THE CHUNK (NN-99): each card computes the chunk's picks it holds, and the
@@ -2216,8 +2396,7 @@ static __device__ inline bool nn__expert_tier__chunk(sys__silicon_family__id fam
             /* ⛳ IN A GROUP A PROMOTION IS NOT THE CHUNK'S: the others cannot know it started, so the CPUs compute it this
              *   chunk — from the RAM an exclusive tier's arriving expert keeps until its commit */
             if (t->exclusive == 1u ? nn__expert_tier__promote(family, t, list[q], pinned, n_pinned) == NN__EXPERT__ARRIVING
-                                   : (nn__expert_tier__stitch(t, list[q], &g)
-                                      && nn__expert__promote(family, layer, type, list[q], &g, pinned, n_pinned) == NN__EXPERT__ARRIVING))
+                                   : nn__expert_tier__promote_from(family, t, layer, type, list[q], pinned, n_pinned) == NN__EXPERT__ARRIVING)
                 card[list[q]] = group ? 0u : 1u;
         }
     }

@@ -73,6 +73,10 @@ static __device__ __forceinline__ void nvidia_cuda12__zzprivate_rotation(uint16_
     nvidia_cuda12__zzpackage_rotation_at(out, in, block * E * NVIDIA_CUDA12__ZZPACKAGE_WARP, sign, inverse, over, E);
 }
 
+static __global__ NVIDIA_CUDA12__ZZPRIVATE_ROT_BOUNDS void nvidia_cuda12__zzprivate_rotation_64(uint16_t* out, const uint16_t* in, const uint16_t* sign,
+                                                                                   uint64_t blocks, uint64_t inverse, unsigned int* over) {
+    nvidia_cuda12__zzprivate_rotation(out, in, sign, blocks, inverse, over, 2u);
+}
 static __global__ NVIDIA_CUDA12__ZZPRIVATE_ROT_BOUNDS void nvidia_cuda12__zzprivate_rotation_128(uint16_t* out, const uint16_t* in, const uint16_t* sign,
                                                                                     uint64_t blocks, uint64_t inverse, unsigned int* over) {
     nvidia_cuda12__zzprivate_rotation(out, in, sign, blocks, inverse, over, 4u);
@@ -86,11 +90,12 @@ static __global__ NVIDIA_CUDA12__ZZPRIVATE_ROT_BOUNDS void nvidia_cuda12__zzpriv
     nvidia_cuda12__zzprivate_rotation(out, in, sign, blocks, inverse, over, 16u);
 }
 
-/* `n / block` blocks of `block` (128, 256 or 512) through the kernel for that width. */
+/* `n / block` blocks of `block` (64, 128, 256 or 512) through the kernel for that width. */
 static inline void nvidia_cuda12__zzprivate_rotate(uint16_t* out, const uint16_t* in, const uint16_t* sign, uint64_t n, uint64_t block,
                                                    uint64_t inverse, unsigned int* over) {
     uint64_t blocks = n / block;
-    const void* kernel = block == 128u ? (const void*)nvidia_cuda12__zzprivate_rotation_128
+    const void* kernel = block == 64u ? (const void*)nvidia_cuda12__zzprivate_rotation_64
+                       : block == 128u ? (const void*)nvidia_cuda12__zzprivate_rotation_128
                        : block == 256u ? (const void*)nvidia_cuda12__zzprivate_rotation_256
                        :                 (const void*)nvidia_cuda12__zzprivate_rotation_512;
     const uint64_t want = (blocks + NVIDIA_CUDA12__ZZPRIVATE_ROT_WARPS - 1u) / NVIDIA_CUDA12__ZZPRIVATE_ROT_WARPS;
@@ -101,11 +106,21 @@ static inline void nvidia_cuda12__zzprivate_rotate(uint16_t* out, const uint16_t
                         NVIDIA_CUDA12__ZZPRIVATE_ROT_WARPS * NVIDIA_CUDA12__ZZPACKAGE_WARP, args, sizes, 6u);
 }
 
-/* ⭐ THE ROTATION of whole 512-blocks, `out` apart from `in`; anything else is the generic door, whose in-place butterfly
- *   defines that case. */
+static void nvidia_cuda12__override_hadamard_ladder_rows(uint16_t* out, const uint16_t* in, const uint16_t* sign, uint64_t cols,
+                                                         uint64_t rows, unsigned int* over);
+
+/* ⭐ THE ROTATION of whole 512-blocks, or past 512 in whole 128s as the ladder, `out` apart from `in`; anything else is
+ *   the generic door, whose in-place butterfly defines that case. */
 static void nvidia_cuda12__override_hadamard_rotate(uint16_t* out, const uint16_t* in, const uint16_t* sign, uint64_t n,
                                                     unsigned int* over) {
     const bool apart = out + n <= in || in + n <= out;
+    /* ⭐ A WIDTH PAST 512 IN WHOLE 128s IS THE LADDER OF ONE ROW: nn's rotation takes blocks of 512, then a 256 where that
+     *   much is left, then a 128, each block's signs from the vector's start — `ladder_rows`' blocks over a row of `n`.
+     *   Inkling 2's width, 2,304, is four 512s and a 256. */
+    if (n > 512u && n % 512u != 0u && n % 128u == 0u && apart) {
+        nvidia_cuda12__override_hadamard_ladder_rows(out, in, sign, n, 1u, over);
+        return;
+    }
     if (n == 0u || n % 512u != 0u || !apart || n / 512u > 0x7FFFFFFFull * NVIDIA_CUDA12__ZZPRIVATE_ROT_WARPS) {
         nn__hadamard__zzabi_launch_rotate(out, in, sign, n, over);
         return;
@@ -113,12 +128,12 @@ static void nvidia_cuda12__override_hadamard_rotate(uint16_t* out, const uint16_
     nvidia_cuda12__zzprivate_rotate(out, in, sign, n, 512u, 0u, over);
 }
 
-/* ⭐ `hadamard_blocks` over whole blocks of 128, 256 or 512, `out` either `in` or apart from it; anything else is the
- *   generic door. */
+/* ⭐ `hadamard_blocks` over whole blocks of 64, 128, 256 or 512 (Inkling 2's message gate rotates a rank of 64: 2.50 µs
+ *   a call on nn's body, nsys on the 5060 Ti), `out` either `in` or apart from it; anything else is the generic door. */
 static void nvidia_cuda12__override_hadamard_blocks(uint16_t* out, const uint16_t* in, const uint16_t* sign, uint64_t n,
                                                     uint64_t block, uint64_t inverse, unsigned int* over) {
     const bool apart = out == in || out + n <= in || in + n <= out;
-    if (n == 0u || (block != 128u && block != 256u && block != 512u) || n % block != 0u || !apart
+    if (n == 0u || (block != 64u && block != 128u && block != 256u && block != 512u) || n % block != 0u || !apart
      || n / block > 0x7FFFFFFFull * NVIDIA_CUDA12__ZZPRIVATE_ROT_WARPS) {
         nn__hadamard__zzabi_launch_blocks(out, in, sign, n, block, inverse, over);
         return;

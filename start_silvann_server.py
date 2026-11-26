@@ -518,7 +518,10 @@ def _boot(args):
         options["layers"] = layers
     with _one_boot_at_a_time():
         named = options                                   # the config's own: what a second choice is made around
-        options, max_context, why = autotune.choose(str(folder), asked, named, video_tokens=S.video_tokens,
+        # ⭐ AN INTEGRATED GPU, THE ONLY GPU, RUNS THE MODEL ONLY WHERE ITS PRODUCTS ARE NO SLOWER THAN THE CORES' — measured
+        #   once for the machine and the model, kept in autotune.json (▶ autotune.silicon); a config's `card` names its own
+        silicon = autotune.silicon(str(folder), named) if card in (None, "auto") else None
+        options, max_context, why = autotune.choose(str(folder), asked, named, silicon=silicon, video_tokens=S.video_tokens,
                                                     margin_mb=cfg.get("vram_margin_mb"))
         arch = SR.ARCHITECTURES.get(SR.architecture_of(str(folder)))
         apart = getattr(arch, "CONVERSATION_A_CARD_OPTION", "cards")          # a conversation a card's option (▶ with_cards)
@@ -530,15 +533,17 @@ def _boot(args):
         S.why = why
         print("[silvann_server] the setup: %s" % why, flush=True)
         try:
-            S.model = SR.open_model(str(folder), lora=cfg.get("lora"), max_context=max_context, progress=_loading(), **options)
+            S.model = SR.open_model(str(folder), lora=cfg.get("lora"), max_context=max_context, silicon=silicon,
+                                    progress=_loading(), **options)
         except Exception as ex:                               # noqa: BLE001 — the engine's refusal is a plain error
             if "kept in autotune.json" not in why or not autotune.refused_by_card(ex):
                 raise
-            options, max_context, why = autotune.choose(str(folder), asked, named, fresh=True,
+            options, max_context, why = autotune.choose(str(folder), asked, named, fresh=True, silicon=silicon,
                                                         video_tokens=S.video_tokens, margin_mb=cfg.get("vram_margin_mb"))
             S.why = why
             print("[silvann_server] the card refused the setup kept for it; chosen again: %s" % why, flush=True)
-            S.model = SR.open_model(str(folder), lora=cfg.get("lora"), max_context=max_context, progress=_loading(), **options)
+            S.model = SR.open_model(str(folder), lora=cfg.get("lora"), max_context=max_context, silicon=silicon,
+                                    progress=_loading(), **options)
     # ⛔ ON WINDOWS A CARD TAKES WHAT IT CANNOT HOLD, and keeps the rest in the PC's RAM: a config that names its own
     #   placement is told so in the log (the setup chosen for the machine stays within the card, ▶ autotune.py)
     try:
@@ -563,7 +568,8 @@ def _boot(args):
         say("the first machine of the ring: layers %d-%d of %d" % (layers[0], layers[-1], total))
         S.model = pipeline.Pipeline(S.model, link, say, fixed=asked != "max")
         max_context = S.model.max_context                 # the ring's, agreed
-    S.setup = dict(folder=str(folder), lora=cfg.get("lora"), max_context=max_context, options=options, ring=ring)
+    S.setup = dict(folder=str(folder), lora=cfg.get("lora"), max_context=max_context, options=options, ring=ring,
+                   silicon=silicon)
     S.runtime = _runtime_for(S.model)
     S.chat = Chat(S.model.folder)
     S.model_id = folder.name
@@ -1252,7 +1258,8 @@ def _runtime_for(model):
 def _bring_back():
     """The text model booted again as it booted first (`S.setup`), and the runtime handed it."""
     up = S.setup
-    S.model = SR.open_model(up["folder"], lora=up["lora"], max_context=up["max_context"], progress=_loading(), **up["options"])
+    S.model = SR.open_model(up["folder"], lora=up["lora"], max_context=up["max_context"], silicon=up.get("silicon"),
+                            progress=_loading(), **up["options"])
     S.runtime.model = S.model
 
 
@@ -1271,12 +1278,11 @@ def _lend(folder, conf, rt=None):
     try:
         asked = conf.get("max_context", "auto")
         asked = "max" if str(asked).lower() in ("max", "auto") else int(asked)
-        options, ctx, why = autotune.choose(str(folder), asked, SR.with_cards(str(folder), conf.get("num_cards"),
-                                                                          conf.get("options") or {},
-                                                                          conf.get("multi_user")),
-                                            video_tokens=S.video_tokens,
+        named = SR.with_cards(str(folder), conf.get("num_cards"), conf.get("options") or {}, conf.get("multi_user"))
+        silicon = autotune.silicon(str(folder), named) if S.config.get("card", "auto") in (None, "auto") else None
+        options, ctx, why = autotune.choose(str(folder), asked, named, silicon=silicon, video_tokens=S.video_tokens,
                                             margin_mb=conf.get("vram_margin_mb", S.config.get("vram_margin_mb")))
-        m = SR.open_model(str(folder), lora=conf.get("lora"), max_context=ctx, progress=_loading(), **options)
+        m = SR.open_model(str(folder), lora=conf.get("lora"), max_context=ctx, silicon=silicon, progress=_loading(), **options)
     except Exception:
         _bring_back()
         holder.done.set()

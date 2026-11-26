@@ -5,6 +5,7 @@
 #include <math.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 #include <immintrin.h>
 #include "../../../packages/nn/contracts/defaults.cuh"   /* NN__ARITHMETIC__FAST */
 #include "../../../packages/nn/contracts/abi/gpu.cuh"    /* what is answered here */
@@ -43,8 +44,31 @@ static __device__ inline float nn__silicon__lanes_max(float part) { return part;
  * registers hold. */
 static __device__ inline nn__gemm__tile nn__silicon__gemm_tile(void) { nn__gemm__tile t = {4u, 4u}; return t; }
 
-/* A half as a float: F16C's own conversion. */
-static __device__ inline float nn__silicon__half_to_float(uint16_t h) { return _cvtsh_ss(h); }
+#ifndef X86_AVX2__F16C
+#define X86_AVX2__F16C 1                          /* F16C's widening; x86_base, built for processors without it, says 0 */
+#endif
+/* A half as a float: F16C's own conversion — or, without it (x86_base), in C: the sign, the exponent rebased, a subnormal
+ *   normalised, an infinity or a NaN kept, exact, as every half is a float. */
+static __device__ inline float nn__silicon__half_to_float(uint16_t h) {
+#if X86_AVX2__F16C
+    return _cvtsh_ss(h);
+#else
+    const uint32_t sign = (uint32_t)(h & 0x8000u) << 16, exponent = (uint32_t)(h >> 10) & 0x1fu, mantissa = (uint32_t)h & 0x3ffu;
+    uint32_t bits = sign;
+    if (exponent == 0x1fu) {
+        bits |= 0x7f800000u | (mantissa << 13);
+    } else if (exponent != 0u) {
+        bits |= ((exponent + 112u) << 23) | (mantissa << 13);
+    } else if (mantissa != 0u) {
+        uint32_t m = mantissa, shifts = 0u;
+        while ((m & 0x400u) == 0u) { m <<= 1; ++shifts; }
+        bits |= ((113u - shifts) << 23) | ((m & 0x3ffu) << 13);
+    }
+    float f;
+    memcpy(&f, &bits, sizeof f);
+    return f;
+#endif
+}
 /* Two halves by two halves onto a float, in the order a sum over the columns has. */
 static __device__ inline float nn__silicon__dot2(uint32_t a, uint32_t b, float c) {
     return (c + nn__silicon__half_to_float((uint16_t)(a & 0xffffu)) * nn__silicon__half_to_float((uint16_t)(b & 0xffffu)))

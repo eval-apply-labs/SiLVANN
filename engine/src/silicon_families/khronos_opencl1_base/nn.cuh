@@ -57,6 +57,15 @@ static uint32_t                 khronos_opencl1_base__zzprivate_kernel_count[KHR
 
 /* Whether a card takes the read-only arenas (▶ above): an NVIDIA card whose compute capability is below the building
  * family's `KHRONOS_OPENCL1_BASE__READ_ONLY_NV_BELOW` — any other card's query answers nothing. */
+/* What a family adds to the program's build options, after `-cl-std=CL1.2` (▶ intel_opencl1_igpu/unit.cuh): nothing by default. */
+#ifndef KHRONOS_OPENCL1_BASE__BUILD_OPTIONS
+#define KHRONOS_OPENCL1_BASE__BUILD_OPTIONS ""
+#endif
+/* …and an option for buffers past the card's largest, asked first and left out where the compiler refuses the program
+ *   with it (▶ intel_opencl1_igpu/unit.cuh): nothing by default. */
+#ifndef KHRONOS_OPENCL1_BASE__BUILD_OPTIONS_LARGE
+#define KHRONOS_OPENCL1_BASE__BUILD_OPTIONS_LARGE ""
+#endif
 #ifndef KHRONOS_OPENCL1_BASE__READ_ONLY_NV_BELOW
 #error "a family built from khronos_opencl1_base says which cards take the read-only arenas: define KHRONOS_OPENCL1_BASE__READ_ONLY_NV_BELOW (0: none)"
 #endif
@@ -67,8 +76,23 @@ static inline bool khronos_opencl1_base__zzprivate_read_only(cl_device_id d) {
     return read_only;
 }
 
+/* Why a build of `p` failed, on stderr: the compiler's code and its log. */
+static inline void khronos_opencl1_base__zzprivate_say_build(cl_program p, cl_device_id device, cl_int code, const char* options) {
+    size_t n = 0u;
+    (void)clGetProgramBuildInfo(p, device, CL_PROGRAM_BUILD_LOG, 0, 0, &n);
+    char* log = (char*)malloc(n + 1u);
+    if (log) {
+        (void)clGetProgramBuildInfo(p, device, CL_PROGRAM_BUILD_LOG, n, log, 0);
+        log[n] = 0;
+    }
+    fprintf(stderr, KHRONOS_OPENCL1_BASE__NAME ": nn's kernels did not build (OpenCL error %d, options \"%s\"):\n%s\n", (int)code,
+            options, log ? log : "");
+    free(log);
+}
+
 /* A card's program, built once, under the lock — at the card's first bind (▶ sys.cuh, `bind_device`), which refuses a
- * card it does not build for. A build that fails says why on stderr, once. */
+ * card it does not build for. A build that fails says why on stderr, once; with the family's option for large buffers
+ * it is tried again without it, the card then holding no buffer past its largest. */
 static inline bool khronos_opencl1_base__zzprivate_program_up(khronos_opencl1_base__state* s, uint32_t card) {
     if (khronos_opencl1_base__zzprivate_program[card]) return true;
     if (khronos_opencl1_base__zzprivate_tried[card]) return false;
@@ -77,21 +101,32 @@ static inline bool khronos_opencl1_base__zzprivate_program_up(khronos_opencl1_ba
     cl_int err = CL_SUCCESS;
     cl_program p = clCreateProgramWithSource(s->context[card], 1u, &text, 0, &err);
     if (err != CL_SUCCESS) return false;
-    const char* options = khronos_opencl1_base__zzprivate_read_only(s->device[card]) ? "-cl-std=CL1.2 -D KHRONOS_OPENCL1_BASE__READ_ONLY"
-                                                                                      : "-cl-std=CL1.2";
-    if (clBuildProgram(p, 1u, &s->device[card], options, 0, 0) != CL_SUCCESS) {
-        size_t n = 0u;
-        (void)clGetProgramBuildInfo(p, s->device[card], CL_PROGRAM_BUILD_LOG, 0, 0, &n);
-        char* log = (char*)malloc(n + 1u);
-        if (log) {
-            (void)clGetProgramBuildInfo(p, s->device[card], CL_PROGRAM_BUILD_LOG, n, log, 0);
-            log[n] = 0;
-            fprintf(stderr, KHRONOS_OPENCL1_BASE__NAME ": nn's kernels did not build:\n%s\n", log);
-            free(log);
+    const bool read_only = khronos_opencl1_base__zzprivate_read_only(s->device[card]);
+    const char* options = read_only
+                              ? "-cl-std=CL1.2 -D KHRONOS_OPENCL1_BASE__READ_ONLY" KHRONOS_OPENCL1_BASE__BUILD_OPTIONS KHRONOS_OPENCL1_BASE__BUILD_OPTIONS_LARGE
+                              : "-cl-std=CL1.2" KHRONOS_OPENCL1_BASE__BUILD_OPTIONS KHRONOS_OPENCL1_BASE__BUILD_OPTIONS_LARGE;
+    cl_int built_code = clBuildProgram(p, 1u, &s->device[card], options, 0, 0);
+    if (built_code != CL_SUCCESS) {
+        khronos_opencl1_base__zzprivate_say_build(p, s->device[card], built_code, options);
+        if (KHRONOS_OPENCL1_BASE__BUILD_OPTIONS_LARGE[0] == 0) { (void)clReleaseProgram(p); return false; }
+        const char* small = read_only ? "-cl-std=CL1.2 -D KHRONOS_OPENCL1_BASE__READ_ONLY" KHRONOS_OPENCL1_BASE__BUILD_OPTIONS
+                                      : "-cl-std=CL1.2" KHRONOS_OPENCL1_BASE__BUILD_OPTIONS;
+        built_code = clBuildProgram(p, 1u, &s->device[card], small, 0, 0);
+        if (built_code != CL_SUCCESS) {
+            khronos_opencl1_base__zzprivate_say_build(p, s->device[card], built_code, small);
+            (void)clReleaseProgram(p);
+            return false;
         }
-        (void)clReleaseProgram(p);
-        return false;
+        s->small_only[card] = true;
+        fprintf(stderr, KHRONOS_OPENCL1_BASE__NAME ": built without \"%s\" — no buffer past this card's largest, %llu bytes\n",
+                KHRONOS_OPENCL1_BASE__BUILD_OPTIONS_LARGE, (unsigned long long)s->largest[card]);
     }
+    /* ⛳ A COMPILER MAY BUILD A PROGRAM AND LEAVE KERNELS OUT OF IT, saying nothing (Intel's, ▶
+     *   `scripts/opencl1_kernel_source.py`'s `INLINE`): said here, once, so a door that does not launch has its reason */
+    cl_uint built = 0u;
+    if (clGetProgramInfo(p, CL_PROGRAM_NUM_KERNELS, sizeof built, &built, 0) == CL_SUCCESS && built < khronos_opencl1_base__kernel_count)
+        fprintf(stderr, KHRONOS_OPENCL1_BASE__NAME ": the card's compiler built %u of the program's %u kernels\n", (unsigned)built,
+                khronos_opencl1_base__kernel_count);
     khronos_opencl1_base__zzprivate_kernels[card] =
         (khronos_opencl1_base__kernel*)calloc(khronos_opencl1_base__kernel_count, sizeof(khronos_opencl1_base__kernel));
     if (khronos_opencl1_base__zzprivate_kernels[card] == 0) { (void)clReleaseProgram(p); return false; }
@@ -176,6 +211,9 @@ static __device__ inline uint32_t nn__silicon__blocks(void) { return 1u; }
 static __device__ inline float nn__silicon__lanes_sum(float part) { return part; }
 static __device__ inline void nn__silicon__lanes_sums(float* parts, uint32_t n) { (void)parts; (void)n; }
 static __device__ inline float khronos_opencl1_base__zzpackage_lanes_sum_each(float part, uint32_t width) { (void)width; return part; }
+static __device__ inline void khronos_opencl1_base__zzpackage_levels_stage(const float* table) { (void)table; }
+static __device__ inline float khronos_opencl1_base__zzpackage_level4(const float* table, uint32_t e) { return table[256u + e]; }
+static __device__ inline float khronos_opencl1_base__zzpackage_level8(const float* table, uint32_t e) { return table[e]; }
 static __device__ inline float khronos_opencl1_base__zzpackage_lanes_hadamard(float v, uint32_t width) { (void)width; return v; }
 static __device__ inline float nn__silicon__lanes_max(float part) { return part; }
 static __device__ inline nn__gemm__tile nn__silicon__gemm_tile(void) { nn__gemm__tile t = {1u, 4u}; return t; }

@@ -866,6 +866,34 @@ static __device__ inline void amd_rocm_base__zzprivate_groups_rows(uint16_t* out
  *   first steps also trade halves of the set: a lane keeps the sums of half its rows and hands the other half to its
  *   partner, until it carries one, so `RW` rows cost `RW - 1 + log2(64 / RW)` exchanges, not `6 · RW`. A row's sum is its own
  *   butterfly's, the same pairs added in the same order, and it lands in every lane of row `a`'s slice, `64 / RW · a` on. */
+/* …and eight rows at once, `sums`' halving carried one step further: 32 apart a lane keeps four rows' sums and hands
+ * over four, 16 apart two, 8 apart one, then the butterfly over the last 8 lanes. Row `a`'s sum lands in lanes `8a` on,
+ * the same pairs added as the one-row butterfly's. */
+static __device__ inline float amd_rocm_base__zzprivate_sums8(float* part, uint32_t lane) {
+    {
+        const bool up = (lane & 32u) != 0u;
+#pragma unroll
+        for (uint32_t a = 0u; a < 4u; ++a) {
+            const float give = up ? part[a] : part[a + 4u], keep = up ? part[a + 4u] : part[a];
+            part[a] = keep + __shfl_xor(give, 32);
+        }
+    }
+    {
+        const bool up = (lane & 16u) != 0u;
+#pragma unroll
+        for (uint32_t a = 0u; a < 2u; ++a) {
+            const float give = up ? part[a] : part[a + 2u], keep = up ? part[a + 2u] : part[a];
+            part[a] = keep + __shfl_xor(give, 16);
+        }
+    }
+    {
+        const bool up = (lane & 8u) != 0u;
+        const float give = up ? part[0] : part[1], keep = up ? part[1] : part[0];
+        part[0] = keep + __shfl_xor(give, 8);
+    }
+    for (uint32_t off = 4u; off > 0u; off >>= 1) part[0] += __shfl_xor(part[0], (int)off);
+    return part[0];
+}
 template <uint32_t RW>
 static __device__ inline float amd_rocm_base__zzprivate_sums(float* part, uint32_t lane) {
     static_assert(RW == 1u || RW == 2u || RW == 4u, "sums' exchanges are written for 1, 2 or 4 rows");
@@ -1029,6 +1057,123 @@ static __device__ inline void amd_rocm_base__zzprivate_groups_units(uint16_t* ou
                 o, codes, lut, g.rows[i], (u - first) * (AMD_ROCM_BASE__ZZPRIVATE_UNIT_ROWS / 2u), cols, xs, table8, low, high, at, real, lane, over,
                 st);
     }
+}
+
+/* ⭐ THE UNITS KERNEL WHERE A ROW IS 64 BLOCKS AND `T` MORE — 4 bits, rows of `64 + T` blocks of 32, `T` 8, 16 or 32
+ *   (Inkling 2's 2,304 columns: 72 blocks). There the units kernel holds two blocks a lane and decodes the second in every
+ *   lane, though only `T` have one: `MEASURED` (the door bench, one MI50, measurements/2026-11-24_nn207_inkling2_rates_node03.md
+ *   ⑰) eight experts' gate and up at 2,304 columns 63.9 µs, where 2,048 take 40.0 and 4,096 72.7. Here a unit is `64 / T`
+ *   rows: each lane takes its own block of every row — the rows' first 64 blocks — and the rows' rests are pooled, one
+ *   block a lane: lane `l` takes block `64 + l % T` of the unit's row `l / T`. A rest's sum is then handed by one exchange to
+ *   lane `l % T`, the lane that holds that block in the units kernel, and added there as the units kernel adds its second
+ *   block: `(0 + first) + rest`, a lane with no rest `+ 0`. So every row's sum is the units kernel's — the same blocks'
+ *   products in the same order, the same butterfly — to the bit, with 64 + T blocks decoded a unit for the units kernel's
+ *   128 a row. `x` is staged word-major (word `q` of block `b` at `q · (64 + T) + b`), so a wave's lanes read consecutive
+ *   16 bytes. Every group at 4 bits; anything else is the units kernel's. */
+template <uint32_t T>
+static __device__ inline void amd_rocm_base__zzprivate_groups_pooled(uint16_t* out, nn__turboquant__groups g, const uint16_t* x, uint64_t cols,
+                                                                        unsigned int* over) {
+    constexpr uint32_t W = AMD_ROCM_BASE__ZZPRIVATE_WAVE, B = W + T, RU = W / T;
+    extern __shared__ uint4 room[];
+    uint4* xs = room;
+    uint32_t low[2], high[2];
+    amd_rocm_base__zzpackage_tables(low, high);
+    for (uint32_t e = (uint32_t)nn__silicon__lane(); e < 4u * B; e += AMD_ROCM_BASE__ZZPRIVATE_ROWS * W) {
+        uint32_t v[4];
+        amd_rocm_base__zzprivate_x8(x + 8u * e, v);
+        xs[(e % 4u) * B + e / 4u] = make_uint4(v[0], v[1], v[2], v[3]);
+    }
+    __syncthreads();
+    const uint32_t lane = (uint32_t)(nn__silicon__lane() % W);
+    const uint32_t wave = (uint32_t)__builtin_amdgcn_readfirstlane((int)(nn__silicon__lane() / W));
+    const uint32_t rest_row = lane / T, rest_block = W + lane % T;               /* this lane's pooled block */
+    const uint32_t slice = W / RU, mine = lane / slice;                          /* the row whose sum this lane writes */
+    const uint64_t row_bytes = cols / 2u;
+    uint64_t i = 0u, first = 0u, units = (g.rows[0] + RU - 1u) / RU;
+    for (uint64_t u = nn__silicon__block() * AMD_ROCM_BASE__ZZPRIVATE_ROWS + wave; ; u += nn__silicon__blocks() * AMD_ROCM_BASE__ZZPRIVATE_ROWS) {
+        while (u >= first + units && i < g.count) {
+            first += units;
+            ++i;
+            units = i < g.count ? (g.rows[i] + RU - 1u) / RU : 0u;
+        }
+        if (i >= g.count) break;
+        const uint8_t* codes = (const uint8_t*)(uintptr_t)g.codes[i];
+        const uint8_t* lut = (const uint8_t*)(uintptr_t)g.luts[i];
+        const uint64_t rows = g.rows[i], r0 = (u - first) * RU;
+        const uint64_t mrow = r0 + mine < rows ? r0 + mine : rows - 1u;
+        uint64_t cur[RU][2], rest[2];                                            /* 16 bytes a block */
+#pragma unroll
+        for (uint32_t a = 0u; a < RU; ++a) {
+            const uint64_t* c = (const uint64_t*)(codes + (r0 + a < rows ? r0 + a : rows - 1u) * row_bytes + (uint64_t)lane * 16u);
+            cur[a][0] = c[0]; cur[a][1] = c[1];
+        }
+        {
+            const uint64_t* c = (const uint64_t*)(codes + (r0 + rest_row < rows ? r0 + rest_row : rows - 1u) * row_bytes
+                                                  + (uint64_t)rest_block * 16u);
+            rest[0] = c[0]; rest[1] = c[1];
+        }
+        const uint32_t lo = lut[mrow * 2ull], hi = lut[mrow * 2ull + 1ull];
+        __builtin_amdgcn_sched_barrier(0);                                       /* the scale's loads stay with the codes' */
+        const float scale = nn__silicon__half_to_float((uint16_t)(lo | (hi << 8)));
+        float part[RU];
+#pragma unroll
+        for (uint32_t a = 0u; a < RU; ++a) part[a] = 0.0f;
+        float sub[RU];
+#pragma unroll
+        for (uint32_t a = 0u; a < RU; ++a) sub[a] = 0.0f;
+        float sub_rest = 0.0f;
+#pragma unroll
+        for (uint32_t q = 0u; q < 4u; ++q) {                                     /* eight columns at a time */
+            const uint4 xv = xs[q * B + lane];
+#pragma unroll
+            for (uint32_t a = 0u; a < RU; ++a) {
+                uint32_t pairs[4];
+                amd_rocm_base__zzprivate_levels8(low, high, (uint32_t)(cur[a][q / 2u] >> (32u * (q % 2u))), pairs);
+                sub[a] = amd_rocm_base__zzpackage_dot2(pairs[0], xv.x, sub[a]);
+                sub[a] = amd_rocm_base__zzpackage_dot2(pairs[1], xv.y, sub[a]);
+                sub[a] = amd_rocm_base__zzpackage_dot2(pairs[2], xv.z, sub[a]);
+                sub[a] = amd_rocm_base__zzpackage_dot2(pairs[3], xv.w, sub[a]);
+            }
+            const uint4 xr = xs[q * B + rest_block];
+            uint32_t pairs[4];
+            amd_rocm_base__zzprivate_levels8(low, high, (uint32_t)(rest[q / 2u] >> (32u * (q % 2u))), pairs);
+            sub_rest = amd_rocm_base__zzpackage_dot2(pairs[0], xr.x, sub_rest);
+            sub_rest = amd_rocm_base__zzpackage_dot2(pairs[1], xr.y, sub_rest);
+            sub_rest = amd_rocm_base__zzpackage_dot2(pairs[2], xr.z, sub_rest);
+            sub_rest = amd_rocm_base__zzpackage_dot2(pairs[3], xr.w, sub_rest);
+        }
+#pragma unroll
+        for (uint32_t a = 0u; a < RU; ++a) {
+            part[a] += sub[a];                                                   /* the first block: every lane has one */
+            const float handed = __shfl(sub_rest, (int)(a * T + lane % T));      /* row a's rest block 64 + lane, from its pool */
+            part[a] += lane < T ? handed : 0.0f;
+        }
+        const float v = (RU == 8u ? amd_rocm_base__zzprivate_sums8(part, lane) : amd_rocm_base__zzprivate_sums<RU == 8u ? 4u : RU>(part, lane)) * scale;
+        if (lane % slice == 0u && r0 + mine < rows) out[g.out_at[i] + r0 + mine] = nn__kernels__zzabi_to_half(v, over);
+    }
+}
+static __global__ AMD_ROCM_BASE__ZZPRIVATE_BOUNDS void amd_rocm_base__zzprivate_groups_pooled_8(uint16_t* out, nn__turboquant__groups g,
+                                                                                                     const uint16_t* x, uint64_t cols, unsigned int* over) {
+    amd_rocm_base__zzprivate_groups_pooled<8u>(out, g, x, cols, over);
+}
+static __global__ AMD_ROCM_BASE__ZZPRIVATE_BOUNDS void amd_rocm_base__zzprivate_groups_pooled_16(uint16_t* out, nn__turboquant__groups g,
+                                                                                                      const uint16_t* x, uint64_t cols, unsigned int* over) {
+    amd_rocm_base__zzprivate_groups_pooled<16u>(out, g, x, cols, over);
+}
+static __global__ AMD_ROCM_BASE__ZZPRIVATE_BOUNDS void amd_rocm_base__zzprivate_groups_pooled_32(uint16_t* out, nn__turboquant__groups g,
+                                                                                                      const uint16_t* x, uint64_t cols, unsigned int* over) {
+    amd_rocm_base__zzprivate_groups_pooled<32u>(out, g, x, cols, over);
+}
+/* The rest a call's rows pool — `T` where every group is at 4 bits and a row is 64 blocks of 32 and `T` more, `T` 8, 16
+ * or 32 — or 0, where the units kernel takes them as it is. */
+static inline uint64_t amd_rocm_base__zzprivate_pooled_rest(const nn__turboquant__groups& g, uint64_t cols) {
+    const uint64_t blocks = cols / 32u;
+    if (cols % 32u != 0u || blocks <= AMD_ROCM_BASE__ZZPRIVATE_WAVE) return 0u;
+    const uint64_t t = blocks - AMD_ROCM_BASE__ZZPRIVATE_WAVE;
+    if (t != 8u && t != 16u && t != 32u) return 0u;
+    for (uint64_t i = 0u; i < g.count; ++i)
+        if (g.d[i] != 4u) return 0u;
+    return t;
 }
 
 /* ⭐ THE GROUPS' WEIGHTED SUM, FOUR ROWS A WAVE: each (group, block) pair's `x` — 32 halves, read from memory, since a
@@ -1442,6 +1587,35 @@ static __global__ AMD_ROCM_BASE__ZZPRIVATE_BOUNDS void amd_rocm_base__zzprivate_
  *   — one `+ 0`, after which a zero changes nothing — and then the butterfly over L lanes is this one's (`REASONED` so;
  *   `MEASURED` byte for byte in the door bench's dumps). */
 #define AMD_ROCM_BASE__ZZPRIVATE_NARROW_BLOCKS 32u   /* the widest row it takes, in blocks of 32 */
+/* Row `mr`'s sum over the `x` staged in `xs`, lane `b` of the row's `L` holding its block `b` (`real` where the row has
+ * one), folded across the `L` lanes as the units kernel folds it — before the row's scale. */
+template <uint32_t L>
+static __device__ inline float amd_rocm_base__zzpackage_narrow_sum8(const uint8_t* weights, const uint4* xs, const uint16_t* table8, uint64_t mr,
+                                                                       uint64_t cols, uint32_t b, bool real) {
+    float sub = 0.0f;
+    if (real) {
+        const uint64_t* c = (const uint64_t*)(weights + mr * cols + (uint64_t)b * 32u);
+        uint64_t cur[4];
+#pragma unroll
+        for (uint32_t w = 0u; w < 4u; ++w) cur[w] = c[w];
+#pragma unroll
+        for (uint32_t q = 0u; q < 4u; ++q) {                       /* eight columns at a time, as the units kernel */
+            const uint4 xv = xs[4u * b + q];
+            const uint64_t cw = cur[q];
+            const uint32_t l0 = table8[cw & 0xFFu], l1 = table8[(cw >> 8) & 0xFFu], l2 = table8[(cw >> 16) & 0xFFu];
+            const uint32_t l3 = table8[(cw >> 24) & 0xFFu], l4 = table8[(cw >> 32) & 0xFFu], l5 = table8[(cw >> 40) & 0xFFu];
+            const uint32_t l6 = table8[(cw >> 48) & 0xFFu], l7 = table8[(cw >> 56) & 0xFFu];
+            sub = amd_rocm_base__zzpackage_dot2(l0 | (l2 << 16), xv.x, sub);
+            sub = amd_rocm_base__zzpackage_dot2(l4 | (l6 << 16), xv.y, sub);
+            sub = amd_rocm_base__zzpackage_dot2(l1 | (l3 << 16), xv.z, sub);
+            sub = amd_rocm_base__zzpackage_dot2(l5 | (l7 << 16), xv.w, sub);
+        }
+    }
+    float v = 0.0f + (real ? sub : 0.0f);                           /* the units kernel's part: zero, then its block */
+    v = v + 0.0f;                                                   /* its exchanges with the lanes past the row */
+    for (uint32_t off = L / 2u; off > 0u; off >>= 1) v += __shfl_xor(v, (int)off);
+    return v;
+}
 template <uint32_t L>
 static __device__ inline void amd_rocm_base__zzprivate_narrow_rows8(uint16_t* out, const uint8_t* weights, const uint8_t* luts,
                                                                         const uint16_t* x, uint64_t rows, uint64_t cols,
@@ -1465,29 +1639,8 @@ static __device__ inline void amd_rocm_base__zzprivate_narrow_rows8(uint16_t* ou
     for (uint64_t r0 = (nn__silicon__block() * AMD_ROCM_BASE__ZZPRIVATE_ROWS + wave) * per; r0 < rows;
          r0 += nn__silicon__blocks() * AMD_ROCM_BASE__ZZPRIVATE_ROWS * per) {
         const uint64_t r = r0 + seat, mr = r < rows ? r : rows - 1u;
-        float sub = 0.0f;
-        if (real) {
-            const uint64_t* c = (const uint64_t*)(weights + mr * cols + (uint64_t)b * 32u);
-            uint64_t cur[4];
-#pragma unroll
-            for (uint32_t w = 0u; w < 4u; ++w) cur[w] = c[w];
-#pragma unroll
-            for (uint32_t q = 0u; q < 4u; ++q) {                       /* eight columns at a time, as the units kernel */
-                const uint4 xv = xs[4u * b + q];
-                const uint64_t cw = cur[q];
-                const uint32_t l0 = table8[cw & 0xFFu], l1 = table8[(cw >> 8) & 0xFFu], l2 = table8[(cw >> 16) & 0xFFu];
-                const uint32_t l3 = table8[(cw >> 24) & 0xFFu], l4 = table8[(cw >> 32) & 0xFFu], l5 = table8[(cw >> 40) & 0xFFu];
-                const uint32_t l6 = table8[(cw >> 48) & 0xFFu], l7 = table8[(cw >> 56) & 0xFFu];
-                sub = amd_rocm_base__zzpackage_dot2(l0 | (l2 << 16), xv.x, sub);
-                sub = amd_rocm_base__zzpackage_dot2(l4 | (l6 << 16), xv.y, sub);
-                sub = amd_rocm_base__zzpackage_dot2(l1 | (l3 << 16), xv.z, sub);
-                sub = amd_rocm_base__zzpackage_dot2(l5 | (l7 << 16), xv.w, sub);
-            }
-        }
         const float scale = nn__silicon__half_to_float((uint16_t)((uint32_t)luts[mr * 2ull] | ((uint32_t)luts[mr * 2ull + 1ull] << 8)));
-        float v = 0.0f + (real ? sub : 0.0f);                           /* the units kernel's part: zero, then its block */
-        v = v + 0.0f;                                                   /* its exchanges with the lanes past the row */
-        for (uint32_t off = L / 2u; off > 0u; off >>= 1) v += __shfl_xor(v, (int)off);
+        const float v = amd_rocm_base__zzpackage_narrow_sum8<L>(weights, xs, table8, mr, cols, b, real);
         if (b == 0u && r < rows) out[r] = nn__kernels__zzabi_to_half(v * scale, over);
     }
 }
@@ -1570,11 +1723,18 @@ static bool amd_rocm_base__zzprivate_units(uint16_t* out, nn__turboquant__groups
                    * amd_rocm_base__zzpackage_resident(per_row, AMD_ROCM_BASE__ZZPRIVATE_ROWS * AMD_ROCM_BASE__ZZPRIVATE_WAVE,
                                                           amd_rocm_base__zzprivate_room_bytes(cols)))
         return false;
-    const void* kernel = held == 1u ? (const void*)amd_rocm_base__zzprivate_groups_u1 : (const void*)amd_rocm_base__zzprivate_groups_u2;
+    /* rows of 64 blocks and a rest: the pooled kernel, `64 / rest` rows a unit, `x` its only room */
+    const uint64_t rest = amd_rocm_base__zzprivate_pooled_rest(g, cols);
+    const void* kernel = rest == 8u  ? (const void*)amd_rocm_base__zzprivate_groups_pooled_8
+                       : rest == 16u ? (const void*)amd_rocm_base__zzprivate_groups_pooled_16
+                       : rest == 32u ? (const void*)amd_rocm_base__zzprivate_groups_pooled_32
+                       : held == 1u  ? (const void*)amd_rocm_base__zzprivate_groups_u1 : (const void*)amd_rocm_base__zzprivate_groups_u2;
     uint64_t units = 0u;
-    for (uint64_t i = 0u; i < g.count; ++i)
-        units += (g.rows[i] + amd_rocm_base__zzprivate_unit_rows(g.d[i]) - 1u) / amd_rocm_base__zzprivate_unit_rows(g.d[i]);
-    const size_t room = amd_rocm_base__zzprivate_room_bytes(cols);
+    for (uint64_t i = 0u; i < g.count; ++i) {
+        const uint64_t per = rest != 0u ? AMD_ROCM_BASE__ZZPRIVATE_WAVE / rest : amd_rocm_base__zzprivate_unit_rows(g.d[i]);
+        units += (g.rows[i] + per - 1u) / per;
+    }
+    const size_t room = rest != 0u ? (size_t)cols * 2u : amd_rocm_base__zzprivate_room_bytes(cols);
     const uint32_t blocks = amd_rocm_base__zzprivate_blocks(kernel, units, room);
     void* args[] = { &out, &g, &x, &cols, &over };
     amd_rocm_base__zzprivate_launch_room(kernel, blocks, args, room);

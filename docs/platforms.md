@@ -48,6 +48,8 @@ The README's short table, in full. A platform not listed here may well work; one
 
 **The CPU alone**
 - AVX2 on a Xeon E5-2680 v4, AVX-512 on a Xeon W-2123
+- `x86_base`, for a processor without AVX2 (SSE4.2 and POPCNT): nn's verbs, and Qwen 3.6 35B-A3B with its experts on it
+  beside an MI50 checked against Hugging Face, at 2.3 tokens a second — on the Xeon E5-2680 v4 told it has no AVX2
 - Arm: the DGX Spark's Grace (GB10, aarch64) — Qwen 3.5 4B and Qwen 3.6 35B-A3B checked against Hugging Face, and the 35B
   whole in the GB10's shared memory through its GPU (sm_121) at 59 tokens a second (rented)
 
@@ -81,6 +83,12 @@ The README's short table, in full. A platform not listed here may well work; one
 take (rented)
 - nn's verbs and the family's doors on each; Qwen 3.6 35B-A3B checked against Hugging Face on both — on the V100 whole on
   its 32 GB at 46 tokens a second, Qwen 3.5 4B at 62
+
+**OpenCL 1.2 through Intel's OpenCL: a Rocket Lake's UHD P750 (Gen12, 32 units), Intel's compute runtime 26.40** —
+`intel_opencl1_igpu` (rented)
+- nn's verbs; Inkling 2 Mini `D8E4` checked against its oracle, with its experts on the CPU and on the GPU — at 4.4 and
+  3.4 tokens a second, where the PC's 8-core Xeon E-2388G alone runs it at 6.5; on Linux the GPU is used when asked for
+  (`SILVANN_IGPU_CPU=1`)
 
 **Windows with an NVIDIA card, natively** (an RTX 5070 Ti, a Ryzen 7 5800X)
 - built from source with CUDA 13.4, Ministral 3 14B `D4` on the card ([`users.md`](users.md#on-windows))
@@ -117,14 +125,20 @@ take (rented)
   shuffle reaches half its wave there); through OpenCL 2.0 the same card ran the 4B correctly
 
 **OpenCL on other devices**
-- the integrated GPUs `intel_opencl1_igpu` (Intel's before Gen9) and `intel_opencl2` (from Gen9) are for among them. On one, the model's memory is read where it is, not
-  copied to the GPU: checked only through PoCL, a CPU's OpenCL
+- Intel's GPUs other than the one above: `intel_opencl2` takes those whose OpenCL shares memory with the CPU finely
+  (fine-grained SVM — Gen9 to Gen11, by Intel's published versions), and every other Intel GPU goes on to
+  `intel_opencl1_igpu`: those before Gen9, and from Gen12 on, whose OpenCL shares it coarsely alone — an Arc too. On an
+  integrated GPU the model's memory is read where it is, not copied to the GPU
+- an integrated GPU computing a model's experts read from the disk, with a card's tier filled from their cache in RAM
+  (v1.8.0): run with the processor's own OpenCL (PoCL) standing in for the integrated GPU, beside an MI50 — Qwen 3.6
+  35B-A3B checked against Hugging Face — and on no integrated GPU yet
 - which card goes to OpenCL 1.2 and which to 2 is a best guess from the vendors' published versions — OpenCL 1.2: every
-  NVIDIA card CUDA does not take, Intel's iGPUs before Gen9, AMD's TeraScale and GCN 1; OpenCL 2: the rest. A card on
-  the wrong one is an issue to open, with its `clinfo`
+  NVIDIA card CUDA does not take, Intel's GPUs the 2.0 families see none of, AMD's TeraScale and GCN 1; OpenCL 2: the
+  rest. A card on the wrong one is an issue to open, with its `clinfo`
 
 **The CPU**
 - AVX-512 on processors other than Skylake (AMD's Zen 4 and 5, later Xeons)
+- `x86_base` on a processor that has no AVX2 (it has run on one told so, above)
 
 ## Not supported
 

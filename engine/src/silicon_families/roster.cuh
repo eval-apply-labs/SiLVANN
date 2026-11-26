@@ -5,6 +5,7 @@
 #include "../packages/sys/contracts/abi/silicon_family.cuh"   /* what a family is, and the bound on its number */
 #include "host/includes.cuh"                                  /* each family's `includes`, in roster order */
 #include "x86_avx2/includes.cuh"
+#include "x86_base/includes.cuh"
 #include "arm_neon/includes.cuh"
 #include "arm_gb10/includes.cuh"
 #include "nvidia_opencl1/includes.cuh"
@@ -47,14 +48,17 @@
  *   (`REASONED` from the ICD loader's design; two of them in one process `MEASURED` on node03's stand-in, NN-142).
  * ⛳ THE OPENCL FAMILIES ARE TWO SOURCES, FOUR ROWS (⚖ 2026-11-09 *"old_nvidia does its own thing and does not stomp
  *   against the intel old igpu"*): 75 NVIDIA's cards through the 1.2 source, the number every machine that stood up on
- *   it recorded (an NVIDIA card, each); 80 Intel's before Gen9 through the same; 100 any GPU through the 2.0 source; 150
- *   Intel's from Gen9 through it, offered before 100.
- * ⛳ THE PROCESSORS ARE A FAMILY A KIND: 50 x86's (`x86_avx2`), 55 and 60 Arm's, one source (`arm_base`, ⚖ 2026-11-09 *"make
+ *   it recorded (an NVIDIA card, each); 80 Intel's through the same, asked last — before Gen9 theirs alone, after it where
+ *   the 2.0 families see none (▶ `choose.cuh`); 100 any GPU through the 2.0 source; 150 Intel's from Gen9 through it,
+ *   offered before 100.
+ * ⛳ THE PROCESSORS ARE A FAMILY A KIND: 50 x86's with AVX2 (`x86_avx2`), 51 x86's without (`x86_base`, its primitives and
+ *   nn's generic bodies, ⚖ 2026-11-25 *"if we dont have an igpu nor avx2 then it degrades to base avx"*), 55 and 60 Arm's, one source (`arm_base`, ⚖ 2026-11-09 *"make
  *   the arm_base silicon platform and then add the overrides for that specific dgx sparx platform"*) — 55 any Armv8.2 with
  *   half precision and the dot product, 60 the DGX Spark's GB10, offered before 55. */
 #define SILICON_FAMILIES__LIST(X)                                                                          \
     X(0u,   HOST,                 host,                 host)                                            \
     X(50u,  X86_AVX2,             x86_avx2,             x86)                                             \
+    X(51u,  X86_BASE,             x86_base,             x86)                                             \
     X(55u,  ARM_NEON,             arm_neon,             arm)                                             \
     X(60u,  ARM_GB10,             arm_gb10,             arm)                                             \
     X(75u,  NVIDIA_OPENCL1,       nvidia_opencl1,       nvidia_opencl)                                   \

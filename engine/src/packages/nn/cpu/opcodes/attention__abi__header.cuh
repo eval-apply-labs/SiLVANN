@@ -10,7 +10,13 @@ static __device__ SYS__NOINLINE void nn__rope__zzabi_adapter_angles(sys__heap_no
 static sys__heap_node nn__rope__zzabi_apply_interleaved(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx);
 static __device__ SYS__NOINLINE void nn__rope__zzabi_adapter_interleaved(sys__heap_node* base, uint64_t form);
 static sys__heap_node nn__attention__zzabi_apply_softmax_sink(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx);
+static sys__heap_node nn__attention__zzabi_apply_score(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx);
+static sys__heap_node nn__attention__zzabi_apply_mix(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx);
+static sys__heap_node nn__attention__zzabi_apply_states(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx);
 static __device__ SYS__NOINLINE void nn__attention__zzabi_adapter_softmax_sink(sys__heap_node* base, uint64_t form);
+static __device__ SYS__NOINLINE void nn__attention__zzabi_adapter_score(sys__heap_node* base, uint64_t form);
+static __device__ SYS__NOINLINE void nn__attention__zzabi_adapter_mix(sys__heap_node* base, uint64_t form);
+static __device__ SYS__NOINLINE void nn__attention__zzabi_adapter_states(sys__heap_node* base, uint64_t form);
 static sys__heap_node nn__attention__zzabi_apply_residual(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx);
 static sys__heap_node nn__attention__zzabi_apply_merge(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx);
 static sys__heap_node nn__attention__zzabi_apply_finish(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx);

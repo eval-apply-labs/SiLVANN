@@ -106,16 +106,112 @@ static void khronos_opencl2_base__override_gemv_groups_sum(uint16_t* out, nn__tu
                         args, sizes, 8u);
 }
 
-/* ⭐ THE ROTATION of whole 512-blocks, `out` apart from `in`; anything else is the generic door. */
+/* ⭐ THE ROTATION of whole 512-blocks, and of the widths nn's door ladders — 512-blocks, then a 256, then a 128 (Inkling 2's
+ * 2,304) — `out` apart from `in`; anything else is the generic door. */
 static void khronos_opencl2_base__override_hadamard_rotate(uint16_t* out, const uint16_t* in, const uint16_t* sign, uint64_t n,
                                                       unsigned int* over) {
     const bool apart = out + n <= in || in + n <= out;
-    if (!khronos_opencl2_base__zzpackage_has_kernel("khronos_opencl2_base__rotate") || n == 0u || n % 512u != 0u || !apart) { nn__hadamard__zzabi_launch_rotate(out, in, sign, n, over); return; }
-    uint64_t blocks = n / 512u;
-    const uint32_t groups = blocks < NN__KERNELS__BLOCKS_MAX ? (uint32_t)blocks : NN__KERNELS__BLOCKS_MAX;
-    void* args[] = { &out, &in, &sign, &blocks, &over };
-    const size_t sizes[] = { sizeof out, sizeof in, sizeof sign, sizeof blocks, sizeof over };
+    const bool ladder = n % 512u != 0u && n % 128u == 0u && (n > 512u || n == 128u || n == 256u);
+    if (!khronos_opencl2_base__zzpackage_has_kernel("khronos_opencl2_base__rotate") || n == 0u || (n % 512u != 0u && !ladder) || !apart) {
+        nn__hadamard__zzabi_launch_rotate(out, in, sign, n, over);
+        return;
+    }
+    const uint64_t whole = n / 512u, rest = n - whole * 512u;
+    const uint64_t units = whole + (rest >= 256u ? 1u : 0u) + (rest % 256u != 0u ? 1u : 0u);
+    const uint32_t groups = units < NN__KERNELS__BLOCKS_MAX ? (uint32_t)units : NN__KERNELS__BLOCKS_MAX;
+    void* args[] = { &out, &in, &sign, &n, &over };
+    const size_t sizes[] = { sizeof out, sizeof in, sizeof sign, sizeof n, sizeof over };
     nn__silicon__launch(0, "khronos_opencl2_base__rotate", groups, KHRONOS_OPENCL2_BASE__ZZPRIVATE_GROUP, args, sizes, 5u);
+}
+
+/* Whether `n` halves at `a` and `m` at `b` share none. */
+static inline bool khronos_opencl2_base__zzprivate_apart(const uint16_t* a, uint64_t n, const uint16_t* b, uint64_t m) {
+    return a + n <= b || b + m <= a;
+}
+/* Whether a row of `n` is one this family's rotation takes: whole 512-blocks, or the ladder's widths (▶ above). */
+static inline bool khronos_opencl2_base__zzprivate_rotates(uint64_t n) {
+    return n != 0u && (n % 512u == 0u || (n % 128u == 0u && (n > 512u || n == 128u || n == 256u)));
+}
+
+/* ⭐ THE ROTATION OF ROWS — each its own ladder, as the rotation of one — in one launch; anything else is the generic door. */
+static void khronos_opencl2_base__override_hadamard_ladder_rows(uint16_t* out, const uint16_t* in, const uint16_t* sign, uint64_t cols,
+                                                              uint64_t rows, unsigned int* over) {
+    const uint64_t n = cols * rows;
+    if (!khronos_opencl2_base__zzpackage_has_kernel("khronos_opencl2_base__rotate_rows") || rows == 0u
+     || !khronos_opencl2_base__zzprivate_rotates(cols) || !(out + n <= in || in + n <= out)) {
+        nn__hadamard__zzabi_launch_ladder_rows(out, in, sign, cols, rows, over);
+        return;
+    }
+    const uint64_t rest = cols % 512u, units = rows * (cols / 512u + (rest >= 256u ? 1u : 0u) + (rest % 256u != 0u ? 1u : 0u));
+    const uint32_t groups = units < NN__KERNELS__BLOCKS_MAX ? (uint32_t)units : NN__KERNELS__BLOCKS_MAX;
+    void* args[] = { &out, &in, &sign, &cols, &rows, &over };
+    const size_t sizes[] = { sizeof out, sizeof in, sizeof sign, sizeof cols, sizeof rows, sizeof over };
+    nn__silicon__launch(0, "khronos_opencl2_base__rotate_rows", groups, KHRONOS_OPENCL2_BASE__ZZPRIVATE_GROUP, args, sizes, 6u);
+}
+
+/* ⭐ THE NORM AND ITS ROTATION, AND TWO NORMS AND THEIR PAIR'S — ONE LAUNCH EACH, nn's bits (▶ kernels.cuh's
+ *   `norm_rotate`): a row no wider than a lane's `HELD` take, a row (or a pair) this family's rotation takes, `o` and `rot`
+ *   apart from each other and from everything the kernel reads — its work-groups each read the whole rows while the others
+ *   write, so a row normed in place, which nn's one work-group allows, is nn's door here. Anything else is nn's door. */
+#define KHRONOS_OPENCL2_BASE__ZZPRIVATE_HOST_NORM_HELD  16u    /* kernels.cuh's `NORM_HELD` */
+#define KHRONOS_OPENCL2_BASE__ZZPRIVATE_ROT_HOST        512u   /* the signs a block of the rotation reads, at most */
+static inline bool khronos_opencl2_base__zzprivate_norm_rotate(uint16_t* rot, uint16_t* o, const uint16_t* x, const uint16_t* y,
+                                                              const uint16_t* w, const uint16_t* sign, uint64_t n, uint64_t rows,
+                                                              float eps, unsigned int* over) {
+    const uint64_t m = rows * n;
+    if (!khronos_opencl2_base__zzpackage_has_kernel("khronos_opencl2_base__norm_rotate")
+     || n > KHRONOS_OPENCL2_BASE__ZZPRIVATE_HOST_NORM_HELD * KHRONOS_OPENCL2_BASE__ZZPRIVATE_GROUP
+     || !khronos_opencl2_base__zzprivate_rotates(m) || !khronos_opencl2_base__zzprivate_apart(rot, m, o, m))
+        return false;
+    const uint16_t* reads[4] = { x, w, sign, y };
+    const uint64_t lengths[4] = { n, n, KHRONOS_OPENCL2_BASE__ZZPRIVATE_ROT_HOST, n };
+    for (uint32_t i = 0u; i < (rows > 1u ? 4u : 3u); ++i)
+        if (!khronos_opencl2_base__zzprivate_apart(rot, m, reads[i], lengths[i]) || !khronos_opencl2_base__zzprivate_apart(o, m, reads[i], lengths[i]))
+            return false;
+    const uint64_t rest = m % 512u, units = m / 512u + (rest >= 256u ? 1u : 0u) + (rest % 256u != 0u ? 1u : 0u);
+    const uint32_t groups = units < NN__KERNELS__BLOCKS_MAX ? (uint32_t)units : NN__KERNELS__BLOCKS_MAX;
+    void* args[] = { &rot, &o, &x, &y, &w, &sign, &n, &rows, &eps, &over };
+    const size_t sizes[] = { sizeof rot, sizeof o, sizeof x, sizeof y, sizeof w, sizeof sign, sizeof n, sizeof rows, sizeof eps, sizeof over };
+    nn__silicon__launch(0, "khronos_opencl2_base__norm_rotate", groups, KHRONOS_OPENCL2_BASE__ZZPRIVATE_GROUP, args, sizes, 10u);
+    return true;
+}
+static void khronos_opencl2_base__override_rmsnorm_rotate(uint16_t* rot, uint16_t* o, const uint16_t* x, const uint16_t* w,
+                                                        const uint16_t* sign, uint64_t n, float eps, unsigned int* over) {
+    if (!khronos_opencl2_base__zzprivate_norm_rotate(rot, o, x, x, w, sign, n, 1u, eps, over))
+        nn__rmsnorm__zzabi_launch_rotate(rot, o, x, w, sign, n, eps, over);
+}
+static void khronos_opencl2_base__override_rmsnorm_pair_rotate(uint16_t* rot, uint16_t* o, const uint16_t* x, const uint16_t* y,
+                                                             const uint16_t* w, const uint16_t* sign, uint64_t n, float eps,
+                                                             unsigned int* over) {
+    if (!khronos_opencl2_base__zzprivate_norm_rotate(rot, o, x, y, w, sign, n, 2u, eps, over))
+        nn__rmsnorm__zzabi_launch_pair_rotate(rot, o, x, y, w, sign, n, eps, over);
+}
+
+/* ⭐ A LEARNED QUERY'S MIX (▶ kernels.cuh's `attention_states`): rows of whole groups of 8, no wider than a lane's groups
+ *   hold, every row 16-byte aligned, `o` apart from what it reads, at most nn's states; anything else is the generic door. */
+static void khronos_opencl2_base__override_attention_states(uint16_t* o, const uint16_t* q, const uint16_t* states, const uint16_t* current,
+                                                          uint64_t queries, uint64_t width, uint64_t rows, uint64_t with_current,
+                                                          float eps, unsigned int* over) {
+    const uint64_t count = rows + (with_current != 0u ? 1u : 0u), span = queries * width;
+    if (!khronos_opencl2_base__zzpackage_has_kernel("khronos_opencl2_base__attention_states") || queries == 0u || width == 0u
+     || width % 8u != 0u || width > 8u * 2u * KHRONOS_OPENCL2_BASE__ZZPRIVATE_GROUP || count == 0u || count > NN__ATTENTION__STATES_MAX
+     || ((uint64_t)(uintptr_t)o) % 16u != 0u || ((uint64_t)(uintptr_t)q) % 16u != 0u
+     || (rows != 0u && ((uint64_t)(uintptr_t)states) % 16u != 0u) || (with_current != 0u && ((uint64_t)(uintptr_t)current) % 16u != 0u)
+     || !khronos_opencl2_base__zzprivate_apart(o, span, q, span)
+     || (rows != 0u && !khronos_opencl2_base__zzprivate_apart(o, span, states, rows * width))
+     || (with_current != 0u && !khronos_opencl2_base__zzprivate_apart(o, span, current, width))) {
+        nn__attention__zzabi_launch_states(o, q, states, current, queries, width, rows, with_current, eps, over);
+        return;
+    }
+    /* each query's row in slices of 32 groups of 8, a work-group a slice: `MEASURED` on node03's MI50 at Inkling 2's three
+     * shapes, 64 the same, 16 and a work-group a query slower (measurements/2026-11-24_nn207_inkling2_rates_node03.md ㉒) */
+    uint64_t slices = (width / 8u + 31u) / 32u;
+    const uint64_t tasks = queries * slices;
+    const uint32_t groups = tasks < NN__KERNELS__BLOCKS_MAX ? (uint32_t)tasks : NN__KERNELS__BLOCKS_MAX;
+    void* args[] = { &o, &q, &states, &current, &queries, &width, &rows, &with_current, &slices, &eps, &over };
+    const size_t sizes[] = { sizeof o, sizeof q, sizeof states, sizeof current, sizeof queries, sizeof width, sizeof rows, sizeof with_current,
+                             sizeof slices, sizeof eps, sizeof over };
+    nn__silicon__launch(0, "khronos_opencl2_base__attention_states", groups, KHRONOS_OPENCL2_BASE__ZZPRIVATE_GROUP, args, sizes, 11u);
 }
 
 /* ⭐ ATTENTION'S RESIDUAL PASSES; anything a kernel cannot take is the generic door. */
@@ -326,11 +422,22 @@ static inline bool khronos_opencl2_base__zzprivate_latent_scores_fit(const uint1
     return kv_heads != 0u && q_heads % kv_heads == 0u && q_heads / kv_heads >= 32u && head_dim != 0u && head_dim % 64u == 0u
         && ((uint64_t)(uintptr_t)q) % 4u == 0u && ((uint64_t)(uintptr_t)k) % 4u == 0u;
 }
+/* …and any other shape a work-item a (query head, position), nn's bits (Inkling 2's 24 heads over 8, and its position
+ * bias's 24 over 1 at a rank of 16). */
 static void khronos_opencl2_base__override_attention_scores_grouped(float* p, const uint16_t* q, const uint16_t* k, uint64_t q_heads,
                                                                uint64_t kv_heads, uint64_t head_dim, uint64_t length) {
     if (length == 0u || !khronos_opencl2_base__zzprivate_latent_scores_fit(q, k, q_heads, kv_heads, head_dim)
      || !khronos_opencl2_base__zzpackage_has_kernel("khronos_opencl2_base__latent_scores")) {
-        nn__attention__zzabi_launch_scores_grouped(p, q, k, q_heads, kv_heads, head_dim, length);
+        if (length == 0u || head_dim == 0u || kv_heads == 0u || q_heads % kv_heads != 0u
+         || !khronos_opencl2_base__zzpackage_has_kernel("khronos_opencl2_base__scores_grouped")) {
+            nn__attention__zzabi_launch_scores_grouped(p, q, k, q_heads, kv_heads, head_dim, length);
+            return;
+        }
+        const uint64_t want = (q_heads * length + KHRONOS_OPENCL2_BASE__ZZPRIVATE_GROUP - 1u) / KHRONOS_OPENCL2_BASE__ZZPRIVATE_GROUP;
+        const uint32_t groups = want < NN__KERNELS__BLOCKS_MAX ? (uint32_t)want : NN__KERNELS__BLOCKS_MAX;
+        void* args[] = { &p, &q, &k, &q_heads, &kv_heads, &head_dim, &length };
+        const size_t sizes[] = { sizeof p, sizeof q, sizeof k, sizeof q_heads, sizeof kv_heads, sizeof head_dim, sizeof length };
+        nn__silicon__launch(0, "khronos_opencl2_base__scores_grouped", groups, KHRONOS_OPENCL2_BASE__ZZPRIVATE_GROUP, args, sizes, 7u);
         return;
     }
     const uint64_t tiles = kv_heads * ((q_heads / kv_heads + 63u) / 64u) * ((length + 63u) / 64u);
@@ -522,6 +629,10 @@ static inline void khronos_opencl2_base__override_doors(nn__doors* doors) {
     doors->turboquant_gemv            = khronos_opencl2_base__override_turboquant_gemv;
     doors->turboquant_gemv_groups     = khronos_opencl2_base__override_gemv_groups;
     doors->turboquant_gemv_groups_sum = khronos_opencl2_base__override_gemv_groups_sum;
+    doors->hadamard_ladder_rows       = khronos_opencl2_base__override_hadamard_ladder_rows;
+    doors->rmsnorm_rotate             = khronos_opencl2_base__override_rmsnorm_rotate;
+    doors->rmsnorm_pair_rotate        = khronos_opencl2_base__override_rmsnorm_pair_rotate;
+    doors->attention_states           = khronos_opencl2_base__override_attention_states;
     doors->hadamard_rotate            = khronos_opencl2_base__override_hadamard_rotate;
     doors->attention_weights          = khronos_opencl2_base__override_attention_weights;
     doors->attention_residual_mix     = khronos_opencl2_base__override_attention_residual_mix;

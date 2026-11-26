@@ -816,6 +816,32 @@ static __device__ inline bool nn__expert__zzprivate_push_front(uint64_t layer, u
         && nn__expert__zzprivate_lru_set(layer, type, &ends);
 }
 
+/* Put one at the back — its band's oldest, the next its slot goes to. ⛔ THE CALLER MUST HAVE UNLINKED IT FIRST, as for
+ * `push_front`. */
+static __device__ inline bool nn__expert__zzprivate_push_back(uint64_t layer, uint64_t type,
+                                                              uint64_t expert) {
+    sys__heap_node me, ends;
+    if (!nn__expert__slot(layer, type, expert, &me))        return false;
+    if (!nn__expert__zzprivate_lru_row(layer, type, &ends)) return false;
+
+    const uint64_t was = ends.args[NN__EXPERT__LRU_OLDEST];
+    me.args[NN__EXPERT__SLOT_PREV] = was;
+    me.args[NN__EXPERT__SLOT_NEXT] = NN__EXPERT__NONE;
+    if (was != NN__EXPERT__NONE) {
+        sys__heap_node o;
+        if (!nn__expert__slot(layer, type, NN__EXPERT__UNLINK(was), &o)) return false;
+        o.args[NN__EXPERT__SLOT_NEXT] = NN__EXPERT__LINK(expert);
+        if (!nn__expert__zzprivate_slot_set(layer, type, NN__EXPERT__UNLINK(was), &o)) return false;
+    } else {
+        /* An empty chain gains its RECENT end here as well. */
+        ends.args[NN__EXPERT__LRU_RECENT] = NN__EXPERT__LINK(expert);
+    }
+    ends.args[NN__EXPERT__LRU_OLDEST] = NN__EXPERT__LINK(expert);
+    ++ends.args[NN__EXPERT__LRU_COUNT];
+    return nn__expert__zzprivate_slot_set(layer, type, expert, &me)
+        && nn__expert__zzprivate_lru_set(layer, type, &ends);
+}
+
 /* How many of a (layer, type) band's experts are resident: its chain's length. */
 static __device__ inline uint64_t nn__expert__layer_resident(uint64_t layer, uint64_t type) {
     sys__heap_node row;
@@ -861,6 +887,15 @@ static __device__ inline bool nn__expert__admit(uint64_t layer, uint64_t expert,
 /* ⛔ TOUCHING AN EXPERT THAT IS NOT RESIDENT IS A REFUSAL, NOT A PROMOTION. The chain orders what is IN
  * VRAM; an absent expert has nothing to be recent about, and letting it in would put a slot with a zero
  * address at the head — which the evictor would then hand out as its best candidate. */
+/* ⭐ AN EXPERT MADE ITS BAND'S OLDEST, THE NEXT ITS SLOT GOES TO (NN-218: a one-way tier's promoted expert, the card's now,
+ *   which RAM need not keep — it is still there until a read needs the room). A no-op on one not resident. */
+static __device__ inline bool nn__expert__age(uint64_t layer, uint64_t type, uint64_t expert) {
+    sys__heap_node me;
+    if (!nn__expert__slot(layer, type, expert, &me)) return false;
+    if (me.args[NN__EXPERT__SLOT_AT] == 0ull) return true;
+    return nn__expert__zzprivate_unlink(layer, type, expert) && nn__expert__zzprivate_push_back(layer, type, expert);
+}
+
 static __device__ inline bool nn__expert__touch(uint64_t layer, uint64_t type, uint64_t expert) {
     sys__heap_node me;
     if (!nn__expert__slot(layer, type, expert, &me)) return false;

@@ -143,7 +143,7 @@ desktop's applications menu. A model downloaded on one system is there on the ot
   a snap's may), the default browser opens the UI and a small message box stands for the window: its OK ends the app.
   On Linux with no display at all (over ssh) it says the address and runs until Ctrl-C.
 - **The cards:** an NVIDIA card through CUDA (its driver from CUDA 12's line on), an AMD or Intel GPU through OpenCL with
-  its own driver, and the CPU alone (AVX2) where there is neither. On Windows these are the libraries `install.ps1`
+  its own driver, and the CPU alone (AVX2, or SSE4.2 on a processor without it) where there is neither. On Windows these are the libraries `install.ps1`
   takes — with them, from 1.6.0, AMD's own family for a Radeon RX 9060 or 9070, not yet run on a card
   ([below](#on-windows)); on Linux an AMD card goes through OpenCL too, as ROCm's own families open the ROCm a system
   has installed and are built by [`install.sh`](#on-linux-installed) and the AMD images instead.
@@ -184,7 +184,8 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
 It fetches the release into `.\silvann` (a git clone), makes its Python environment and takes the libraries GitHub built
-for the release — `silvann_windows_x64.zip` on the release's page, used when git's hashes of the engine and `scripts/build.py`
+for the release — `silvann_windows_libraries_update_x64.zip` on the release's page (`silvann_windows_x64.zip` up to 1.6.0; it is
+what this installer fetches, not the app: that is `silvann_portable_x64.zip`), used when git's hashes of the engine and `scripts/build.py`
 it was built from are the folder's — then writes `silvann.cmd` and `silvann_cli.cmd` into the folder and puts the folder
 on your PATH, from the next PowerShell you open (in the one it ran in, `.\silvann\silvann`). The `silvann` command is
 Linux's: `list`, `download`, `serve`, `ui`, `models <folder>`, `update`, `build`, `help`. Where the libraries are not the
@@ -426,7 +427,10 @@ Which model suits a machine — the card, the RAM, the CPU — and how fast each
 [`results.md`](results.md#which-model-for-your-machine).
 
 On a machine with no card the model runs on the CPU's own cores (the `x86_avx2` family, which needs AVX2, FMA and F16C:
-Intel from Haswell, 2013, AMD from Excavator, 2015; an older processor has no family to run on). The pack for it is
+Intel from Haswell, 2013, AMD from Excavator, 2015; a processor without them, from SSE4.2 and POPCNT on, runs the
+`x86_base` family, nn's own arithmetic — correct, and many times slower: the 35B with its experts on the test machine's
+Xeons, told they have no AVX2, answered at 2.3 tokens a second beside an MI50, against 31.6 with AVX2; v1.8.0). The pack
+for it is
 `silvann_tq_D8E4_qwen3.6_35b_a3b`, the one for a card too: on the test machine's two Xeons it answers at 14-16 tokens a
 second after a 1,000-position prompt, and at 11.9 held to 12 GB of RAM with its experts read from the disk (v0.18.1). On a processor with AVX-512 (F, BW, VL and DQ) the family's matrix products use it: on a four-core Xeon
 W-2123 with two DDR4-2400 sticks the 35B D8E4 alone ran at 9.0 tokens a second against 1.7 with AVX2, and with its
@@ -736,6 +740,15 @@ tier's size runs the model without the disk. It costs speed where a card cannot 
 token went from 107 to 138 ms. The engine measures that at boot and, on such a card, sends an expert back only after
 the one coming in has arrived. Over a group of cards (`num_cards`) each card's exclusive tier is its own: an expert
 is on one card or in RAM, and the group gives back the RAM of every card's tier.
+
+**From the disk, one way.** Where the experts are read from the disk into a cache in RAM (`experts_from: "disk"`) and
+the card's tier is filled from that cache, `card_exclusive: true` makes the tier one way: an expert the card holds is
+not also kept in the cache, which holds others in its place, and an expert the card gives up is read back from the disk
+at once, as one used often enough to have earned the card. On our MI50 with Qwen 3.6 35B-A3B, a 1 GB tier and a 6 GB
+cache, a token went from 46.8 to 41.0 ms, the disk read 20 experts a token instead of 27, and the experts kept both on
+the card and in RAM went from 459 to 42. The boot chooses it for the Qwen models where the processor's cores compute
+the experts and the tier is not lent the cache's rows; GLM 5.3 Flash and DeepSeek-V4.1-Flash take it where the config
+says so.
 
 ### The experts in RAM, and swap
 

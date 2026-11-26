@@ -86,10 +86,10 @@ static sys__heap_node nn__vector__zzabi_apply_widen(const sys__heap_node* argv, 
     return nn__doors_answer(&argv[1]);
 }
 
-/* `(nn__vector__exp x out n)` and `(nn__vector__softplus x out n)` — one input, one output, the same
- * checks; only the door differs, so one body serves both. */
+/* `(nn__vector__exp x out n)`, `(nn__vector__softplus x out n)` and `(nn__vector__tanh x out n)` — one input, one output,
+ * the same checks; only the door differs, so one body serves the three: `which` 0 the first, 1 the second, 2 the third. */
 static inline sys__heap_node nn__vector__zzabi_zzprivate_unary(const sys__heap_node* argv, unsigned argc,
-                                                               sys__engine__ctx* ctx, bool softplus) {
+                                                               sys__engine__ctx* ctx, unsigned which) {
     if (argc != 3u) return nn__vector__zzabi_error(SYS__OPCODES__FAULT_ARITY);
     uint64_t x_at = 0, o_at = 0, x_room = 0, o_room = 0;
     if (argv[2].dtype != SYS__KIND__VALUE_INT
@@ -101,19 +101,111 @@ static inline sys__heap_node nn__vector__zzabi_zzprivate_unary(const sys__heap_n
 
     const nn__doors* doors = nn__doors_for(ctx);
     if (doors == 0) return nn__vector__zzabi_error(NN__PRIMITIVES__FAULT_NO_DEVICE);
-    (softplus ? doors->vector_softplus : doors->vector_exp)((uint16_t*)(uintptr_t)o_at, (const uint16_t*)(uintptr_t)x_at, n,
-                                                            ctx->fault_word);
+    (which == 2u ? doors->vector_tanh : which == 1u ? doors->vector_softplus : doors->vector_exp)(
+        (uint16_t*)(uintptr_t)o_at, (const uint16_t*)(uintptr_t)x_at, n, ctx->fault_word);
     return nn__doors_answer(&argv[1]);
 }
 /* ── `out[i] = exp(x[i])` ────────────────────────────────────────────────────────────────────────── */
 static sys__heap_node nn__vector__zzabi_apply_exp(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx) {
-    return nn__vector__zzabi_zzprivate_unary(argv, argc, ctx, false);
+    return nn__vector__zzabi_zzprivate_unary(argv, argc, ctx, 0u);
 }
 /* ── `out[i] = log(1 + exp(x[i]))`, in the form that is total ───────────────────────────────────────
  * ⛳ `max(x,0) + log1p(exp(-|x|))`. For `x >= 0` that is `x + log(1 + e^-x)` and for `x < 0` it is
  * `log(1 + e^x)` — the same function on both arms, written so the exponent is never positive. */
 static sys__heap_node nn__vector__zzabi_apply_softplus(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx) {
-    return nn__vector__zzabi_zzprivate_unary(argv, argc, ctx, true);
+    return nn__vector__zzabi_zzprivate_unary(argv, argc, ctx, 1u);
+}
+/* ── `out[i] = tanh(x[i])` ──────────────────────────────────────────────────────────────────────────────────────── */
+static sys__heap_node nn__vector__zzabi_apply_tanh(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx) {
+    return nn__vector__zzabi_zzprivate_unary(argv, argc, ctx, 2u);
+}
+
+/* `(nn__vector__l2clip x limit out rows n)` — each of `rows` rows of `n` halves held to the length `limit`: a row longer
+ * than it scaled down to it, a shorter one as it is (`x · min(limit / (‖x‖ + 1e-6), 1)`). `out` may be `x`. No rows, a row
+ * of no elements and a limit that is not above zero are refused. */
+static sys__heap_node nn__vector__zzabi_apply_l2clip(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx) {
+    if (argc != 5u) return nn__vector__zzabi_error(SYS__OPCODES__FAULT_ARITY);
+    uint64_t x_at = 0, o_at = 0, x_room = 0, o_room = 0;
+    if (argv[1].dtype != SYS__KIND__VALUE_FLOAT || argv[3].dtype != SYS__KIND__VALUE_INT || argv[4].dtype != SYS__KIND__VALUE_INT
+     || !nn__primitives__room(&argv[0], &x_at, &x_room)
+     || !nn__primitives__room(&argv[2], &o_at, &o_room)) return nn__vector__zzabi_error(SYS__OPCODES__FAULT_TYPE);
+    const uint64_t rows = argv[3].args[0], n = argv[4].args[0];
+    const float limit = (float)sys__heap_node__real(argv[1].args[0]);
+    if (rows == 0ull || n == 0ull || rows > (1ull << 32) || n > (1ull << 32) || !(limit > 0.0f)
+     || !nn__primitives__fits(rows * n, x_room) || !nn__primitives__fits(rows * n, o_room))
+        return nn__vector__zzabi_error(NN__PRIMITIVES__FAULT_BOUNDS);
+
+    const nn__doors* doors = nn__doors_for(ctx);
+    if (doors == 0) return nn__vector__zzabi_error(NN__PRIMITIVES__FAULT_NO_DEVICE);
+    doors->vector_l2clip((uint16_t*)(uintptr_t)o_at, (const uint16_t*)(uintptr_t)x_at, rows, n, limit, ctx->fault_word);
+    return nn__doors_answer(&argv[2]);
+}
+
+/* `(nn__vector__add_fp32 x y out n)` — `n` floats and `n` floats, summed into `out`, which may be either: what a program
+ * adds to an attention's scores between `nn__attention__score` and their softmax. */
+static sys__heap_node nn__vector__zzabi_apply_add_fp32(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx) {
+    if (argc != 4u) return nn__vector__zzabi_error(SYS__OPCODES__FAULT_ARITY);
+    uint64_t x_at = 0, y_at = 0, o_at = 0, x_room = 0, y_room = 0, o_room = 0;
+    if (argv[3].dtype != SYS__KIND__VALUE_INT || !nn__primitives__room(&argv[0], &x_at, &x_room)
+     || !nn__primitives__room(&argv[1], &y_at, &y_room)
+     || !nn__primitives__room(&argv[2], &o_at, &o_room)) return nn__vector__zzabi_error(SYS__OPCODES__FAULT_TYPE);
+    const uint64_t n = argv[3].args[0];
+    if (n > (1ull << 32) || 4ull * n > x_room || 4ull * n > y_room || 4ull * n > o_room)
+        return nn__vector__zzabi_error(NN__PRIMITIVES__FAULT_BOUNDS);
+
+    const nn__doors* doors = nn__doors_for(ctx);
+    if (doors == 0) return nn__vector__zzabi_error(NN__PRIMITIVES__FAULT_NO_DEVICE);
+    doors->vector_add_fp32((float*)(uintptr_t)o_at, (const float*)(uintptr_t)x_at, (const float*)(uintptr_t)y_at, n);
+    return nn__doors_answer(&argv[2]);
+}
+
+/* `(nn__convolution__step x history taps made out width count group scale)` — a short causal convolution's step, a
+ * channel its own taps: `out[c] = scale · (x[c] + Σ tap[lag][c] · x_lag[c])` over this position's input and the
+ * `count − 1` before it. `taps` is a row a lag, this position's first; `history` the inputs before this one, a row a lag,
+ * the newest first — the step slides it, this input in and the oldest out. With `group` not zero, each run of `group`
+ * channels has `count` taps of its own in `made` that join the layer's; with `group` zero `made` is any buffer, not
+ * read. `out` and `x` are not `history`. Refused: a `count` under 2 or over 16, a `group` that does not divide `width`. */
+static sys__heap_node nn__vector__zzabi_apply_convolution_step(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx) {
+    if (argc != 9u) return nn__vector__zzabi_error(SYS__OPCODES__FAULT_ARITY);
+    uint64_t x_at = 0, x_room = 0, h_at = 0, h_room = 0, t_at = 0, t_room = 0, m_at = 0, m_room = 0, o_at = 0, o_room = 0;
+    if (argv[5].dtype != SYS__KIND__VALUE_INT || argv[6].dtype != SYS__KIND__VALUE_INT || argv[7].dtype != SYS__KIND__VALUE_INT
+     || argv[8].dtype != SYS__KIND__VALUE_FLOAT
+     || !nn__primitives__room(&argv[0], &x_at, &x_room) || !nn__primitives__room(&argv[1], &h_at, &h_room)
+     || !nn__primitives__room(&argv[2], &t_at, &t_room) || !nn__primitives__room(&argv[3], &m_at, &m_room)
+     || !nn__primitives__room(&argv[4], &o_at, &o_room)) return nn__vector__zzabi_error(SYS__OPCODES__FAULT_TYPE);
+    const uint64_t width = argv[5].args[0], count = argv[6].args[0], group = argv[7].args[0];
+    if (width == 0ull || width > (1ull << 24) || count < 2ull || count > 16ull || (group != 0ull && width % group != 0ull)
+     || !nn__primitives__fits(width, x_room) || !nn__primitives__fits(width, o_room)
+     || !nn__primitives__fits((count - 1ull) * width, h_room) || !nn__primitives__fits(count * width, t_room)
+     || (group != 0ull && !nn__primitives__fits((width / group) * count, m_room))
+     || o_at == h_at || x_at == h_at) return nn__vector__zzabi_error(NN__PRIMITIVES__FAULT_BOUNDS);
+
+    const nn__doors* doors = nn__doors_for(ctx);
+    if (doors == 0) return nn__vector__zzabi_error(NN__PRIMITIVES__FAULT_NO_DEVICE);
+    doors->convolution_step((uint16_t*)(uintptr_t)o_at, (uint16_t*)(uintptr_t)h_at, (const uint16_t*)(uintptr_t)t_at,
+                            (const uint16_t*)(uintptr_t)m_at, (const uint16_t*)(uintptr_t)x_at, width, count, group,
+                            (float)sys__heap_node__real(argv[8].args[0]), ctx->fault_word);
+    return nn__doors_answer(&argv[4]);
+}
+
+/* `(nn__vector__gate_tanh x y forget gain out n)` — a gate between two vectors, each side its own tanh:
+ * `out[i] = (1 − tanh(forget[i]))·x[i] + tanh(gain[i])·y[i]`. `out` may be `x` or `y`. */
+static sys__heap_node nn__vector__zzabi_apply_gate_tanh(const sys__heap_node* argv, unsigned argc, sys__engine__ctx* ctx) {
+    if (argc != 6u) return nn__vector__zzabi_error(SYS__OPCODES__FAULT_ARITY);
+    uint64_t at[5] = { 0, 0, 0, 0, 0 }, room[5] = { 0, 0, 0, 0, 0 };
+    if (argv[5].dtype != SYS__KIND__VALUE_INT) return nn__vector__zzabi_error(SYS__OPCODES__FAULT_TYPE);
+    for (unsigned a = 0u; a < 5u; ++a)
+        if (!nn__primitives__room(&argv[a], &at[a], &room[a])) return nn__vector__zzabi_error(SYS__OPCODES__FAULT_TYPE);
+    const uint64_t n = argv[5].args[0];
+    if (n == 0ull || n > (1ull << 32)) return nn__vector__zzabi_error(NN__PRIMITIVES__FAULT_BOUNDS);
+    for (unsigned a = 0u; a < 5u; ++a)
+        if (!nn__primitives__fits(n, room[a])) return nn__vector__zzabi_error(NN__PRIMITIVES__FAULT_BOUNDS);
+
+    const nn__doors* doors = nn__doors_for(ctx);
+    if (doors == 0) return nn__vector__zzabi_error(NN__PRIMITIVES__FAULT_NO_DEVICE);
+    doors->vector_gate_tanh((uint16_t*)(uintptr_t)at[4], (const uint16_t*)(uintptr_t)at[0], (const uint16_t*)(uintptr_t)at[1],
+                            (const uint16_t*)(uintptr_t)at[2], (const uint16_t*)(uintptr_t)at[3], n, ctx->fault_word);
+    return nn__doors_answer(&argv[4]);
 }
 
 /* ── `out[i] = x[i] * rsqrt(Σ x^2 + 1e-6)` ──────────────────────────────────────────────────────────
@@ -222,6 +314,11 @@ SYS__ENGINE__ABI__BRIDGE(nn__vector__zzabi_adapter_copy,          nn__vector__zz
 SYS__ENGINE__ABI__BRIDGE(nn__vector__zzabi_adapter_widen,         nn__vector__zzabi_apply_widen)
 SYS__ENGINE__ABI__BRIDGE(nn__vector__zzabi_adapter_exp,           nn__vector__zzabi_apply_exp)
 SYS__ENGINE__ABI__BRIDGE(nn__vector__zzabi_adapter_softplus,      nn__vector__zzabi_apply_softplus)
+SYS__ENGINE__ABI__BRIDGE(nn__vector__zzabi_adapter_tanh,          nn__vector__zzabi_apply_tanh)
+SYS__ENGINE__ABI__BRIDGE(nn__vector__zzabi_adapter_l2clip,        nn__vector__zzabi_apply_l2clip)
+SYS__ENGINE__ABI__BRIDGE(nn__vector__zzabi_adapter_add_fp32,      nn__vector__zzabi_apply_add_fp32)
+SYS__ENGINE__ABI__BRIDGE(nn__vector__zzabi_adapter_convolution_step, nn__vector__zzabi_apply_convolution_step)
+SYS__ENGINE__ABI__BRIDGE(nn__vector__zzabi_adapter_gate_tanh,     nn__vector__zzabi_apply_gate_tanh)
 SYS__ENGINE__ABI__BRIDGE(nn__vector__zzabi_adapter_l2norm,        nn__vector__zzabi_apply_l2norm)
 /* `(nn__vector__top_k x n k picks weights)` — the `k` largest of `n` values: their indices into the first
  * `k` elements of `picks`, a node array the program made, and their softmax into `weights` as halves;

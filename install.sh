@@ -85,7 +85,7 @@ find_cards() {
     #   time they take only the cards no other family does — an NVIDIA card older than CUDA's (OpenCL 1.2,
     #   nvidia_opencl1), an Intel GPU (intel_opencl2 from Gen9, intel_opencl1_igpu before), an AMD card without ROCm's HIP
     #   (khronos_opencl2) — so a machine whose cards CUDA or ROCm run is unchanged
-    FAMILIES="x86_avx2 khronos_opencl2 intel_opencl2 nvidia_opencl1 intel_opencl1_igpu"
+    FAMILIES="x86_avx2 x86_base khronos_opencl2 intel_opencl2 nvidia_opencl1 intel_opencl1_igpu"
     local opencl_card=""
     if [ "$(uname -m)" = aarch64 ]; then
         # ⭐ AN ARM MACHINE'S OWN: arm_neon (Armv8.2 with half precision and the dot product) and arm_gb10 (the DGX Spark's

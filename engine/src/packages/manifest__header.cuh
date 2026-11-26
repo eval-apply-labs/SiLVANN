@@ -166,7 +166,8 @@
     X(3, ai_z__glm_5_3, "ai_z__glm_5_3") \
     X(4, ai_qwen_image, "ai_qwen_image") \
     X(5, ai_deepseek_4, "ai_deepseek_4") \
-    X(6, ai_qwen_4, "ai_qwen_4")
+    X(6, ai_qwen_4, "ai_qwen_4") \
+    X(7, ai_thinkingmachines__inkling_2, "ai_thinkingmachines__inkling_2")
 
 /* The ids, generated, so that nobody writes a number twice.
  *

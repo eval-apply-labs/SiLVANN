@@ -177,6 +177,23 @@
 #define nn__rmsnorm__zzabi_launch_fp32_rows__RUNS         NN__GPU__ZZPRIVATE_WIDE,     nn__rmsnorm__zzabi_body_fp32_rows,        NN__GPU__ZZPRIVATE_UP_TO(rows, NN__KERNELS__BLOCKS_MAX), 256u, (o, x, w, n, rows, period, eps, over)
 #define nn__gated__zzabi_launch_rank__RUNS                NN__GPU__ZZPRIVATE_WIDE,     nn__gated__zzabi_body_rank,               NN__GPU__ZZPRIVATE_EACH(rank), 256u, (rot, act, a, sign, rank, scale, over)
 #define nn__gated__zzabi_launch_mean__RUNS                NN__GPU__ZZPRIVATE_WIDE,     nn__gated__zzabi_body_mean,               NN__GPU__ZZPRIVATE_EACH(hidden), 256u, (into, inj, gt, an, ij, hidden, streams, mean, over)
+#define nn__swiglu__zzabi_launch_softcapped__RUNS         NN__GPU__ZZPRIVATE_WIDE,     nn__swiglu__zzabi_body_softcapped,        NN__GPU__ZZPRIVATE_EACH(pairs * n), 256u, (act, gu, pairs, n, gate_cap, up_cap, over)
+#define nn__vector__zzabi_launch_l2clip__RUNS             NN__GPU__ZZPRIVATE_WIDE,     nn__vector__zzabi_body_l2clip,            NN__GPU__ZZPRIVATE_UP_TO(rows, NN__KERNELS__BLOCKS_MAX), 256u, (o, x, rows, n, limit, over)
+#define nn__vector__zzabi_launch_add_fp32__RUNS           NN__GPU__ZZPRIVATE_WIDE,     nn__vector__zzabi_body_add_fp32,          NN__GPU__ZZPRIVATE_EACH(n), 256u, (z, x, y, n)
+#define nn__convolution__zzabi_launch_step__RUNS          NN__GPU__ZZPRIVATE_WIDE,     nn__convolution__zzabi_body_step,         NN__GPU__ZZPRIVATE_EACH(width), 256u, (o, s, w, made, x, width, count, group, scale, over)
+#define nn__vector__zzabi_launch_gate_tanh__RUNS          NN__GPU__ZZPRIVATE_WIDE,     nn__vector__zzabi_body_gate_tanh,         NN__GPU__ZZPRIVATE_EACH(n), 256u, (o, x, y, forget, gain, n, over)
+#define nn__attention__zzabi_launch_states__RUNS          NN__GPU__ZZPRIVATE_WIDE,     nn__attention__zzabi_body_states,         NN__GPU__ZZPRIVATE_UP_TO(queries, NN__KERNELS__BLOCKS_MAX), 256u, (o, q, states, current, queries, width, rows, with_current, eps, over)
+#define nn__vector__zzabi_launch_scale_l2clip__RUNS       NN__GPU__ZZPRIVATE_WIDE,     nn__vector__zzabi_body_scale_l2clip,      NN__GPU__ZZPRIVATE_UP_TO(rows, NN__KERNELS__BLOCKS_MAX), 256u, (o, x, scale, rows, n, limit, factor, over)
+#define nn__vector__zzabi_launch_gate_sigmoid__RUNS       NN__GPU__ZZPRIVATE_WIDE,     nn__vector__zzabi_body_gate_sigmoid,      NN__GPU__ZZPRIVATE_EACH(n), 256u, (o, x, gate, n, over)
+#define nn__attention__zzabi_launch_softmax_sink_bias__RUNS NN__GPU__ZZPRIVATE_WIDE,   nn__attention__zzabi_body_softmax_sink_bias, NN__GPU__ZZPRIVATE_UP_TO(rows, NN__KERNELS__BLOCKS_MAX), 256u, (p, bias, sink, rows, length)
+#define nn__rmsnorm__zzabi_launch_pair_rotate__RUNS       NN__GPU__ZZPRIVATE_BY_ROW,   nn__rmsnorm__zzprivate_pair_rotate_by_three, 1u, 1u, (rot, o, x, y, w, sign, n, eps, over)
+#define nn__convolution__zzabi_launch_step_add__RUNS      NN__GPU__ZZPRIVATE_WIDE,     nn__convolution__zzabi_body_step_add,     NN__GPU__ZZPRIVATE_EACH(width), 256u, (o, sum, s, w, made, x, add, width, count, group, scale, over)
+#define nn__attention__zzabi_launch_states_rows__RUNS     NN__GPU__ZZPRIVATE_WIDE,     nn__attention__zzabi_body_states_rows,    NN__GPU__ZZPRIVATE_UP_TO(n * queries, NN__KERNELS__BLOCKS_MAX), 256u, (o, q, states, current, queries, width, rows, with_current, eps, n, states_stride, current_stride, o_stride, over)
+#define nn__convolution__zzabi_launch_steps__RUNS         NN__GPU__ZZPRIVATE_WIDE,     nn__convolution__zzabi_body_steps,        NN__GPU__ZZPRIVATE_EACH(width), 256u, (o, sum, s, w, made, x, add, width, count, group, scale, n, made_stride, over)
+#define nn__attention__zzabi_launch_window_scores__RUNS   NN__GPU__ZZPRIVATE_WIDE,     nn__attention__zzabi_body_window_scores,  NN__GPU__ZZPRIVATE_EACH(rows * q_heads * ((len0 + (rows - 1ull) * step + NN__ATTENTION__GROUP_SPAN - 1u) / NN__ATTENTION__GROUP_SPAN)), 256u, (p, p_row, q, k, k_row, bq, table, last, len0, step, q_heads, kv_heads, head_dim, rank, rows)
+#define nn__attention__zzabi_launch_window_softmax__RUNS  NN__GPU__ZZPRIVATE_WIDE,     nn__attention__zzabi_body_window_softmax, NN__GPU__ZZPRIVATE_UP_TO(rows * heads, NN__KERNELS__BLOCKS_MAX), 256u, (p, p_row, sink, sink_row, len0, step, heads, rows)
+#define nn__attention__zzabi_launch_window_mix__RUNS      NN__GPU__ZZPRIVATE_WIDE,     nn__attention__zzabi_body_window_mix,     NN__GPU__ZZPRIVATE_UP_TO(rows * q_heads, NN__KERNELS__BLOCKS_MAX), 256u, (o, o_row, p, p_row, v, v_row, len0, step, q_heads, kv_heads, head_dim, rows, over)
+#define nn__vector__zzabi_launch_gate_tanh_rank__RUNS     NN__GPU__ZZPRIVATE_BY_ROW,   nn__vector__zzprivate_gate_tanh_rank_by_three, 1u, 1u, (o, rotated, products, x, y, rank, sign, codes, codes_room, scales, scales_room, d, n, width, over)
 #define nn__vector__zzabi_launch_widen__RUNS              NN__GPU__ZZPRIVATE_WIDE,     nn__vector__zzabi_body_widen,             NN__GPU__ZZPRIVATE_EACH(n), 256u, (out, x, n)
 #define nn__vector__zzabi_launch_copy_rows__RUNS          NN__GPU__ZZPRIVATE_WIDE,     nn__vector__zzabi_body_copy_rows,         NN__GPU__ZZPRIVATE_EACH(rows * width), 256u, (out, out_row, in, in_row, width, rows)
 #define nn__expert__zzabi_launch_multiply_fp16_rows__RUNS NN__GPU__ZZPRIVATE_WIDE,     nn__expert__zzabi_body_multiply_fp16_rows, NN__GPU__ZZPRIVATE_UP_TO(n, NN__KERNELS__BLOCKS_MAX), 256u, (out, W, x, rows, cols, n, over)
@@ -458,6 +475,35 @@ static void nn__rmsnorm__zzprivate_rotate_by_two(uint16_t* rot, uint16_t* o, con
     const nn__doors* doors = nn__attention__zzprivate_own();
     doors->rmsnorm(o, x, w, n, eps, over);
     doors->hadamard_rotate(rot, o, sign, n, over);
+}
+
+/* ── ⭐ TWO NORMS AND THEIR PAIR'S ROTATION: THE FAMILY'S THREE DOORS, ONE AFTER ANOTHER ──────────────────────────────────
+ * nn's definition of `rmsnorm_pair_rotate`: `o = rmsnorm(x, w)` and `o + n = rmsnorm(y, w)`, each row its own scale, then
+ * `rot = hadamard_rotate(o, sign)` over the pair's `2n` — what a gate reading two vectors, each normed, hands one
+ * TurboQuant gemv. A family with no kernel of its own runs, through this, those three launches and their bits; one that
+ * has answers it in one launch, the same bits. */
+static void nn__rmsnorm__zzprivate_pair_rotate_by_three(uint16_t* rot, uint16_t* o, const uint16_t* x, const uint16_t* y, const uint16_t* w,
+                                                        const uint16_t* sign, uint64_t n, float eps, unsigned int* over) {
+    const nn__doors* doors = nn__attention__zzprivate_own();
+    doors->rmsnorm(o, x, w, n, eps, over);
+    doors->rmsnorm(o + n, y, w, n, eps, over);
+    doors->hadamard_rotate(rot, o, sign, 2u * n, over);
+}
+
+/* ── ⭐ A GATE'S END: THE RANK ROTATED, TWO PRODUCTS OVER IT, THE GATE — THE FAMILY'S THREE DOORS, ONE AFTER ANOTHER ──────
+ * nn's definition of `vector_gate_tanh_rank`: `rotated = hadamard_blocks(rank, sign)` in one block of `width`; `products`
+ * = the TurboQuant gemv of `codes`' `2n` rows — forget's `n`, then gain's — over `rotated` (over `rank` itself at 16
+ * bits, which is not rotated); then `o = gate_tanh(x, y, forget, gain)`. A message gate's end after its controller's
+ * product down to the rank. A family with no kernel of its own runs, through this, those three launches and their bits,
+ * `rotated` and `products` its scratch; one that has answers it in one launch, the same bits, and may leave them unwritten. */
+static void nn__vector__zzprivate_gate_tanh_rank_by_three(uint16_t* o, uint16_t* rotated, uint16_t* products, const uint16_t* x, const uint16_t* y,
+                                                          const uint16_t* rank, const uint16_t* sign, const uint8_t* codes, uint64_t codes_room,
+                                                          const uint8_t* scales, uint64_t scales_room, uint64_t d, uint64_t n, uint64_t width,
+                                                          unsigned int* over) {
+    const nn__doors* doors = nn__attention__zzprivate_own();
+    doors->hadamard_blocks(rotated, rank, sign, width, width, 0u, over);
+    doors->turboquant_gemv(products, codes, codes_room, scales, scales_room, d == 16u ? rank : rotated, d, 2u * n, width, over);
+    doors->vector_gate_tanh(o, x, y, products, products + n, n, over);
 }
 
 extern "C" {

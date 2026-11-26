@@ -1,6 +1,6 @@
 # SiLVANN
 
-> **Public beta, v1.6.0.** The normal path has been tested on a reasonable sample of cards, but a bug-free experience is
+> **Public beta, v1.7.1.** The normal path has been tested on a reasonable sample of cards, but a bug-free experience is
 > not expected yet. It is shared for enthusiasts with patience, who can follow a guide and do some troubleshooting. The
 > cards it has run on — NVIDIA's from a GTX 1080 Ti to a B200, AMD's MI50, MI355X and RDNA4 Radeons, and Windows natively
 > on one PC — are in [`docs/platforms.md`](docs/platforms.md); less common setups may not behave as expected, and a
@@ -51,12 +51,13 @@ measured on, how fast it reads a prompt and answers after one:
 |---|---|---|---|---|---|---|---|---|
 | [a phone](docs/android.md) | 5.4 GB | 8 Arm cores | — | [Qwen 3.5 2B](docs/models.md#qwen-35-2b) `D4` | Android (Termux), experimental | 15.2-15.9 positions/s | 8.02-9.60 tokens/s after 163 | — |
 | [none](docs/results.md#no-graphics-card) | 16 GB | 4 cores | — | [Qwen 3.5 4B](docs/models.md#qwen-35-4b) `D4` | the CPU alone | 18.9 positions/s | 7.95 tokens/s after 8k | 8,320 |
-| [8 GB](docs/results.md#an-8-gb-card) | 32 GB | 4 cores | — | [Qwen 3.6 35B-A3B](docs/models.md#qwen-36-35b-a3b) `D8E4` | the experts in RAM, a tier on the card | 94.9 positions/s | 14.34 tokens/s after 100k | 262,144 |
+| [8 GB](docs/results.md#an-8-gb-card) | 16 GB | 4 cores | — | [Inkling 2 Mini](docs/models.md#inkling-2-mini) `D8E4` | the experts in RAM, a tier on the card | 48.8 positions/s | 13.85 tokens/s after 100k | 178,176 |
+| [16 GB](docs/results.md#a-16-gb-card) | 16 GB | 4 cores | — | [Inkling 2 Mini](docs/models.md#inkling-2-mini) `D8E4` | on the card | 128.3 positions/s | 28.96 tokens/s after 57k | 57,344 |
+| [16 GB](docs/results.md#a-16-gb-card) | 16 GB | 4 cores | — | [Inkling 2 Mini](docs/models.md#inkling-2-mini) `D8E4` | the experts in RAM, a tier lent the cache | 59.3 positions/s | 19.04 tokens/s after 100k | 424,960 |
 | [16 GB](docs/results.md#a-16-gb-card) | 32 GB | 4 cores | NVMe, 5.7 GB/s | [Qwen 3.8 Flash-Next](docs/models.md#qwen-38-flash-next) `D8E4` | the experts from the disk | 29.2-29.4 positions/s | 10.61-10.64 tokens/s after 2k | — |
 | [16 GB](docs/results.md#a-16-gb-card) | 14 GB | 4 cores | NVMe, 5.7 GB/s | [GLM 5.3 Flash](docs/models.md#glm-53-flash) `D8E4` | the experts from the disk | 9.1 positions/s | 2.21 tokens/s after 100k | 110,000 |
-| [16 GB](docs/results.md#a-16-gb-card) | 16 GB | 4 cores | — | [Qwen 3.8 27B](docs/models.md#qwen-38-27b) `D4` | on the card | 221.3 positions/s | 14.32 tokens/s after 35k | 35,840 |
-| [2× 16 GB](docs/results.md#two-cards-or-more) | 125 GB | 28 cores | — | [Qwen 3.6 35B-A3B](docs/models.md#qwen-36-35b-a3b) `D8E4` | every layer over both cards, a tier on each | 85.9 positions/s | 32.22 tokens/s after 100k | 262,144 |
 | [32 GB](docs/results.md#a-24-or-32-gb-card) | 160 GB | 28 cores | — | [GLM 5.3 Flash](docs/models.md#glm-53-flash) `D8E4` | every expert in RAM, a tier on the card | 72.1 positions/s | 9.86 tokens/s after 100k | 1,048,576 |
+| [16 GB](docs/results.md#a-16-gb-card) | 62 GB | 4 cores | NVMe, 5.7 GB/s | [DeepSeek-V4.1-Flash](docs/models.md#deepseek-v41-flash) `D8E4` | the experts from the disk | 8.2 positions/s | 2.53-2.56 tokens/s after 1k | — |
 | [32 GB](docs/results.md#a-24-or-32-gb-card) | 1.5 TB (PMem 100) | 48 cores | — | [DeepSeek-V4.1-Flash](docs/models.md#deepseek-v41-flash) `D8E4` | every expert in RAM, a CPU worker a socket | 27.6-29.5 positions/s | 10.9-11.6 tokens/s after 2k | 2,320 as run |
 <!-- /rates -->
 
@@ -70,7 +71,7 @@ every machine one model was measured on, its packs and its notes: [`docs/models.
 names no setup chooses its own when the server starts, by trying it on the card: where its experts go, how much of the
 card holds the ones used most, the context the card has room for ([`docs/config.md`](docs/config.md)).
 
-**New in v1.6.0**: [`docs/release_logs/v1.md`](docs/release_logs/v1.md); every 0.x release before it:
+**New in v1.7.1**: [`docs/release_logs/v1.md`](docs/release_logs/v1.md); every 0.x release before it:
 [`docs/release_logs/v0.md`](docs/release_logs/v0.md).
 
 ## Platforms
@@ -78,7 +79,7 @@ card holds the ones used most, the context the card has room for ([`docs/config.
 - **Runs on:** Linux with an AMD card (ROCm 7 or later: the MI50, the MI100 on and the Radeons of RDNA4; ROCm 6 for
   the MI50 too), an NVIDIA card (CUDA 12)
   or OpenCL, or the CPU alone (AVX2 or
-  AVX-512); Windows with an NVIDIA card; and, experimentally, an Android phone's Arm cores
+  AVX-512, or SSE4.2, much slower, without AVX2); Windows with an NVIDIA card; and, experimentally, an Android phone's Arm cores
   ([`docs/android.md`](docs/android.md)). Each machine it was measured on is in the table above.
 - **Not yet tested:** AMD's MI100, MI200s and MI300s and the Radeons before RDNA3 (RDNA3 has run through OpenCL 2.0);
   NVIDIA's B300, and its cards before Pascal; Intel's GPUs and other integrated GPUs; Windows' prebuilt libraries,

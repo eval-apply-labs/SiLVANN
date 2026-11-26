@@ -208,6 +208,20 @@ for P in $(echo "${SILVANN_SILICON_FAMILIES:-$ALL}" | tr ',' ' '); do
             > "$OUT/x86_avx2.log" 2>&1 \
             || { echo "⛔ x86_avx2:"; reason "$OUT/x86_avx2.log"; }
         built x86_avx2 "$OUT/libsilvann_x86_avx2.so" ;;
+    x86_base)
+        # ⛳ THE CPU WITHOUT AVX2: x86_avx2's primitives and nn's generic bodies, for x86-64-v2 (SSE4.2, POPCNT) — what every
+        #   x86-64 processor since Nehalem runs; it counts no device on one older (▶ x86_base/unit.cuh)
+        if [ "$(uname -m)" != x86_64 ]; then
+            WHY="not built: an x86-64 processor's family, and this one is $(uname -m)"
+            echo "$WHY" > "$OUT/libsilvann_$P.skipped"; rm -f "$OUT/libsilvann_$P.so"; echo "⚠ $P skipped — $WHY"; continue
+        fi
+        tu x86_base > "$OUT/x86_base.cpp"
+        rm -f "$OUT/libsilvann_x86_base.so"
+        g++ $NNDIAL -O3 -march=x86-64-v2 -std=c++17 -fPIC -shared -fvisibility=hidden -I src \
+            "$OUT/x86_base.cpp" -lpthread -o "$OUT/libsilvann_x86_base.so" \
+            > "$OUT/x86_base.log" 2>&1 \
+            || { echo "⛔ x86_base:"; reason "$OUT/x86_base.log"; }
+        built x86_base "$OUT/libsilvann_x86_base.so" ;;
     arm_neon|arm_gb10)
         # ⛳ THE ARM PROCESSORS, ONE SOURCE (`arm_base`): g++ for the instruction set each family's name promises —
         #   arm_neon Armv8.2 with half precision and the dot product, arm_gb10 the DGX Spark's Armv9.2 with SVE2, i8mm and

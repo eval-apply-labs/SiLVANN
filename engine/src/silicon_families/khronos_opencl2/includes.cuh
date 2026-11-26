@@ -17,7 +17,7 @@
  * ⭐ AND IT TAKES ANY GPU NO FAMILY ABOVE IT TAKES. ⚖ 2026-10-18, the architect: *"it is exactly where igpus are going
  *   to be the most popular so it is worth it to have opencl2 at least, so you can also support amd"*, and of which
  *   cards: *"any GPU, last chance"*. Every card but NVIDIA's (`sm_*`: NVIDIA's own family takes them, and NVIDIA's
- *   OpenCL has no fine-grained SVM) and the processors' (`x86_avx2`, `host`) is this family's, and runs here when its OpenCL is
+ *   OpenCL has no fine-grained SVM) and the processors' (`x86_avx2`, `x86_base`, `host`, Arm's) is this family's, and runs here when its OpenCL is
  *   2.0 with fine-grained SVM (`device_count`) — an AMD or Intel GPU on Windows, named by OpenCL's loader. A card off
  *   the list is a developer preview. One without fine-grained SVM is reported, not run: the 1.2 families are of the same
  *   vendor, so they are not asked once this one is open — so a card whose OpenCL is 1.2 (NN-96's best guess,
@@ -33,7 +33,8 @@ static inline bool khronos_opencl2__includes(const char* card) {
 #define KHRONOS_OPENCL2__ZZPRIVATE_IS(T)  if (silicon_families__card_is(card, #T)) return true;
     KHRONOS_OPENCL2__TARGETS(KHRONOS_OPENCL2__ZZPRIVATE_IS)
 #undef KHRONOS_OPENCL2__ZZPRIVATE_IS
-    if (card == 0 || card[0] == 0 || silicon_families__card_is(card, "x86_avx2") || silicon_families__card_is(card, "host")
+    if (card == 0 || card[0] == 0 || silicon_families__card_is(card, "x86_avx2") || silicon_families__card_is(card, "x86_base")
+        || silicon_families__card_is(card, "host")
         || silicon_families__card_is(card, "arm_neon") || silicon_families__card_is(card, "arm_gb10"))
         return false;                                   /* the processors: their own families' */
     return !silicon_families__opencl1_only(card);

@@ -280,6 +280,21 @@
     /* ⭐ AN N-GRAM MEMORY'S ROWS IN THE PROGRAM — ⚖ 2026-11-01 *"yes then it makes sense to turn it into an nn verb"*:   */ \
     /* a position's n-grams hashed and their rows read from the table's file, as Flash-Next's and DeepSeek V4's hosts   */ \
     /* did between tokens. ▶ `contracts/objects/ngram.cuh`.                                                               */ \
-    X(PKG, 86, "nn__ngram__rows",     nn__ngram__zzabi_adapter_rows,               NN__NGRAM__ROWS)
+    X(PKG, 86, "nn__ngram__rows",     nn__ngram__zzabi_adapter_rows,               NN__NGRAM__ROWS) \
+    /* ⭐ INKLING 2's WORDS (NN-207): `tanh`; rows held to a length; and an attention's two halves — its scores as they are */ \
+    /* before a softmax, and the mix — so a model's own addition goes between them: floats added to the scores, then the */ \
+    /* softmax it takes (`nn__attention__softmax_sink`). ▶ `cpu/opcodes/vector__abi.cuh`, `attention__abi.cuh`.           */ \
+    X(PKG, 87, "nn__vector__tanh",    nn__vector__zzabi_adapter_tanh,              NN__VECTOR__TANH) \
+    X(PKG, 88, "nn__vector__l2clip",  nn__vector__zzabi_adapter_l2clip,            NN__VECTOR__L2CLIP) \
+    X(PKG, 89, "nn__vector__add_fp32", nn__vector__zzabi_adapter_add_fp32,         NN__VECTOR__ADD_FP32) \
+    X(PKG, 90, "nn__attention__score", nn__attention__zzabi_adapter_score,       NN__ATTENTION__SCORE) \
+    X(PKG, 91, "nn__attention__mix",  nn__attention__zzabi_adapter_mix,            NN__ATTENTION__MIX) \
+    /* and its experts' activation, soft-capped — the door nn's routed experts take where a model's has caps.           */ \
+    X(PKG, 92, "nn__swiglu__softcapped", nn__swiglu__zzabi_adapter_softcapped,     NN__SWIGLU__SOFTCAPPED) \
+    /* Three of a model's sites a launch each: a short causal convolution's step, a gate between two vectors, and a few  */ \
+    /* queries' mix over a few states as wide as the model.                                                             */ \
+    X(PKG, 93, "nn__convolution__step", nn__vector__zzabi_adapter_convolution_step, NN__CONVOLUTION__STEP) \
+    X(PKG, 94, "nn__vector__gate_tanh", nn__vector__zzabi_adapter_gate_tanh,       NN__VECTOR__GATE_TANH) \
+    X(PKG, 95, "nn__attention__states", nn__attention__zzabi_adapter_states,       NN__ATTENTION__STATES)
 
 #endif /* SILVANN__PACKAGES_NN_CONTRACTS_MACROS_LANGUAGE_CONTRACT__VERBS_CUH */

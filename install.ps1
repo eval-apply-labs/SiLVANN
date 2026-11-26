@@ -1,7 +1,7 @@
 <#
 SiLVANN's installer on Windows: the release, its Python environment and its libraries, in a folder of its own under the
 current one, and a `silvann` command - install.sh's counterpart. The libraries are the release's own, prebuilt on
-GitHub for every card the families list (silvann_windows_x64.zip, attached to the release): taken when they were built
+GitHub for every card the families list (silvann_windows_libraries_update_x64.zip, attached to the release): taken when they were built
 from this folder's engine and scripts\build.py, else built here as scripts\build.ps1 builds them.
 
   powershell -ExecutionPolicy Bypass -File install.ps1
@@ -118,7 +118,7 @@ function Find-Cards {
     # OpenCL.dll's import library made from them), and at run time they take only the cards no other family does - an
     # NVIDIA card older than CUDA's (OpenCL 1.2, nvidia_opencl1), an Intel GPU (intel_opencl2 from Gen9, intel_opencl1_igpu
     # before), an AMD GPU (khronos_opencl2) - so a PC whose card CUDA runs is unchanged
-    $script:Families = "x86_avx2 khronos_opencl2 intel_opencl2 nvidia_opencl1 intel_opencl1_igpu"
+    $script:Families = "x86_avx2 x86_base khronos_opencl2 intel_opencl2 nvidia_opencl1 intel_opencl1_igpu"
     $openclCard = $false
     $cpu = (Get-CimInstance Win32_Processor | Select-Object -First 1).Name
     Note "the CPU: $cpu"
@@ -252,17 +252,21 @@ function Get-Libraries {
     # those, its `v` tag (v0.0.0), unsigned
     $tmp = Join-Path ([IO.Path]::GetTempPath()) ("silvann-lib-" + [Guid]::NewGuid().ToString("N"))
     New-Item -ItemType Directory -Force -Path $tmp | Out-Null
-    $zip = Join-Path $tmp "silvann_windows_x64.zip"
+    $zip = Join-Path $tmp "libraries.zip"
     $ProgressPreference = "SilentlyContinue"   # Windows PowerShell's progress bar slows a download many times over
     try {
         [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
         $got = $null
         foreach ($tag in @(("rel" + $version.Substring(1)), ("n" + $version.Substring(1)), $version)) {
-            try {
-                Invoke-WebRequest -UseBasicParsing -Uri "$Releases/download/$tag/silvann_windows_x64.zip" -OutFile $zip
-                $got = $tag
-                break
-            } catch { $last = $_ }
+            # the zip's name, and the one it had up to 1.6.0
+            foreach ($name in @("silvann_windows_libraries_update_x64.zip", "silvann_windows_x64.zip")) {
+                try {
+                    Invoke-WebRequest -UseBasicParsing -Uri "$Releases/download/$tag/$name" -OutFile $zip
+                    $got = $tag
+                    break
+                } catch { $last = $_ }
+            }
+            if ($got) { break }
         }
         if (-not $got) { throw $last }
         Note "   the release's $got"

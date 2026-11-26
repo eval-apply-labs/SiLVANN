@@ -249,10 +249,12 @@ class DeepSeek4(Generates):
             raise Refused("card_experts (a fixed share on the cards) or card_experts_gb (a tier a card), not both")
         if self.CARD_GB and self.TOPK > 12:
             raise Refused("a tier takes at most 12 picks a position, not %d" % self.TOPK)
-        # a tier copies an expert from its place in RAM, which a cache read from the disk gives up as it fills (GLM's rule)
-        if experts_from == "disk" and (self.CARD_GB or self.NK):
-            raise Refused("a card's share of the experts is copied from the experts in RAM, and from the disk they are a "
-                          "cache — experts_from 'ram' or 'mapped', or no card_experts%s" % ("_gb" if self.CARD_GB else ""))
+        # ⭐ FROM THE DISK, THE TIER PROMOTED FROM THE CACHE (NN-217, as GLM's and Qwen's, NN-164): the slot a socket's cache
+        #   holds an expert in when the promotion is made — a part each over two sockets, stitched as from RAM; the card's
+        #   fixed share (`card_experts`) is copied from RAM at the load, and a cache holds none of it then
+        if experts_from == "disk" and self.NK:
+            raise Refused("a card's fixed share of the experts is copied from the experts in RAM, and from the disk they are a "
+                          "cache — experts_from 'ram' or 'mapped', or card_experts_gb (a tier promoted from the cache)")
         # ⭐ AN EXCLUSIVE TIER (NN-106 ④), as GLM's: each expert of a layer in RAM on a card OR in the CPU's memory, never
         #   both, so the cards' share is RAM given back — node03's case, 253 GiB of experts beside 251 GB of RAM. Each card
         #   starts with its share of every layer copied into RAM (and in a group the slice, `card_shared` of a card's slots
@@ -260,7 +262,12 @@ class DeepSeek4(Generates):
         #   feeds no tier, as before. Over a prompt's chunk each card computes the picks it holds (▶ `_rows_procedures`),
         #   and an expert the chunk picks `card_line` times or more is worth its copy — ASSUMED from GLM's line on node03's
         #   MI50s (8), as this model calibrates none. `card_duplex` and `card_duplex_line` as GLM's (▶ `expert_tier.duplex`)
-        self.CARD_EXCLUSIVE, self.CARD_FREE = bool(card_exclusive), int(card_free)
+        # ⭐ `card_exclusive` WITH THE EXPERTS FROM THE DISK IS THE TIER ONE WAY (NN-218, nn's EXCLUSIVE 3): disk → RAM → card,
+        #   nothing copied off the card — an expert the card holds the cache's next victim, one it lets go read back from the
+        #   disk at once. With the experts in RAM it is the exclusive tier as before (CARD_EXCLUSIVE: each expert on the card
+        #   OR in RAM, a promotion swapping one back). `experts_from` "disk" named: "auto" keeps it the RAM's.
+        self.ONE_WAY = bool(card_exclusive) and experts_from == "disk"
+        self.CARD_EXCLUSIVE, self.CARD_FREE = bool(card_exclusive) and not self.ONE_WAY, int(card_free)
         self.CARD_DUPLEX_LINE, self.CARD_DUPLEX, self.CARD_LINE = int(card_duplex_line), card_duplex, int(card_line)
         if self.CARD_EXCLUSIVE and not self.CARD_GB:
             raise Refused("an exclusive tier needs a card tier — card_experts_gb")
@@ -1426,9 +1433,12 @@ class DeepSeek4(Generates):
         # over two sockets, every expert in two parts of their own widths, each its socket's plan (NN-167, nn's PART_SHAPES)
         parts, plan0 = (self.SOCKETS, self.SPLANS[0]) if self.SOCKETS > 1 else (1, p)
         shapes = [(w, self.SPLANS[s]) for s, (_, w) in enumerate(self.SPARTS)] if self.SOCKETS > 1 else None
+        # from the disk the tier is fed from each socket's cache (nn's EXCLUSIVE 2: part s in worker CPU + s's), not sources
+        disk = self.EXPERTS_FROM == "disk"
         expert_tier.tier(self.m, self.sfx("tier_card", k), self.T_CEXP, self.EXPERTS, self.TOPK, self.H, self.MINTER, p, self.LAYERS,
-                         self._FED[k], parts, plan0, self.GATE_ROW, self.DOWN_ROW, self.CARD_LANDING or 1, exclusive,
-                         self.CARD_LANDING_LINE, ranks=self.P, shared=shared, part_shapes=shapes)
+                         None if disk else self._FED[k], parts, plan0, self.GATE_ROW, self.DOWN_ROW, self.CARD_LANDING or 1,
+                         exclusive, self.CARD_LANDING_LINE, ranks=self.P, shared=shared, part_shapes=shapes,
+                         slots=dict(worker=self.CPU, type=0, one_way=self.ONE_WAY) if disk else None)
 
     def _from_speeds(self):
         """`card_shared` "auto" in a group and `card_landing` "auto": a CPU pick against a card expert and an expert's

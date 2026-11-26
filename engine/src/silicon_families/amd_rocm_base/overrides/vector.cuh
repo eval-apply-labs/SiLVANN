@@ -2,7 +2,7 @@
 #define SILVANN__SILICON_FAMILIES_AMD_ROCM_BASE_OVERRIDES_VECTOR_CUH
 /* ══ vector's DOOR, RUN FASTER — amd_rocm_base ═════════════════════════════════════════════════════════════════════
  * nn's vector door (`nn/cpu/opcodes/vector__abi.cuh`), where this family covers it: the top k, a router's and a sampler's,
- * a scored router's, the sum of a tensor-parallel group's parts, and a sampler's repetition penalty. */
+ * a scored router's and a biased one's, the sum of a tensor-parallel group's parts, and a sampler's repetition penalty. */
 
 /* What this file needs, named where a reader — and an editor — can follow it. */
 #include <stdint.h>
@@ -392,6 +392,95 @@ static void amd_rocm_base__override_vector_top_k_scored(uint64_t* values, uint64
     const size_t sizes[] = { sizeof values, sizeof stride, sizeof weights, sizeof x, sizeof bias, sizeof n, sizeof k, sizeof scale,
                              sizeof score };
     nn__silicon__launch(kernel, "amd_rocm_base__zzprivate_top_k_scored", 1u, AMD_ROCM_BASE__ZZPRIVATE_WAVE, args, sizes, 9u);
+}
+/* ⭐ THE BIASED SIGMOID ROUTER — nn's `top_k_biased` (GLM's, Inkling 2's): the `k` experts whose σ(logit) + bias is largest,
+ *   weighed by σ(logit) alone over their sum (+1e-20) and scaled. That is `top_k_scored` with the sigmoid its score: the
+ *   same expressions, the same rule for a tie (the lowest index) and a NaN (never taken), no fault word in either — so the
+ *   scored wave above answers it, nn's bits. nn's body is `k` rounds of a block's two folds: `MEASURED` (rocprof on Inkling 2
+ *   Mini, node03's MI50, 8 of 128) 30.4 µs a call; the door bench 7.9 µs back to back for nn's body's 28.2, its picks and
+ *   weights nn's host body's to the bit. */
+static void amd_rocm_base__override_vector_top_k_biased(uint64_t* values, uint64_t stride, uint16_t* weights, const uint16_t* x,
+                                                           const uint16_t* bias, uint64_t n, uint64_t k, float scale) {
+    if (n == 0u || n > AMD_ROCM_BASE__ZZPRIVATE_TOP_K_MOST || k == 0u || k > NN__VECTOR__ROUTER_K_MAX || stride == 0u) {
+        nn__vector__zzabi_launch_top_k_biased(values, stride, weights, x, bias, n, k, scale);
+        return;
+    }
+    amd_rocm_base__override_vector_top_k_scored(values, stride, weights, x, bias, n, k, scale, NN__VECTOR__SCORE_SIGMOID);
+}
+
+/* ⭐ A MESSAGE GATE'S END IN ONE LAUNCH — nn's `vector_gate_tanh_rank` at 8 bits over a rank of 64: the rank rotated as
+ *   `hadamard_blocks` rotates a block of 64 (`hadamard_at`, the block's first wave, into the block's own memory), forget's
+ *   and gain's rows over it as the narrow kernel sums a row (`narrow_sum8`, sixteen lanes a row), each rounded to a half as
+ *   that product writes it, and the gate as nn's `gate_tanh` body takes the two. So `o` is, to the bit, the family's three
+ *   doors' — one launch for three, the rank and the products never leaving the block; `rotated` and `products` are not
+ *   written. The rotated rank and the 8-bit levels are staged and waited for once, before any lane takes a row, every
+ *   thread of the block reaching it. Forget's `n` rows then gain's, one after another, their codes on 8 bytes; anything
+ *   else is nn's three doors. */
+#define AMD_ROCM_BASE__ZZPRIVATE_GATE_RANK 64u
+static __device__ inline void amd_rocm_base__zzprivate_gate_rank_rows8(uint16_t* o, const uint16_t* x, const uint16_t* y, const uint16_t* rank,
+                                                                          const uint16_t* sign, const uint8_t* codes, const uint8_t* luts,
+                                                                          uint64_t n, unsigned int* over) {
+    const uint32_t L = 16u, W = AMD_ROCM_BASE__ZZPRIVATE_WAVE;
+    const uint64_t cols = AMD_ROCM_BASE__ZZPRIVATE_GATE_RANK;
+    __shared__ uint16_t rotated[AMD_ROCM_BASE__ZZPRIVATE_GATE_RANK];
+    __shared__ uint4 xs[AMD_ROCM_BASE__ZZPRIVATE_GATE_RANK / 8u];
+    __shared__ uint16_t table8[256];
+    for (uint32_t e = (uint32_t)nn__silicon__lane(); e < 256u; e += AMD_ROCM_BASE__ZZPRIVATE_ROWS * W)
+        table8[e] = nn__turboquant__zzabi_levels(8u)[e];
+    const uint32_t lane = (uint32_t)(nn__silicon__lane() % W);
+    const uint32_t wave = (uint32_t)__builtin_amdgcn_readfirstlane((int)(nn__silicon__lane() / W));
+    if (wave == 0u) amd_rocm_base__zzpackage_hadamard_at<1u>(rotated, rank, 0u, sign, 0u, over);
+    __syncthreads();
+    /* the rotated rank as the narrow kernel holds an `x`, each eight as (x0,x2) (x4,x6) (x1,x3) (x5,x7) — moves, not sums */
+    const uint32_t t = (uint32_t)nn__silicon__lane();
+    if (t < cols) {
+        const uint32_t p = t % 8u;
+        ((uint16_t*)(void*)xs)[t - p + ((p & 1u) != 0u ? 4u + p / 2u : p / 2u)] = rotated[t];
+    }
+    __syncthreads();
+    const uint32_t per = W / L, seat = lane / L, b = lane % L;   /* a wave's rows, this lane's */
+    const bool real = b < cols / 32u;
+    for (uint64_t r0 = (nn__silicon__block() * AMD_ROCM_BASE__ZZPRIVATE_ROWS + wave) * per; r0 < n;
+         r0 += nn__silicon__blocks() * AMD_ROCM_BASE__ZZPRIVATE_ROWS * per) {
+        const uint64_t r = r0 + seat, mr = r < n ? r : n - 1u;
+        const float forget_scale = nn__silicon__half_to_float((uint16_t)((uint32_t)luts[mr * 2ull] | ((uint32_t)luts[mr * 2ull + 1ull] << 8)));
+        const float gain_scale = nn__silicon__half_to_float((uint16_t)((uint32_t)luts[(n + mr) * 2ull]
+                                                                       | ((uint32_t)luts[(n + mr) * 2ull + 1ull] << 8)));
+        const float forget_sum = amd_rocm_base__zzpackage_narrow_sum8<16u>(codes, xs, table8, mr, cols, b, real);
+        const float gain_sum = amd_rocm_base__zzpackage_narrow_sum8<16u>(codes, xs, table8, n + mr, cols, b, real);
+        if (b == 0u && r < n) {
+            const uint16_t forget = nn__kernels__zzabi_to_half(forget_sum * forget_scale, over);
+            const uint16_t gain = nn__kernels__zzabi_to_half(gain_sum * gain_scale, over);
+            const float f = 1.0f - 2.0f / (nn__silicon__expf(2.0f * nn__silicon__half_to_float(forget)) + 1.0f);
+            const float g = 1.0f - 2.0f / (nn__silicon__expf(2.0f * nn__silicon__half_to_float(gain)) + 1.0f);
+            o[r] = nn__kernels__zzabi_to_half((1.0f - f) * nn__silicon__half_to_float(x[r]) + g * nn__silicon__half_to_float(y[r]), over);
+        }
+    }
+}
+static __global__ AMD_ROCM_BASE__ZZPRIVATE_BOUNDS void amd_rocm_base__zzprivate_gate_rank(uint16_t* o, const uint16_t* x, const uint16_t* y,
+                                                                                                const uint16_t* rank, const uint16_t* sign,
+                                                                                                const uint8_t* codes, const uint8_t* luts,
+                                                                                                uint64_t n, unsigned int* over) {
+    amd_rocm_base__zzprivate_gate_rank_rows8(o, x, y, rank, sign, codes, luts, n, over);
+}
+static void amd_rocm_base__override_vector_gate_tanh_rank(uint16_t* o, uint16_t* rotated, uint16_t* products, const uint16_t* x, const uint16_t* y,
+                                                             const uint16_t* rank, const uint16_t* sign, const uint8_t* codes, uint64_t codes_room,
+                                                             const uint8_t* scales, uint64_t scales_room, uint64_t d, uint64_t n, uint64_t width,
+                                                             unsigned int* over) {
+    const uint64_t rows = 2u * n;
+    if (d != 8u || width != AMD_ROCM_BASE__ZZPRIVATE_GATE_RANK || n == 0u || ((uint64_t)(uintptr_t)codes) % 8u != 0u
+     || codes_room / width < rows || scales_room / 2u < rows || (o < x + n && x < o + n) || (o < y + n && y < o + n)) {
+        nn__vector__zzabi_launch_gate_tanh_rank(o, rotated, products, x, y, rank, sign, codes, codes_room, scales, scales_room, d, n, width, over);
+        return;
+    }
+    const uint32_t threads = AMD_ROCM_BASE__ZZPRIVATE_ROWS * AMD_ROCM_BASE__ZZPRIVATE_WAVE;
+    const uint64_t per = AMD_ROCM_BASE__ZZPRIVATE_WAVE / 16u;
+    const uint32_t most = amd_rocm_base__zzpackage_resident((const void*)amd_rocm_base__zzprivate_gate_rank, threads, 0u);
+    const uint64_t want = (n + per * AMD_ROCM_BASE__ZZPRIVATE_ROWS - 1u) / (per * AMD_ROCM_BASE__ZZPRIVATE_ROWS);
+    const uint32_t blocks = want < most ? (uint32_t)want : most;
+    void* args[] = { &o, &x, &y, &rank, &sign, &codes, &scales, &n, &over };
+    const size_t sizes[] = { sizeof o, sizeof x, sizeof y, sizeof rank, sizeof sign, sizeof codes, sizeof scales, sizeof n, sizeof over };
+    nn__silicon__launch((const void*)amd_rocm_base__zzprivate_gate_rank, "amd_rocm_base__zzprivate_gate_rank", blocks, threads, args, sizes, 9u);
 }
 
 static void amd_rocm_base__override_vector_sum(uint16_t* out, nn__vector__parts parts, uint64_t n, unsigned int* over) {

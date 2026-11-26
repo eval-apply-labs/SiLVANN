@@ -50,6 +50,7 @@ static inline void nvidia_cuda12__override_doors(nn__doors* doors) {
     doors->unfold_rows          = nvidia_cuda12__override_unfold_rows;
     doors->vector_top_k         = nvidia_cuda12__override_vector_top_k;
     doors->vector_top_k_scored  = nvidia_cuda12__override_vector_top_k_scored;
+    doors->vector_top_k_biased  = nvidia_cuda12__override_vector_top_k_biased;
     doors->vector_sum           = nvidia_cuda12__override_vector_sum;
     doors->rmsnorm_fp32         = nvidia_cuda12__override_rmsnorm_fp32;
     doors->kda_steps_decayed             = nvidia_cuda12__override_kda_steps_decayed;
@@ -69,11 +70,12 @@ static inline void nvidia_cuda12__override_doors(nn__doors* doors) {
     doors->attention_absorb_rows         = nvidia_cuda12__override_attention_absorb_rows;
     doors->attention_expand              = nvidia_cuda12__override_attention_expand;
     doors->attention_expand_rows         = nvidia_cuda12__override_attention_expand_rows;
+    doors->attention_states              = nvidia_cuda12__override_attention_states;
     doors->turboquant_gemv_groups_n  = nvidia_cuda12__override_turboquant_gemv_groups_n;
     doors->turboquant_gemv_int8      = nvidia_cuda12__override_turboquant_gemv_int8;
     doors->rmsnorm                   = nvidia_cuda12__override_rmsnorm;
     doors->rmsnorm_rows              = nvidia_cuda12__override_rmsnorm_rows;
-    doors->rmsnorm_rotate            = nvidia_cuda12__override_rmsnorm_rotate;
+    doors->rmsnorm_pair_rotate       = nvidia_cuda12__override_rmsnorm_pair_rotate;
     doors->rmsnorm_fp32_rows         = nvidia_cuda12__override_rmsnorm_fp32_rows;
     doors->deltanet_steps_gate       = nvidia_cuda12__override_deltanet_steps_gate;
     doors->deltanet_gates_rows       = nvidia_cuda12__override_deltanet_gates_rows;

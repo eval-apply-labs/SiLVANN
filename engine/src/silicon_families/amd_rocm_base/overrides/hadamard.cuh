@@ -2,7 +2,7 @@
 #define SILVANN__SILICON_FAMILIES_AMD_ROCM_BASE_OVERRIDES_HADAMARD_CUH
 /* ══ hadamard's DOORS, RUN FASTER — amd_rocm_base ══════════════════════════════════════════════════════════════════
  * nn's hadamard doors (`nn/cpu/opcodes/hadamard__abi.cuh`), where this family covers them: the rotation over blocks
- * of 512, and over blocks of 128, 256 or 512 at a head's width. */
+ * of 512, and over blocks of 64, 128, 256 or 512 at a head's width. */
 
 /* What this file needs, named where a reader — and an editor — can follow it. */
 #include <stdint.h>
@@ -40,6 +40,33 @@ static __device__ __forceinline__ void amd_rocm_base__zzpackage_butterfly8(float
         const bool low = (lane & m) == 0u;
 #pragma unroll
         for (uint32_t e = 0u; e < AMD_ROCM_BASE__ZZPRIVATE_ROT_EACH; ++e) {
+            const float other = amd_rocm_base__zzpackage_xor(v[e], m);
+            v[e] = low ? v[e] + other : other - v[e];
+        }
+    }
+}
+
+/* The butterfly of a block of `E · 64` whose lane `lane` holds elements `E·lane … E·lane + E − 1` in `v` — the stages
+ * of `hadamard_at` below on values already in registers, in its order, so a block of 128 or 256 rotated from them is the
+ * ladder's to the bit (and a 512 `butterfly8`'s). Unscaled. */
+template <uint32_t E>
+static __device__ __forceinline__ void amd_rocm_base__zzpackage_butterfly_of(float* v, uint32_t lane) {
+#pragma unroll
+    for (uint32_t h = 1u; h < E; h <<= 1) {                                         /* inside the lane */
+#pragma unroll
+        for (uint32_t e = 0u; e < E; ++e) {
+            if ((e & h) == 0u) {
+                const float x = v[e], y = v[e + h];
+                v[e] = x + y;
+                v[e + h] = x - y;
+            }
+        }
+    }
+#pragma unroll
+    for (uint32_t m = 1u; m < AMD_ROCM_BASE__ZZPRIVATE_WAVE; m <<= 1) {         /* across lanes */
+        const bool low = (lane & m) == 0u;
+#pragma unroll
+        for (uint32_t e = 0u; e < E; ++e) {
             const float other = amd_rocm_base__zzpackage_xor(v[e], m);
             v[e] = low ? v[e] + other : other - v[e];
         }
@@ -167,6 +194,10 @@ static __device__ inline void amd_rocm_base__zzprivate_hadamard_block(uint16_t* 
     amd_rocm_base__zzpackage_hadamard_at<E>(out, in, block * B, sign, inverse, over);
 }
 
+static __global__ AMD_ROCM_BASE__ZZPRIVATE_BOUNDS void amd_rocm_base__zzprivate_hadamard_e1(uint16_t* out, const uint16_t* in, const uint16_t* sign,
+                                                                                                  uint64_t blocks, uint64_t inverse, unsigned int* over) {
+    amd_rocm_base__zzprivate_hadamard_block<1u>(out, in, sign, blocks, inverse, over);
+}
 static __global__ AMD_ROCM_BASE__ZZPRIVATE_BOUNDS void amd_rocm_base__zzprivate_hadamard_e2(uint16_t* out, const uint16_t* in, const uint16_t* sign,
                                                                                                   uint64_t blocks, uint64_t inverse, unsigned int* over) {
     amd_rocm_base__zzprivate_hadamard_block<2u>(out, in, sign, blocks, inverse, over);
@@ -180,17 +211,22 @@ static __global__ AMD_ROCM_BASE__ZZPRIVATE_BOUNDS void amd_rocm_base__zzprivate_
     amd_rocm_base__zzprivate_hadamard_block<8u>(out, in, sign, blocks, inverse, over);
 }
 
-/* ⭐ `hadamard_blocks` over whole blocks of 128, 256 or 512, `out` either `in` or apart from it; anything else is the
- *   generic door. */
+/* ⭐ `hadamard_blocks` over whole blocks of 64, 128, 256 or 512, `out` either `in` or apart from it; anything else is the
+ *   generic door. A block of 64 is a lane an element, every stage across lanes — Inkling 2's message gate rotates its
+ *   rank of 64 so: `MEASURED` (rocprof on the model, node03's MI50) nn's body 14.8 µs a call there, 96 calls a token; the
+ *   door bench 16.1 µs back to back for nn's body, 2.3 for this. Like the other sizes it sums in the butterfly's order,
+ *   not nn's direct one: within a half's step of nn's host body (the bench), and in the model not nn's bits (`MEASURED`,
+ *   measurements/2026-11-24_nn207_inkling2_rates_node03.md ⑪). */
 static void amd_rocm_base__override_hadamard_blocks(uint16_t* out, const uint16_t* in, const uint16_t* sign, uint64_t n,
                                                        uint64_t block, uint64_t inverse, unsigned int* over) {
     const bool apart = out == in || out + n <= in || in + n <= out;
-    if (n == 0u || (block != 128u && block != 256u && block != 512u) || n % block != 0u || !apart) {
+    if (n == 0u || (block != 64u && block != 128u && block != 256u && block != 512u) || n % block != 0u || !apart) {
         nn__hadamard__zzabi_launch_blocks(out, in, sign, n, block, inverse, over);
         return;
     }
     uint64_t blocks = n / block;
-    const void* kernel = block == 128u ? (const void*)amd_rocm_base__zzprivate_hadamard_e2
+    const void* kernel = block == 64u  ? (const void*)amd_rocm_base__zzprivate_hadamard_e1
+                       : block == 128u ? (const void*)amd_rocm_base__zzprivate_hadamard_e2
                        : block == 256u ? (const void*)amd_rocm_base__zzprivate_hadamard_e4
                        :                 (const void*)amd_rocm_base__zzprivate_hadamard_e8;
     const uint64_t want = (blocks + AMD_ROCM_BASE__ZZPRIVATE_ROWS - 1u) / AMD_ROCM_BASE__ZZPRIVATE_ROWS;

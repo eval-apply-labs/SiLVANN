@@ -43,6 +43,7 @@ static inline void amd_rocm_base__override_doors(nn__doors* doors) {
     doors->rmsnorm              = amd_rocm_base__override_rmsnorm;
     doors->rmsnorm_rows         = amd_rocm_base__override_rmsnorm_rows;
     doors->rmsnorm_rotate       = amd_rocm_base__override_rmsnorm_rotate;
+    doors->rmsnorm_pair_rotate  = amd_rocm_base__override_rmsnorm_pair_rotate;
     doors->rmsnorm_fp32         = amd_rocm_base__override_rmsnorm_fp32;
     doors->rmsnorm_fp32_rows    = amd_rocm_base__override_rmsnorm_fp32_rows;
     doors->gated_rank           = amd_rocm_base__override_gated_rank;
@@ -51,6 +52,8 @@ static inline void amd_rocm_base__override_doors(nn__doors* doors) {
     doors->vector_top_k         = amd_rocm_base__override_vector_top_k;
     doors->vector_penalize      = amd_rocm_base__override_vector_penalize;
     doors->vector_top_k_scored  = amd_rocm_base__override_vector_top_k_scored;
+    doors->vector_top_k_biased  = amd_rocm_base__override_vector_top_k_biased;
+    doors->vector_gate_tanh_rank = amd_rocm_base__override_vector_gate_tanh_rank;
     doors->vector_sum           = amd_rocm_base__override_vector_sum;
     doors->attention_merge      = amd_rocm_base__override_attention_merge;
     doors->attention_weights_tq      = amd_rocm_base__override_attention_weights_tq;
@@ -74,6 +77,7 @@ static inline void amd_rocm_base__override_doors(nn__doors* doors) {
     doors->index_select_rows         = amd_rocm_base__override_index_select_rows;
     doors->attention_scores_grouped_rows = amd_rocm_base__override_attention_scores_grouped_rows;
     doors->attention_mix_rows        = amd_rocm_base__override_attention_mix_rows;
+    doors->attention_states          = amd_rocm_base__override_attention_states;
 }
 
 #endif /* SILVANN__SILICON_FAMILIES_AMD_ROCM_BASE_OVERRIDES_DOORS_CUH */

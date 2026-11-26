@@ -536,13 +536,36 @@ static inline bool nn__package__host_init(const char* config, uint64_t length, s
      * package and arrived at nothing — which no allocation can improve and no later reader can diagnose. */
     if (want == 0ull) return false;
 
-    if (!sys__gpu__memory_allocate(room->family, &room->at, (size_t)want)) return false;
+    /* ⭐ THE ROOM IN HOST RAM WHERE THE BOOT ASKS IT (NN-216): `nn__room__in_host_ram` 1 — an integrated GPU's in the CPU
+     *   worker's place — the room is mapped host RAM, the family's address for its kernels and the program's copy kept
+     *   beside it (▶ loader__impl.cuh's host rooms), so the CPU reaches what the integrated GPU computes on: a card's
+     *   tier gathers its promotions from it. On an integrated GPU the two are one memory (its family's own rule). */
+    uint64_t in_host_ram = 0ull;
+    const int host_said = sys__settings__host_count(config, length, "device_params", "nn__room__in_host_ram", &in_host_ram);
+    if (host_said == SYS__SETTINGS__READ_MALFORMED || in_host_ram > 1ull) return false;
+    if (in_host_ram == 1ull) {
+        void* host = 0;
+        if (!sys__gpu__memory_allocate_host_ram_mapped(room->family, &host, &room->at, (size_t)want)) return false;
+        if (!nn__loader__zzpackage_host_room((uint64_t)(uintptr_t)room->at, want, host)) {
+            sys__gpu__memory_free_host_ram(room->family, host);
+            room->at = 0;
+            return false;
+        }
+    } else if (!sys__gpu__memory_allocate(room->family, &room->at, (size_t)want)) {
+        return false;
+    }
     room->bytes = want;
     /* ⭐ AND THE RAM SPAN, IN PINNED RAM THE WORKER'S CARD CAN WRITE — taken second, so a refusal here gives
      * the span back and leaves nothing half-taken. */
     if (ram_said == SYS__SETTINGS__READ_FOUND) {
         if (!sys__gpu__memory_allocate_host_ram_mapped(room->family, &room->ram_at, &room->ram_card_at, (size_t)ram)) {
-            sys__gpu__memory_free(room->family, room->at);
+            void* host = nn__loader__zzpackage_host_copy((uint64_t)(uintptr_t)room->at);
+            if (host != 0) {
+                (void)nn__loader__zzpackage_host_room((uint64_t)(uintptr_t)room->at, 0ull, 0);
+                sys__gpu__memory_free_host_ram(room->family, host);
+            } else {
+                sys__gpu__memory_free(room->family, room->at);
+            }
             room->at = 0; room->bytes = 0ull; room->ram_at = 0; room->ram_card_at = 0;
             return false;
         }
@@ -557,7 +580,15 @@ static inline bool nn__package__host_init(const char* config, uint64_t length, s
 static inline void nn__package__host_teardown(sys__package_room* room) {
     nn__loader__zzpackage_stop();                   /* the loader threads read into this room: they go first */
     if (room == 0) return;
-    if (room->at != 0) sys__gpu__memory_free(room->family, room->at);
+    if (room->at != 0) {
+        void* host = nn__loader__zzpackage_host_copy((uint64_t)(uintptr_t)room->at);
+        if (host != 0) {                            /* a room in host RAM (NN-216): given back as it was taken */
+            (void)nn__loader__zzpackage_host_room((uint64_t)(uintptr_t)room->at, 0ull, 0);
+            sys__gpu__memory_free_host_ram(room->family, host);
+        } else {
+            sys__gpu__memory_free(room->family, room->at);
+        }
+    }
     if (room->ram_at != 0) sys__gpu__memory_free_host_ram(room->family, room->ram_at);
     room->at = 0; room->bytes = 0ull;
     room->ram_at = 0; room->ram_card_at = 0; room->ram_bytes = 0ull;

@@ -83,6 +83,9 @@ static inline uint32_t silicon_families__cards_present(char (*names)[SILICON_FAM
     __builtin_cpu_init();
     if (n < most && __builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma") && __builtin_cpu_supports("f16c"))
         snprintf(names[n++], SILICON_FAMILIES__CARD_NAME_BYTES, "x86_avx2");
+    /* …and where they cannot, `x86_base`'s — nn's generic bodies built for x86-64-v2 */
+    else if (n < most && __builtin_cpu_supports("sse4.2") && __builtin_cpu_supports("popcnt"))
+        snprintf(names[n++], SILICON_FAMILIES__CARD_NAME_BYTES, "x86_base");
 #elif defined(__aarch64__)
     /* ⭐ AN ARM MACHINE'S: `arm_neon` where the processors have Armv8.2's half precision and dot product; `arm_gb10`
      *   where they are the DGX Spark's GB10 — Cortex-X925 (part 0xd85) and Cortex-A725 (0xd87) beside each other, as

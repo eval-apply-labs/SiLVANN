@@ -15,6 +15,9 @@
 /* ⭐ BUILT FROM `khronos_opencl2_base` (▶ its manifest): the source's answers, this family's cards and name */
 #define KHRONOS_OPENCL2_BASE__TAKES(card)  khronos_opencl2__includes(card)
 #define KHRONOS_OPENCL2_BASE__NAME         "khronos_opencl2"
+/* AMD's cards among its own, on Linux: AMD's OpenCL dispatching on the calling thread (▶ khronos_opencl2_base/sys.cuh).
+ * intel_opencl2 leaves it alone. */
+#define KHRONOS_OPENCL2_BASE__DIRECT_DISPATCH 1
 #include "../khronos_opencl2_base/manifest.cuh"   /* the answers to every package the OpenCL 2.0 families support */
 #include "../../packages/manifest__gpu.cuh"       /* every package's card side, written against them */
 #include "../khronos_opencl2_base/overrides/nn.cuh"   /* the doors run faster than the generic body */

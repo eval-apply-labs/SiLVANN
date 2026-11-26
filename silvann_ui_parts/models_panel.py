@@ -58,6 +58,9 @@ class ModelsPanel(Part):
                                   ).props("dense outline")
         self.models_table = models_table
         self.models_table()
+        # the list is the packs a user is offered (▶ fetch.LISTED) and any other that is here: the rest are on the page
+        ui.link("to see all available packs go to https://huggingface.co/eval-apply", "https://huggingface.co/eval-apply",
+                new_tab=True).classes("text-xs")
 
         if DOWNLOADS.known is None or DOWNLOADS.states is None:
             asyncio.create_task(self.read_catalogue())
